@@ -1,0 +1,13 @@
+[package]
+name = "reasonix-sandbox"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Sandbox trait and platform-specific sandbox implementations"
+
+[dependencies]
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+reasonix-core = { version = "0.1.0", path = "../reasonix-core" }

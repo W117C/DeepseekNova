@@ -1,0 +1,32 @@
+[package]
+name = "reasonix-serve"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "HTTP server (axum) for reasonix"
+
+[dependencies]
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+reasonix-core = { version = "0.1.0", path = "../reasonix-core" }
+futures-core = { workspace = true }
+futures = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+reqwest = { workspace = true, features = ["json", "stream"] }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+futures-core = { workspace = true }
+futures = { workspace = true }
+tower-http = { workspace = true }
+tower = { workspace = true }
