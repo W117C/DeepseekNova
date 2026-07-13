@@ -369,6 +369,23 @@ impl Tool for MoveFileTool {
 // Path sanitization
 // ---------------------------------------------------------------------------
 
+/// Normalize path components by resolving `.` and `..` without hitting the disk.
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            std::path::Component::CurDir => {}
+            _ => {
+                normalized.push(component);
+            }
+        }
+    }
+    normalized
+}
+
 /// Basic path sanitization: reject obviously malicious paths
 /// and ensure the path stays within the workspace root.
 fn sanitize_path(raw: &str) -> anyhow::Result<PathBuf> {
@@ -391,7 +408,7 @@ fn sanitize_path(raw: &str) -> anyhow::Result<PathBuf> {
     let canonical = if resolved.exists() {
         std::fs::canonicalize(&resolved)?
     } else {
-        resolved.components().collect::<PathBuf>()
+        normalize_path(&resolved)
     };
 
     // Security: block explicit path traversal via '..' that escapes workspace
@@ -403,4 +420,38 @@ fn sanitize_path(raw: &str) -> anyhow::Result<PathBuf> {
     }
 
     Ok(canonical)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_path() {
+        assert_eq!(normalize_path(Path::new("/a/b/../../c")), PathBuf::from("/c"));
+        assert_eq!(normalize_path(Path::new("a/b/../../c")), PathBuf::from("c"));
+        assert_eq!(normalize_path(Path::new("a/b/../c")), PathBuf::from("a/c"));
+        assert_eq!(normalize_path(Path::new("a/./b")), PathBuf::from("a/b"));
+    }
+
+    #[test]
+    fn test_sanitize_path_traversal() {
+        let cwd = std::env::current_dir().unwrap();
+        
+        // Non-existent path inside workspace should succeed
+        let ok_path = "src/nonexistent_file_xyz.rs";
+        let res = sanitize_path(ok_path).unwrap();
+        assert_eq!(res, cwd.join(ok_path));
+
+        // Path containing .. but staying inside workspace should succeed
+        let ok_traversal = "src/../src/nonexistent_file_xyz.rs";
+        let res = sanitize_path(ok_traversal).unwrap();
+        assert_eq!(res, cwd.join("src/nonexistent_file_xyz.rs"));
+
+        // Non-existent path traversing outside workspace should be blocked
+        let bad_path = "src/../../outside_workspace_xyz.rs";
+        let res = sanitize_path(bad_path);
+        assert!(res.is_err(), "Should block path traversal outside workspace: {:?}", res);
+        assert!(res.unwrap_err().to_string().contains("escapes workspace root"));
+    }
 }

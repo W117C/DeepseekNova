@@ -133,12 +133,22 @@ async fn start_server() -> u16 {
 // Tests
 // ---------------------------------------------------------------------------
 
+fn test_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+}
+
 #[tokio::test]
 async fn health_endpoint_returns_ok() {
     let port = start_server().await;
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-    let resp = reqwest::get(format!("http://127.0.0.1:{port}/health"))
+    let client = test_client();
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/health"))
+        .send()
         .await
         .unwrap();
     assert_eq!(
@@ -156,7 +166,7 @@ async fn chat_endpoint_streams_sse() {
     let port = start_server().await;
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-    let client = reqwest::Client::new();
+    let client = test_client();
     let resp = client
         .post(format!("http://127.0.0.1:{port}/v1/chat"))
         .json(&ChatRequest {
@@ -179,7 +189,7 @@ async fn chat_empty_prompt_rejected() {
     let port = start_server().await;
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-    let client = reqwest::Client::new();
+    let client = test_client();
     let resp = client
         .post(format!("http://127.0.0.1:{port}/v1/chat"))
         .json(&ChatRequest {
@@ -204,7 +214,7 @@ async fn chat_prompt_too_long_rejected() {
 
     let long_prompt = "x".repeat(32_001);
 
-    let client = reqwest::Client::new();
+    let client = test_client();
     let resp = client
         .post(format!("http://127.0.0.1:{port}/v1/chat"))
         .json(&ChatRequest {
