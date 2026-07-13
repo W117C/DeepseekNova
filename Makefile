@@ -10,9 +10,9 @@ build:
 # Run formatting, clippy, tests, and documentation checks
 check:
 	cargo fmt --all -- --check
-	cargo clippy --workspace --all-targets -- -D warnings
-	cargo test --workspace
-	cargo doc --workspace --no-deps --document-private-items
+	cargo clippy --workspace --exclude dpronix-desktop --all-targets -- -D warnings
+	cargo test --workspace --exclude dpronix-desktop
+	cargo doc --workspace --exclude dpronix-desktop --no-deps --document-private-items
 
 # Format code
 fmt:
