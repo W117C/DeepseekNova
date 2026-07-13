@@ -21,6 +21,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install native dependencies
+        uses: ./.github/actions/setup-linux
+      - name: Verify native dependencies
+        run: |
+          pkg-config --version
+          pkg-config --libs glib-2.0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --all-targets --workspace
@@ -31,6 +37,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install native dependencies
+        uses: ./.github/actions/setup-linux
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -57,6 +65,9 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
+      - name: Install native dependencies (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        uses: ./.github/actions/setup-linux
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all --workspace
@@ -67,6 +78,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install native dependencies
+        uses: ./.github/actions/setup-linux
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo doc --no-deps --workspace --document-private-items
@@ -89,6 +102,9 @@ jobs:
             target: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v4
+      - name: Install native dependencies (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        uses: ./.github/actions/setup-linux
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}

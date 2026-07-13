@@ -45,6 +45,9 @@ jobs:
             binary: dpronix-cli.exe
     steps:
       - uses: actions/checkout@v4
+      - name: Install native dependencies (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        uses: ./.github/actions/setup-linux
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -87,6 +90,9 @@ jobs:
             binary: dpronix-desktop
     steps:
       - uses: actions/checkout@v4
+      - name: Install native dependencies (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        uses: ./.github/actions/setup-linux
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}

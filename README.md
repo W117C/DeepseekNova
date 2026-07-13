@@ -7,6 +7,21 @@
 
 > 从 esengine/DeepSeek-DPronix、deepcode-cli、Ruflo、ECC 等顶级项目吸取设计，围绕 DeepSeek 的 prefix cache 和 thinking mode 深度优化。
 
+## 系统编译依赖 (Linux)
+
+由于本项目包含 **Tauri 桌面端**，在 Linux (如 Ubuntu) 系统下编译或运行本地测试需要安装相关的系统库：
+
+```bash
+sudo apt update
+sudo apt install -y \
+  pkg-config \
+  libglib2.0-dev \
+  libgtk-3-dev \
+  libwebkit2gtk-4.1-dev \
+  libayatana-appindicator3-dev \
+  librsvg2-dev
+```
+
 ## 特性
 
 - 🧠 **DeepSeek-V4 原生优化** — 思考模式（`reasoning_effort`）、上下文缓存（`cache_hit_tokens`）、`reasoning_content` 正确回传
