@@ -61,7 +61,7 @@ pub struct Plan {
     pub goal: Goal,
     /// Actions in the plan.
     pub actions: Vec<Action>,
-    /// Dependency edges: action_id → [dependency_action_ids].
+    /// Dependency edges: action_id → \[dependency_action_ids\].
     pub dependencies: HashMap<String, Vec<String>>,
     /// Overall plan status.
     pub status: PlanStatus,
