@@ -22,7 +22,7 @@ test:
 
 # Run the CLI app locally
 run:
-	cargo run --bin reasonix-cli
+	cargo run --bin dpronix-cli
 
 # Build for release
 release:

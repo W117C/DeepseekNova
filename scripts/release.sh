@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# reasonix-rs release script
+# dpronix-rs release script
 # Usage: ./scripts/release.sh 0.1.0
 
 VERSION="${1:?Usage: $0 <version> (e.g. 0.1.0)}"
 
-echo "=== reasonix-rs release v${VERSION} ==="
+echo "=== dpronix-rs release v${VERSION} ==="
 
 # 1. Verify clean working tree
 if [ -d .git ]; then
@@ -63,23 +63,23 @@ with open('Cargo.toml', 'w') as f:
 echo ""
 echo "--- cargo publish --dry-run (library crates) ---"
 LIBS=(
-    "reasonix-core"
-    "reasonix-config"
-    "reasonix-event"
-    "reasonix-permission"
-    "reasonix-context"
-    "reasonix-provider"
-    "reasonix-tools"
-    "reasonix-mcp"
-    "reasonix-checkpoint"
-    "reasonix-sandbox"
-    "reasonix-store"
-    "reasonix-skills"
-    "reasonix-telemetry"
-    "reasonix-serve"
-    "reasonix-tui"
-    "reasonix-agent"
-    "reasonix-runtime"
+    "dpronix-core"
+    "dpronix-config"
+    "dpronix-event"
+    "dpronix-permission"
+    "dpronix-context"
+    "dpronix-provider"
+    "dpronix-tools"
+    "dpronix-mcp"
+    "dpronix-checkpoint"
+    "dpronix-sandbox"
+    "dpronix-store"
+    "dpronix-skills"
+    "dpronix-telemetry"
+    "dpronix-serve"
+    "dpronix-tui"
+    "dpronix-agent"
+    "dpronix-runtime"
 )
 for lib in "${LIBS[@]}"; do
     echo "  checking $lib..."
@@ -88,12 +88,12 @@ done
 
 echo ""
 echo "--- cargo publish --dry-run (cli binary) ---"
-cargo publish -p reasonix-cli --dry-run --allow-dirty
+cargo publish -p dpronix-cli --dry-run --allow-dirty
 
 # 5. Build release artifacts
 echo ""
 echo "--- building release artifacts ---"
-cargo build --release -p reasonix-cli
+cargo build --release -p dpronix-cli
 
 # Copy to dist/
 mkdir -p dist
@@ -121,4 +121,4 @@ echo "=== Release v${VERSION} complete ==="
 echo "Next steps:"
 echo "  1. Review: git diff HEAD~1"
 echo "  2. Push:   git push origin main v${VERSION}"
-echo "  3. Publish: cargo publish -p reasonix-core && ... && cargo publish -p reasonix-cli"
+echo "  3. Publish: cargo publish -p dpronix-core && ... && cargo publish -p dpronix-cli"

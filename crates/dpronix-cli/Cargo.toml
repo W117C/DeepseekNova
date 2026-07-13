@@ -1,0 +1,21 @@
+[package]
+name = "dpronix-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+dpronix-core = { version = "0.1.0", path = "../dpronix-core" }
+dpronix-config = { version = "0.1.0", path = "../dpronix-config" }
+dpronix-provider = { version = "0.1.0", path = "../dpronix-provider" }
+dpronix-agent = { version = "0.1.0", path = "../dpronix-agent" }
+dpronix-tools = { version = "0.1.0", path = "../dpronix-tools" }
+dpronix-skills = { version = "0.1.0", path = "../dpronix-skills" }
+dirs = { workspace = true }

@@ -2,7 +2,7 @@
 """Add version = "0.1.0" to all path-only dependencies for crates.io publishing."""
 import os, re
 
-ROOT = "/Users/ze/Downloads/reasonix-rs/crates"
+ROOT = "/Users/ze/Downloads/dpronix-rs/crates"
 
 for crate in sorted(os.listdir(ROOT)):
     toml_path = os.path.join(ROOT, crate, "Cargo.toml")

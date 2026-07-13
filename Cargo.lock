@@ -1199,6 +1199,345 @@ dependencies = [
 ]
 
 [[package]]
+name = "dpronix-agent"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "dpronix-core",
+ "dpronix-provider",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "dpronix-checkpoint"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "dpronix-core",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tracing",
+ "walkdir",
+]
+
+[[package]]
+name = "dpronix-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "dirs",
+ "dpronix-agent",
+ "dpronix-config",
+ "dpronix-core",
+ "dpronix-provider",
+ "dpronix-skills",
+ "dpronix-tools",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "dpronix-config"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml 0.8.2",
+]
+
+[[package]]
+name = "dpronix-context"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "dpronix-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "dpronix-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "criterion",
+ "futures-core",
+ "hex",
+ "indexmap 2.14.0",
+ "rand",
+ "serde",
+ "serde_jcs",
+ "serde_json",
+ "sha2",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "dpronix-desktop"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dpronix-agent",
+ "dpronix-config",
+ "dpronix-core",
+ "dpronix-event",
+ "dpronix-provider",
+ "dpronix-runtime",
+ "dpronix-skills",
+ "dpronix-store",
+ "dpronix-tools",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-clipboard-manager",
+ "tauri-plugin-dialog",
+ "tauri-plugin-shell",
+ "tauri-plugin-single-instance",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "dpronix-event"
+version = "0.1.0"
+dependencies = [
+ "dpronix-core",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "dpronix-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "dpronix-config",
+ "dpronix-core",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+]
+
+[[package]]
+name = "dpronix-orch"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "dpronix-agent",
+ "dpronix-config",
+ "dpronix-core",
+ "dpronix-event",
+ "dpronix-provider",
+ "dpronix-tools",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "dpronix-permission"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dpronix-config",
+ "dpronix-core",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "toml 0.8.2",
+ "tracing",
+]
+
+[[package]]
+name = "dpronix-provider"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "dpronix-config",
+ "dpronix-core",
+ "futures",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+]
+
+[[package]]
+name = "dpronix-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dpronix-agent",
+ "dpronix-config",
+ "dpronix-context",
+ "dpronix-core",
+ "dpronix-event",
+ "dpronix-permission",
+ "dpronix-provider",
+ "dpronix-tools",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "dpronix-sandbox"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dpronix-core",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "dpronix-serve"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum 0.8.9",
+ "dpronix-core",
+ "futures",
+ "futures-core",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tower 0.5.3",
+ "tower-http",
+ "tracing",
+]
+
+[[package]]
+name = "dpronix-skills"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "dpronix-core",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "walkdir",
+]
+
+[[package]]
+name = "dpronix-store"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "dpronix-core",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "dpronix-telemetry"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry-stdout",
+ "opentelemetry_sdk",
+ "tokio",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "dpronix-tools"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "dpronix-checkpoint",
+ "dpronix-core",
+ "dpronix-sandbox",
+ "glob",
+ "hex",
+ "regex",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "dpronix-tui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "crossterm",
+ "dpronix-core",
+ "ratatui",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+]
+
+[[package]]
 name = "dtoa"
 version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3631,345 +3970,6 @@ name = "raw-window-handle"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20675572f6f24e9e76ef639bc5552774ed45f1c30e2951e1e99c59888861c539"
-
-[[package]]
-name = "reasonix-agent"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "reasonix-core",
- "reasonix-provider",
- "serde",
- "serde_json",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "reasonix-checkpoint"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "hex",
- "reasonix-core",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
- "tracing",
- "walkdir",
-]
-
-[[package]]
-name = "reasonix-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "dirs",
- "reasonix-agent",
- "reasonix-config",
- "reasonix-core",
- "reasonix-provider",
- "reasonix-skills",
- "reasonix-tools",
- "tokio",
- "tokio-stream",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "reasonix-config"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "dirs",
- "serde",
- "serde_json",
- "tempfile",
- "toml 0.8.2",
-]
-
-[[package]]
-name = "reasonix-context"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "reasonix-core",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "reasonix-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "criterion",
- "futures-core",
- "hex",
- "indexmap 2.14.0",
- "rand",
- "serde",
- "serde_jcs",
- "serde_json",
- "sha2",
- "thiserror 1.0.69",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "reasonix-desktop"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "reasonix-agent",
- "reasonix-config",
- "reasonix-core",
- "reasonix-event",
- "reasonix-provider",
- "reasonix-runtime",
- "reasonix-skills",
- "reasonix-store",
- "reasonix-tools",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-clipboard-manager",
- "tauri-plugin-dialog",
- "tauri-plugin-shell",
- "tauri-plugin-single-instance",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "reasonix-event"
-version = "0.1.0"
-dependencies = [
- "reasonix-core",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "reasonix-mcp"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "reasonix-config",
- "reasonix-core",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tokio",
- "tokio-stream",
- "tracing",
-]
-
-[[package]]
-name = "reasonix-orch"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "reasonix-agent",
- "reasonix-config",
- "reasonix-core",
- "reasonix-event",
- "reasonix-provider",
- "reasonix-tools",
- "serde",
- "serde_json",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "reasonix-permission"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "reasonix-config",
- "reasonix-core",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "toml 0.8.2",
- "tracing",
-]
-
-[[package]]
-name = "reasonix-provider"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "futures",
- "reasonix-config",
- "reasonix-core",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tokio-stream",
- "tracing",
-]
-
-[[package]]
-name = "reasonix-runtime"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "reasonix-agent",
- "reasonix-config",
- "reasonix-context",
- "reasonix-core",
- "reasonix-event",
- "reasonix-permission",
- "reasonix-provider",
- "reasonix-tools",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "reasonix-sandbox"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "reasonix-core",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "reasonix-serve"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum 0.8.9",
- "futures",
- "futures-core",
- "reasonix-core",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tokio",
- "tokio-stream",
- "tower 0.5.3",
- "tower-http",
- "tracing",
-]
-
-[[package]]
-name = "reasonix-skills"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "reasonix-core",
- "serde",
- "serde_json",
- "serde_yaml",
- "tempfile",
- "tokio",
- "tracing",
- "walkdir",
-]
-
-[[package]]
-name = "reasonix-store"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "reasonix-core",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "reasonix-telemetry"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "opentelemetry",
- "opentelemetry-otlp",
- "opentelemetry-stdout",
- "opentelemetry_sdk",
- "tokio",
- "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "reasonix-tools"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "glob",
- "hex",
- "reasonix-checkpoint",
- "reasonix-core",
- "reasonix-sandbox",
- "regex",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tokio",
- "tracing",
- "url",
-]
-
-[[package]]
-name = "reasonix-tui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "crossterm",
- "ratatui",
- "reasonix-core",
- "tokio",
- "tokio-stream",
- "tracing",
-]
 
 [[package]]
 name = "redox_syscall"

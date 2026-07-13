@@ -1,0 +1,18 @@
+[package]
+name = "dpronix-telemetry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "OpenTelemetry integration for reasonix"
+
+[dependencies]
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry-sdk = { workspace = true }
+opentelemetry-otlp = { workspace = true }
+opentelemetry-stdout = { workspace = true }

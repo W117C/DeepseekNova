@@ -65,8 +65,8 @@ When the context approaches token limits, older messages are summarized to make 
 ### Build from Source
 
 ```bash
-git clone https://github.com/user/reasonix-rs.git
-cd reasonix-rs
+git clone https://github.com/user/dpronix-rs.git
+cd dpronix-rs
 cargo build --release
 ```
 

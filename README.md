@@ -1,9 +1,9 @@
 # DPRonix — DeepSeek-V4 原生 AI 编码代理框架
 
-[![CI](https://github.com/user/reasonix-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/user/reasonix-rs/actions/workflows/ci.yml)
+[![CI](https://github.com/user/dpronix-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/user/dpronix-rs/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
 
-**DPronix**（原名 reasonix-rs）是一个深度适配 **DeepSeek-V4** 的模块化 AI 编码代理框架，支持思考模式、上下文缓存、工具调用和多 Agent 编排。提供 CLI、TUI、HTTP API 和 **Tauri 桌面端**四种交互方式。
+**DPronix**（原名 dpronix-rs）是一个深度适配 **DeepSeek-V4** 的模块化 AI 编码代理框架，支持思考模式、上下文缓存、工具调用和多 Agent 编排。提供 CLI、TUI、HTTP API 和 **Tauri 桌面端**四种交互方式。
 
 > 从 esengine/DeepSeek-Reasonix、deepcode-cli、Ruflo、ECC 等顶级项目吸取设计，围绕 DeepSeek 的 prefix cache 和 thinking mode 深度优化。
 
@@ -24,16 +24,16 @@
 ## 架构
 
 ```
-                         reasonix-cli (binary)
+                         dpronix-cli (binary)
                               │
          ┌────────────────────┼────────────────────┐
          ▼                    ▼                    ▼
-  reasonix-runtime    reasonix-agent       reasonix-provider
+  dpronix-runtime    dpronix-agent       dpronix-provider
   (composition root)  (Runner impl)        (Provider trait)
          │                    │                    │
          └────────────────────┼────────────────────┘
                               │
-                       reasonix-core (foundation)
+                       dpronix-core (foundation)
            types / graph / runner / tool / registry
                               │
     ┌─────────┬─────────┬─────┼─────┬─────────┬─────────┬──────────┐
@@ -51,26 +51,26 @@ config     event      permission│ context    tools      mcp        orch (★)
 
 | Crate | 描述 |
 |---|---|
-| `reasonix-core` | 核心类型系统：Runner、Tool、ExecutionGraph、RegistryHub、Plugin |
-| `reasonix-agent` | Agent 循环、工具执行、记忆压缩、规划模式、子 Agent |
-| `reasonix-provider` | LLM Provider：OpenAI（SSE + thinking mode）、Anthropic |
-| `reasonix-tools` | 13 内置工具 + **Snippet 系统**（read→snippet_id→edit） |
-| `reasonix-orch` ★ | 编排层：**GOAP 规划器**、**Swarm 协调器**、**向量记忆** |
-| `reasonix-desktop` ★ | **Tauri 2.x 桌面端**（React/TS + Rust 后端） |
-| `reasonix-mcp` | MCP 客户端 |
-| `reasonix-config` | TOML 分层配置 |
-| `reasonix-context` | 工作区索引、项目记忆 |
-| `reasonix-permission` | 权限门控（allow/ask/deny） |
-| `reasonix-event` | 事件总线 |
-| `reasonix-runtime` | 组合根 |
-| `reasonix-sandbox` | 进程沙箱（macOS/Linux） |
-| `reasonix-checkpoint` | 文件检查点/回滚 |
-| `reasonix-store` | JSONL 会话持久化 |
-| `reasonix-tui` | ratatui 终端 UI |
-| `reasonix-serve` | axum HTTP/SSE 服务器 |
-| `reasonix-skills` | Skills 系统（Markdown + YAML） |
-| `reasonix-cli` | CLI 二进制 |
-| `reasonix-telemetry` | OpenTelemetry |
+| `dpronix-core` | 核心类型系统：Runner、Tool、ExecutionGraph、RegistryHub、Plugin |
+| `dpronix-agent` | Agent 循环、工具执行、记忆压缩、规划模式、子 Agent |
+| `dpronix-provider` | LLM Provider：OpenAI（SSE + thinking mode）、Anthropic |
+| `dpronix-tools` | 13 内置工具 + **Snippet 系统**（read→snippet_id→edit） |
+| `dpronix-orch` ★ | 编排层：**GOAP 规划器**、**Swarm 协调器**、**向量记忆** |
+| `dpronix-desktop` ★ | **Tauri 2.x 桌面端**（React/TS + Rust 后端） |
+| `dpronix-mcp` | MCP 客户端 |
+| `dpronix-config` | TOML 分层配置 |
+| `dpronix-context` | 工作区索引、项目记忆 |
+| `dpronix-permission` | 权限门控（allow/ask/deny） |
+| `dpronix-event` | 事件总线 |
+| `dpronix-runtime` | 组合根 |
+| `dpronix-sandbox` | 进程沙箱（macOS/Linux） |
+| `dpronix-checkpoint` | 文件检查点/回滚 |
+| `dpronix-store` | JSONL 会话持久化 |
+| `dpronix-tui` | ratatui 终端 UI |
+| `dpronix-serve` | axum HTTP/SSE 服务器 |
+| `dpronix-skills` | Skills 系统（Markdown + YAML） |
+| `dpronix-cli` | CLI 二进制 |
+| `dpronix-telemetry` | OpenTelemetry |
 
 ## 快速开始
 
@@ -82,8 +82,8 @@ config     event      permission│ context    tools      mcp        orch (★)
 ### 安装
 
 ```bash
-git clone https://github.com/user/reasonix-rs.git
-cd reasonix-rs
+git clone https://github.com/user/dpronix-rs.git
+cd dpronix-rs
 cargo build --release
 ```
 
@@ -110,7 +110,7 @@ cargo run -- serve --port 3000
 ### 桌面端
 
 ```bash
-cd crates/reasonix-desktop
+cd crates/dpronix-desktop
 
 # 安装前端依赖
 cd frontend && npm install && cd ..
@@ -155,26 +155,26 @@ compaction_threshold_tokens = 32000
 ├── Cargo.toml                    # Workspace 根
 ├── reasonix.toml                 # 项目配置
 ├── crates/
-│   ├── reasonix-core/            # 核心类型、Runner/Tool/Plugin traits
-│   ├── reasonix-agent/           # Agent 循环 + 工具执行
-│   ├── reasonix-provider/        # OpenAI/Anthropic Provider
-│   ├── reasonix-tools/           # 13 内置工具 + Snippet 系统
-│   ├── reasonix-orch/ ★          # GOAP Planner + Swarm + Vector Memory
-│   ├── reasonix-desktop/ ★       # Tauri 桌面端
-│   ├── reasonix-cli/             # CLI 二进制
-│   ├── reasonix-mcp/             # MCP 客户端
-│   ├── reasonix-config/          # 配置加载
-│   ├── reasonix-context/         # 上下文管理
-│   ├── reasonix-permission/      # 权限系统
-│   ├── reasonix-event/           # 事件总线
-│   ├── reasonix-runtime/         # 组合根
-│   ├── reasonix-sandbox/         # 沙箱
-│   ├── reasonix-checkpoint/      # 检查点
-│   ├── reasonix-store/           # 会话持久化
-│   ├── reasonix-tui/             # TUI
-│   ├── reasonix-serve/           # HTTP 服务器
-│   ├── reasonix-skills/          # Skills
-│   └── reasonix-telemetry/       # 遥测
+│   ├── dpronix-core/            # 核心类型、Runner/Tool/Plugin traits
+│   ├── dpronix-agent/           # Agent 循环 + 工具执行
+│   ├── dpronix-provider/        # OpenAI/Anthropic Provider
+│   ├── dpronix-tools/           # 13 内置工具 + Snippet 系统
+│   ├── dpronix-orch/ ★          # GOAP Planner + Swarm + Vector Memory
+│   ├── dpronix-desktop/ ★       # Tauri 桌面端
+│   ├── dpronix-cli/             # CLI 二进制
+│   ├── dpronix-mcp/             # MCP 客户端
+│   ├── dpronix-config/          # 配置加载
+│   ├── dpronix-context/         # 上下文管理
+│   ├── dpronix-permission/      # 权限系统
+│   ├── dpronix-event/           # 事件总线
+│   ├── dpronix-runtime/         # 组合根
+│   ├── dpronix-sandbox/         # 沙箱
+│   ├── dpronix-checkpoint/      # 检查点
+│   ├── dpronix-store/           # 会话持久化
+│   ├── dpronix-tui/             # TUI
+│   ├── dpronix-serve/           # HTTP 服务器
+│   ├── dpronix-skills/          # Skills
+│   └── dpronix-telemetry/       # 遥测
 ├── .github/workflows/            # CI/CD
 └── GUIDE.md                      # 用户指南
 ```

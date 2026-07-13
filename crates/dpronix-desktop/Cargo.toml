@@ -1,0 +1,36 @@
+[package]
+name = "dpronix-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-shell = "2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+dpronix-core = { version = "0.1.0", path = "../dpronix-core" }
+dpronix-agent = { version = "0.1.0", path = "../dpronix-agent" }
+dpronix-config = { version = "0.1.0", path = "../dpronix-config" }
+dpronix-provider = { version = "0.1.0", path = "../dpronix-provider" }
+dpronix-tools = { version = "0.1.0", path = "../dpronix-tools" }
+dpronix-runtime = { version = "0.1.0", path = "../dpronix-runtime" }
+dpronix-store = { version = "0.1.0", path = "../dpronix-store" }
+dpronix-skills = { version = "0.1.0", path = "../dpronix-skills" }
+dpronix-event = { version = "0.1.0", path = "../dpronix-event" }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

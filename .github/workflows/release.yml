@@ -1,7 +1,7 @@
 # Release workflow — triggered by version tags (v*)
 # Builds and publishes:
-#   1. CLI binary (reasonix-cli) for 3 platforms
-#   2. Desktop app (reasonix-desktop) for macOS + Linux
+#   1. CLI binary (dpronix-cli) for 3 platforms
+#   2. Desktop app (dpronix-desktop) for macOS + Linux
 #   3. npm package with prebuilt binaries
 #
 # Uses the existing cargo-dist configuration from Cargo.toml
@@ -36,13 +36,13 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            binary: reasonix-cli
+            binary: dpronix-cli
           - os: macos-latest
             target: aarch64-apple-darwin
-            binary: reasonix-cli
+            binary: dpronix-cli
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            binary: reasonix-cli.exe
+            binary: dpronix-cli.exe
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -51,7 +51,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }} -p reasonix-cli
+        run: cargo build --release --target ${{ matrix.target }} -p dpronix-cli
 
       - name: Package
         shell: bash
@@ -59,9 +59,9 @@ jobs:
           cd target/${{ matrix.target }}/release
           mkdir -p /tmp/artifacts
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            7z a -tzip /tmp/artifacts/reasonix-${{ matrix.target }}.zip reasonix-cli.exe
+            7z a -tzip /tmp/artifacts/reasonix-${{ matrix.target }}.zip dpronix-cli.exe
           else
-            tar czf /tmp/artifacts/reasonix-${{ matrix.target }}.tar.gz reasonix-cli
+            tar czf /tmp/artifacts/reasonix-${{ matrix.target }}.tar.gz dpronix-cli
           fi
 
       - name: Upload artifact
@@ -98,14 +98,14 @@ jobs:
 
       - name: Build frontend
         run: |
-          cd crates/reasonix-desktop/frontend
+          cd crates/dpronix-desktop/frontend
           npm ci
           npm run build
 
       - uses: Swatinem/rust-cache@v2
 
       - name: Build desktop app
-        run: cargo build --release -p reasonix-desktop
+        run: cargo build --release -p dpronix-desktop
 
       - name: Package desktop
         shell: bash

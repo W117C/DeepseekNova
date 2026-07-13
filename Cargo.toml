@@ -1,25 +1,25 @@
 [workspace]
 members = [
-    "crates/reasonix-cli",
-    "crates/reasonix-config",
-    "crates/reasonix-provider",
-    "crates/reasonix-agent",
-    "crates/reasonix-tools",
-    "crates/reasonix-core",
-    "crates/reasonix-mcp",
-    "crates/reasonix-event",
-    "crates/reasonix-permission",
-    "crates/reasonix-context",
-    "crates/reasonix-runtime",
-    "crates/reasonix-sandbox",
-    "crates/reasonix-checkpoint",
-    "crates/reasonix-store",
-    "crates/reasonix-tui",
-    "crates/reasonix-serve",
-    "crates/reasonix-skills",
-    "crates/reasonix-telemetry",
-    "crates/reasonix-desktop",
-    "crates/reasonix-orch",
+    "crates/dpronix-cli",
+    "crates/dpronix-config",
+    "crates/dpronix-provider",
+    "crates/dpronix-agent",
+    "crates/dpronix-tools",
+    "crates/dpronix-core",
+    "crates/dpronix-mcp",
+    "crates/dpronix-event",
+    "crates/dpronix-permission",
+    "crates/dpronix-context",
+    "crates/dpronix-runtime",
+    "crates/dpronix-sandbox",
+    "crates/dpronix-checkpoint",
+    "crates/dpronix-store",
+    "crates/dpronix-tui",
+    "crates/dpronix-serve",
+    "crates/dpronix-skills",
+    "crates/dpronix-telemetry",
+    "crates/dpronix-desktop",
+    "crates/dpronix-orch",
 ]
 resolver = "2"
 
@@ -27,7 +27,7 @@ resolver = "2"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/user/reasonix-rs"
+repository = "https://github.com/user/dpronix-rs"
 
 [workspace.dependencies]
 anyhow = "1.0"
@@ -93,7 +93,7 @@ targets = [
     "x86_64-pc-windows-msvc",
 ]
 # The primary binary
-app-name = "reasonix-cli"
+app-name = "dpronix-cli"
 # Installer configurations
 installer = ["shell", "powershell", "npm"]
 # MSI not needed; npm covers the widest audience

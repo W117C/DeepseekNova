@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to reasonix-rs will be documented in this file.
+All notable changes to dpronix-rs will be documented in this file.
 
 ## [0.2.0] — 2026-07-12
 
@@ -22,7 +22,7 @@ All notable changes to reasonix-rs will be documented in this file.
 - DeepSeek reasoning content displayed in dim ANSI style
 
 #### Desktop App (Phase 3)
-- New `reasonix-desktop` crate: Tauri 2.x desktop application
+- New `dpronix-desktop` crate: Tauri 2.x desktop application
 - 7 Tauri Commands: `submit_prompt` (Channel streaming), `cancel_run`, `list_skills`, `list_providers`, `get_config`, `get_capabilities`, `health_check`
 - React/TypeScript frontend with streaming chat UI, dark theme, skills panel
 - System tray with hide/show/quit
@@ -32,7 +32,7 @@ All notable changes to reasonix-rs will be documented in this file.
 - Session-level cache hit rate display in status bar
 
 #### Multi-Agent Orchestration (Phase 4)
-- New `reasonix-orch` crate: GOAP Goal Planner + Swarm Coordinator
+- New `dpronix-orch` crate: GOAP Goal Planner + Swarm Coordinator
 - GoalPlanner: A* planner that decomposes goals into action DAGs using DeepSeek-V4 thinking mode
 - SwarmCoordinator: Queen-led multi-agent team coordination
 - VectorMemory: Cosine similarity search, text→embedding hashing, importance-based compaction, file persistence
@@ -67,35 +67,35 @@ All notable changes to reasonix-rs will be documented in this file.
 ### Added
 
 #### Foundation (Phase 0)
-- `reasonix-core`: Core type system — `Runner` trait, `Tool` trait, `ExecutionGraph`, `RegistryHub`, `Chunk`, `Usage`
-- `reasonix-provider`: LLM provider abstraction with OpenAI and Anthropic implementations, streaming support, retry, factory
-- `reasonix-agent`: Main agent loop with multi-step reasoning, memory compaction, plan mode runner, sub-agent runner, coordinator runner
-- `reasonix-tools`: 13 built-in tools — read_file, write_file, edit_file, move_file, ls, glob, grep, shell, web_fetch, todo_write, remember, forget, recall
-- `reasonix-mcp`: MCP client for connecting to external tool servers
-- `reasonix-config`: TOML-based config with multi-layer merging (default → user → project → env)
-- `reasonix-context`: Workspace indexing, working memory, project memory (REASONIX.md + .reasonix/memory/)
-- `reasonix-permission`: Policy-based permission gating for tool execution (allow/ask/deny)
-- `reasonix-event`: Event bus for agent lifecycle events
-- `reasonix-runtime`: Composition root — wires registry, context, event, permission, and config together
-- `reasonix-cli`: CLI binary with subcommands: run, chat, serve, setup, init, config
+- `dpronix-core`: Core type system — `Runner` trait, `Tool` trait, `ExecutionGraph`, `RegistryHub`, `Chunk`, `Usage`
+- `dpronix-provider`: LLM provider abstraction with OpenAI and Anthropic implementations, streaming support, retry, factory
+- `dpronix-agent`: Main agent loop with multi-step reasoning, memory compaction, plan mode runner, sub-agent runner, coordinator runner
+- `dpronix-tools`: 13 built-in tools — read_file, write_file, edit_file, move_file, ls, glob, grep, shell, web_fetch, todo_write, remember, forget, recall
+- `dpronix-mcp`: MCP client for connecting to external tool servers
+- `dpronix-config`: TOML-based config with multi-layer merging (default → user → project → env)
+- `dpronix-context`: Workspace indexing, working memory, project memory (REASONIX.md + .reasonix/memory/)
+- `dpronix-permission`: Policy-based permission gating for tool execution (allow/ask/deny)
+- `dpronix-event`: Event bus for agent lifecycle events
+- `dpronix-runtime`: Composition root — wires registry, context, event, permission, and config together
+- `dpronix-cli`: CLI binary with subcommands: run, chat, serve, setup, init, config
 
 #### Planning & Execution (Phase 2)
-- `reasonix-core::executor`: Graph executor with topological sort and concurrent execution
-- `reasonix-core::planner`: SimplePlanner and Planner trait
-- `reasonix-agent::plan_mode`: Plan-first execution (read-only planning → user approval → execute)
-- `reasonix-agent::sub_agent`: Sub-agent delegation with isolated contexts
-- `reasonix-agent::coordinator`: Two-model coordinator (planner + executor)
+- `dpronix-core::executor`: Graph executor with topological sort and concurrent execution
+- `dpronix-core::planner`: SimplePlanner and Planner trait
+- `dpronix-agent::plan_mode`: Plan-first execution (read-only planning → user approval → execute)
+- `dpronix-agent::sub_agent`: Sub-agent delegation with isolated contexts
+- `dpronix-agent::coordinator`: Two-model coordinator (planner + executor)
 
 #### Safety (Phase 3)
-- `reasonix-sandbox`: Sandbox trait with platform-specific impls (macOS Seatbelt, Linux bubblewrap)
-- `reasonix-checkpoint`: File checkpoint and rollback manager
-- `reasonix-store`: Session persistence (JSONL format)
+- `dpronix-sandbox`: Sandbox trait with platform-specific impls (macOS Seatbelt, Linux bubblewrap)
+- `dpronix-checkpoint`: File checkpoint and rollback manager
+- `dpronix-store`: Session persistence (JSONL format)
 
 #### Interface (Phase 4)
-- `reasonix-tui`: Terminal UI with ratatui — split-pane, streaming, color-coded output
-- `reasonix-serve`: HTTP server with axum — SSE streaming, OpenAI-compatible `/v1/chat` endpoint
-- `reasonix-skills`: Skill system — load markdown + YAML frontmatter from `.reasonix/skills/`
-- `reasonix-telemetry`: OpenTelemetry integration with OTLP/gRPC and stdout exporters
+- `dpronix-tui`: Terminal UI with ratatui — split-pane, streaming, color-coded output
+- `dpronix-serve`: HTTP server with axum — SSE streaming, OpenAI-compatible `/v1/chat` endpoint
+- `dpronix-skills`: Skill system — load markdown + YAML frontmatter from `.reasonix/skills/`
+- `dpronix-telemetry`: OpenTelemetry integration with OTLP/gRPC and stdout exporters
 
 #### Tooling
 - CI/CD: GitHub Actions with 6 jobs (check, clippy, fmt, test matrix, docs, release)

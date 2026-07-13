@@ -3,8 +3,8 @@
 ## Setup
 
 ```bash
-git clone https://github.com/user/reasonix-rs.git
-cd reasonix-rs
+git clone https://github.com/user/dpronix-rs.git
+cd dpronix-rs
 cargo build
 ```
 
@@ -36,23 +36,23 @@ Types: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`, `perf`, `ci`
 
 ```
 crates/
-├── reasonix-core/       # Foundation: types, traits, registry
-├── reasonix-agent/      # Agent loop, memory, plan mode
-├── reasonix-provider/   # LLM provider abstraction
-├── reasonix-tools/      # Built-in tools
-├── reasonix-mcp/        # MCP client
-├── reasonix-config/     # Configuration
-├── reasonix-context/    # Workspace indexing, context
-├── reasonix-permission/ # Permission gating
-├── reasonix-event/      # Event bus
-├── reasonix-runtime/    # Composition root
-├── reasonix-sandbox/    # Process sandbox
-├── reasonix-checkpoint/ # File checkpoint/rollback
-├── reasonix-store/      # Session persistence
-├── reasonix-tui/        # Terminal UI
-├── reasonix-serve/      # HTTP server
-├── reasonix-skills/     # Skill system
-└── reasonix-cli/        # CLI binary
+├── dpronix-core/       # Foundation: types, traits, registry
+├── dpronix-agent/      # Agent loop, memory, plan mode
+├── dpronix-provider/   # LLM provider abstraction
+├── dpronix-tools/      # Built-in tools
+├── dpronix-mcp/        # MCP client
+├── dpronix-config/     # Configuration
+├── dpronix-context/    # Workspace indexing, context
+├── dpronix-permission/ # Permission gating
+├── dpronix-event/      # Event bus
+├── dpronix-runtime/    # Composition root
+├── dpronix-sandbox/    # Process sandbox
+├── dpronix-checkpoint/ # File checkpoint/rollback
+├── dpronix-store/      # Session persistence
+├── dpronix-tui/        # Terminal UI
+├── dpronix-serve/      # HTTP server
+├── dpronix-skills/     # Skill system
+└── dpronix-cli/        # CLI binary
 ```
 
 ## Testing
@@ -61,7 +61,7 @@ crates/
 - **Integration tests**: `crates/<crate>/tests/` directories
 - **Run all tests**: `cargo test --all --workspace`
 - **Run specific crate tests**: `cargo test -p <crate-name>`
-- **Run benchmarks**: `cargo bench -p reasonix-core`
+- **Run benchmarks**: `cargo bench -p dpronix-core`
 
 ## Code Style
 
