@@ -76,6 +76,8 @@ fn merge_preserves_provider_overrides() {
         timeout_secs: 120,
         max_retries: 3,
         headers: vec![],
+        thinking_enabled: false,
+        extra_body: None,
     });
 
     let over = Config {
@@ -110,6 +112,8 @@ fn merge_overrides_non_default_providers() {
         timeout_secs: 120,
         max_retries: 3,
         headers: vec![],
+        thinking_enabled: false,
+        extra_body: None,
     });
 
     let over = Config {
@@ -123,6 +127,8 @@ fn merge_overrides_non_default_providers() {
             timeout_secs: 60,
             max_retries: 2,
             headers: vec![],
+            thinking_enabled: false,
+            extra_body: None,
         }],
         ..Default::default()
     };
@@ -169,6 +175,8 @@ fn resolve_provider_for_model() {
             timeout_secs: 120,
             max_retries: 3,
             headers: vec![],
+            thinking_enabled: false,
+            extra_body: None,
         }],
         models: vec![ModelConfig {
             name: "deepseek-chat".into(),

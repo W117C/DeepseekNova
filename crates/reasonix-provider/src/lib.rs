@@ -1,9 +1,13 @@
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+
 use async_trait::async_trait;
 use reasonix_core::chunk::ChunkStream;
 use reasonix_core::Message;
 
 pub mod anthropic;
 pub mod openai;
+pub mod scavenge;
+pub mod telemetry;
 pub mod types;
 
 // ---------------------------------------------------------------------------
@@ -90,7 +94,9 @@ pub mod factory {
                     cfg.api_key_env.as_deref().unwrap_or("DEEPSEEK_API_KEY"),
                     cfg.timeout_secs,
                     cfg.max_retries,
-                )?;
+                )?
+                    .with_thinking(cfg.thinking_enabled)
+                    .with_extra_body(cfg.extra_body.clone());
                 Ok(Box::new(provider))
             }
             "anthropic" => {
@@ -114,7 +120,9 @@ pub mod factory {
                     cfg.api_key_env.as_deref().unwrap_or("OLLAMA"),
                     cfg.timeout_secs,
                     cfg.max_retries,
-                )?;
+                )?
+                    .with_thinking(cfg.thinking_enabled)
+                    .with_extra_body(cfg.extra_body.clone());
                 Ok(Box::new(provider))
             }
             other => anyhow::bail!("unknown provider kind: {other}"),
@@ -137,6 +145,8 @@ pub mod factory {
                 timeout_secs: 30,
                 max_retries: 3,
                 headers: vec![],
+                thinking_enabled: false,
+                extra_body: None,
             };
             let result = create_provider(&cfg);
             let err = match result {

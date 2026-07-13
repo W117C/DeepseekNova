@@ -20,6 +20,8 @@ url = { workspace = true }
 reasonix-core = { version = "0.1.0", path = "../reasonix-core" }
 reasonix-sandbox = { version = "0.1.0", path = "../reasonix-sandbox" }
 reasonix-checkpoint = { version = "0.1.0", path = "../reasonix-checkpoint" }
+sha2 = { workspace = true }
+hex = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

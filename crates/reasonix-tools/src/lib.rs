@@ -4,6 +4,7 @@ pub mod grep;
 pub mod ls;
 pub mod memory;
 pub mod shell;
+pub mod snippet;
 pub mod todo;
 pub mod web_fetch;
 

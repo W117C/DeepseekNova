@@ -28,6 +28,7 @@ pub mod memory;
 pub mod plan_mode;
 pub mod sub_agent;
 pub mod test_utils;
+pub mod budget;
 
 pub use agent::*;
 pub use coordinator::*;

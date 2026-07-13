@@ -1,0 +1,170 @@
+# Release workflow — triggered by version tags (v*)
+# Builds and publishes:
+#   1. CLI binary (reasonix-cli) for 3 platforms
+#   2. Desktop app (reasonix-desktop) for macOS + Linux
+#   3. npm package with prebuilt binaries
+#
+# Uses the existing cargo-dist configuration from Cargo.toml
+
+name: Release
+
+on:
+  push:
+    tags: ["v*", "desktop-v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g., v0.2.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ── CLI Release Build (3 platforms) ──────────────────────────────
+  cli-release:
+    name: CLI release (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary: reasonix-cli
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            binary: reasonix-cli
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary: reasonix-cli.exe
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }} -p reasonix-cli
+
+      - name: Package
+        shell: bash
+        run: |
+          cd target/${{ matrix.target }}/release
+          mkdir -p /tmp/artifacts
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            7z a -tzip /tmp/artifacts/reasonix-${{ matrix.target }}.zip reasonix-cli.exe
+          else
+            tar czf /tmp/artifacts/reasonix-${{ matrix.target }}.tar.gz reasonix-cli
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: reasonix-${{ matrix.target }}
+          path: /tmp/artifacts/reasonix-${{ matrix.target }}.*
+          if-no-files-found: error
+
+  # ── Desktop Release (macOS + Linux) ─────────────────────────────
+  desktop-release:
+    name: Desktop release (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    if: startsWith(github.ref, 'refs/tags/desktop-v') || github.event_name == 'workflow_dispatch'
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            binary: dpronix-desktop
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary: dpronix-desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Install Node.js for frontend build
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build frontend
+        run: |
+          cd crates/reasonix-desktop/frontend
+          npm ci
+          npm run build
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build desktop app
+        run: cargo build --release -p reasonix-desktop
+
+      - name: Package desktop
+        shell: bash
+        run: |
+          mkdir -p /tmp/artifacts
+          cd target/release
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            7z a -tzip /tmp/artifacts/dpronix-desktop-${{ matrix.target }}.zip *.exe
+          else
+            tar czf /tmp/artifacts/dpronix-desktop-${{ matrix.target }}.tar.gz ${{ matrix.binary }}
+          fi
+
+      - name: Upload desktop artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dpronix-desktop-${{ matrix.target }}
+          path: /tmp/artifacts/dpronix-desktop-${{ matrix.target }}.*
+          if-no-files-found: error
+
+  # ── GitHub Release (publish artifacts) ──────────────────────────
+  publish:
+    name: Create GitHub Release
+    needs: [cli-release, desktop-release]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/desktop-v') || github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/artifacts
+
+      - name: Generate SHA256 checksums
+        run: |
+          cd /tmp/artifacts
+          find . -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec sha256sum {} \; > checksums.txt
+          cat checksums.txt
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Release ${{ github.ref_name }}
+          body: |
+            ## DPRonix ${{ github.ref_name }}
+
+            ### Downloads
+            See artifacts attached to this release.
+
+            ### Checksums
+            SHA256 checksums are in checksums.txt attached to this release.
+
+            ### Changes
+            See the [CHANGELOG](CHANGELOG.md) for details.
+          files: |
+            /tmp/artifacts/**/*.tar.gz
+            /tmp/artifacts/**/*.zip
+            /tmp/artifacts/**/checksums.txt
+          draft: true
+          prerelease: false

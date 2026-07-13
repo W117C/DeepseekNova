@@ -17,4 +17,5 @@ reasonix-config = { version = "0.1.0", path = "../reasonix-config" }
 reasonix-provider = { version = "0.1.0", path = "../reasonix-provider" }
 reasonix-agent = { version = "0.1.0", path = "../reasonix-agent" }
 reasonix-tools = { version = "0.1.0", path = "../reasonix-tools" }
+reasonix-skills = { version = "0.1.0", path = "../reasonix-skills" }
 dirs = { workspace = true }

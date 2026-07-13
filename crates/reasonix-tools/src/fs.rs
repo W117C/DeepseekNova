@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use crate::snippet;
 use reasonix_checkpoint::CheckpointManager;
 use reasonix_core::{Tool, ToolContext, ToolSchema};
 use serde::Deserialize;
@@ -59,7 +60,15 @@ impl Tool for ReadFileTool {
         }
 
         let content = fs::read_to_string(&path).await?;
-        Ok(content)
+
+        // Register snippet and append snippet ID for the model to reference
+        let mut tracker = crate::snippet::global_tracker().lock().await;
+        let snippet_id = tracker.register(&path.to_string_lossy(), &content);
+        drop(tracker);
+
+        // Return content with snippet marker for edit validation
+        Ok(format!("{}\n\n[SNIPPED ID: {}]\n[Snippet generated from: {}]\n",
+            content.trim_end(), snippet_id, path.display()))
     }
 }
 
@@ -182,6 +191,8 @@ struct EditFileArgs {
     path: String,
     search: String,
     replace: String,
+    #[serde(default)]
+    snippet_id: Option<String>,
 }
 
 #[async_trait]
@@ -207,6 +218,10 @@ impl Tool for EditFileTool {
                     "replace": {
                         "type": "string",
                         "description": "Text to replace with."
+                    },
+                    "snippet_id": {
+                        "type": "string",
+                        "description": "Optional snippet ID from read_file."
                     }
                 },
                 "required": ["path", "search", "replace"]
@@ -228,6 +243,16 @@ impl Tool for EditFileTool {
         }
 
         let original = fs::read_to_string(&path).await?;
+
+        // Validate snippet if provided (deepcode-cli style)
+        if let Some(ref snip_id) = parsed.snippet_id {
+            let tracker = crate::snippet::global_tracker().lock().await;
+            if let Err(current) = tracker.validate(snip_id, &original) {
+                drop(tracker);
+                return Ok(format!("SNIPPED STALE: The file has changed since you read it.\n                    Current content:\n---\n{}\n---\nPlease re-read.", current));
+            }
+            drop(tracker);
+        }
 
         if let Some(pos) = original.find(&parsed.search) {
             let edited = format!(

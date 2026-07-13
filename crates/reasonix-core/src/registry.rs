@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use indexmap::IndexMap;
 use std::sync::Arc;
 
 use crate::graph::ExecutionGraph;
@@ -50,13 +50,13 @@ impl Default for RegistryHub {
 // ---------------------------------------------------------------------------
 
 pub struct ToolRegistry {
-    tools: HashMap<String, Arc<dyn Tool>>,
+    tools: IndexMap<String, Arc<dyn Tool>>,
 }
 
 impl ToolRegistry {
     pub fn new() -> Self {
         Self {
-            tools: HashMap::new(),
+            tools: IndexMap::new(),
         }
     }
 
@@ -92,13 +92,13 @@ pub type ProviderFactory =
     fn(crate::config::ProviderConfigData) -> anyhow::Result<Arc<dyn crate::runner::Runner>>;
 
 pub struct ProviderRegistry {
-    factories: HashMap<String, ProviderFactory>,
+    factories: IndexMap<String, ProviderFactory>,
 }
 
 impl ProviderRegistry {
     pub fn new() -> Self {
         Self {
-            factories: HashMap::new(),
+            factories: IndexMap::new(),
         }
     }
 
@@ -137,13 +137,13 @@ pub trait Planner: Send + Sync {
 }
 
 pub struct PlannerRegistry {
-    planners: HashMap<String, Arc<dyn Planner>>,
+    planners: IndexMap<String, Arc<dyn Planner>>,
 }
 
 impl PlannerRegistry {
     pub fn new() -> Self {
         Self {
-            planners: HashMap::new(),
+            planners: IndexMap::new(),
         }
     }
 
@@ -176,13 +176,13 @@ pub struct Skill {
 }
 
 pub struct SkillRegistry {
-    skills: HashMap<String, Skill>,
+    skills: IndexMap<String, Skill>,
 }
 
 impl SkillRegistry {
     pub fn new() -> Self {
         Self {
-            skills: HashMap::new(),
+            skills: IndexMap::new(),
         }
     }
 
@@ -213,13 +213,13 @@ pub struct Command {
 }
 
 pub struct CommandRegistry {
-    commands: HashMap<String, Command>,
+    commands: IndexMap<String, Command>,
 }
 
 impl CommandRegistry {
     pub fn new() -> Self {
         Self {
-            commands: HashMap::new(),
+            commands: IndexMap::new(),
         }
     }
 

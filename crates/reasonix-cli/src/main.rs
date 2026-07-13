@@ -109,19 +109,23 @@ async fn main() -> anyhow::Result<()> {
             stream_events(&plan_runner, input).await?;
         }
 
-        // ── Chat ─────────────────────────────────────────────────────────
+        // ── Chat (with /new loop) ────────────────────────────────────────
         Some(Commands::Chat { model }) => {
             info!("chat: model={model:?}");
-
-            let provider = resolve_provider(&config, model)?;
-            let agent = build_agent(
-                Arc::clone(&provider),
-                model.as_deref(),
-                &config,
-                0, // no max_steps limit in chat mode
-            );
-
-            chat::run_chat_repl(&agent, model.clone()).await?;
+            loop {
+                let provider = resolve_provider(&config, model)?;
+                let agent = build_agent(
+                    Arc::clone(&provider),
+                    model.as_deref(),
+                    &config,
+                    0, // no max_steps limit in chat mode
+                );
+                let restart = chat::run_chat_repl(&agent, model.clone()).await?;
+                if !restart {
+                    break;
+                }
+                info!("restarting chat session...");
+            }
         }
 
         Some(Commands::Serve { addr }) => {
@@ -145,9 +149,14 @@ async fn main() -> anyhow::Result<()> {
 
         None => {
             info!("no command provided — starting interactive chat");
-            let provider = resolve_provider(&config, &None)?;
-            let agent = build_agent(Arc::clone(&provider), None, &config, 0);
-            chat::run_chat_repl(&agent, None).await?;
+            loop {
+                let provider = resolve_provider(&config, &None)?;
+                let agent = build_agent(Arc::clone(&provider), None, &config, 0);
+                let restart = chat::run_chat_repl(&agent, None).await?;
+                if !restart {
+                    break;
+                }
+            }
         }
     }
 

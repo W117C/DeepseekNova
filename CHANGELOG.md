@@ -2,6 +2,66 @@
 
 All notable changes to reasonix-rs will be documented in this file.
 
+## [0.2.0] — 2026-07-12
+
+### Added
+
+#### Core Engine Fixes (Phase 1)
+- True SSE streaming: switched from `response.text()` buffering to `response.bytes_stream()` line-by-line parsing
+- Agent tool execution loop: agent now actually runs tools when model calls them, feeds results back into memory
+- DeepSeek thinking mode: `reasoning_effort` parameter, `reasoning_content` streamed as `ReasoningDelta`
+- Proper reasoning_content passthrough: `Message` struct now has `reasoning_content` field (required by DeepSeek-V4 when tool calls are involved)
+- `extra_body` support: `ChatCompletionRequest` can pass DeepSeek-specific params like `{"thinking": {"type": "enabled"}}`
+- Ctrl-C cancellation: `CancellationToken` wired to `tokio::signal::ctrl_c()` for graceful agent interruption
+
+#### CLI & TUI (Phase 2)
+- 10+ slash commands: `/exit /new /clear /raw /model /skills /mcp /undo /help`
+- 3 display modes: normal (all), lite (hide reasoning), raw (chunk types)
+- `/new` session restart loop
+- Skills listing from `.reasonix/skills/` and `.agents/skills/`
+- DeepSeek reasoning content displayed in dim ANSI style
+
+#### Desktop App (Phase 3)
+- New `reasonix-desktop` crate: Tauri 2.x desktop application
+- 7 Tauri Commands: `submit_prompt` (Channel streaming), `cancel_run`, `list_skills`, `list_providers`, `get_config`, `get_capabilities`, `health_check`
+- React/TypeScript frontend with streaming chat UI, dark theme, skills panel
+- System tray with hide/show/quit
+- Single-instance lock
+- Window close→hide to tray behavior
+- Frontend: components extracted (Transcript, MessageCard, Composer)
+- Session-level cache hit rate display in status bar
+
+#### Multi-Agent Orchestration (Phase 4)
+- New `reasonix-orch` crate: GOAP Goal Planner + Swarm Coordinator
+- GoalPlanner: A* planner that decomposes goals into action DAGs using DeepSeek-V4 thinking mode
+- SwarmCoordinator: Queen-led multi-agent team coordination
+- VectorMemory: Cosine similarity search, text→embedding hashing, importance-based compaction, file persistence
+
+#### DeepSeek-V4 Optimizations
+- `reasoning_effort` config (low/medium/high/max)
+- `thinking_enabled` provider config flag
+- `cache_hit_tokens` / `cache_miss_tokens` parsed from API responses with DeepSeek field names
+- `ResponseUsage` updated with `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens` serde aliases
+
+#### Snippet System (Phase 5)
+- New snippet module: ReadFileTool returns `[SNIPPED ID: xxx]` for edit validation
+- EditFileTool accepts optional `snippet_id`, validates file hasn't changed since read
+- Stale edits return current content instead of hard failure
+- SHA256 content hashing, global singleton tracker
+
+#### Release Pipeline
+- Cargo-dist configuration with multi-target builds
+- GitHub Actions release workflow (CLI + Desktop)
+- npm installer config
+
+### Fixed
+- `blocking_send` in tokio async context → all uses `tx.send().await`
+- UTF-8 corruption across TCP chunk boundaries → raw `Vec<u8>` accumulation
+- Tool error messages leaking file paths → 500-char truncation with `floor_char_boundary()`
+- `&s[..max]` UTF-8 slice panics → `floor_char_boundary()` everywhere
+- `[redacted]` placeholder corruption across 29+ source files
+- TypeScript `[redacted]` → `number` type fixes in types.ts
+
 ## [0.1.0] — 2026-07-03
 
 ### Added

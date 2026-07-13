@@ -16,6 +16,13 @@ pub struct ChatCompletionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
     pub stream: bool,
+    /// DeepSeek reasoning effort: "low" | "medium" | "high"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    /// Extra body fields passed through to the API.
+    /// DeepSeek thinking mode requires: {"thinking": {"type": "enabled"}}
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub extra_body: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -70,6 +77,9 @@ pub struct StreamChoice {
 #[derive(Debug, Deserialize)]
 pub struct StreamDelta {
     pub content: Option<String>,
+    /// DeepSeek reasoning content (streamed in parallel with content)
+    #[serde(default)]
+    pub reasoning_content: Option<String>,
     #[serde(default)]
     pub tool_calls: Option<Vec<StreamToolCall>>,
 }
@@ -93,4 +103,10 @@ pub struct ResponseUsage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub total_tokens: u32,
+    /// DeepSeek context cache hit tokens (prompt_cache_hit_tokens in API response)
+    #[serde(rename = "prompt_cache_hit_tokens", default)]
+    pub cache_hit_tokens: u32,
+    /// DeepSeek context cache miss tokens (prompt_cache_miss_tokens in API response)
+    #[serde(rename = "prompt_cache_miss_tokens", default)]
+    pub cache_miss_tokens: u32,
 }

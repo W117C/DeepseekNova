@@ -201,6 +201,7 @@ impl PromptBuilder {
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         });
 
         // Conversation history from working memory
@@ -219,6 +220,7 @@ impl PromptBuilder {
                         name: None,
                         tool_calls: None,
                         tool_call_id: None,
+                        reasoning_content: None,
                     },
                 );
             }
@@ -557,6 +559,7 @@ mod tests {
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         });
         wm.add_message(Message {
             role: Role::Assistant,
@@ -564,6 +567,7 @@ mod tests {
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         });
         assert_eq!(wm.get_all().len(), 2);
     }
@@ -577,6 +581,7 @@ mod tests {
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         });
         assert_eq!(wm.get_all().len(), 1);
         wm.clear();
@@ -594,6 +599,7 @@ mod tests {
                 name: None,
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             });
         }
         assert_eq!(wm.get_all().len(), 5);
@@ -610,6 +616,7 @@ mod tests {
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         });
         assert_eq!(wm.pinned.len(), 1);
         wm.clear();
@@ -663,6 +670,7 @@ mod tests {
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         });
         wm.compaction_digest = Some("summary of earlier conversation".into());
 

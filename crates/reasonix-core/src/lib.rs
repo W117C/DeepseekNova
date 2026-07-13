@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+
 //! # reasonix-core
 //!
 //! Foundation crate for the reasonix agent framework. Provides the core type system,
@@ -30,7 +32,11 @@ pub mod chunk;
 pub mod error;
 pub mod executor;
 pub mod graph;
+pub mod identity;
+pub mod memory;
 pub mod planner;
+pub mod plugin;
+pub mod prefix;
 pub mod registry;
 pub mod runner;
 pub mod tool;

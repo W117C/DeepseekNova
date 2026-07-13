@@ -228,6 +228,7 @@ impl From<&StoredMessage> for Message {
             name: sm.name.clone(),
             tool_calls: None,
             tool_call_id: sm.tool_call_id.clone(),
+            reasoning_content: None,
         }
     }
 }
@@ -260,6 +261,7 @@ mod tests {
                 name: None,
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
             Message {
                 role: Role::Assistant,
@@ -267,6 +269,7 @@ mod tests {
                 name: None,
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
         ]
     }

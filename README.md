@@ -1,13 +1,27 @@
-# reasonix
+# DPRonix — DeepSeek-V4 原生 AI 编码代理框架
 
 [![CI](https://github.com/user/reasonix-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/user/reasonix-rs/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
 
-**reasonix** is a modular, extensible AI agent framework for Rust. It provides the building blocks for
-creating autonomous agents that can use tools, follow multi-step plans, coordinate with sub-agents, and
-interact through CLI, TUI, or HTTP interfaces.
+**DPronix**（原名 reasonix-rs）是一个深度适配 **DeepSeek-V4** 的模块化 AI 编码代理框架，支持思考模式、上下文缓存、工具调用和多 Agent 编排。提供 CLI、TUI、HTTP API 和 **Tauri 桌面端**四种交互方式。
 
-## Architecture
+> 从 esengine/DeepSeek-Reasonix、deepcode-cli、Ruflo、ECC 等顶级项目吸取设计，围绕 DeepSeek 的 prefix cache 和 thinking mode 深度优化。
+
+## 特性
+
+- 🧠 **DeepSeek-V4 原生优化** — 思考模式（`reasoning_effort`）、上下文缓存（`cache_hit_tokens`）、`reasoning_content` 正确回传
+- 🔧 **真正的 SSE 流式传输** — `bytes_stream()` 逐行解析，跨 TCP 分片 UTF-8 安全
+- 🛠️ **工具执行循环** — Agent 自动执行工具调用并反馈结果
+- 🎯 **Snippet 系统** — read→snippet_id→edit 验证，防止编辑过期文件
+- 🐝 **GOAP 规划器** — A* 目标导向规划，DeepSeek-V4 思考模式执行
+- 🐜 **Swarm 编排** — Queen-led 多 Agent 协调
+- 🧠 **向量记忆** — 余弦相似度搜索、重要性压缩、文件持久化
+- 🔌 **Plugin 系统** — Plugin trait + RegistryHub
+- 💻 **Tauri 桌面端** — React/TS 前端 + Rust 后端，系统托盘，单实例锁
+- ⌨️ **丰富 CLI** — 10+ 斜杠命令、3 种显示模式（normal/lite/raw）
+- 📦 **跨平台发布** — cargo-dist + GitHub Actions（macOS/Linux/Windows）
+
+## 架构
 
 ```
                          reasonix-cli (binary)
@@ -22,42 +36,50 @@ interact through CLI, TUI, or HTTP interfaces.
                        reasonix-core (foundation)
            types / graph / runner / tool / registry
                               │
-    ┌─────────┬─────────┬─────┼─────┬─────────┬─────────┐
-    ▼         ▼         ▼     │     ▼         ▼         ▼
-reasonix-  reasonix-  reasonix-│ reasonix-  reasonix-  reasonix-
-config     event      permission│ context    tools      mcp
+    ┌─────────┬─────────┬─────┼─────┬─────────┬─────────┬──────────┐
+    ▼         ▼         ▼     │     ▼         ▼         ▼          ▼
+reasonix-  reasonix-  reasonix-│ reasonix-  reasonix-  reasonix-  reasonix-
+config     event      permission│ context    tools      mcp        orch (★)
+                                                                    │
+                                                   ┌────────────────┤
+                                                   ▼                ▼
+                                            planner (GOAP)    memory (vector)
+                                            swarm (Queen)    plugin system
 ```
 
-### Crates
+### Workspace Crates（21 crates）
 
-| Crate | Description |
+| Crate | 描述 |
 |---|---|
-| `reasonix-core` | Core types: `Runner` trait, `Tool` trait, `ExecutionGraph`, `RegistryHub` |
-| `reasonix-agent` | Agent loop with multi-step reasoning, memory compaction, plan mode, sub-agents |
-| `reasonix-provider` | LLM provider abstraction: OpenAI, Anthropic, streaming + retry |
-| `reasonix-tools` | Built-in tools: fs (read/write/edit/move), grep, glob, ls, shell, web_fetch, todo, memory |
-| `reasonix-mcp` | MCP (Model Context Protocol) client — connect to external tool servers |
-| `reasonix-config` | TOML-based configuration with multi-layer merging |
-| `reasonix-context` | Workspace indexing, project memory, prompt building |
-| `reasonix-permission` | Policy-based permission gating for tool execution |
-| `reasonix-event` | Event bus for agent lifecycle events |
-| `reasonix-runtime` | Composition root — wires all components together |
-| `reasonix-sandbox` | Process sandboxing (macOS Seatbelt, Linux bubblewrap) |
-| `reasonix-checkpoint` | File checkpoint/rollback for safe tool execution |
-| `reasonix-store` | Session persistence (JSONL) |
-| `reasonix-tui` | Terminal UI (ratatui) — interactive chat with streaming |
-| `reasonix-serve` | HTTP server (axum) — SSE streaming, OpenAI-compatible API |
-| `reasonix-skills` | Skill system — load reusable prompts from `.reasonix/skills/` |
-| `reasonix-cli` | CLI binary with subcommands: run, chat, serve, setup, init, config |
+| `reasonix-core` | 核心类型系统：Runner、Tool、ExecutionGraph、RegistryHub、Plugin |
+| `reasonix-agent` | Agent 循环、工具执行、记忆压缩、规划模式、子 Agent |
+| `reasonix-provider` | LLM Provider：OpenAI（SSE + thinking mode）、Anthropic |
+| `reasonix-tools` | 13 内置工具 + **Snippet 系统**（read→snippet_id→edit） |
+| `reasonix-orch` ★ | 编排层：**GOAP 规划器**、**Swarm 协调器**、**向量记忆** |
+| `reasonix-desktop` ★ | **Tauri 2.x 桌面端**（React/TS + Rust 后端） |
+| `reasonix-mcp` | MCP 客户端 |
+| `reasonix-config` | TOML 分层配置 |
+| `reasonix-context` | 工作区索引、项目记忆 |
+| `reasonix-permission` | 权限门控（allow/ask/deny） |
+| `reasonix-event` | 事件总线 |
+| `reasonix-runtime` | 组合根 |
+| `reasonix-sandbox` | 进程沙箱（macOS/Linux） |
+| `reasonix-checkpoint` | 文件检查点/回滚 |
+| `reasonix-store` | JSONL 会话持久化 |
+| `reasonix-tui` | ratatui 终端 UI |
+| `reasonix-serve` | axum HTTP/SSE 服务器 |
+| `reasonix-skills` | Skills 系统（Markdown + YAML） |
+| `reasonix-cli` | CLI 二进制 |
+| `reasonix-telemetry` | OpenTelemetry |
 
-## Quick Start
+## 快速开始
 
-### Prerequisites
+### 前置条件
 
 - Rust 1.75+
-- An OpenAI-compatible API key (set `OPENAI_API_KEY` env var)
+- DeepSeek API key（设置 `DEEPSEEK_API_KEY` 环境变量）
 
-### Installation
+### 安装
 
 ```bash
 git clone https://github.com/user/reasonix-rs.git
@@ -65,142 +87,115 @@ cd reasonix-rs
 cargo build --release
 ```
 
-### Basic Usage
+### CLI 使用
 
 ```bash
-# One-shot: ask the agent to do something
-cargo run -- run "List all Rust files in src/"
+# 一次性任务
+cargo run -- run "列出 src/ 下所有 Rust 文件"
 
-# Interactive terminal UI
+# 交互式聊天（带斜杠命令）
 cargo run -- chat
+# > /help  # 查看所有命令
+# > /raw   # 切换显示模式
 
-# Start HTTP server with SSE streaming
+# 高级用法：规划模式
+cargo run -- plan "实现用户认证功能" \
+  --planner-model deepseek-pro \
+  --executor-model deepseek-flash
+
+# HTTP 服务器
 cargo run -- serve --port 3000
-
-# Initialize a new project with .reasonix/ scaffolding
-cargo run -- init
-
-# Interactive setup wizard
-cargo run -- setup
 ```
 
-### Configuration
+### 桌面端
 
-reasonix looks for configuration in these locations (merged in order):
-1. `~/.config/reasonix/config.toml` — user defaults
-2. `.reasonix/config.toml` — project overrides
-3. Environment variables (`REASONIX_*`)
+```bash
+cd crates/reasonix-desktop
+
+# 安装前端依赖
+cd frontend && npm install && cd ..
+
+# 开发模式
+cargo run
+```
+
+### 配置
 
 ```toml
-# .reasonix/config.toml
-[default_provider]
+# reasonix.toml
+[[providers]]
+name = "deepseek-flash"
 kind = "openai"
-model = "gpt-4o"
-api_key_env = "OPENAI_API_KEY"
+base_url = "https://api.deepseek.com"
+model = "deepseek-v4-flash"
+api_key_env = "DEEPSEEK_API_KEY"
+thinking_enabled = true    # 启用 DeepSeek 思考模式
 
 [agent]
 max_steps = 25
 system_prompt = "You are a helpful software engineer."
-
-[tools]
-sandbox = true          # Enable sandbox for shell commands
-allowed_dirs = ["src/", "tests/"]
+compaction_threshold_tokens = 32000
 ```
 
-### HTTP API
+## DeepSeek-V4 深度集成
+
+| 特性 | 支持 |
+|---|---|
+| 思考模式（thinking mode） | ✅ `reasoning_effort: "low/medium/high/max"` |
+| 思考内容流式 | ✅ `reasoning_content` → `ReasoningDelta` chunk |
+| 上下文缓存 | ✅ `cache_hit_tokens` / `cache_miss_tokens` 解析 + 前端显示 |
+| 工具调用 + 思考 | ✅ 多轮思考→工具执行循环 |
+| `reasoning_content` 回传 | ✅ 工具调用轮次必须回传（否则 400） |
+| `extra_body` 扩展 | ✅ `{"thinking": {"type": "enabled"}}` |
+
+## 项目结构
+
+```
+.
+├── Cargo.toml                    # Workspace 根
+├── reasonix.toml                 # 项目配置
+├── crates/
+│   ├── reasonix-core/            # 核心类型、Runner/Tool/Plugin traits
+│   ├── reasonix-agent/           # Agent 循环 + 工具执行
+│   ├── reasonix-provider/        # OpenAI/Anthropic Provider
+│   ├── reasonix-tools/           # 13 内置工具 + Snippet 系统
+│   ├── reasonix-orch/ ★          # GOAP Planner + Swarm + Vector Memory
+│   ├── reasonix-desktop/ ★       # Tauri 桌面端
+│   ├── reasonix-cli/             # CLI 二进制
+│   ├── reasonix-mcp/             # MCP 客户端
+│   ├── reasonix-config/          # 配置加载
+│   ├── reasonix-context/         # 上下文管理
+│   ├── reasonix-permission/      # 权限系统
+│   ├── reasonix-event/           # 事件总线
+│   ├── reasonix-runtime/         # 组合根
+│   ├── reasonix-sandbox/         # 沙箱
+│   ├── reasonix-checkpoint/      # 检查点
+│   ├── reasonix-store/           # 会话持久化
+│   ├── reasonix-tui/             # TUI
+│   ├── reasonix-serve/           # HTTP 服务器
+│   ├── reasonix-skills/          # Skills
+│   └── reasonix-telemetry/       # 遥测
+├── .github/workflows/            # CI/CD
+└── GUIDE.md                      # 用户指南
+```
+
+## 开发
 
 ```bash
-# Start the server
-cargo run -- serve --port 3000
-
-# Health check
-curl http://localhost:3000/health
-
-# Streaming chat (SSE)
-curl -N -X POST http://localhost:3000/v1/chat \
-  -H "Content-Type: application/json" \
-  -d '{"prompt": "Explain the repository pattern"}'
-```
-
-SSE event types: `text`, `reasoning`, `tool_start`, `tool_end`, `tool_result`, `usage`, `done`, `error`.
-
-### Skills
-
-Skills are reusable prompt templates stored in `.reasonix/skills/`:
-
-```markdown
----
-name: code-reviewer
-description: Review code for bugs and style issues
-tools_allowed:
-  - read_file
-  - grep
-  - glob
----
-# Code Reviewer
-
-You are a senior software engineer. When reviewing code:
-1. Check for correctness first
-2. Look for security vulnerabilities
-3. Suggest style and maintainability improvements
-4. Note any missing tests
-```
-
-The agent can activate a skill during conversation, which injects the skill's system prompt.
-
-### TUI
-
-```bash
-cargo run -- chat
-```
-
-- **Enter** — submit prompt
-- **Esc / q** — quit (when idle)
-- Streaming text, tool calls, and token usage displayed in real-time
-
-## Development
-
-```bash
-# Run all tests
+# 测试
 cargo test --all --workspace
 
-# Check compilation
+# 编译检查
 cargo check --all-targets --workspace
 
 # Lint
 cargo clippy --all-targets --workspace -- -D warnings
 
-# Format
+# 格式化
 cargo fmt --all --check
 
-# Build docs
+# 文档
 cargo doc --no-deps --workspace --document-private-items
-```
-
-### Project Structure
-
-```
-.
-├── crates/
-│   ├── reasonix-core/       # Foundation: types, traits, registry
-│   ├── reasonix-agent/      # Agent loop, memory, plan mode
-│   ├── reasonix-provider/   # LLM provider abstraction
-│   ├── reasonix-tools/      # Built-in tools
-│   ├── reasonix-mcp/        # MCP client
-│   ├── reasonix-config/     # Configuration
-│   ├── reasonix-context/    # Workspace indexing, context
-│   ├── reasonix-permission/ # Permission gating
-│   ├── reasonix-event/      # Event bus
-│   ├── reasonix-runtime/    # Composition root
-│   ├── reasonix-sandbox/    # Process sandbox
-│   ├── reasonix-checkpoint/ # File checkpoint/rollback
-│   ├── reasonix-store/      # Session persistence
-│   ├── reasonix-tui/        # Terminal UI
-│   ├── reasonix-serve/      # HTTP server
-│   ├── reasonix-skills/     # Skill system
-│   └── reasonix-cli/        # CLI binary
-├── .github/workflows/       # CI/CD
-└── GUIDE.md                 # User guide
 ```
 
 ## License

@@ -185,6 +185,7 @@ impl Runner for SubAgentRunner {
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         });
 
         info!(
@@ -237,6 +238,7 @@ async fn run_sub_agent_loop(
         name: None,
         tool_calls: None,
         tool_call_id: None,
+        reasoning_content: None,
     });
 
     for step in 0..max_steps {
@@ -337,6 +339,7 @@ async fn run_sub_agent_loop(
                 name: None,
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             });
 
             let output = RunOutput {
@@ -361,6 +364,7 @@ async fn run_sub_agent_loop(
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         });
     }
 
@@ -405,6 +409,7 @@ async fn compact_with_provider(
         name: None,
         tool_calls: None,
         tool_call_id: None,
+        reasoning_content: None,
     }];
 
     let result = provider.generate(&summary_msgs, &[]).await?;
@@ -535,6 +540,7 @@ mod tests {
                 name: None,
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             })
         }
     }
@@ -598,6 +604,7 @@ mod tests {
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         }];
         let tokens = estimate_tokens(&msgs);
         assert!(tokens > 0);

@@ -15,6 +15,7 @@ fn working_memory_add_and_get() {
         name: None,
         tool_calls: None,
         tool_call_id: None,
+        reasoning_content: None,
     };
     wm.add_message(msg);
     let all = wm.get_all();
@@ -31,6 +32,7 @@ fn working_memory_clear_removes_all() {
         name: None,
         tool_calls: None,
         tool_call_id: None,
+        reasoning_content: None,
     });
     wm.clear();
     assert!(wm.get_all().is_empty());
@@ -45,6 +47,7 @@ fn working_memory_rewind_trims_tail() {
         name: None,
         tool_calls: None,
         tool_call_id: None,
+        reasoning_content: None,
     });
     wm.add_message(Message {
         role: Role::Assistant,
@@ -52,6 +55,7 @@ fn working_memory_rewind_trims_tail() {
         name: None,
         tool_calls: None,
         tool_call_id: None,
+        reasoning_content: None,
     });
     wm.rewind(1);
     let all = wm.get_all();
@@ -68,6 +72,7 @@ fn working_memory_pin_is_stored() {
         name: None,
         tool_calls: None,
         tool_call_id: None,
+        reasoning_content: None,
     });
     assert_eq!(wm.pinned.len(), 1);
     assert_eq!(wm.pinned[0].content, "pinned");
@@ -143,6 +148,7 @@ fn prompt_builder_includes_conversation_history() {
         name: None,
         tool_calls: None,
         tool_call_id: None,
+        reasoning_content: None,
     });
     wm.add_message(Message {
         role: Role::Assistant,
@@ -150,6 +156,7 @@ fn prompt_builder_includes_conversation_history() {
         name: None,
         tool_calls: None,
         tool_call_id: None,
+        reasoning_content: None,
     });
 
     let pm = ProjectMemory::new();

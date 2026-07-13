@@ -53,7 +53,8 @@ async fn read_file_returns_content() {
         .await
         .unwrap();
 
-    assert_eq!(result, "world");
+    assert!(result.contains("world"), "should contain file content");
+    assert!(result.contains("[SNIPPED ID:"), "should include snippet id");
 }
 
 #[tokio::test]
@@ -99,7 +100,7 @@ async fn write_and_read_roundtrips() {
         .execute(&ctx, &format!(r#"{{"path":"{}"}}"#, target.display()))
         .await
         .unwrap();
-    assert_eq!(content, "hello disk");
+    assert!(content.contains("hello disk"), "should contain file content");
 }
 
 #[tokio::test]

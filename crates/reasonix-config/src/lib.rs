@@ -9,6 +9,7 @@
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
+use serde_json;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -94,6 +95,16 @@ pub struct ProviderConfig {
     /// Extra headers to send with every request.
     #[serde(default)]
     pub headers: Vec<HeaderEntry>,
+
+    /// Enable DeepSeek thinking mode.
+    /// When true, sends extra_body: {"thinking": {"type": "enabled"}}.
+    #[serde(default)]
+    pub thinking_enabled: bool,
+
+    /// Extra JSON body fields to include in every request to this provider.
+    /// Merged into the request body at the top level.
+    #[serde(default)]
+    pub extra_body: Option<serde_json::Value>,
 }
 
 fn default_timeout() -> u64 {
@@ -546,6 +557,8 @@ mod tests {
                 timeout_secs: 120,
                 max_retries: 3,
                 headers: vec![],
+                thinking_enabled: false,
+                extra_body: None,
             }],
             ..Config::default()
         };
