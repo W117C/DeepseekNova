@@ -6,20 +6,20 @@
 //!
 //! ## Agent Types
 //!
-//! - **[`Agent`](agent::Agent)** — the main agent loop. Multi-step reasoning with
+//! - **[`Agent`]** — the main agent loop. Multi-step reasoning with
 //!   tool use, memory management, streaming output, and cancellation support.
-//! - **[`CoordinatorRunner`](coordinator::CoordinatorRunner)** — two-model coordinator.
-//!   Uses a planner model to produce an [`ExecutionGraph`] and an executor model to
+//! - **[`CoordinatorRunner`]** — two-model coordinator.
+//!   Uses a planner model to produce an [`dpronix_core::graph::ExecutionGraph`] and an executor model to
 //!   run it. Supports sub-agent delegation.
-//! - **[`PlanModeRunner`](plan_mode::PlanModeRunner)** — plan-first execution.
+//! - **[`PlanModeRunner`]** — plan-first execution.
 //!   The planner analyzes the task in a read-only session, produces a plan, then
 //!   the executor carries it out.
-//! - **[`SubAgentRunner`](sub_agent::SubAgentRunner)** — lightweight agent for
+//! - **[`SubAgentRunner`]** — lightweight agent for
 //!   delegated tasks. Runs in isolation with its own context.
 //!
 //! ## Memory
 //!
-//! The [`Memory`](memory::Memory) type manages conversation history with automatic
+//! The [`Memory`] type manages conversation history with automatic
 //! compaction. When the context approaches token limits, older messages are summarized
 //! using the provider, keeping the working set small.
 

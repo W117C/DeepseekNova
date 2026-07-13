@@ -7,14 +7,14 @@
 //!
 //! ## Key Abstractions
 //!
-//! - **[`Runner`](runner::Runner)** — the central execution trait. Agent, Planner,
+//! - **[`Runner`]** — the central execution trait. Agent, Planner,
 //!   Coordinator, and SubAgent all implement it. Produces a stream of
-//!   [`RunEvent`](runner::RunEvent)s.
-//! - **[`Tool`](tool::Tool)** — unified interface for all tools (builtin, MCP, skill).
+//!   [`RunEvent`]s.
+//! - **[`Tool`]** — unified interface for all tools (builtin, MCP, skill).
 //!   Each tool declares its schema and executes against JSON arguments.
-//! - **[`ExecutionGraph`](graph::ExecutionGraph)** — a DAG of [`ExecutionNode`](graph::ExecutionNode)s
+//! - **[`ExecutionGraph`]** — a DAG of [`ExecutionNode`]s
 //!   with retry policies and edge conditions. Used by the planner and graph executor.
-//! - **[`RegistryHub`](registry::RegistryHub)** — centralized registry for tools,
+//! - **[`RegistryHub`]** — centralized registry for tools,
 //!   providers, planners, skills, and commands.
 //!
 //! ## Example
