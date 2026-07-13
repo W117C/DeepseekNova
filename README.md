@@ -1,11 +1,11 @@
 # DPronix — DeepSeek-V4 原生 AI 编码代理框架
 
-[![CI](https://github.com/user/dpronix-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/user/dpronix-rs/actions/workflows/ci.yml)
+[![CI](https://github.com/W117C/DPronix/actions/workflows/ci.yml/badge.svg)](https://github.com/W117C/DPronix/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
 
 **DPronix**（原名 dpronix-rs）是一个深度适配 **DeepSeek-V4** 的模块化 AI 编码代理框架，支持思考模式、上下文缓存、工具调用和多 Agent 编排。提供 CLI、TUI、HTTP API 和 **Tauri 桌面端**四种交互方式。
 
-> 从 esengine/DeepSeek-Reasonix、deepcode-cli、Ruflo、ECC 等顶级项目吸取设计，围绕 DeepSeek 的 prefix cache 和 thinking mode 深度优化。
+> 从 esengine/DeepSeek-DPronix、deepcode-cli、Ruflo、ECC 等顶级项目吸取设计，围绕 DeepSeek 的 prefix cache 和 thinking mode 深度优化。
 
 ## 特性
 
@@ -38,7 +38,7 @@
                               │
     ┌─────────┬─────────┬─────┼─────┬─────────┬─────────┬──────────┐
     ▼         ▼         ▼     │     ▼         ▼         ▼          ▼
-reasonix-  reasonix-  reasonix-│ reasonix-  reasonix-  reasonix-  reasonix-
+dpronix-  dpronix-  dpronix-│ dpronix-  dpronix-  dpronix-  dpronix-
 config     event      permission│ context    tools      mcp        orch (★)
                                                                     │
                                                    ┌────────────────┤
@@ -82,7 +82,7 @@ config     event      permission│ context    tools      mcp        orch (★)
 ### 安装
 
 ```bash
-git clone https://github.com/user/dpronix-rs.git
+git clone https://github.com/W117C/DPronix.git
 cd dpronix-rs
 cargo build --release
 ```
@@ -122,7 +122,7 @@ cargo run
 ### 配置
 
 ```toml
-# reasonix.toml
+# dpronix.toml
 [[providers]]
 name = "deepseek-flash"
 kind = "openai"
@@ -153,7 +153,7 @@ compaction_threshold_tokens = 32000
 ```
 .
 ├── Cargo.toml                    # Workspace 根
-├── reasonix.toml                 # 项目配置
+├── dpronix.toml                 # 项目配置
 ├── crates/
 │   ├── dpronix-core/            # 核心类型、Runner/Tool/Plugin traits
 │   ├── dpronix-agent/           # Agent 循环 + 工具执行

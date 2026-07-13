@@ -1,7 +1,7 @@
 use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "reasonix")]
+#[command(name = "dpronix")]
 #[command(version = "0.1.0")]
 #[command(about = "A DeepSeek-native AI coding agent for your terminal", long_about = None)]
 pub struct Cli {
@@ -78,6 +78,6 @@ pub enum Commands {
     },
     /// Print configuration details
     Config,
-    /// Init a new Reasonix project
+    /// Init a new DPronix project
     Init,
 }

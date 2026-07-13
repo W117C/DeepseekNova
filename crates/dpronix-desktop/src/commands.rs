@@ -1,5 +1,5 @@
 //! Tauri command handlers — the bridge between the React/TS frontend
-//! and the reasonix agent kernel.
+//! and the dpronix agent kernel.
 //!
 //! Each command is an async function that the frontend calls via `invoke()`.
 //! Streaming events are delivered through Tauri Channels (`tauri::ipc::Channel`),
@@ -242,11 +242,11 @@ pub async fn cancel_run(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
-/// List available skills from .reasonix/skills/ and .agents/skills/.
+/// List available skills from .dpronix/skills/ and .agents/skills/.
 #[tauri::command]
 pub async fn list_skills() -> Result<Vec<SkillSummary>, String> {
     let mut skills = Vec::new();
-    let paths = [".reasonix/skills", ".agents/skills"];
+    let paths = [".dpronix/skills", ".agents/skills"];
     for path_str in &paths {
         let loader = dpronix_skills::SkillLoader::new(path_str);
         if let Ok(loaded) = loader.load_all() {

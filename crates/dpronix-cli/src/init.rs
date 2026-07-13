@@ -1,25 +1,25 @@
 use anyhow::Context;
 use std::path::Path;
 
-/// Initialize a new reasonix project in the current directory.
-/// Creates: REASONIX.md, reasonix.toml (if not exists),
-/// .reasonix/commands/ (empty dir), .reasonix/memory/ (empty dir).
+/// Initialize a new dpronix project in the current directory.
+/// Creates: REASONIX.md, dpronix.toml (if not exists),
+/// .dpronix/commands/ (empty dir), .dpronix/memory/ (empty dir).
 pub async fn run_init() -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("cannot determine current directory")?;
 
-    // Create .reasonix/commands/
-    let commands_dir = cwd.join(".reasonix").join("commands");
+    // Create .dpronix/commands/
+    let commands_dir = cwd.join(".dpronix").join("commands");
     std::fs::create_dir_all(&commands_dir)
         .with_context(|| format!("failed to create {}", commands_dir.display()))?;
 
-    // Create .reasonix/memory/
-    let memory_dir = cwd.join(".reasonix").join("memory");
+    // Create .dpronix/memory/
+    let memory_dir = cwd.join(".dpronix").join("memory");
     std::fs::create_dir_all(&memory_dir)
         .with_context(|| format!("failed to create {}", memory_dir.display()))?;
 
     // Create REASONIX.md if it doesn't exist
-    let reasonix_md_path = cwd.join("REASONIX.md");
-    if !reasonix_md_path.exists() {
+    let dpronix_md_path = cwd.join("REASONIX.md");
+    if !dpronix_md_path.exists() {
         let project_name = cwd
             .file_name()
             .and_then(|n| n.to_str())
@@ -44,20 +44,20 @@ pub async fn run_init() -> anyhow::Result<()> {
 - [File organization]
 
 ## Commands
-Custom slash commands go in .reasonix/commands/ as .md files.
+Custom slash commands go in .dpronix/commands/ as .md files.
 "#
         );
-        std::fs::write(&reasonix_md_path, template)
-            .with_context(|| format!("failed to write {}", reasonix_md_path.display()))?;
+        std::fs::write(&dpronix_md_path, template)
+            .with_context(|| format!("failed to write {}", dpronix_md_path.display()))?;
         println!("✓ Created REASONIX.md");
     } else {
         println!("  REASONIX.md already exists — skipping");
     }
 
-    // Create reasonix.toml if it doesn't exist
-    let config_path = cwd.join("reasonix.toml");
+    // Create dpronix.toml if it doesn't exist
+    let config_path = cwd.join("dpronix.toml");
     if !config_path.exists() {
-        let template = r#"# reasonix project configuration
+        let template = r#"# dpronix project configuration
 
 [agent]
 max_steps = 10
@@ -67,9 +67,9 @@ default_mode = "ask"
 "#;
         std::fs::write(&config_path, template)
             .with_context(|| format!("failed to write {}", config_path.display()))?;
-        println!("✓ Created reasonix.toml");
+        println!("✓ Created dpronix.toml");
     } else {
-        println!("  reasonix.toml already exists — skipping");
+        println!("  dpronix.toml already exists — skipping");
     }
 
     // Create a sample command
@@ -84,20 +84,20 @@ Run the project build command and report any errors.
     }
 
     println!();
-    println!("reasonix project initialized at {}", cwd.display());
+    println!("dpronix project initialized at {}", cwd.display());
     println!();
     println!("Next steps:");
     println!("  1. Edit REASONIX.md with your project context");
-    println!("  2. Add custom commands to .reasonix/commands/");
-    println!("  3. Run `reasonix chat` to start a session");
+    println!("  2. Add custom commands to .dpronix/commands/");
+    println!("  3. Run `dpronix chat` to start a session");
 
     Ok(())
 }
 
-/// Load custom slash commands from .reasonix/commands/*.md.
+/// Load custom slash commands from .dpronix/commands/*.md.
 #[allow(dead_code)] // Will be wired into chat REPL in Phase 4 (slash commands / skills)
 pub fn load_custom_commands(root: &Path) -> Vec<CustomCommand> {
-    let commands_dir = root.join(".reasonix").join("commands");
+    let commands_dir = root.join(".dpronix").join("commands");
     if !commands_dir.is_dir() {
         return Vec::new();
     }
@@ -207,8 +207,8 @@ mod tests {
     #[test]
     fn load_commands_from_temp_dir() {
         let dir = std::env::temp_dir()
-            .join(format!("reasonix-init-test-{}", std::process::id()));
-        let commands_dir = dir.join(".reasonix").join("commands");
+            .join(format!("dpronix-init-test-{}", std::process::id()));
+        let commands_dir = dir.join(".dpronix").join("commands");
         std::fs::create_dir_all(&commands_dir).unwrap();
 
         // Write a valid command file
@@ -232,8 +232,8 @@ mod tests {
     #[test]
     fn load_commands_empty_dir() {
         let dir = std::env::temp_dir()
-            .join(format!("reasonix-init-empty-{}", std::process::id()));
-        let commands_dir = dir.join(".reasonix").join("commands");
+            .join(format!("dpronix-init-empty-{}", std::process::id()));
+        let commands_dir = dir.join(".dpronix").join("commands");
         std::fs::create_dir_all(&commands_dir).unwrap();
 
         let commands = load_custom_commands(&dir);

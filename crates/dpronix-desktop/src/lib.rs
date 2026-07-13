@@ -1,6 +1,6 @@
 //! # dpronix-desktop
 //!
-//! Native desktop application for the reasonix AI agent framework.
+//! Native desktop application for the dpronix AI agent framework.
 //! Built with Tauri 2.x — Rust backend with a React/TypeScript frontend.
 //!
 //! ## Architecture

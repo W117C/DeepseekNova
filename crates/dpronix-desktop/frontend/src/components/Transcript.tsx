@@ -1,6 +1,6 @@
 /**
  * Transcript — scrollable conversation message list.
- * Inspired by DeepSeek-Reasonix desktop/frontend/src/components/Transcript.tsx
+ * Inspired by DeepSeek-DPronix desktop/frontend/src/components/Transcript.tsx
  */
 import { useEffect, useRef } from "react";
 import MessageCard from "./MessageCard";

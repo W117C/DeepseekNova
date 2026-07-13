@@ -1,9 +1,9 @@
-# Contributing to reasonix
+# Contributing to dpronix
 
 ## Setup
 
 ```bash
-git clone https://github.com/user/dpronix-rs.git
+git clone https://github.com/W117C/DPronix.git
 cd dpronix-rs
 cargo build
 ```

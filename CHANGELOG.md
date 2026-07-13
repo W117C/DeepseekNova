@@ -18,7 +18,7 @@ All notable changes to dpronix-rs will be documented in this file.
 - 10+ slash commands: `/exit /new /clear /raw /model /skills /mcp /undo /help`
 - 3 display modes: normal (all), lite (hide reasoning), raw (chunk types)
 - `/new` session restart loop
-- Skills listing from `.reasonix/skills/` and `.agents/skills/`
+- Skills listing from `.dpronix/skills/` and `.agents/skills/`
 - DeepSeek reasoning content displayed in dim ANSI style
 
 #### Desktop App (Phase 3)
@@ -73,7 +73,7 @@ All notable changes to dpronix-rs will be documented in this file.
 - `dpronix-tools`: 13 built-in tools — read_file, write_file, edit_file, move_file, ls, glob, grep, shell, web_fetch, todo_write, remember, forget, recall
 - `dpronix-mcp`: MCP client for connecting to external tool servers
 - `dpronix-config`: TOML-based config with multi-layer merging (default → user → project → env)
-- `dpronix-context`: Workspace indexing, working memory, project memory (REASONIX.md + .reasonix/memory/)
+- `dpronix-context`: Workspace indexing, working memory, project memory (REASONIX.md + .dpronix/memory/)
 - `dpronix-permission`: Policy-based permission gating for tool execution (allow/ask/deny)
 - `dpronix-event`: Event bus for agent lifecycle events
 - `dpronix-runtime`: Composition root — wires registry, context, event, permission, and config together
@@ -94,7 +94,7 @@ All notable changes to dpronix-rs will be documented in this file.
 #### Interface (Phase 4)
 - `dpronix-tui`: Terminal UI with ratatui — split-pane, streaming, color-coded output
 - `dpronix-serve`: HTTP server with axum — SSE streaming, OpenAI-compatible `/v1/chat` endpoint
-- `dpronix-skills`: Skill system — load markdown + YAML frontmatter from `.reasonix/skills/`
+- `dpronix-skills`: Skill system — load markdown + YAML frontmatter from `.dpronix/skills/`
 - `dpronix-telemetry`: OpenTelemetry integration with OTLP/gRPC and stdout exporters
 
 #### Tooling

@@ -1,4 +1,4 @@
-//! HTTP server for reasonix — exposes Runner via a REST + SSE API.
+//! HTTP server for dpronix — exposes Runner via a REST + SSE API.
 //!
 //! ```no_run
 //! use dpronix_serve::Server;
@@ -55,7 +55,7 @@ impl Server {
             .with_state(Arc::new(self));
 
         let listener = tokio::net::TcpListener::bind(addr).await?;
-        tracing::info!("reasonix serve listening on {addr}");
+        tracing::info!("dpronix serve listening on {addr}");
         axum::serve(listener, app).await?;
         Ok(())
     }

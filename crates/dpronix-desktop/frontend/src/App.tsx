@@ -126,7 +126,7 @@ export default function App() {
             <h3>Skills</h3>
             <button className="btn-icon-small" onClick={() => setShowSkills(false)}>✕</button>
           </div>
-          {skills.length === 0 && <p className="muted">No skills found. Create .md files in .reasonix/skills/</p>}
+          {skills.length === 0 && <p className="muted">No skills found. Create .md files in .dpronix/skills/</p>}
           {skills.map((s) => (
             <div key={s.name} className="skill-card">
               <strong>{s.name}</strong> — {s.description}

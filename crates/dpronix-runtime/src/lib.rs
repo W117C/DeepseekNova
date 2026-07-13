@@ -102,7 +102,7 @@ mod tests {
         let config = Config::default();
         // Use a temp dir to avoid scanning the full project tree
         let dir = std::env::temp_dir()
-            .join(format!("reasonix-rt-test-{}", std::process::id()));
+            .join(format!("dpronix-rt-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
 
         let context = ContextEngine::new(dir.clone()).unwrap();

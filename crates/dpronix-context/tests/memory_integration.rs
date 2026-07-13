@@ -83,23 +83,23 @@ fn working_memory_pin_is_stored() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn project_memory_loads_reasonix_md() {
+fn project_memory_loads_dpronix_md() {
     let dir = TempDir::new().unwrap();
     std::fs::write(dir.path().join("REASONIX.md"), "# Project Context").unwrap();
 
     let mut pm = ProjectMemory::new();
-    pm.load_reasonix_md(dir.path());
+    pm.load_dpronix_md(dir.path());
 
-    assert!(pm.reasonix_md.is_some());
-    assert!(pm.reasonix_md.unwrap().contains("Project Context"));
+    assert!(pm.dpronix_md.is_some());
+    assert!(pm.dpronix_md.unwrap().contains("Project Context"));
 }
 
 #[test]
-fn project_memory_missing_reasonix_md_stays_none() {
+fn project_memory_missing_dpronix_md_stays_none() {
     let dir = TempDir::new().unwrap();
     let mut pm = ProjectMemory::new();
-    pm.load_reasonix_md(dir.path());
-    assert!(pm.reasonix_md.is_none());
+    pm.load_dpronix_md(dir.path());
+    assert!(pm.dpronix_md.is_none());
 }
 
 // ---------------------------------------------------------------------------
@@ -130,7 +130,7 @@ fn prompt_builder_injects_project_memory() {
     let dir = TempDir::new().unwrap();
     std::fs::write(dir.path().join("REASONIX.md"), "# My Project\nVersion 2.0").unwrap();
     let mut pm = ProjectMemory::new();
-    pm.load_reasonix_md(dir.path());
+    pm.load_dpronix_md(dir.path());
 
     let wm = WorkingMemory::new();
     let messages = PromptBuilder::build("you are a bot", &[], &wm, &pm);

@@ -11,14 +11,14 @@ for crate in sorted(os.listdir(ROOT)):
     with open(toml_path) as f:
         content = f.read()
 
-    # Fix: reasonix-XXX = { path = "../name" } -> reasonix-XXX = { version = "0.1.0", path = "../name" }
+    # Fix: dpronix-XXX = { path = "../name" } -> dpronix-XXX = { version = "0.1.0", path = "../name" }
     def add_version(m):
         dep_name = m.group(1)
         dep_path = m.group(2)
         return f'{dep_name} = {{ version = "0.1.0", path = "{dep_path}" }}'
 
     content = re.sub(
-        r'(reasonix-[\w-]+)\s*=\s*\{\s*path\s*=\s*"((?:\.\./)[^"]+)"\s*\}',
+        r'(dpronix-[\w-]+)\s*=\s*\{\s*path\s*=\s*"((?:\.\./)[^"]+)"\s*\}',
         add_version,
         content,
     )

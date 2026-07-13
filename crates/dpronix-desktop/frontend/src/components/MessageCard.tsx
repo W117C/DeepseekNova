@@ -1,7 +1,7 @@
 /**
  * MessageCard — renders one message in the conversation transcript.
  * Supports 4 roles: user, assistant, reasoning, tool.
- * Inspired by DeepSeek-Reasonix desktop/frontend/src/components/Message.tsx
+ * Inspired by DeepSeek-DPronix desktop/frontend/src/components/Message.tsx
  */
 import type { Message } from "../types";
 

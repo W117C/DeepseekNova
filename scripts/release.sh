@@ -98,11 +98,11 @@ cargo build --release -p dpronix-cli
 # Copy to dist/
 mkdir -p dist
 if [[ "$(uname -s)" == "Darwin" ]]; then
-    cp target/release/reasonix dist/reasonix-${VERSION}-aarch64-apple-darwin
-    echo "  dist/reasonix-${VERSION}-aarch64-apple-darwin"
+    cp target/release/dpronix dist/dpronix-${VERSION}-aarch64-apple-darwin
+    echo "  dist/dpronix-${VERSION}-aarch64-apple-darwin"
 elif [[ "$(uname -s)" == "Linux" ]]; then
-    cp target/release/reasonix dist/reasonix-${VERSION}-x86_64-unknown-linux-gnu
-    echo "  dist/reasonix-${VERSION}-x86_64-unknown-linux-gnu"
+    cp target/release/dpronix dist/dpronix-${VERSION}-x86_64-unknown-linux-gnu
+    echo "  dist/dpronix-${VERSION}-x86_64-unknown-linux-gnu"
 fi
 
 # 6. Create git tag

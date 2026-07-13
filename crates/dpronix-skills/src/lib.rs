@@ -1,7 +1,7 @@
-//! Skill system for reasonix.
+//! Skill system for dpronix.
 //!
 //! Skills are reusable prompt templates stored as markdown files with YAML
-//! frontmatter in `.reasonix/skills/`. Each skill is exposed as a tool so
+//! frontmatter in `.dpronix/skills/`. Each skill is exposed as a tool so
 //! the agent can activate it during a conversation.
 //!
 //! ## Quick start
@@ -10,8 +10,8 @@
 //! use dpronix_skills::{SkillLoader, SkillTool};
 //! use std::sync::Arc;
 //!
-//! // Load skills from the project's .reasonix/skills/ directory
-//! let loader = SkillLoader::new(".reasonix/skills");
+//! // Load skills from the project's .dpronix/skills/ directory
+//! let loader = SkillLoader::new(".dpronix/skills");
 //! let skills = loader.load_all().unwrap();
 //!
 //! // Wrap each skill as a Tool for the registry

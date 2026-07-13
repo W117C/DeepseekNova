@@ -1,4 +1,4 @@
-//! OpenTelemetry integration for reasonix.
+//! OpenTelemetry integration for dpronix.
 //!
 //! Provides distributed tracing and metrics via the OpenTelemetry protocol (OTLP).
 //! Traces are automatically collected from existing `tracing` spans and exported
@@ -10,12 +10,12 @@
 //! # fn main() -> anyhow::Result<()> {
 //! // Export to an OTLP collector (e.g. local Jaeger, Grafana Agent)
 //! let _guard = dpronix_telemetry::TelemetryGuard::init(
-//!     "reasonix",
+//!     "dpronix",
 //!     Some("http://localhost:4317"),
 //! )?;
 //!
 //! // Or use stdout for local debugging
-//! // let _guard = dpronix_telemetry::TelemetryGuard::init_stdout("reasonix")?;
+//! // let _guard = dpronix_telemetry::TelemetryGuard::init_stdout("dpronix")?;
 //!
 //! // All tracing::info_span! / tracing::debug! calls are automatically
 //! // bridged to OpenTelemetry spans and exported.
@@ -75,7 +75,7 @@ impl TelemetryGuard {
             )]))
             .build();
 
-        let tracer = tracer_provider.tracer("reasonix");
+        let tracer = tracer_provider.tracer("dpronix");
 
         let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
 
@@ -114,7 +114,7 @@ impl TelemetryGuard {
             )]))
             .build();
 
-        let tracer = tracer_provider.tracer("reasonix");
+        let tracer = tracer_provider.tracer("dpronix");
 
         let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
 
@@ -155,7 +155,7 @@ mod tests {
     fn init_stdout_does_not_panic() {
         // This will fail to set the global default if tests have already
         // set a subscriber, but it should not panic.
-        let result = TelemetryGuard::init_stdout("reasonix-test");
+        let result = TelemetryGuard::init_stdout("dpronix-test");
         // Either succeeds or gracefully handles the already-set case.
         assert!(result.is_ok());
     }

@@ -64,9 +64,9 @@ fn scan_dir(
     entries: &mut Vec<FileEntry>,
     ignores: &[String],
 ) -> anyhow::Result<()> {
-    // Skip hidden directories except .git and .reasonix
+    // Skip hidden directories except .git and .dpronix
     if let Some(name) = dir.file_name().and_then(|n| n.to_str()) {
-        if name.starts_with('.') && name != "." && name != ".reasonix" {
+        if name.starts_with('.') && name != "." && name != ".dpronix" {
             return Ok(());
         }
     }
@@ -182,9 +182,9 @@ impl PromptBuilder {
         system_content.push_str(system_prompt);
 
         // Inject project memory
-        if let Some(ref reasonix_md) = project_memory.reasonix_md {
+        if let Some(ref dpronix_md) = project_memory.dpronix_md {
             system_content.push_str("\n\n---\n## Project Context\n\n");
-            system_content.push_str(reasonix_md);
+            system_content.push_str(dpronix_md);
         }
 
         // Inject tool descriptions
@@ -282,7 +282,7 @@ impl Default for WorkingMemory {
 
 pub struct ProjectMemory {
     pub auto_memory: HashMap<String, MemoryEntry>,
-    pub reasonix_md: Option<String>,
+    pub dpronix_md: Option<String>,
     pub custom_commands: Vec<Command>,
 }
 
@@ -290,24 +290,24 @@ impl ProjectMemory {
     pub fn new() -> Self {
         Self {
             auto_memory: HashMap::new(),
-            reasonix_md: None,
+            dpronix_md: None,
             custom_commands: Vec::new(),
         }
     }
 
     /// Load REASONIX.md from the workspace root if present.
-    pub fn load_reasonix_md(&mut self, root: &Path) {
+    pub fn load_dpronix_md(&mut self, root: &Path) {
         let path = root.join("REASONIX.md");
         if path.exists() {
             if let Ok(content) = std::fs::read_to_string(&path) {
-                self.reasonix_md = Some(content);
+                self.dpronix_md = Some(content);
             }
         }
     }
 
-    /// Load all persistent memory entries from .reasonix/memory/*.md files.
+    /// Load all persistent memory entries from .dpronix/memory/*.md files.
     pub fn load_memory_files(&mut self, root: &Path) {
-        let memory_dir = root.join(".reasonix").join("memory");
+        let memory_dir = root.join(".dpronix").join("memory");
         if !memory_dir.is_dir() {
             return;
         }
@@ -331,9 +331,9 @@ impl ProjectMemory {
         }
     }
 
-    /// Load custom slash commands from .reasonix/commands/*.md files.
+    /// Load custom slash commands from .dpronix/commands/*.md files.
     pub fn load_custom_commands(&mut self, root: &Path) {
-        let commands_dir = root.join(".reasonix").join("commands");
+        let commands_dir = root.join(".dpronix").join("commands");
         if !commands_dir.is_dir() {
             return;
         }
@@ -459,7 +459,7 @@ impl ContextEngine {
     pub fn new(root: PathBuf) -> anyhow::Result<Self> {
         let workspace = WorkspaceIndex::scan(&root)?;
         let mut project_memory = ProjectMemory::new();
-        project_memory.load_reasonix_md(&root);
+        project_memory.load_dpronix_md(&root);
         project_memory.load_memory_files(&root);
         project_memory.load_custom_commands(&root);
 
@@ -649,7 +649,7 @@ mod tests {
     #[test]
     fn prompt_builder_injects_project_memory() {
         let mut pm = ProjectMemory::new();
-        pm.reasonix_md = Some("This is a Rust project.".into());
+        pm.dpronix_md = Some("This is a Rust project.".into());
 
         let messages = PromptBuilder::build(
             "You are helpful.",
@@ -707,7 +707,7 @@ mod tests {
     #[test]
     fn workspace_scan_temp_dir() {
         let dir = std::env::temp_dir()
-            .join(format!("reasonix-ctx-test-{}", std::process::id()));
+            .join(format!("dpronix-ctx-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
 
         // Create a test file
@@ -731,7 +731,7 @@ mod tests {
     #[test]
     fn workspace_scan_respects_gitignore() {
         let dir = std::env::temp_dir()
-            .join(format!("reasonix-ctx-gi-{}", std::process::id()));
+            .join(format!("dpronix-ctx-gi-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
 
         std::fs::write(dir.join(".gitignore"), "*.log\ntarget/\n").unwrap();

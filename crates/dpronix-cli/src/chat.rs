@@ -20,7 +20,7 @@ pub async fn run_chat_repl(
 ) -> anyhow::Result<bool> {
     println!();
     println!("╭──────────────────────────────────────────────────╮");
-    println!("│     reasonix — interactive chat                  │");
+    println!("│     dpronix — interactive chat                  │");
     println!("│     /exit  /new  /model  /skills  /help          │");
     println!("╰──────────────────────────────────────────────────╯");
     println!();
@@ -242,14 +242,14 @@ async fn handle_slash_command(
             println!("  /model thinking — toggle thinking mode (not yet wired)");
             println!("  /model effort   — set reasoning effort low|medium|high");
             println!();
-            println!("Current: configured via reasonix.toml or --model flag");
+            println!("Current: configured via dpronix.toml or --model flag");
         }
 
         // ── Skills ────────────────────────────────────────────
         "skills" => {
             // Try to load skills from standard paths
             let paths = [
-                ".reasonix/skills",
+                ".dpronix/skills",
                 ".agents/skills",
             ];
             let mut found = false;
@@ -275,13 +275,13 @@ async fn handle_slash_command(
                 }
             }
             if !found {
-                println!("No skills found. Create .md files in .reasonix/skills/");
+                println!("No skills found. Create .md files in .dpronix/skills/");
             }
         }
 
         // ── MCP status ────────────────────────────────────────
         "mcp" => {
-            println!("MCP servers are configured in reasonix.toml:");
+            println!("MCP servers are configured in dpronix.toml:");
             println!("  [[mcp_servers]]");
             println!("  name = \"my-server\"");
             println!("  command = \"npx\"");

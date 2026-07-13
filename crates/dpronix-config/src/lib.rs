@@ -2,8 +2,8 @@
 //!
 //! Precedence (lowest to highest):
 //!   1. Hard-coded defaults
-//!   2. `~/.reasonix/config.toml`  (user)
-//!   3. `./reasonix.toml`          (project)
+//!   2. `~/.dpronix/config.toml`  (user)
+//!   3. `./dpronix.toml`          (project)
 //!   4. Environment variables       (REASONIX_*)
 //!   5. CLI flags                   (applied by caller)
 
@@ -369,7 +369,7 @@ impl Config {
     pub fn load() -> anyhow::Result<Self> {
         let mut config = Config::default();
 
-        // Layer 1: user-global config (~/.reasonix/config.toml)
+        // Layer 1: user-global config (~/.dpronix/config.toml)
         if let Some(user_path) = user_config_path() {
             if user_path.exists() {
                 let user = Self::load_from_file(&user_path)?;
@@ -377,8 +377,8 @@ impl Config {
             }
         }
 
-        // Layer 2: project-local config (./reasonix.toml)
-        let project_path = PathBuf::from("reasonix.toml");
+        // Layer 2: project-local config (./dpronix.toml)
+        let project_path = PathBuf::from("dpronix.toml");
         if project_path.exists() {
             let project = Self::load_from_file(&project_path)?;
             config.merge(project);
@@ -504,7 +504,7 @@ impl SandboxConfig {
 // ---------------------------------------------------------------------------
 
 fn user_config_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join(".reasonix").join("config.toml"))
+    dirs::home_dir().map(|home| home.join(".dpronix").join("config.toml"))
 }
 
 // ---------------------------------------------------------------------------

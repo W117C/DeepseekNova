@@ -56,7 +56,7 @@ struct PlanEdge {
 
 /// A Goal Contract forces the planner to reason about the what and why
 /// before the how. Mirrors the Context / Request / Output / Constraints /
-/// Pause structure used by DeepSeek-Reasonix's TASK_CONTRACT.
+/// Pause structure used by DeepSeek-DPronix's TASK_CONTRACT.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoalContract {
     /// Background the planner needs (project shape, prior decisions, etc.)

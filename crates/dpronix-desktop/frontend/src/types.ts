@@ -1,6 +1,6 @@
 /**
  * types.ts — Wire contract matching commands.rs.
- * Mirrors the approach of DeepSeek-Reasonix desktop/frontend/src/lib/types.ts
+ * Mirrors the approach of DeepSeek-DPronix desktop/frontend/src/lib/types.ts
  * but simplified for our Tauri backend.
  */
 

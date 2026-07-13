@@ -1,6 +1,6 @@
 //! # dpronix-agent
 //!
-//! Agent implementations — the brains of reasonix. Each agent type implements
+//! Agent implementations — the brains of dpronix. Each agent type implements
 //! [`Runner`](dpronix_core::runner::Runner) and can be plugged into the runtime.
 //!
 //! ## Agent Types

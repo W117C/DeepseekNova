@@ -202,7 +202,7 @@ impl McpConnection {
                 experimental: None,
             },
             client_info: ClientInfo {
-                name: "reasonix".into(),
+                name: "dpronix".into(),
                 version: "0.1.0".into(),
             },
         })?;

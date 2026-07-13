@@ -194,7 +194,7 @@ mod tests {
         use std::sync::atomic::{AtomicU32, Ordering};
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("reasonix-ck-test-{}-{}", std::process::id(), id));
+        let dir = std::env::temp_dir().join(format!("dpronix-ck-test-{}-{}", std::process::id(), id));
         let _ = std::fs::create_dir_all(&dir);
         dir
     }

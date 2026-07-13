@@ -49,14 +49,14 @@ struct SkillFrontmatter {
 // SkillLoader
 // ---------------------------------------------------------------------------
 
-/// Loads skills from a `.reasonix/skills/` directory.
+/// Loads skills from a `.dpronix/skills/` directory.
 pub struct SkillLoader {
     root: PathBuf,
 }
 
 impl SkillLoader {
-    /// Create a new loader rooted at `path` (e.g. `~/.reasonix/skills/` or
-    /// `<project>/.reasonix/skills/`).
+    /// Create a new loader rooted at `path` (e.g. `~/.dpronix/skills/` or
+    /// `<project>/.dpronix/skills/`).
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self { root: path.into() }
     }

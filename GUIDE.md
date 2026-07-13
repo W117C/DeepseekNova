@@ -1,4 +1,4 @@
-# reasonix User Guide
+# dpronix User Guide
 
 ## Table of Contents
 
@@ -17,7 +17,7 @@
 
 ## Concepts
 
-reasonix is built around a few core abstractions:
+dpronix is built around a few core abstractions:
 
 ### Runner
 
@@ -65,22 +65,22 @@ When the context approaches token limits, older messages are summarized to make 
 ### Build from Source
 
 ```bash
-git clone https://github.com/user/dpronix-rs.git
+git clone https://github.com/W117C/DPronix.git
 cd dpronix-rs
 cargo build --release
 ```
 
-The binary is at `target/release/reasonix`.
+The binary is at `target/release/dpronix`.
 
 ### Initialize a Project
 
 ```bash
-reasonix init
+dpronix init
 ```
 
-This creates a `.reasonix/` directory with:
+This creates a `.dpronix/` directory with:
 ```
-.reasonix/
+.dpronix/
 ├── config.toml        # Project configuration
 ├── skills/            # Custom skills (markdown + frontmatter)
 ├── commands/          # Custom slash commands
@@ -90,7 +90,7 @@ This creates a `.reasonix/` directory with:
 ### Setup Wizard
 
 ```bash
-reasonix setup
+dpronix setup
 ```
 
 Walks through provider selection, API key configuration, and tool preferences.
@@ -100,14 +100,14 @@ Walks through provider selection, API key configuration, and tool preferences.
 Configuration is merged from multiple sources (last wins):
 
 1. **Built-in defaults**
-2. **User config**: `~/.config/reasonix/config.toml`
-3. **Project config**: `.reasonix/config.toml`
+2. **User config**: `~/.config/dpronix/config.toml`
+3. **Project config**: `.dpronix/config.toml`
 4. **Environment variables**: `REASONIX_PROVIDER_MODEL`, `REASONIX_MAX_STEPS`, etc.
 
 ### Full Configuration Reference
 
 ```toml
-# .reasonix/config.toml
+# .dpronix/config.toml
 
 [default_provider]
 kind = "openai"                    # openai | anthropic | ollama
@@ -202,7 +202,7 @@ servers = [
 ## Skills
 
 Skills are reusable prompt templates that extend the agent's capabilities. They live in
-`.reasonix/skills/` as markdown files.
+`.dpronix/skills/` as markdown files.
 
 ### File Format
 
@@ -222,7 +222,7 @@ Detailed instructions for how the agent should behave when this skill is active.
 
 ### Built-in Skills
 
-Place skill files in `.reasonix/skills/`. The agent discovers them automatically on startup.
+Place skill files in `.dpronix/skills/`. The agent discovers them automatically on startup.
 When activated, the skill's system prompt is injected into the conversation.
 
 ### Example: Code Reviewer
@@ -260,7 +260,7 @@ Check for:
 Start the server:
 
 ```bash
-reasonix serve --port 3000 --host 127.0.0.1
+dpronix serve --port 3000 --host 127.0.0.1
 ```
 
 ### Endpoints
@@ -334,7 +334,7 @@ while (true) {
 Launch the interactive terminal UI:
 
 ```bash
-reasonix chat
+dpronix chat
 ```
 
 ### Layout
@@ -364,7 +364,7 @@ reasonix chat
 
 ## MCP Integration
 
-reasonix can connect to MCP (Model Context Protocol) servers for additional tools.
+dpronix can connect to MCP (Model Context Protocol) servers for additional tools.
 
 ### Configuration
 
@@ -388,7 +388,7 @@ Plan mode separates thinking from doing:
 
 ```bash
 # Enable plan mode
-reasonix run --plan "Refactor the auth module to use JWT"
+dpronix run --plan "Refactor the auth module to use JWT"
 ```
 
 ### Execution Graph Nodes
@@ -408,7 +408,7 @@ reasonix run --plan "Refactor the auth module to use JWT"
 For complex tasks, the agent can delegate to sub-agents with isolated contexts:
 
 ```bash
-reasonix run "Audit the entire codebase for security issues"
+dpronix run "Audit the entire codebase for security issues"
 ```
 
 The coordinator agent spawns sub-agents for independent work (e.g., one per module) and

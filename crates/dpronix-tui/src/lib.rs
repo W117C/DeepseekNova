@@ -1,4 +1,4 @@
-//! ratatui-based interactive terminal UI for reasonix.
+//! ratatui-based interactive terminal UI for dpronix.
 //!
 //! Wraps a [`Runner`] and displays streaming output in a split-pane TUI:
 //! - **Conversation pane** (top) — scrollable, shows agent text + tool calls.

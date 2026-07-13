@@ -1,6 +1,6 @@
 //! # Plugin System
 //!
-//! Extensible plugin framework for reasonix. Inspired by Ruflo's 35+ plugin
+//! Extensible plugin framework for dpronix. Inspired by Ruflo's 35+ plugin
 //! ecosystem and ECC's cross-tool plugin system.
 //!
 //! ## Architecture

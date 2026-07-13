@@ -1,6 +1,6 @@
 /**
  * Composer — input area with send/cancel button.
- * Inspired by DeepSeek-Reasonix desktop/frontend/src/components/Composer.tsx
+ * Inspired by DeepSeek-DPronix desktop/frontend/src/components/Composer.tsx
  */
 
 import { useCallback, useRef, useEffect } from "react";
