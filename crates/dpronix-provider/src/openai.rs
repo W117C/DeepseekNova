@@ -1,7 +1,4 @@
-use crate::types::{
-    ChatCompletionResponse, OpenAIFunction, OpenAIRequestTool,
-    StreamResponse,
-};
+use crate::types::{ChatCompletionResponse, OpenAIFunction, OpenAIRequestTool, StreamResponse};
 use crate::{Provider, ProviderError};
 use anyhow::Context;
 use async_trait::async_trait;
@@ -423,7 +420,6 @@ mod tests {
     use super::*;
     use dpronix_core::tool::ToolContext;
     use dpronix_core::types::ToolSchema;
-    
 
     #[allow(dead_code)]
     struct NoopTool;

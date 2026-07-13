@@ -141,7 +141,12 @@ async fn health_endpoint_returns_ok() {
     let resp = reqwest::get(format!("http://127.0.0.1:{port}/health"))
         .await
         .unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::OK, "health failed: {:?}", resp.text().await.unwrap());
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::OK,
+        "health failed: {:?}",
+        resp.text().await.unwrap()
+    );
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["status"], "ok");
 }

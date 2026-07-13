@@ -1,4 +1,10 @@
-#![allow(dead_code, unused_variables, clippy::len_without_is_empty, clippy::too_many_arguments, clippy::bool_assert_comparison)]
+#![allow(
+    dead_code,
+    unused_variables,
+    clippy::len_without_is_empty,
+    clippy::too_many_arguments,
+    clippy::bool_assert_comparison
+)]
 //! # dpronix-orch
 //!
 //! Multi-agent orchestration for DeepSeek-V4: Goal-Oriented Action Planning (GOAP),

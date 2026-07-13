@@ -372,8 +372,7 @@ Constraints:
 
             // Check if all dependencies are completed
             let deps = plan.dependencies.get(&action.id);
-            let all_deps_done =
-                deps.is_none_or(|deps| deps.iter().all(|d| completed.contains(d)));
+            let all_deps_done = deps.is_none_or(|deps| deps.iter().all(|d| completed.contains(d)));
             if all_deps_done {
                 ready.push(action);
             }
