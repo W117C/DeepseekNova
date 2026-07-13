@@ -134,10 +134,7 @@ async fn start_server() -> u16 {
 // ---------------------------------------------------------------------------
 
 fn test_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .no_proxy()
-        .build()
-        .unwrap()
+    reqwest::Client::builder().no_proxy().build().unwrap()
 }
 
 #[tokio::test]
