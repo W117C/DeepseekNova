@@ -7,24 +7,36 @@ use dpronix_core::tool::ToolContext;
 use dpronix_core::Tool;
 use dpronix_tools::*;
 use std::path::PathBuf;
-use tempfile::TempDir;
 
-// ---------------------------------------------------------------------------
-// Helper: create a temp dir with test files
-// ---------------------------------------------------------------------------
+use std::sync::Once;
+
+static INIT: Once = Once::new();
+
+fn init_test_workspace() {
+    INIT.call_once(|| {
+        let temp_dir = std::env::temp_dir().join("dpronix-test-workspace");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let canonical = std::fs::canonicalize(&temp_dir).unwrap_or(temp_dir);
+        std::env::set_current_dir(&canonical).unwrap();
+    });
+}
 
 struct Fixture {
-    dir: TempDir,
+    dir: std::path::PathBuf,
 }
 
 impl Fixture {
     fn new() -> Self {
-        let dir = tempfile::tempdir().unwrap();
+        init_test_workspace();
+        let cwd = std::env::current_dir().unwrap();
+        let unique_name = format!("run-{}", uuid::Uuid::new_v4());
+        let dir = cwd.join(unique_name);
+        std::fs::create_dir_all(&dir).unwrap();
         Self { dir }
     }
 
     fn write(&self, relative_path: &str, content: &str) -> PathBuf {
-        let full = self.dir.path().join(relative_path);
+        let full = self.dir.join(relative_path);
         if let Some(parent) = full.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
@@ -33,7 +45,13 @@ impl Fixture {
     }
 
     fn path(&self) -> PathBuf {
-        self.dir.path().to_path_buf()
+        self.dir.clone()
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
 

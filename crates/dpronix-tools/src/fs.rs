@@ -369,28 +369,9 @@ impl Tool for MoveFileTool {
 // Path sanitization
 // ---------------------------------------------------------------------------
 
-/// Normalize path components by resolving `.` and `..` without hitting the disk.
-fn normalize_path(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::ParentDir => {
-                normalized.pop();
-            }
-            std::path::Component::CurDir => {}
-            _ => {
-                normalized.push(component);
-            }
-        }
-    }
-    normalized
-}
-
 /// Basic path sanitization: reject obviously malicious paths
 /// and ensure the path stays within the workspace root.
 fn sanitize_path(raw: &str) -> anyhow::Result<PathBuf> {
-    let path = Path::new(raw);
-
     if raw.is_empty() {
         anyhow::bail!("empty path");
     }
@@ -398,44 +379,13 @@ fn sanitize_path(raw: &str) -> anyhow::Result<PathBuf> {
         anyhow::bail!("path contains null byte");
     }
 
-    let resolved = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()?.join(path)
-    };
-
-    // Canonicalize if exists, otherwise clean up .. and .
-    let canonical = if resolved.exists() {
-        std::fs::canonicalize(&resolved)?
-    } else {
-        normalize_path(&resolved)
-    };
-
-    // Security: block explicit path traversal via '..' that escapes workspace
-    if raw.contains("..") {
-        let cwd = std::env::current_dir()?;
-        if !canonical.starts_with(&cwd) {
-            anyhow::bail!("path escapes workspace root via '..': {}", raw);
-        }
-    }
-
-    Ok(canonical)
+    let cwd = std::env::current_dir()?;
+    crate::security::path::secure_resolve(&cwd, Path::new(raw))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_normalize_path() {
-        assert_eq!(
-            normalize_path(Path::new("/a/b/../../c")),
-            PathBuf::from("/c")
-        );
-        assert_eq!(normalize_path(Path::new("a/b/../../c")), PathBuf::from("c"));
-        assert_eq!(normalize_path(Path::new("a/b/../c")), PathBuf::from("a/c"));
-        assert_eq!(normalize_path(Path::new("a/./b")), PathBuf::from("a/b"));
-    }
 
     #[test]
     fn test_sanitize_path_traversal() {

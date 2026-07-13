@@ -23,6 +23,10 @@ members = [
 ]
 resolver = "2"
 
+[workspace.lints.rust]
+rustdoc_broken_intra_doc_links = "deny"
+rustdoc_invalid_codeblock_attributes = "deny"
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"

@@ -7,10 +7,12 @@ all: build
 build:
 	cargo build
 
-# Run formatting and linting checks
+# Run formatting, clippy, tests, and documentation checks
 check:
 	cargo fmt --all -- --check
-	cargo clippy --all-targets --all-features -- -D warnings
+	cargo clippy --workspace --all-targets -- -D warnings
+	cargo test --workspace
+	cargo doc --workspace --no-deps --document-private-items
 
 # Format code
 fmt:
