@@ -428,7 +428,10 @@ mod tests {
 
     #[test]
     fn test_normalize_path() {
-        assert_eq!(normalize_path(Path::new("/a/b/../../c")), PathBuf::from("/c"));
+        assert_eq!(
+            normalize_path(Path::new("/a/b/../../c")),
+            PathBuf::from("/c")
+        );
         assert_eq!(normalize_path(Path::new("a/b/../../c")), PathBuf::from("c"));
         assert_eq!(normalize_path(Path::new("a/b/../c")), PathBuf::from("a/c"));
         assert_eq!(normalize_path(Path::new("a/./b")), PathBuf::from("a/b"));
@@ -437,7 +440,7 @@ mod tests {
     #[test]
     fn test_sanitize_path_traversal() {
         let cwd = std::env::current_dir().unwrap();
-        
+
         // Non-existent path inside workspace should succeed
         let ok_path = "src/nonexistent_file_xyz.rs";
         let res = sanitize_path(ok_path).unwrap();
@@ -451,7 +454,14 @@ mod tests {
         // Non-existent path traversing outside workspace should be blocked
         let bad_path = "src/../../outside_workspace_xyz.rs";
         let res = sanitize_path(bad_path);
-        assert!(res.is_err(), "Should block path traversal outside workspace: {:?}", res);
-        assert!(res.unwrap_err().to_string().contains("escapes workspace root"));
+        assert!(
+            res.is_err(),
+            "Should block path traversal outside workspace: {:?}",
+            res
+        );
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("escapes workspace root"));
     }
 }
