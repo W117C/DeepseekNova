@@ -21,6 +21,12 @@ fn init_test_workspace() {
     });
 }
 
+fn test_ctx(workspace: PathBuf) -> ToolContext {
+    ToolContext::new("call-1")
+        .with_workspace(workspace)
+        .with_extension(dpronix_security::context::SecurityContext::with_safe_defaults())
+}
+
 struct Fixture {
     dir: std::path::PathBuf,
 }
@@ -63,7 +69,7 @@ impl Drop for Fixture {
 async fn read_file_returns_content() {
     let f = Fixture::new();
     f.write("hello.txt", "world");
-    let ctx = ToolContext::new("call-1");
+    let ctx = test_ctx(f.path());
     let tool = ReadFileTool;
 
     let result = tool
@@ -81,7 +87,7 @@ async fn read_file_returns_content() {
 #[tokio::test]
 async fn read_file_errors_on_missing() {
     let f = Fixture::new();
-    let ctx = ToolContext::new("call-1");
+    let ctx = test_ctx(f.path());
     let tool = ReadFileTool;
 
     let result = tool
@@ -101,7 +107,7 @@ async fn read_file_errors_on_missing() {
 #[tokio::test]
 async fn write_and_read_roundtrips() {
     let f = Fixture::new();
-    let ctx = ToolContext::new("call-1");
+    let ctx = test_ctx(f.path());
     let write_tool = WriteFileTool::new();
     let read_tool = ReadFileTool;
     let target = f.path().join("output.txt");
@@ -130,7 +136,7 @@ async fn write_and_read_roundtrips() {
 #[tokio::test]
 async fn write_creates_parent_dirs() {
     let f = Fixture::new();
-    let ctx = ToolContext::new("call-1");
+    let ctx = test_ctx(f.path());
     let tool = WriteFileTool::new();
     let target = f.path().join("a/b/c/deep.txt");
 
@@ -152,7 +158,7 @@ async fn write_creates_parent_dirs() {
 async fn edit_file_replaces_text() {
     let f = Fixture::new();
     let path = f.write("greeting.rs", "fn main() {\n    println!(\"hello\");\n}\n");
-    let ctx = ToolContext::new("call-1");
+    let ctx = test_ctx(f.path());
     let tool = EditFileTool::new();
 
     let result = tool
@@ -175,7 +181,7 @@ async fn edit_file_replaces_text() {
 async fn edit_file_errors_when_search_not_found() {
     let f = Fixture::new();
     let path = f.write("config.toml", "[server]\nport = 3000\n");
-    let ctx = ToolContext::new("call-1");
+    let ctx = test_ctx(f.path());
     let tool = EditFileTool::new();
 
     let result = tool
@@ -202,7 +208,7 @@ async fn ls_lists_directory() {
     f.write("b.rs", "b");
     f.write("sub/c.md", "c");
 
-    let ctx = ToolContext::new("call-1");
+    let ctx = test_ctx(f.path());
     let tool = LsTool;
 
     let result = tool
@@ -226,7 +232,7 @@ async fn glob_matches_pattern() {
     f.write("src/lib.rs", "pub mod foo;");
     f.write("tests/test.rs", "// test");
 
-    let ctx = ToolContext::new("call-1");
+    let ctx = test_ctx(f.path());
     let tool = GlobTool;
 
     let result = tool
@@ -254,7 +260,7 @@ async fn grep_finds_matches() {
         "pub fn login() { /* TODO */ }\npub fn logout() {}\n",
     );
 
-    let ctx = ToolContext::new("call-1");
+    let ctx = test_ctx(f.path());
     let tool = GrepTool;
 
     // Grep the file directly
@@ -274,7 +280,7 @@ async fn grep_no_matches_returns_info() {
     let f = Fixture::new();
     let path = f.write("just.rs", "nothing here");
 
-    let ctx = ToolContext::new("call-1");
+    let ctx = test_ctx(f.path());
     let tool = GrepTool;
 
     let result = tool
@@ -298,7 +304,7 @@ async fn move_file_renames() {
     let f = Fixture::new();
     let src = f.write("old_name.txt", "rename me");
     let dst = f.path().join("new_name.txt");
-    let ctx = ToolContext::new("call-1");
+    let ctx = test_ctx(f.path());
     let tool = MoveFileTool::new();
 
     let result = tool
