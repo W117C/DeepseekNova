@@ -50,8 +50,13 @@ async fn main() -> anyhow::Result<()> {
                 let executor_provider = resolve_provider(&config, &executor_model)?;
                 let max_nodes = coordinator.max_graph_nodes;
 
+                let workspace_root = std::env::current_dir().unwrap_or_default();
+                let security =
+                    dpronix_runtime::build_security_context(&config, &workspace_root)?;
                 let mut runner = CoordinatorRunner::new(planner_provider, executor_provider)
-                    .with_max_graph_nodes(max_nodes);
+                    .with_max_graph_nodes(max_nodes)
+                    .with_workspace_root(workspace_root)
+                    .with_security(security);
 
                 // Wire all built-in tools for the executor.
                 for tool in dpronix_tools::all_builtin_tools() {
@@ -72,7 +77,7 @@ async fn main() -> anyhow::Result<()> {
                     model_args.model.as_deref(),
                     &config,
                     model_args.max_steps,
-                );
+                )?;
 
                 let input = RunInput {
                     prompt: prompt_str,
@@ -119,7 +124,7 @@ async fn main() -> anyhow::Result<()> {
                     model.as_deref(),
                     &config,
                     0, // no max_steps limit in chat mode
-                );
+                )?;
                 let restart = chat::run_chat_repl(&agent, model.clone()).await?;
                 if !restart {
                     break;
@@ -151,7 +156,7 @@ async fn main() -> anyhow::Result<()> {
             info!("no command provided — starting interactive chat");
             loop {
                 let provider = resolve_provider(&config, &None)?;
-                let agent = build_agent(Arc::clone(&provider), None, &config, 0);
+                let agent = build_agent(Arc::clone(&provider), None, &config, 0)?;
                 let restart = chat::run_chat_repl(&agent, None).await?;
                 if !restart {
                     break;
@@ -193,7 +198,10 @@ fn build_agent(
     _model: Option<&str>,
     config: &dpronix_config::Config,
     max_steps: usize,
-) -> dpronix_agent::Agent {
+) -> anyhow::Result<dpronix_agent::Agent> {
+    let workspace_root = std::env::current_dir().unwrap_or_default();
+    let security = dpronix_runtime::build_security_context(config, &workspace_root)?;
+
     let mut agent = dpronix_agent::Agent::new(
         provider,
         if max_steps > 0 {
@@ -201,7 +209,9 @@ fn build_agent(
         } else {
             config.agent.max_steps
         },
-    );
+    )
+    .with_workspace_root(workspace_root)
+    .with_security(security);
 
     if let Some(ref sp) = config.agent.system_prompt {
         agent = agent.with_system_prompt(sp.clone());
@@ -212,7 +222,7 @@ fn build_agent(
         agent.register_tool(tool);
     }
 
-    agent
+    Ok(agent)
 }
 
 /// Stream events from any [`Runner`] to stdout in a consistent format.

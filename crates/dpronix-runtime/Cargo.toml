@@ -17,3 +17,4 @@ dpronix-tools = { version = "0.1.0", path = "../dpronix-tools" }
 dpronix-permission = { version = "0.1.0", path = "../dpronix-permission" }
 dpronix-context = { version = "0.1.0", path = "../dpronix-context" }
 dpronix-event = { version = "0.1.0", path = "../dpronix-event" }
+dpronix-security = { version = "0.1.0", path = "../dpronix-security" }

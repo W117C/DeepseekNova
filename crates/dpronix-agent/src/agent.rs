@@ -4,7 +4,9 @@ use dpronix_core::tool::ToolContext;
 use dpronix_core::types::{FunctionCall, ToolCall};
 use dpronix_core::{Message, Role, RunEvent, RunEventStream, RunInput, RunOutput, Runner, Tool};
 use dpronix_provider::Provider;
+use dpronix_security::context::SecurityContext;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
@@ -23,6 +25,13 @@ pub struct Agent {
     tools: HashMap<String, Arc<dyn Tool>>,
     max_steps: usize,
     system_prompt: Option<String>,
+    /// Workspace root used to confine filesystem tool calls. Defaults to the
+    /// process working directory at construction time.
+    workspace_root: PathBuf,
+    /// Security context injected into every ToolContext. Defaults to the
+    /// safe-defaults policy (all builtin capabilities granted).
+    security: SecurityContext,
+
     compaction_threshold_tokens: Option<u32>,
 }
 
@@ -33,6 +42,9 @@ impl Agent {
             tools: HashMap::new(),
             max_steps: if max_steps == 0 { 10 } else { max_steps },
             system_prompt: None,
+            workspace_root: std::env::current_dir().unwrap_or_default(),
+            security: SecurityContext::with_safe_defaults(),
+
             compaction_threshold_tokens: None,
         }
     }
@@ -44,6 +56,18 @@ impl Agent {
 
     pub fn with_compaction_threshold(mut self, tokens: Option<u32>) -> Self {
         self.compaction_threshold_tokens = tokens;
+        self
+    }
+
+    /// Override the workspace root used to confine filesystem tool calls.
+    pub fn with_workspace_root(mut self, workspace_root: PathBuf) -> Self {
+        self.workspace_root = workspace_root;
+        self
+    }
+
+    /// Override the security context injected into every tool execution.
+    pub fn with_security(mut self, security: SecurityContext) -> Self {
+        self.security = security;
         self
     }
 
@@ -63,6 +87,8 @@ impl Runner for Agent {
         let max_steps = self.max_steps;
         let system_prompt = self.system_prompt.clone();
         let compaction_threshold = self.compaction_threshold_tokens;
+        let workspace_root = self.workspace_root.clone();
+        let security = self.security.clone();
 
         let mut memory = Memory::new();
 
@@ -105,6 +131,8 @@ impl Runner for Agent {
                 input,
                 &tx,
                 &cancel,
+                workspace_root,
+                security,
             )
             .await
             {
@@ -138,6 +166,8 @@ async fn run_agent_loop(
     input: RunInput,
     tx: &mpsc::Sender<anyhow::Result<RunEvent>>,
     cancel: &CancellationToken,
+    workspace_root: PathBuf,
+    security: SecurityContext,
 ) -> anyhow::Result<()> {
     // Add user prompt
     memory.add_message(Message {
@@ -192,8 +222,17 @@ async fn run_agent_loop(
             .collect();
 
         // Stream from provider
-        let step_result =
-            stream_and_process_turn(&provider, &tools, &tool_map, memory, tx, cancel).await?;
+        let step_result = stream_and_process_turn(
+            &provider,
+            &tools,
+            &tool_map,
+            memory,
+            tx,
+            cancel,
+            &workspace_root,
+            &security,
+        )
+        .await?;
 
         match step_result {
             StepOutcome::Complete(output) => {
@@ -239,6 +278,8 @@ async fn stream_and_process_turn(
     memory: &mut Memory,
     tx: &mpsc::Sender<anyhow::Result<RunEvent>>,
     cancel: &CancellationToken,
+    workspace_root: &std::path::Path,
+    security: &SecurityContext,
 ) -> anyhow::Result<StepOutcome> {
     // Build tool refs for provider
     let tool_refs: Vec<&dyn Tool> = tools.iter().map(|t| t.as_ref()).collect();
@@ -389,7 +430,9 @@ async fn stream_and_process_turn(
                 break;
             }
 
-            let ctx = ToolContext::with_cancellation(&call.id, cancel.child_token());
+            let ctx = ToolContext::with_cancellation(&call.id, cancel.child_token())
+                .with_workspace(workspace_root.to_path_buf())
+                .with_extension(security.clone());
             let result = if let Some(tool) = tool_map.get(&call.name) {
                 info!(tool = %call.name, id = %call.id, "executing tool");
                 match tool.execute(&ctx, &call.arguments).await {

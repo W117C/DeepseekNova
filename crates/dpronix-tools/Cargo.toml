@@ -20,6 +20,7 @@ url = { workspace = true }
 dpronix-core = { version = "0.1.0", path = "../dpronix-core" }
 dpronix-sandbox = { version = "0.1.0", path = "../dpronix-sandbox" }
 dpronix-checkpoint = { version = "0.1.0", path = "../dpronix-checkpoint" }
+dpronix-security = { version = "0.1.0", path = "../dpronix-security" }
 sha2 = { workspace = true }
 hex = { workspace = true }
 

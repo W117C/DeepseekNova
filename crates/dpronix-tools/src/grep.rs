@@ -48,6 +48,10 @@ impl Tool for GrepTool {
     }
 
     async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
+        dpronix_security::context::enforce_capability(
+            ctx,
+            dpronix_security::capability::Capability::FileRead,
+        )?;
         let parsed: GrepArgs = serde_json::from_str(args)?;
 
         if ctx.cancellation.is_cancelled() {
@@ -58,29 +62,51 @@ impl Tool for GrepTool {
             .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))?;
 
         let base = match parsed.path {
-            Some(ref p) => std::path::PathBuf::from(p),
-            None => std::env::current_dir()?,
+            Some(ref p) => dpronix_security::path::sanitize_path(&ctx.workspace_root, p)?,
+            None => ctx.workspace_root.clone(),
         };
+
+        let security = ctx
+            .extensions
+            .get::<dpronix_security::context::SecurityContext>();
+        let max_files = security.map(|s| s.limits.max_files).unwrap_or(500) as u32;
+        let max_total_bytes = security
+            .map(|s| s.limits.max_total_read_bytes)
+            .unwrap_or(50 * 1024 * 1024);
+        let max_file_size = security
+            .map(|s| s.limits.max_file_size)
+            .unwrap_or(1024 * 1024);
 
         let mut results: Vec<String> = Vec::new();
         let mut files_searched = 0u32;
-        const MAX_FILES: u32 = 500;
+        let mut total_bytes_searched = 0u64;
 
         if base.is_file() {
-            search_file(&base, &re, &mut results)?;
+            let bytes = search_file(&base, &re, &mut results, max_file_size)?;
+            total_bytes_searched += bytes;
             files_searched = 1;
         } else {
             // Walk directory
             let mut read_dir = tokio::fs::read_dir(&base).await?;
             while let Some(entry) = read_dir.next_entry().await? {
-                if files_searched >= MAX_FILES {
-                    results.push(format!("... (stopped after {MAX_FILES} files)"));
+                if files_searched >= max_files {
+                    results.push(format!("... (stopped after {max_files} files)"));
+                    break;
+                }
+                if total_bytes_searched >= max_total_bytes {
+                    results.push(format!(
+                        "... (stopped after reading {max_total_bytes} bytes)"
+                    ));
                     break;
                 }
                 if ctx.cancellation.is_cancelled() {
                     anyhow::bail!("cancelled");
                 }
                 let path = entry.path();
+                // Ensure the path is safe (prevent symlink escape)
+                if dpronix_security::path::secure_resolve(&ctx.workspace_root, &path).is_err() {
+                    continue;
+                }
                 if path.is_file() {
                     // Check glob filter if specified
                     if let Some(ref g) = parsed.glob {
@@ -89,7 +115,8 @@ impl Tool for GrepTool {
                             continue;
                         }
                     }
-                    search_file(&path, &re, &mut results)?;
+                    let bytes = search_file(&path, &re, &mut results, max_file_size)?;
+                    total_bytes_searched += bytes;
                     files_searched += 1;
                 }
             }
@@ -97,13 +124,13 @@ impl Tool for GrepTool {
 
         if results.is_empty() {
             Ok(format!(
-                "no matches for '{}' in {} (searched {files_searched} files)",
+                "no matches for '{}' in {} (searched {files_searched} files, {total_bytes_searched} bytes)",
                 parsed.pattern,
                 base.display()
             ))
         } else {
             Ok(format!(
-                "{} match(es) in {files_searched} files:\n{}",
+                "{} match(es) in {files_searched} files ({total_bytes_searched} bytes):\n{}",
                 results.len(),
                 results.join("\n")
             ))
@@ -111,19 +138,21 @@ impl Tool for GrepTool {
     }
 }
 
-/// Search a single file for regex matches.
+/// Search a single file for regex matches. Returns size of read file.
 fn search_file(
     path: &std::path::Path,
     re: &regex::Regex,
     results: &mut Vec<String>,
-) -> anyhow::Result<()> {
-    let content = std::fs::read_to_string(path)?;
-    const MAX_SIZE: u64 = 1024 * 1024; // 1 MB per file
-    if content.len() as u64 > MAX_SIZE {
+    max_file_size: u64,
+) -> anyhow::Result<u64> {
+    let metadata = std::fs::metadata(path)?;
+    let size = metadata.len();
+    if size > max_file_size {
         results.push(format!("{}: [file too large, skipped]", path.display()));
-        return Ok(());
+        return Ok(0);
     }
 
+    let content = std::fs::read_to_string(path)?;
     for (line_num, line) in content.lines().enumerate() {
         if re.is_match(line) {
             let trimmed = if line.len() > 200 {
@@ -134,7 +163,7 @@ fn search_file(
             results.push(format!("{}:{}: {}", path.display(), line_num + 1, trimmed));
         }
     }
-    Ok(())
+    Ok(size)
 }
 
 /// Simple glob match for file name filtering (supports * and ? wildcards).

@@ -2,7 +2,6 @@ use async_trait::async_trait;
 use dpronix_core::{Tool, ToolContext, ToolSchema};
 use serde::Deserialize;
 use serde_json::json;
-use std::path::Path;
 
 pub struct LsTool;
 
@@ -38,6 +37,10 @@ impl Tool for LsTool {
     }
 
     async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
+        dpronix_security::context::enforce_capability(
+            ctx,
+            dpronix_security::capability::Capability::FileRead,
+        )?;
         let parsed: LsArgs = if args.trim().is_empty() {
             LsArgs { path: None }
         } else {
@@ -49,8 +52,8 @@ impl Tool for LsTool {
         }
 
         let dir = match parsed.path {
-            Some(p) => Path::new(&p).to_path_buf(),
-            None => std::env::current_dir()?,
+            Some(p) => dpronix_security::path::sanitize_path(&ctx.workspace_root, &p)?,
+            None => ctx.workspace_root.clone(),
         };
 
         let mut entries: Vec<String> = Vec::new();

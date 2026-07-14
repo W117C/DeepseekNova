@@ -9,12 +9,63 @@ pub enum ParallelSafety {
     RequiresResource(String),
 }
 
+use std::any::{Any, TypeId};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+#[derive(Clone, Default)]
+pub struct ExtensionRegistry {
+    map: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
+}
+
+impl ExtensionRegistry {
+    pub fn new() -> Self {
+        Self {
+            map: HashMap::new(),
+        }
+    }
+
+    pub fn insert<T: Any + Send + Sync>(&mut self, value: T) {
+        self.map.insert(TypeId::of::<T>(), Arc::new(value));
+    }
+
+    pub fn get<T: Any + Send + Sync>(&self) -> Option<&T> {
+        self.map
+            .get(&TypeId::of::<T>())
+            .and_then(|val| val.downcast_ref::<T>())
+    }
+}
+
+impl std::fmt::Debug for ExtensionRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let keys: Vec<TypeId> = self.map.keys().cloned().collect();
+        f.debug_struct("ExtensionRegistry")
+            .field("keys_count", &keys.len())
+            .finish()
+    }
+}
+
 /// ToolContext carries runtime state into every tool execution.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ToolContext {
     pub cancellation: CancellationToken,
     pub call_id: String,
     pub plan_mode: bool,
+    pub workspace_root: PathBuf,
+    pub extensions: ExtensionRegistry,
+}
+
+impl std::fmt::Debug for ToolContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolContext")
+            .field("cancellation", &self.cancellation)
+            .field("call_id", &self.call_id)
+            .field("plan_mode", &self.plan_mode)
+            .field("workspace_root", &self.workspace_root)
+            .field("extensions", &self.extensions)
+            .finish()
+    }
 }
 
 impl ToolContext {
@@ -23,6 +74,8 @@ impl ToolContext {
             cancellation: CancellationToken::new(),
             call_id: call_id.into(),
             plan_mode: false,
+            workspace_root: std::env::current_dir().unwrap_or_default(),
+            extensions: ExtensionRegistry::new(),
         }
     }
 
@@ -34,7 +87,21 @@ impl ToolContext {
             cancellation: cancel,
             call_id: call_id.into(),
             plan_mode: false,
+            workspace_root: std::env::current_dir().unwrap_or_default(),
+            extensions: ExtensionRegistry::new(),
         }
+    }
+
+    /// Builder method to override the default workspace root.
+    pub fn with_workspace(mut self, workspace_root: PathBuf) -> Self {
+        self.workspace_root = workspace_root;
+        self
+    }
+
+    /// Builder method to insert an extension into the registry.
+    pub fn with_extension<T: Any + Send + Sync>(mut self, extension: T) -> Self {
+        self.extensions.insert(extension);
+        self
     }
 }
 

@@ -1,0 +1,11 @@
+[package]
+name = "dpronix-security"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+tracing = { workspace = true }
+dpronix-core = { version = "0.1.0", path = "../dpronix-core" }

@@ -17,5 +17,6 @@ dpronix-config = { version = "0.1.0", path = "../dpronix-config" }
 dpronix-provider = { version = "0.1.0", path = "../dpronix-provider" }
 dpronix-agent = { version = "0.1.0", path = "../dpronix-agent" }
 dpronix-tools = { version = "0.1.0", path = "../dpronix-tools" }
+dpronix-runtime = { version = "0.1.0", path = "../dpronix-runtime" }
 dpronix-skills = { version = "0.1.0", path = "../dpronix-skills" }
 dirs = { workspace = true }

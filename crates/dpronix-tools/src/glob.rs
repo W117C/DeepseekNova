@@ -41,6 +41,10 @@ impl Tool for GlobTool {
     }
 
     async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
+        dpronix_security::context::enforce_capability(
+            ctx,
+            dpronix_security::capability::Capability::FileRead,
+        )?;
         let parsed: GlobArgs = serde_json::from_str(args)?;
 
         if ctx.cancellation.is_cancelled() {
@@ -48,8 +52,8 @@ impl Tool for GlobTool {
         }
 
         let base = match parsed.path {
-            Some(p) => std::path::PathBuf::from(p),
-            None => std::env::current_dir()?,
+            Some(p) => dpronix_security::path::sanitize_path(&ctx.workspace_root, &p)?,
+            None => ctx.workspace_root.clone(),
         };
 
         // Build the full glob pattern
@@ -62,7 +66,16 @@ impl Tool for GlobTool {
         for entry in paths {
             match entry {
                 Ok(p) => {
-                    matches.push(p.display().to_string());
+                    if dpronix_security::path::secure_resolve(&ctx.workspace_root, &p).is_ok() {
+                        matches.push(p.display().to_string());
+                    } else {
+                        tracing::warn!(
+                            security_event = "glob_match_blocked",
+                            match_path = ?p.display(),
+                            workspace = ?ctx.workspace_root.display(),
+                            reason = "matched path escapes workspace root"
+                        );
+                    }
                 }
                 Err(e) => {
                     tracing::warn!("glob error: {e}");

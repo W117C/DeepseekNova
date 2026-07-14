@@ -46,8 +46,12 @@ impl Tool for ReadFileTool {
     }
 
     async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
+        dpronix_security::context::enforce_capability(
+            ctx,
+            dpronix_security::capability::Capability::FileRead,
+        )?;
         let parsed: ReadFileArgs = serde_json::from_str(args)?;
-        let path = sanitize_path(&parsed.path)?;
+        let path = sanitize_path(&ctx.workspace_root, &parsed.path)?;
 
         if ctx.cancellation.is_cancelled() {
             anyhow::bail!("cancelled");
@@ -130,8 +134,12 @@ impl Tool for WriteFileTool {
     }
 
     async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
+        dpronix_security::context::enforce_capability(
+            ctx,
+            dpronix_security::capability::Capability::FileWrite,
+        )?;
         let parsed: WriteFileArgs = serde_json::from_str(args)?;
-        let path = sanitize_path(&parsed.path)?;
+        let path = sanitize_path(&ctx.workspace_root, &parsed.path)?;
 
         if ctx.cancellation.is_cancelled() {
             anyhow::bail!("cancelled");
@@ -231,8 +239,12 @@ impl Tool for EditFileTool {
     }
 
     async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
+        dpronix_security::context::enforce_capability(
+            ctx,
+            dpronix_security::capability::Capability::FileWrite,
+        )?;
         let parsed: EditFileArgs = serde_json::from_str(args)?;
-        let path = sanitize_path(&parsed.path)?;
+        let path = sanitize_path(&ctx.workspace_root, &parsed.path)?;
 
         if ctx.cancellation.is_cancelled() {
             anyhow::bail!("cancelled");
@@ -339,9 +351,13 @@ impl Tool for MoveFileTool {
     }
 
     async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
+        dpronix_security::context::enforce_capability(
+            ctx,
+            dpronix_security::capability::Capability::FileWrite,
+        )?;
         let parsed: MoveFileArgs = serde_json::from_str(args)?;
-        let src = sanitize_path(&parsed.source)?;
-        let dst = sanitize_path(&parsed.destination)?;
+        let src = sanitize_path(&ctx.workspace_root, &parsed.source)?;
+        let dst = sanitize_path(&ctx.workspace_root, &parsed.destination)?;
 
         if ctx.cancellation.is_cancelled() {
             anyhow::bail!("cancelled");
@@ -369,18 +385,9 @@ impl Tool for MoveFileTool {
 // Path sanitization
 // ---------------------------------------------------------------------------
 
-/// Basic path sanitization: reject obviously malicious paths
-/// and ensure the path stays within the workspace root.
-fn sanitize_path(raw: &str) -> anyhow::Result<PathBuf> {
-    if raw.is_empty() {
-        anyhow::bail!("empty path");
-    }
-    if raw.contains('\0') {
-        anyhow::bail!("path contains null byte");
-    }
-
-    let cwd = std::env::current_dir()?;
-    crate::security::path::secure_resolve(&cwd, Path::new(raw))
+/// Helper wrapper calling the centralized sanitize_path helper.
+fn sanitize_path(workspace: &Path, raw: &str) -> anyhow::Result<PathBuf> {
+    dpronix_security::path::sanitize_path(workspace, raw)
 }
 
 #[cfg(test)]
@@ -393,17 +400,17 @@ mod tests {
 
         // Non-existent path inside workspace should succeed
         let ok_path = "src/nonexistent_file_xyz.rs";
-        let res = sanitize_path(ok_path).unwrap();
+        let res = sanitize_path(&cwd, ok_path).unwrap();
         assert_eq!(res, cwd.join(ok_path));
 
         // Path containing .. but staying inside workspace should succeed
         let ok_traversal = "src/../src/nonexistent_file_xyz.rs";
-        let res = sanitize_path(ok_traversal).unwrap();
+        let res = sanitize_path(&cwd, ok_traversal).unwrap();
         assert_eq!(res, cwd.join("src/nonexistent_file_xyz.rs"));
 
         // Non-existent path traversing outside workspace should be blocked
         let bad_path = "src/../../outside_workspace_xyz.rs";
-        let res = sanitize_path(bad_path);
+        let res = sanitize_path(&cwd, bad_path);
         assert!(
             res.is_err(),
             "Should block path traversal outside workspace: {:?}",

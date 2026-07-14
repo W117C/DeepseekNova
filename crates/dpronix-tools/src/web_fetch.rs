@@ -44,6 +44,10 @@ impl Tool for WebFetchTool {
     }
 
     async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
+        dpronix_security::context::enforce_capability(
+            ctx,
+            dpronix_security::capability::Capability::NetworkAccess,
+        )?;
         let parsed: WebFetchArgs = serde_json::from_str(args)?;
 
         if ctx.cancellation.is_cancelled() {
@@ -57,6 +61,17 @@ impl Tool for WebFetchTool {
         let host = url
             .host_str()
             .ok_or_else(|| anyhow::anyhow!("URL has no host: {}", parsed.url))?;
+        if let Some(sec) = ctx
+            .extensions
+            .get::<dpronix_security::context::SecurityContext>()
+        {
+            if !sec.policy.is_domain_allowed(host) {
+                anyhow::bail!(
+                    "Security violation: domain '{}' is blocked by security policy",
+                    host
+                );
+            }
+        }
         validate_host_ssrf(host).await?;
 
         // Step 3 — Build an HTTP client (no automatic redirects — we re-validate each hop)

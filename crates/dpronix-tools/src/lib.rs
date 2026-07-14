@@ -8,8 +8,6 @@ pub mod snippet;
 pub mod todo;
 pub mod web_fetch;
 
-pub mod security;
-
 pub use fs::*;
 pub use glob::*;
 pub use grep::*;

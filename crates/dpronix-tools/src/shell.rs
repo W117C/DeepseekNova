@@ -58,7 +58,23 @@ impl Tool for ShellTool {
     }
 
     async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
+        dpronix_security::context::enforce_capability(
+            ctx,
+            dpronix_security::capability::Capability::CommandExecute,
+        )?;
         let parsed: ShellArgs = serde_json::from_str(args)?;
+
+        if let Some(sec) = ctx
+            .extensions
+            .get::<dpronix_security::context::SecurityContext>()
+        {
+            if !sec.policy.is_command_allowed(&parsed.command) {
+                anyhow::bail!(
+                    "Security violation: command '{}' is blocked by security policy",
+                    parsed.command
+                );
+            }
+        }
 
         if ctx.cancellation.is_cancelled() {
             anyhow::bail!("cancelled");

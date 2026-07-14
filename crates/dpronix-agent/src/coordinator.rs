@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::SubAgentRunner;
@@ -9,6 +10,7 @@ use dpronix_core::graph::{Action, ExecutionGraph, ExecutionNode};
 use dpronix_core::tool::ToolContext;
 use dpronix_core::{Message, Role, RunEvent, RunEventStream, RunInput, RunOutput, Runner, Tool};
 use dpronix_provider::Provider;
+use dpronix_security::context::SecurityContext;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
@@ -324,6 +326,10 @@ pub struct CoordinatorRunner {
     /// When true (default), planner system prompt is pinned byte-for-byte
     /// across turns so prefix cache stays warm.
     cache_stable_prefix: bool,
+    /// Workspace root used to confine filesystem tool calls in executor nodes.
+    workspace_root: PathBuf,
+    /// Security context injected into every executor tool execution.
+    security: SecurityContext,
 }
 
 impl CoordinatorRunner {
@@ -338,6 +344,8 @@ impl CoordinatorRunner {
             goal_mode: false,
             reasoning_language: ReasoningLanguage::Auto,
             cache_stable_prefix: true,
+            workspace_root: std::env::current_dir().unwrap_or_default(),
+            security: SecurityContext::with_safe_defaults(),
         }
     }
 
@@ -390,6 +398,18 @@ impl CoordinatorRunner {
         self.cache_stable_prefix = enabled;
         self
     }
+
+    /// Override the workspace root used to confine filesystem tool calls.
+    pub fn with_workspace_root(mut self, workspace_root: PathBuf) -> Self {
+        self.workspace_root = workspace_root;
+        self
+    }
+
+    /// Override the security context injected into every executor tool execution.
+    pub fn with_security(mut self, security: SecurityContext) -> Self {
+        self.security = security;
+        self
+    }
 }
 
 #[async_trait::async_trait]
@@ -408,6 +428,8 @@ impl Runner for CoordinatorRunner {
         let max_nodes = self.max_graph_nodes;
         let sub_agent_runner = self.sub_agent_runner.clone();
         let goal_mode = self.goal_mode;
+        let workspace_root = self.workspace_root.clone();
+        let security = self.security.clone();
 
         tokio::spawn(async move {
             if let Err(e) = run_coordinator(
@@ -418,6 +440,8 @@ impl Runner for CoordinatorRunner {
                 max_nodes,
                 sub_agent_runner,
                 goal_mode,
+                workspace_root,
+                security,
                 input,
                 &tx,
             )
@@ -444,6 +468,8 @@ async fn run_coordinator(
     max_nodes: usize,
     sub_agent_runner: Option<Arc<SubAgentRunner>>,
     goal_mode: bool,
+    workspace_root: PathBuf,
+    security: SecurityContext,
     input: RunInput,
     tx: &mpsc::Sender<anyhow::Result<RunEvent>>,
 ) -> anyhow::Result<()> {
@@ -505,6 +531,8 @@ async fn run_coordinator(
         provider: executor,
         tools,
         sub_agent_runner,
+        workspace_root,
+        security,
     });
 
     let think: Arc<dyn ThinkCallback> = callbacks.clone();
@@ -679,6 +707,8 @@ struct CoordinatorCallbacks {
     provider: Arc<dyn Provider>,
     tools: HashMap<String, Arc<dyn Tool>>,
     sub_agent_runner: Option<Arc<SubAgentRunner>>,
+    workspace_root: PathBuf,
+    security: SecurityContext,
 }
 
 #[async_trait::async_trait]
@@ -705,7 +735,9 @@ impl ToolCallback for CoordinatorCallbacks {
             .get(tool_name)
             .ok_or_else(|| anyhow::anyhow!("unknown tool: {tool_name}"))?;
 
-        let ctx = ToolContext::new(uuid::Uuid::new_v4().to_string());
+        let ctx = ToolContext::new(uuid::Uuid::new_v4().to_string())
+            .with_workspace(self.workspace_root.clone())
+            .with_extension(self.security.clone());
         let args_str = serde_json::to_string(args)?;
         tool.execute(&ctx, &args_str).await
     }
