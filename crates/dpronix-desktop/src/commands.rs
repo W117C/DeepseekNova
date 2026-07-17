@@ -5,7 +5,7 @@
 //! Streaming events are delivered through Tauri Channels (`tauri::ipc::Channel`),
 //! the desktop equivalent of the HTTP SSE stream in `dpronix-serve`.
 
-use dpronix_core::runner::{RunEvent, RunInput, Runner};
+use dpronix_core::runner::{RunInput, Runner, WireEvent};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::{ipc::Channel, State};
@@ -15,70 +15,6 @@ use tracing::info;
 use crate::AppState;
 
 // ---------------------------------------------------------------------------
-// Wire types — the JSON contract between frontend and backend.
-// Mirrors the SSE wire format from dpronix-serve but uses
-// Tauri Channel events instead of HTTP data: frames.
-// ---------------------------------------------------------------------------
-
-/// A single event pushed to the frontend Channel.
-/// The `kind` field discriminates the event type (analogous to SSE event names).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum WireEvent {
-    TextDelta {
-        text: String,
-    },
-    ReasoningDelta {
-        text: String,
-        signature: Option<String>,
-    },
-    ToolCallStart {
-        id: String,
-        name: String,
-    },
-    ToolCallDelta {
-        id: String,
-        args_delta: String,
-    },
-    ToolCallEnd {
-        id: String,
-        name: String,
-        arguments: String,
-    },
-    ToolResult {
-        call_id: String,
-        result: String,
-    },
-    Usage {
-        prompt_tokens: u32,
-        completion_tokens: u32,
-        total_tokens: u32,
-        cache_hit_tokens: u32,
-        cache_miss_tokens: u32,
-        session_cache_hit_tokens: u32,
-        session_cache_miss_tokens: u32,
-    },
-    TurnComplete,
-    Done {
-        text: String,
-        usage: Option<UsageInfo>,
-    },
-    Error {
-        message: String,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UsageInfo {
-    pub prompt_tokens: u32,
-    pub completion_tokens: u32,
-    pub total_tokens: u32,
-    pub cache_hit_tokens: u32,
-    pub cache_miss_tokens: u32,
-    pub session_cache_hit_tokens: u32,
-    pub session_cache_miss_tokens: u32,
-}
-
 /// Frontend request to submit a prompt to the agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubmitRequest {
@@ -159,100 +95,22 @@ pub async fn submit_prompt(
     tokio::spawn(async move {
         match agent.run_stream(input).await {
             Ok(mut stream) => {
-                let mut final_text = String::new();
-                let mut final_usage: Option<UsageInfo> = None;
+                let final_text = String::new();
+                let _final_output: Option<String> = None;
 
                 while let Some(event) = stream.next().await {
                     if cancel_clone.is_cancelled() {
                         let _ = on_event.send(WireEvent::Done {
-                            text: final_text,
-                            usage: final_usage,
+                            text: final_text.clone(),
+                            usage: None,
                         });
                         return;
                     }
 
                     match event {
-                        Ok(RunEvent::TextDelta(text)) => {
-                            final_text.push_str(&text);
-                            let _ = on_event.send(WireEvent::TextDelta { text });
-                        }
-                        Ok(RunEvent::ReasoningDelta { text, signature }) => {
-                            let _ = on_event.send(WireEvent::ReasoningDelta { text, signature });
-                        }
-                        Ok(RunEvent::ToolCallStart { id, name }) => {
-                            let _ = on_event.send(WireEvent::ToolCallStart { id, name });
-                        }
-                        Ok(RunEvent::ToolCallDelta { id, args_delta }) => {
-                            let _ = on_event.send(WireEvent::ToolCallDelta { id, args_delta });
-                        }
-                        Ok(RunEvent::ToolCallEnd {
-                            id,
-                            name,
-                            arguments,
-                        }) => {
-                            let _ = on_event.send(WireEvent::ToolCallEnd {
-                                id,
-                                name,
-                                arguments,
-                            });
-                        }
-                        Ok(RunEvent::ToolResult { call_id, result }) => {
-                            let _ = on_event.send(WireEvent::ToolResult { call_id, result });
-                        }
-                        Ok(RunEvent::Usage(u)) => {
-                            let usage_info = UsageInfo {
-                                prompt_tokens: u.prompt_tokens,
-                                completion_tokens: u.completion_tokens,
-                                total_tokens: u.total_tokens,
-                                cache_hit_tokens: u.cache_hit_tokens,
-                                cache_miss_tokens: u.cache_miss_tokens,
-                                session_cache_hit_tokens: u.cache_hit_tokens,
-                                session_cache_miss_tokens: u.cache_miss_tokens,
-                            };
-                            final_usage = Some(usage_info.clone());
-                            let _ = on_event.send(WireEvent::Usage {
-                                prompt_tokens: u.prompt_tokens,
-                                completion_tokens: u.completion_tokens,
-                                total_tokens: u.total_tokens,
-                                cache_hit_tokens: u.cache_hit_tokens,
-                                cache_miss_tokens: u.cache_miss_tokens,
-                                session_cache_hit_tokens: u.cache_hit_tokens,
-                                session_cache_miss_tokens: u.cache_miss_tokens,
-                            });
-                        }
-                        Ok(RunEvent::TurnComplete) => {
-                            let _ = on_event.send(WireEvent::TurnComplete);
-                        }
-                        Ok(RunEvent::Done(output)) => {
-                            let usage_info = UsageInfo {
-                                prompt_tokens: output.usage.as_ref().map_or(0, |u| u.prompt_tokens),
-                                completion_tokens: output
-                                    .usage
-                                    .as_ref()
-                                    .map_or(0, |u| u.completion_tokens),
-                                total_tokens: output.usage.as_ref().map_or(0, |u| u.total_tokens),
-                                cache_hit_tokens: output
-                                    .usage
-                                    .as_ref()
-                                    .map_or(0, |u| u.cache_hit_tokens),
-                                cache_miss_tokens: output
-                                    .usage
-                                    .as_ref()
-                                    .map_or(0, |u| u.cache_miss_tokens),
-                                session_cache_hit_tokens: output
-                                    .usage
-                                    .as_ref()
-                                    .map_or(0, |u| u.cache_hit_tokens),
-                                session_cache_miss_tokens: output
-                                    .usage
-                                    .as_ref()
-                                    .map_or(0, |u| u.cache_miss_tokens),
-                            };
-                            let _ = on_event.send(WireEvent::Done {
-                                text: output.text,
-                                usage: Some(usage_info),
-                            });
-                            return;
+                        Ok(ev) => {
+                            let wire: WireEvent = ev.into();
+                            let _ = on_event.send(wire);
                         }
                         Err(e) => {
                             let _ = on_event.send(WireEvent::Error {
