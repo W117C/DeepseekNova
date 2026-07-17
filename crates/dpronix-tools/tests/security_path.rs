@@ -29,10 +29,13 @@ fn test_secure_resolve_scenarios() {
     let res = secure_resolve(&root, bad_path_2);
     assert!(res.is_err(), "should block escape: {:?}", res);
 
-    // Case 4: Absolute path escape should be blocked
-    let abs_path = Path::new("/etc");
-    let res = secure_resolve(&root, abs_path);
-    assert!(res.is_err(), "should block absolute path escape: {:?}", res);
+    // Case 4: Absolute path escape should be blocked (Unix only — /etc is not absolute on Windows)
+    #[cfg(unix)]
+    {
+        let abs_path = Path::new("/etc");
+        let res = secure_resolve(&root, abs_path);
+        assert!(res.is_err(), "should block absolute path escape: {:?}", res);
+    }
 
     // Case 5: Symlink pointing outside workspace should be blocked
     #[cfg(unix)]
