@@ -211,6 +211,7 @@ impl Tool for EditFileTool {
             name: "edit_file".to_string(),
             description: "Replaces the first exact match of SEARCH with REPLACE in a file. \
                  SEARCH must match exactly including whitespace and indentation. \
+                 You MUST provide the snippet_id from a prior read_file call. \
                  If a checkpoint manager is configured, the file is snapshotted before editing."
                 .to_string(),
             parameters: json!({
@@ -230,10 +231,11 @@ impl Tool for EditFileTool {
                     },
                     "snippet_id": {
                         "type": "string",
-                        "description": "Optional snippet ID from read_file."
+                        "description": "Snippet ID from a prior read_file call. \
+                             Required — you MUST call read_file first and pass its snippet_id here."
                     }
                 },
-                "required": ["path", "search", "replace"]
+                "required": ["path", "search", "replace", "snippet_id"]
             }),
         }
     }
@@ -246,6 +248,13 @@ impl Tool for EditFileTool {
         let parsed: EditFileArgs = serde_json::from_str(args)?;
         let path = sanitize_path(&ctx.workspace_root, &parsed.path)?;
 
+        // snippet_id is now required — enforce read-then-edit contract
+        let snip_id = parsed.snippet_id.ok_or_else(|| {
+            anyhow::anyhow!(
+                "snippet_id is required. You MUST call read_file first and pass its snippet_id to edit_file."
+            )
+        })?;
+
         if ctx.cancellation.is_cancelled() {
             anyhow::bail!("cancelled");
         }
@@ -257,16 +266,17 @@ impl Tool for EditFileTool {
 
         let original = fs::read_to_string(&path).await?;
 
-        // Validate snippet if provided (deepcode-cli style)
-        if let Some(ref snip_id) = parsed.snippet_id {
+        // Validate snippet (mandatory — read-then-edit contract)
+        {
             let tracker = crate::snippet::global_tracker().lock().await;
-            if let Err(current) = tracker.validate(snip_id, &original) {
+            if let Err(current) = tracker.validate(&snip_id, &original) {
                 drop(tracker);
-                return Ok(format!("SNIPPED STALE: The file has changed since you read it.\n                    Current content:\n---\n{}\n---\nPlease re-read.", current));
+                return Ok(format!("SNIPPED STALE: The file has changed since you read it.\nCurrent content:\n---\n{}\n---\nPlease re-read the file first.", current));
             }
             drop(tracker);
         }
 
+        // Attempt search/replace
         if let Some(pos) = original.find(&parsed.search) {
             let edited = format!(
                 "{}{}{}",
@@ -288,10 +298,28 @@ impl Tool for EditFileTool {
 
             Ok(format!("replaced 1 occurrence in {}", path.display()))
         } else {
-            anyhow::bail!(
-                "SEARCH block not found in {}. The exact text must match including whitespace.",
+            // Search not found — provide candidate lines for LLM-assisted recovery
+            let candidates: Vec<String> = original
+                .lines()
+                .enumerate()
+                .filter(|(_, l)| {
+                    let search_trimmed = parsed.search.trim();
+                    l.contains(search_trimmed) || l.trim() == search_trimmed
+                })
+                .take(5)
+                .map(|(i, l)| format!("  line {}: {}", i + 1, l.trim()))
+                .collect();
+
+            let mut msg = format!(
+                "SEARCH block not found in {}.\nThe exact text must match including whitespace.\n",
                 path.display()
             );
+            if !candidates.is_empty() {
+                msg.push_str("\nSimilar lines found (check whitespace/indentation):\n");
+                msg.push_str(&candidates.join("\n"));
+            }
+            msg.push_str("\n\nPlease read the file again with read_file to get a fresh snippet and see current content.");
+            anyhow::bail!("{}", msg);
         }
     }
 }
