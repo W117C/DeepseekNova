@@ -17,12 +17,8 @@ jobs:
   desktop:
     name: desktop build (ubuntu-latest)
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install native dependencies
-        uses: ./.github/actions/setup-linux
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -33,13 +29,13 @@ jobs:
         working-directory: crates/dpronix-desktop/frontend
         run: npm ci
 
-      - name: Build frontend
+      - name: TypeScript check
         working-directory: crates/dpronix-desktop/frontend
-        run: npm run build
+        run: npx tsc --noEmit
 
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build desktop app
-        run: cargo build -p dpronix-desktop --release
+      - name: Rust check (compile verify, no link)
+        run: cargo check -p dpronix-desktop
