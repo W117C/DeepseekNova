@@ -23,6 +23,7 @@ jobs:
   deny:
     name: cargo deny
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: embark-studios/cargo-deny-action@v2

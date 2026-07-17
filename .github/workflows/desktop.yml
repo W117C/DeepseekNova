@@ -15,8 +15,8 @@ env:
 
 jobs:
   desktop:
-    name: desktop build (ubuntu-latest)
-    runs-on: ubuntu-latest
+    name: desktop build (ubuntu-22.04)
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
