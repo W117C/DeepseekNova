@@ -159,19 +159,33 @@ async fn edit_file_replaces_text() {
     let f = Fixture::new();
     let path = f.write("greeting.rs", "fn main() {\n    println!(\"hello\");\n}\n");
     let ctx = test_ctx(f.path());
-    let tool = EditFileTool::new();
 
+    // First, read the file to establish a valid snippet
+    let read_tool = crate::ReadFileTool;
+    let read_result = read_tool
+        .execute(&ctx, &format!(r#"{{"path":"{}"}}"#, path.display()))
+        .await
+        .unwrap();
+    // Extract snippet_id from the read result: ends with "[SNIPPED ID: snip_xxx]"
+    let snippet_id = read_result
+        .lines()
+        .find_map(|l| l.strip_prefix("[SNIPPED ID: "))
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or("snip_missing");
+
+    let tool = EditFileTool::new();
     let result = tool
         .execute(
             &ctx,
             &format!(
-                r#"{{"path":"{}","search":"println!(\"hello\")","replace":"println!(\"hi\")"}}"#,
-                path.display()
+                r#"{{"path":"{}","search":"println!(\"hello\")","replace":"println!(\"hi\")","snippet_id":"{}"}}"#,
+                path.display(),
+                snippet_id
             ),
         )
         .await;
 
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "edit should succeed: {:?}", result);
     let content = std::fs::read_to_string(&path).unwrap();
     assert!(content.contains("println!(\"hi\")"));
     assert!(!content.contains("println!(\"hello\")"));

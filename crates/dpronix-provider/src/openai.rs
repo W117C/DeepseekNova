@@ -70,10 +70,12 @@ impl OpenAIProvider {
     }
 
     fn build_tools(&self, tools: &[&dyn Tool]) -> Option<Vec<OpenAIRequestTool>> {
-        let schemas: Vec<_> = tools.iter().map(|t| t.schema()).collect();
+        let mut schemas: Vec<_> = tools.iter().map(|t| t.schema()).collect();
         if schemas.is_empty() {
             return None;
         }
+        // Sort by name for cache-stable tool ordering
+        schemas.sort_by(|a, b| a.name.cmp(&b.name));
         let oai_tools: Vec<OpenAIRequestTool> = schemas
             .iter()
             .map(|s| OpenAIRequestTool {
