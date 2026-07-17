@@ -35,12 +35,14 @@ fn test_secure_resolve_scenarios() {
     assert!(res.is_err(), "should block absolute path escape: {:?}", res);
 
     // Case 5: Symlink pointing outside workspace should be blocked
-    let link_path = root.join("bad_symlink");
-    let target = Path::new("/private/etc"); // generic unix path
     #[cfg(unix)]
     {
-        if std::os::unix::fs::symlink(target, &link_path).is_ok() {
-            let res = secure_resolve(&root, Path::new("bad_symlink/passwd"));
+        let outside_tmp = tempfile::tempdir().unwrap();
+        let outside_path = std::fs::canonicalize(outside_tmp.path()).unwrap();
+        let link_path = root.join("bad_symlink");
+
+        if std::os::unix::fs::symlink(&outside_path, &link_path).is_ok() {
+            let res = secure_resolve(&root, Path::new("bad_symlink/some_file"));
             assert!(res.is_err(), "should block symlink escape: {:?}", res);
         }
     }
