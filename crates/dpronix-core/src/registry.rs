@@ -89,7 +89,10 @@ impl Default for ToolRegistry {
 // ---------------------------------------------------------------------------
 
 pub type ProviderFactory =
-    Box<dyn Fn(crate::config::ProviderConfigData) -> anyhow::Result<Arc<dyn crate::runner::Runner>> + Send + Sync>;
+    Box<
+        dyn Fn(crate::config::ProviderConfigData) ->
+            anyhow::Result<Arc<dyn crate::runner::Runner>> + Send + Sync,
+    >;
 
 pub struct ProviderRegistry {
     factories: IndexMap<String, ProviderFactory>,

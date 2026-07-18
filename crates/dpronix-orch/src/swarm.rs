@@ -15,7 +15,7 @@
 //! ```
 
 use crate::types::*;
-use dpronix_core::runner::{RunInput, Runner, RunOutput};
+use dpronix_core::runner::{RunInput, Runner};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use std::collections::HashMap;
