@@ -36,9 +36,8 @@ pub struct AppState {
     pub runner: tokio::sync::Mutex<Option<Box<dyn dpronix_core::Runner + Send>>>,
     pub cancel: tokio::sync::Mutex<Option<tokio_util::sync::CancellationToken>>,
     /// Channel for delivering approval responses to a waiting agent.
-    pub approval_tx: std::sync::Arc<
-        tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<(String, bool)>>>,
-    >,
+    pub approval_tx:
+        std::sync::Arc<tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<(String, bool)>>>>,
     /// Persistent conversation store for the current session. Shared across
     /// successive `submit_prompt` calls so the agent remembers prior turns
     /// (and DeepSeek-V4 reasoning replay spans user turns). Cleared by
@@ -84,7 +83,11 @@ pub fn run() {
                 Menu::with_items(app, &[&show, &PredefinedMenuItem::separator(app)?, &quit])?;
 
             let _tray = TrayIconBuilder::new()
-                .icon(app.default_window_icon().cloned().unwrap_or_else(|| tauri::image::Image::rgba(0, 0, 0, 0)))
+                .icon(
+                    app.default_window_icon()
+                        .cloned()
+                        .unwrap_or_else(|| tauri::image::Image::new(&[0, 0, 0, 0], 1, 1)),
+                )
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "quit" => app.exit(0),

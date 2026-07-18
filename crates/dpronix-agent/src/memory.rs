@@ -182,8 +182,11 @@ impl Memory {
                 self.full_results
                     .insert(call_id.clone(), msg.content.clone());
 
-                let head_len = ((threshold_chars as f32 * TRUNCATION_HEAD_RATIO) as usize).min(tlen);
-                let tail_len = threshold_chars.saturating_sub(head_len).min(tlen - head_len);
+                let head_len =
+                    ((threshold_chars as f32 * TRUNCATION_HEAD_RATIO) as usize).min(tlen);
+                let tail_len = threshold_chars
+                    .saturating_sub(head_len)
+                    .min(tlen - head_len);
 
                 // P0 FIX: Use floor_char_boundary to avoid splitting UTF-8 characters
                 let head_end = floor_char_boundary_safe(&msg.content, head_len);
@@ -247,9 +250,9 @@ impl Memory {
             .iter()
             .filter_map(|m| {
                 if m.role == Role::Assistant {
-                    m.tool_calls.as_ref().map(|tcs| {
-                        tcs.iter().map(|tc| tc.id.clone()).collect::<Vec<_>>()
-                    })
+                    m.tool_calls
+                        .as_ref()
+                        .map(|tcs| tcs.iter().map(|tc| tc.id.clone()).collect::<Vec<_>>())
                 } else {
                     None
                 }

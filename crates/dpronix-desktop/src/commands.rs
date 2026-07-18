@@ -333,12 +333,17 @@ fn save_sessions(sessions: &[SessionInfo]) {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let _ = std::fs::write(&path, serde_json::to_string_pretty(sessions).unwrap_or_default());
+    let _ = std::fs::write(
+        &path,
+        serde_json::to_string_pretty(sessions).unwrap_or_default(),
+    );
 }
 
 fn generate_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let d = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
     format!("s{:x}{:04x}", d.as_secs(), d.subsec_nanos() % 0x10000)
 }
 
@@ -386,12 +391,23 @@ pub async fn get_workspace_files() -> Result<Vec<String>, String> {
     let mut dir = tokio::fs::read_dir(&cwd)
         .await
         .map_err(|e| format!("read_dir error: {e}"))?;
-    while let Some(entry) = dir.next_entry().await.map_err(|e| format!("entry error: {e}"))? {
+    while let Some(entry) = dir
+        .next_entry()
+        .await
+        .map_err(|e| format!("entry error: {e}"))?
+    {
         let path = entry.path();
         let display = if path.is_dir() {
-            format!("{}/", path.file_name().map(|s| s.to_string_lossy()).unwrap_or_default())
+            format!(
+                "{}/",
+                path.file_name()
+                    .map(|s| s.to_string_lossy())
+                    .unwrap_or_default()
+            )
         } else {
-            path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
+            path.file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default()
         };
         entries.push(display);
     }

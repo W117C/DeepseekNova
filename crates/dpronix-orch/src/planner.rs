@@ -111,18 +111,17 @@ impl GoalPlanner {
 
         // Parse the plan from LLM output (JSON-first, YAML fallback)
         let plan = match self.config.plan_output_format {
-            PlanFormat::Json => {
-                match self.parse_plan_json(&goal, &plan_text, &reasoning, &usage) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        warn!("JSON parse failed ({}), falling back to YAML-like parser", e);
-                        self.parse_plan_yaml(&goal, &plan_text, &reasoning, &usage)?
-                    }
+            PlanFormat::Json => match self.parse_plan_json(&goal, &plan_text, &reasoning, &usage) {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!(
+                        "JSON parse failed ({}), falling back to YAML-like parser",
+                        e
+                    );
+                    self.parse_plan_yaml(&goal, &plan_text, &reasoning, &usage)?
                 }
-            }
-            PlanFormat::Yaml => {
-                self.parse_plan_yaml(&goal, &plan_text, &reasoning, &usage)?
-            }
+            },
+            PlanFormat::Yaml => self.parse_plan_yaml(&goal, &plan_text, &reasoning, &usage)?,
         };
         info!(plan_id = %plan.id, actions = plan.actions.len(), "plan created");
         Ok(plan)
@@ -136,7 +135,10 @@ impl GoalPlanner {
         while completed.len() < plan.actions.len() {
             let ready = self.ready_actions(plan, &completed);
             if ready.is_empty() {
-                let all_blocked = plan.actions.iter().all(|a| matches!(a.status, ActionStatus::Blocked(_)));
+                let all_blocked = plan
+                    .actions
+                    .iter()
+                    .all(|a| matches!(a.status, ActionStatus::Blocked(_)));
                 if all_blocked {
                     plan.status = PlanStatus::Failed("all actions blocked".to_string());
                     return Err(anyhow::anyhow!("all actions blocked, cannot make progress"));
@@ -158,7 +160,8 @@ impl GoalPlanner {
                         if completed.len() + 1 < plan.actions.len() {
                             continue;
                         }
-                        plan.status = PlanStatus::Failed(format!("action '{}' failed: {}", action.name, e));
+                        plan.status =
+                            PlanStatus::Failed(format!("action '{}' failed: {}", action.name, e));
                         return Err(e);
                     }
                 }
@@ -300,50 +303,63 @@ Constraints:
         let parsed: serde_json::Value = serde_json::from_str(&json_str)
             .map_err(|e| anyhow::anyhow!("failed to parse plan JSON: {e}"))?;
 
-        let actions_arr = parsed.get("actions")
+        let actions_arr = parsed
+            .get("actions")
             .and_then(|v| v.as_array())
             .ok_or_else(|| anyhow::anyhow!("missing 'actions' array in plan JSON"))?;
 
         let mut actions = Vec::new();
         for action_val in actions_arr {
-            let id = action_val.get("id")
+            let id = action_val
+                .get("id")
                 .and_then(|v| v.as_str())
                 .unwrap_or("action")
                 .to_string();
 
-            let name = action_val.get("name")
+            let name = action_val
+                .get("name")
                 .and_then(|v| v.as_str())
                 .unwrap_or("execute")
                 .to_string();
 
-            let description = action_val.get("description")
+            let description = action_val
+                .get("description")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
 
-            let preconditions = action_val.get("preconditions")
+            let preconditions = action_val
+                .get("preconditions")
                 .and_then(|v| v.as_array())
-                .map(|arr| arr.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
                 .unwrap_or_default();
 
-            let effects = action_val.get("effects")
+            let effects = action_val
+                .get("effects")
                 .and_then(|v| v.as_array())
-                .map(|arr| arr.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
                 .unwrap_or_default();
 
-            let cost = action_val.get("cost")
+            let cost = action_val
+                .get("cost")
                 .and_then(|v| v.as_f64())
                 .unwrap_or(5.0) as f32;
 
-            let tool = action_val.get("tool")
+            let tool = action_val
+                .get("tool")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
 
-            let delegatable = action_val.get("delegatable")
+            let delegatable = action_val
+                .get("delegatable")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true);
 
@@ -361,17 +377,25 @@ Constraints:
             });
         }
 
-        let dependencies = parsed.get("dependencies")
+        let dependencies = parsed
+            .get("dependencies")
             .and_then(|v| v.as_object())
             .map(|obj| {
                 obj.iter()
                     .filter_map(|(k, v)| {
-                        let deps: Vec<String> = v.as_array()
-                            .map(|arr| arr.iter()
-                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                .collect())
+                        let deps: Vec<String> = v
+                            .as_array()
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                    .collect()
+                            })
                             .unwrap_or_default();
-                        if k.is_empty() { None } else { Some((k.clone(), deps)) }
+                        if k.is_empty() {
+                            None
+                        } else {
+                            Some((k.clone(), deps))
+                        }
                     })
                     .collect::<HashMap<String, Vec<String>>>()
             })
@@ -588,9 +612,8 @@ Constraints:
             if attempt > 0 {
                 let delay = base_delay * 2u32.pow(attempt - 1);
                 // Add jitter: random 0-50% of delay
-                let jitter = Duration::from_millis(
-                    rand::random::<u64>() % (delay.as_millis() as u64 / 2)
-                );
+                let jitter =
+                    Duration::from_millis(rand::random::<u64>() % (delay.as_millis() as u64 / 2));
                 let total_delay = delay + jitter;
                 info!(action = %action.name, attempt, delay = ?total_delay, "retrying action");
                 tokio::time::sleep(total_delay).await;

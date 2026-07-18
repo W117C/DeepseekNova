@@ -90,7 +90,8 @@ impl Default for ToolRegistry {
 
 /// P2 Fix #12: ProviderFactory uses Box<dyn Fn> instead of fn pointer
 /// to allow closures with captured state (e.g. for provider configuration).
-pub type ProviderFactory = Box<dyn Fn(ProviderConfigData) -> anyhow::Result<Arc<dyn crate::runner::Runner>> + Send + Sync>;
+pub type ProviderFactory =
+    Box<dyn Fn(ProviderConfigData) -> anyhow::Result<Arc<dyn crate::runner::Runner>> + Send + Sync>;
 
 #[derive(Debug, Clone)]
 pub struct ProviderConfigData {
