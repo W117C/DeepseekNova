@@ -76,11 +76,17 @@ export default function App() {
       onToolResult(callId: string, result: string) {
         updateMessage(callId, (m) => ({ ...m, toolResult: result }));
       },
+      onTurnComplete() {
+        if (streamingReasoningId.current) {
+          updateMessage(streamingReasoningId.current, (m) => ({ ...m, reasoningDone: true }));
+          streamingReasoningId.current = "";
+        }
+      },
       onUsage(usage: UsageInfo) {
         setLastUsage(usage);
         setSessionCache(prev => ({ hit: prev.hit + usage.cache_hit_tokens, miss: prev.miss + usage.cache_miss_tokens }));
       },
-      onDone(text: string) {
+      onDone(text: string, _usage?: UsageInfo) {
         if (streamingReasoningId.current) {
           updateMessage(streamingReasoningId.current, (m) => ({ ...m, reasoningDone: true }));
           streamingReasoningId.current = "";
@@ -149,7 +155,7 @@ export default function App() {
       )}
 
       {/* Transcript */}
-      <Transcript messages={messages} loading={running && messages.length > 0 && !streamingMsgId.current} />
+      <Transcript messages={messages} running={running} />
 
       {/* Status bar */}
       <div className="status-bar">
