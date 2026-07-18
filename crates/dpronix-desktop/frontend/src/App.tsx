@@ -190,12 +190,25 @@ export default function App() {
         showSkills={showSkills}
         onToggleSkills={() => setShowSkills((v) => !v)}
         onNewSession={handleNewSession}
+        running={running}
+        thinkingEnabled={thinkingEnabled}
+        onToggleThinking={() => setThinkingEnabled((v) => !v)}
+        reasoningEffort={reasoningEffort}
+        onSetEffort={setReasoningEffort}
+        effortLevels={capabilities?.reasoning_effort_levels ?? ["low", "medium", "high"]}
+        supportsThinking={capabilities?.supports_thinking ?? false}
+        supportsEffort={capabilities?.supports_reasoning_effort ?? false}
       />
 
       {/* Sidebar */}
-      <Sidebar collapsed={sideCollapsed} messageCount={messages.length} />
+      <Sidebar
+              collapsed={sideCollapsed}
+              messageCount={messages.length}
+              onNewSession={handleNewSession}
+              running={running}
+            />
 
-      {/* Main area: thread + controls + composer */}
+      {/* Main area: thread + composer */}
       <div className="main-area">
         {/* Skills panel (overlay) */}
         {showSkills && (
@@ -220,34 +233,6 @@ export default function App() {
         {showSettings && (
           <SettingsPanel capabilities={capabilities} onClose={() => setShowSettings(false)} />
         )}
-
-        {/* Thinking / effort controls */}
-        <div className="controls-row">
-          {capabilities?.supports_thinking && (
-            <label className="chip chip-toggle" title="DeepSeek-V4 thinking mode">
-              <input
-                type="checkbox"
-                checked={thinkingEnabled}
-                disabled={running}
-                onChange={(e) => setThinkingEnabled(e.target.checked)}
-              />
-              thinking
-            </label>
-          )}
-          {capabilities?.supports_reasoning_effort && (
-            <select
-              className="field"
-              value={reasoningEffort}
-              disabled={running || !thinkingEnabled}
-              onChange={(e) => setReasoningEffort(e.target.value)}
-              title="Reasoning effort"
-            >
-              {(capabilities.reasoning_effort_levels ?? ["low", "medium", "high"]).map((lvl) => (
-                <option key={lvl} value={lvl}>{lvl}</option>
-              ))}
-            </select>
-          )}
-        </div>
 
         {/* Transcript */}
         <Transcript messages={messages} loading={running && messages.length > 0 && !streamingMsgId.current} />
