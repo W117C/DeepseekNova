@@ -80,3 +80,12 @@ export interface Message {
   toolResult?: string;
   reasoningDone?: boolean;
 }
+
+/** A pending tool approval request (Act mode). */
+export interface ApprovalRequest {
+  id: string;
+  title: string;
+  description: string;
+  toolName: string;
+  toolArgs?: string;
+}
