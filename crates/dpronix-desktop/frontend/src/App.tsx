@@ -6,6 +6,7 @@ import SidebarPanel from "./components/SidebarPanel";
 import { ApprovalCard, ToolCallCard, ReasoningDisclosure } from "./components/ThreadCards";
 import ContextPanel from "./components/ContextPanel";
 import StatusBar from "./components/StatusBar";
+import MarkdownRenderer from "./components/MarkdownRenderer";
 
 function uid() { return (Date.now() + Math.random()).toString(36); }
 
@@ -34,6 +35,9 @@ export default function App() {
   const [modifiedFiles] = useState<ContextFile[]>([]);
   const [pendingApproval, setPendingApproval] = useState<ApprovalRequest | null>(null);
   const [toolCalls, setToolCalls] = useState<ToolCall[]>([]);
+  const promptHistory = useRef<string[]>([]);
+  const promptHistoryIdx = useRef(-1);
+  const savedDraft = useRef("");
 
   useEffect(() => {
     getCapabilities().then((c) => setCapabilities(c as unknown as Capabilities)).catch(console.error);
@@ -50,6 +54,8 @@ export default function App() {
     streamingText.current = ""; streamingMsgId.current = "";
     streamingReasoning.current = ""; streamingReasoningMsgId.current = "";
     addMessage({ id: uid(), role: "user", content: prompt });
+    promptHistory.current.push(prompt);
+    promptHistoryIdx.current = -1; savedDraft.current = "";
 
     const handlers = {
       onText(text: string) {
@@ -159,7 +165,7 @@ export default function App() {
             ))}
 
             {messages.filter((m) => m.role === "assistant" && m.content).map((m) => (
-              <div key={m.id} style={{ fontSize: 13, lineHeight: 1.72, color: "var(--rx-text-primary)", whiteSpace: "pre-wrap" }}>{m.content}</div>
+              <div key={m.id}><MarkdownRenderer content={m.content} /></div>
             ))}
 
             {messages.filter((m) => m.role === "user").map((m) => (
@@ -195,7 +201,32 @@ export default function App() {
               rows={1}
               placeholder="Continue conversation..."
               disabled={running}
-              onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); running ? handleCancel() : handleSubmit(); } }}
+              onKeyDown={(e) => {
+                const mod = e.metaKey || e.ctrlKey;
+                // Prompt history: Cmd+Up / Cmd+Down
+                if (mod && e.key === "ArrowUp") {
+                  e.preventDefault();
+                  if (promptHistory.current.length > 0 && promptHistoryIdx.current < promptHistory.current.length - 1) {
+                    if (promptHistoryIdx.current === -1) savedDraft.current = input;
+                    promptHistoryIdx.current++;
+                    setInput(promptHistory.current[promptHistory.current.length - 1 - promptHistoryIdx.current]);
+                  }
+                  return;
+                }
+                if (mod && e.key === "ArrowDown") {
+                  e.preventDefault();
+                  if (promptHistoryIdx.current > 0) {
+                    promptHistoryIdx.current--;
+                    setInput(promptHistory.current[promptHistory.current.length - 1 - promptHistoryIdx.current]);
+                  } else if (promptHistoryIdx.current === 0) {
+                    promptHistoryIdx.current = -1;
+                    setInput(savedDraft.current);
+                  }
+                  return;
+                }
+                // Cmd+L: focus stays (default textarea behavior)
+                if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); running ? handleCancel() : handleSubmit(); }
+              }}
             />
             <button className="send" aria-label="Send" disabled={!input.trim() && !running} onClick={running ? handleCancel : handleSubmit}>
               {running ? "\u25A0" : "\u2192"}

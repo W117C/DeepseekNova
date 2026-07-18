@@ -8215,3 +8215,9 @@ html[data-platform="macos"] .splash {
 .status-bar .dot { width: 6px; height: 6px; border-radius: 50%; }
 .status-bar .dot.ready { background: var(--rx-success); }
 .status-bar .dot.running { background: var(--rx-accent); }
+
+/* ── Markdown / Code ── */
+.md-code-block { margin: 8px 0; border: 1px solid var(--rx-border); border-radius: var(--rx-radius); overflow: hidden; }
+.md-code-lang { font-size: 10px; padding: 4px 10px; background: var(--rx-surface-1); color: var(--rx-text-muted); text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--rx-border); }
+.md-code-block pre { margin: 0; padding: 10px 12px; background: var(--rx-surface-0); overflow-x: auto; font-size: 12px; font-family: var(--rx-font-mono); line-height: 1.55; color: var(--rx-text-primary); }
+.md-inline-code { font-family: var(--rx-font-mono); font-size: 0.875em; background: var(--rx-surface-1); border: 1px solid var(--rx-border); padding: 1px 5px; border-radius: 3px; }
