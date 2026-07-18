@@ -1,8 +1,6 @@
 /**
- * Composer — input area with send/cancel button.
- * Inspired by DeepSeek-DPronix desktop/frontend/src/components/Composer.tsx
+ * Composer — Reasonix-style input area with auto-resize and keyboard shortcuts.
  */
-
 import { useCallback, useRef, useEffect } from "react";
 
 interface ComposerProps {
@@ -31,9 +29,21 @@ export default function Composer({
     const el = textareaRef.current;
     if (el) {
       el.style.height = "auto";
-      el.style.height = Math.min(el.scrollHeight, 120) + "px";
+      el.style.height = Math.min(el.scrollHeight, 160) + "px";
     }
   }, [value]);
+
+  // Cmd+L global focus
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && (e.key === "l" || e.key === "L")) {
+        e.preventDefault();
+        textareaRef.current?.focus();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -50,15 +60,14 @@ export default function Composer({
   );
 
   return (
-    <div className="composer">
-      <div className="composer-input-wrap">
+    <div className="composer-wrap">
+      <div className="composer">
         <textarea
           ref={textareaRef}
-          className="composer-input"
           placeholder={
             running
-              ? "Agent is running… (Enter to cancel)"
-              : placeholder ?? "Ask anything… (Enter to send, Shift+Enter for new line)"
+              ? "Agent is running... (Enter to cancel)"
+              : placeholder ?? "Ask anything... (Enter to send, Shift+Enter for new line)"
           }
           value={value}
           onChange={(e) => onChange(e.target.value)}
@@ -66,14 +75,17 @@ export default function Composer({
           disabled={running || disabled}
           rows={1}
         />
-        <button
-          className={`composer-btn ${running ? "btn-cancel" : "btn-send"}`}
-          onClick={running ? onCancel : onSubmit}
-          disabled={!running && (!value.trim() || disabled)}
-          title={running ? "Cancel" : "Send"}
-        >
-          {running ? "■" : "→"}
-        </button>
+        <div className="composer-actions">
+          <button
+            type="button"
+            className={`btn ${running ? "danger" : "primary"}`}
+            onClick={running ? onCancel : onSubmit}
+            disabled={!running && (!value.trim() || disabled)}
+            title={running ? "Cancel (Esc)" : "Send (Enter)"}
+          >
+            {running ? "Cancel" : "Send"}
+          </button>
+        </div>
       </div>
     </div>
   );

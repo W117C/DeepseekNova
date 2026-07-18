@@ -1,16 +1,14 @@
 /**
  * MessageCard — renders one message in the conversation transcript.
  * Supports 4 roles: user, assistant, reasoning, tool.
- * Inspired by DeepSeek-DPronix desktop/frontend/src/components/Message.tsx
  */
 import type { Message } from "../types";
 
-/** Truncate long strings at character boundary */
 function truncate(s: string, max: number): string {
   if (s.length <= max) return s;
   let boundary = max;
   while (boundary > 0 && (s.charCodeAt(boundary) & 0xC0) === 0x80) boundary--;
-  return s.slice(0, boundary) + "…";
+  return s.slice(0, boundary) + "...";
 }
 
 interface MessageCardProps {
@@ -20,46 +18,45 @@ interface MessageCardProps {
 export default function MessageCard({ message }: MessageCardProps) {
   const { role, content, toolName, toolArgs, toolResult, reasoningDone } = message;
 
-  const className = `msg msg-${role}`;
+  const className = `msg ${role === "user" ? "msg-user" : role === "assistant" ? "msg-assistant" : ""}`;
 
   return (
-    <div className={className}>
+    <div className="msg-turn">
       {/* Role label */}
-      <div className="msg-label">
+      <div className="msg-status" style={{ textAlign: "left", marginBottom: 4 }}>
         {role === "user" ? "You" :
-         role === "reasoning" ? (reasoningDone ? "Thought" : "Reasoning") :
+         role === "reasoning" ? (reasoningDone ? "Thought" : "Thinking...") :
          role === "tool" ? (toolName ?? "Tool") :
          "DPronix"}
       </div>
 
-      {/* Reasoning — collapsible (DeepSeek thinking mode); auto-collapses when done */}
+      {/* Reasoning — collapsible (DeepSeek thinking mode) */}
       {role === "reasoning" ? (
-        <div className="msg-reasoning-content">
+        <div className="msg-reasoning">
           <details open={!reasoningDone}>
-            <summary>{reasoningDone ? "Thinking (done)" : "Thinking…"}</summary>
-            <pre>{content}</pre>
+            <summary style={{ cursor: "pointer", fontSize: 11, color: "var(--warning)", fontWeight: 500 }}>
+              {reasoningDone ? "Thinking (done)" : "Thinking..."}
+            </summary>
+            <pre style={{ fontFamily: "inherit", fontSize: "inherit", margin: "6px 0 0", whiteSpace: "pre-wrap" }}>{content}</pre>
           </details>
         </div>
       ) : role === "tool" ? (
-        /* Tool call — args + result */
-        <div className="msg-tool-content">
-          <div className="tool-header">
-            <code>{toolName}</code>
-          </div>
-          {toolArgs && (
-            <pre className="tool-args">{truncate(toolArgs, 500)}</pre>
-          )}
+        /* Tool call */
+        <div className="msg-tool">
+          <div className="tool-name">{toolName}</div>
+          {toolArgs && <div className="tool-args">{truncate(toolArgs, 500)}</div>}
           {toolResult && (
             <div className="tool-result">
-              <div className="tool-result-label">→ Result</div>
-              <pre>{toolResult}</pre>
+              {truncate(toolResult, 800)}
             </div>
           )}
         </div>
-      ) : (
+      ) : content ? (
         /* Text message */
-        <div className="msg-text">{content || "▊"}</div>
-      )}
+        <div className={className}>
+          <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{content}</div>
+        </div>
+      ) : null}
     </div>
   );
 }

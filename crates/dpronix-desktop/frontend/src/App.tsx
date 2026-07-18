@@ -1,8 +1,11 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { submitPrompt, cancelRun, newSession, listSkills, getCapabilities } from "./bridge";
 import type { Capabilities, SkillSummary, UsageInfo, Message } from "./types";
+import TitleBar from "./components/TitleBar";
+import Sidebar from "./components/Sidebar";
 import Transcript from "./components/Transcript";
 import Composer from "./components/Composer";
+import StatusBar from "./components/StatusBar";
 import SettingsPanel from "./components/SettingsPanel";
 
 function uid(): string {
@@ -21,6 +24,9 @@ export default function App() {
   const [sessionCache, setSessionCache] = useState({ hit: 0, miss: 0 });
   const [reasoningEffort, setReasoningEffort] = useState("high");
   const [thinkingEnabled, setThinkingEnabled] = useState(true);
+  const [sideCollapsed, setSideCollapsed] = useState(() => {
+    return localStorage.getItem("dpronix.sideCollapsed") === "true";
+  });
   const streamingText = useRef("");
   const streamingMsgId = useRef("");
   const streamingReasoning = useRef("");
@@ -31,6 +37,11 @@ export default function App() {
     getCapabilities().then((c) => setCapabilities(c as unknown as Capabilities)).catch(console.error);
     listSkills().then(setSkills).catch(console.error);
   }, []);
+
+  // Persist sidebar collapse state
+  useEffect(() => {
+    localStorage.setItem("dpronix.sideCollapsed", String(sideCollapsed));
+  }, [sideCollapsed]);
 
   const addMessage = useCallback((msg: Message) => {
     setMessages((prev) => [...prev, msg]);
@@ -54,7 +65,6 @@ export default function App() {
 
     const handlers = {
       onText(text: string) {
-        // Thinking chain (if any) is complete once visible output starts.
         if (streamingReasoningMsgId.current) {
           updateMessage(streamingReasoningMsgId.current, (m) => ({ ...m, reasoningDone: true }));
           streamingReasoningMsgId.current = "";
@@ -67,8 +77,6 @@ export default function App() {
         updateMessage(streamingMsgId.current, (m) => ({ ...m, content: streamingText.current }));
       },
       onReasoning(text: string) {
-        // Accumulate DeepSeek-V4 thinking deltas into a single collapsible card
-        // instead of one card per delta.
         streamingReasoning.current += text;
         if (!streamingReasoningMsgId.current) {
           streamingReasoningMsgId.current = uid();
@@ -142,15 +150,79 @@ export default function App() {
     streamingReasoningMsgId.current = "";
   }, [running]);
 
+  const handleToggleSide = useCallback(() => setSideCollapsed((v) => !v), []);
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const mod = e.ctrlKey || e.metaKey;
+      if (mod && (e.key === "b" || e.key === "B")) {
+        e.preventDefault();
+        handleToggleSide();
+      } else if (mod && (e.key === "n" || e.key === "N")) {
+        e.preventDefault();
+        handleNewSession();
+      } else if (mod && e.key === ",") {
+        e.preventDefault();
+        setShowSettings((v) => !v);
+      } else if (e.key === "Escape" && running) {
+        e.preventDefault();
+        handleCancel();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [handleToggleSide, handleNewSession, handleCancel, running]);
+
+  const modelName = capabilities?.version
+    ? `deepseek-v4`  // TODO: surface real model from backend
+    : undefined;
+
   return (
-    <div className="app-container">
-      {/* Header */}
-      <header className="app-header">
-        <div className="header-left">
-          <h1 className="header-logo">DPronix</h1>
-          <span className="header-badge">desktop v{capabilities?.version ?? "dev"}</span>
-        </div>
-        <div className="header-center">
+    <div className="app" data-side-collapsed={sideCollapsed}>
+      {/* Title bar */}
+      <TitleBar
+        sideCollapsed={sideCollapsed}
+        onToggleSide={handleToggleSide}
+        modelName={modelName}
+        showSettings={showSettings}
+        onToggleSettings={() => setShowSettings((v) => !v)}
+        showSkills={showSkills}
+        onToggleSkills={() => setShowSkills((v) => !v)}
+        onNewSession={handleNewSession}
+      />
+
+      {/* Sidebar */}
+      <Sidebar collapsed={sideCollapsed} messageCount={messages.length} />
+
+      {/* Main area: thread + controls + composer */}
+      <div className="main-area">
+        {/* Skills panel (overlay) */}
+        {showSkills && (
+          <div className="skills-panel">
+            <div className="skills-panel-header">
+              <h3>Skills</h3>
+              <button className="btn-icon-small" onClick={() => setShowSkills(false)}>x</button>
+            </div>
+            {skills.length === 0 && <p className="muted">No skills found. Create .md files in .dpronix/skills/</p>}
+            {skills.map((s) => (
+              <div key={s.name} className="skill-card">
+                <strong>{s.name}</strong> - {s.description}
+                {s.tools_allowed.length > 0 && (
+                  <div className="skill-tags">{s.tools_allowed.map((t) => <span key={t} className="tag">{t}</span>)}</div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Settings panel (overlay) */}
+        {showSettings && (
+          <SettingsPanel capabilities={capabilities} onClose={() => setShowSettings(false)} />
+        )}
+
+        {/* Thinking / effort controls */}
+        <div className="controls-row">
           {capabilities?.supports_thinking && (
             <label className="chip chip-toggle" title="DeepSeek-V4 thinking mode">
               <input
@@ -163,94 +235,35 @@ export default function App() {
             </label>
           )}
           {capabilities?.supports_reasoning_effort && (
-            <label className="chip" title="Reasoning effort passed to the model">
-              effort:
-              <select
-                value={reasoningEffort}
-                disabled={running || !thinkingEnabled}
-                onChange={(e) => setReasoningEffort(e.target.value)}
-              >
-                {(capabilities.reasoning_effort_levels ?? ["low", "medium", "high"]).map((lvl) => (
-                  <option key={lvl} value={lvl}>{lvl}</option>
-                ))}
-              </select>
-            </label>
+            <select
+              className="field"
+              value={reasoningEffort}
+              disabled={running || !thinkingEnabled}
+              onChange={(e) => setReasoningEffort(e.target.value)}
+              title="Reasoning effort"
+            >
+              {(capabilities.reasoning_effort_levels ?? ["low", "medium", "high"]).map((lvl) => (
+                <option key={lvl} value={lvl}>{lvl}</option>
+              ))}
+            </select>
           )}
         </div>
-        <div className="header-right">
-          <button className="btn-icon" onClick={handleNewSession} disabled={running} title="New session (clear history)">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M12 5v14M5 12h14"/>
-            </svg>
-          </button>
-          <button className={`btn-icon ${showSkills ? "active" : ""}`} onClick={() => setShowSkills(!showSkills)} title="Skills">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
-            </svg>
-          </button>
-          <button className={`btn-icon ${showSettings ? "active" : ""}`} onClick={() => setShowSettings(!showSettings)} title="Settings & providers">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-            </svg>
-          </button>
-        </div>
-      </header>
 
-      {/* Skills panel */}
-      {showSkills && (
-        <div className="skills-panel">
-          <div className="skills-panel-header">
-            <h3>Skills</h3>
-            <button className="btn-icon-small" onClick={() => setShowSkills(false)}>✕</button>
-          </div>
-          {skills.length === 0 && <p className="muted">No skills found. Create .md files in .dpronix/skills/</p>}
-          {skills.map((s) => (
-            <div key={s.name} className="skill-card">
-              <strong>{s.name}</strong> — {s.description}
-              {s.tools_allowed.length > 0 && (
-                <div className="skill-tags">{s.tools_allowed.map((t) => <span key={t} className="tag">{t}</span>)}</div>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
+        {/* Transcript */}
+        <Transcript messages={messages} loading={running && messages.length > 0 && !streamingMsgId.current} />
 
-      {/* Settings panel */}
-      {showSettings && (
-        <SettingsPanel capabilities={capabilities} onClose={() => setShowSettings(false)} />
-      )}
-
-      {/* Transcript */}
-      <Transcript messages={messages} loading={running && messages.length > 0 && !streamingMsgId.current} />
-
-      {/* Status bar */}
-      <div className="status-bar">
-        {lastUsage && (
-          <span className="status-item" title="Token usage for last turn">
-            {lastUsage.prompt_tokens}↑ {lastUsage.completion_tokens}↓
-            {lastUsage.reasoning_tokens > 0 && (
-              <span className="status-item" title="DeepSeek-V4 billed reasoning tokens">
-                🧠 {lastUsage.reasoning_tokens}
-              </span>
-            )}
-            {sessionCache.hit + sessionCache.miss > 0 && (
-              <span className="status-item" title="Session cache hit rate">
-                💡 cache {Math.round(sessionCache.hit / (sessionCache.hit + sessionCache.miss) * 100)}%
-              </span>
-            )}
-          </span>
-        )}
-        <span className="status-item status-right">{running ? "running…" : "ready"}</span>
+        {/* Composer */}
+        <Composer
+          value={input}
+          onChange={setInput}
+          onSubmit={handleSubmit}
+          onCancel={handleCancel}
+          running={running}
+        />
       </div>
 
-      {/* Composer */}
-      <Composer
-        value={input}
-        onChange={setInput}
-        onSubmit={handleSubmit}
-        onCancel={handleCancel}
-        running={running}
-      />
+      {/* Status bar */}
+      <StatusBar lastUsage={lastUsage} sessionCache={sessionCache} running={running} />
     </div>
   );
 }
