@@ -7,8 +7,8 @@
  * <Transcript> which preserves chronological order (no filter-split).
  * Streaming state is held in refs to avoid re-render churn.
  */
-import { useState, useCallback, useRef, useEffect } from "react";
-import { submitPrompt, cancelRun, newSession, listSkills, getCapabilities, respondApproval, getWorkspaceFiles, listSessions, createSession } from "./bridge";
+import { useState, useCallback, useRef, useEffect, lazy, Suspense } from "react";
+import { submitPrompt, cancelRun, newSession, listSkills, getCapabilities, respondApproval, getWorkspaceFiles, listSessions, createSession, listProviders, listMcpServers, getConfig, saveConfig, switchModel } from "./bridge";
 import type {
   Capabilities,
   SkillSummary,
@@ -18,7 +18,13 @@ import type {
   AgentStatus,
   ApprovalRequest,
   ContextFile,
+  ProviderSummary,
+  McpServer,
+  AppConfig,
+  Mode,
+  Effort,
 } from "./types";
+import { DEFAULT_CONFIG } from "./types";
 import TitleBar from "./components/TitleBar";
 import SidebarPanel from "./components/SidebarPanel";
 import Transcript from "./components/Transcript";
@@ -26,6 +32,7 @@ import ContextPanel from "./components/ContextPanel";
 import StatusBar from "./components/StatusBar";
 import Composer from "./components/Composer";
 import SettingsPanel from "./components/SettingsPanel";
+const ModeBar = lazy(() => import("./components/ModeBar"));
 
 function uid() {
   return (Date.now() + Math.random()).toString(36);
@@ -42,13 +49,21 @@ export default function App() {
   const [sideCollapsed, setSideCollapsed] = useState(false);
   const [lastUsage, setLastUsage] = useState<UsageInfo | null>(null);
   const [sessionCache, setSessionCache] = useState({ hit: 0, miss: 0 });
-  const [reasoningEffort, setReasoningEffort] = useState("high");
   const [thinkingEnabled, setThinkingEnabled] = useState(true);
   const [agentStatus, setAgentStatus] = useState<AgentStatus>("ready");
   const [pendingApproval, setPendingApproval] = useState<ApprovalRequest | null>(null);
   const [theme, setTheme] = useState<"dark" | "light">(
     () => (typeof localStorage !== "undefined" && localStorage.getItem("dp-theme") as "dark" | "light") || "dark",
   );
+
+  // Enhanced: providers, MCP, config, mode/effort
+  const [providers, setProviders] = useState<ProviderSummary[]>([]);
+  const [mcpServers, setMcpServers] = useState<McpServer[]>([]);
+  const [config, setConfig] = useState<AppConfig>(DEFAULT_CONFIG);
+  const [mode, setMode] = useState<Mode>("act");
+  const [effort, setEffort] = useState<Effort>("high");
+  const [autoMode, setAutoMode] = useState(false);
+  const [currentModel, setCurrentModel] = useState<string>("");
 
   // streaming refs — accumulate text without spawning re-renders per token
   const streamingText = useRef("");
@@ -79,6 +94,19 @@ export default function App() {
         setSessions(list.map((s) => ({ id: s.id, title: s.title, active: false }))),
       )
       .catch(console.error);
+    // Enhanced: load providers, MCP, config
+    listProviders().then(setProviders).catch(console.error);
+    listMcpServers().then(setMcpServers).catch(console.error);
+    getConfig().then((s) => {
+      try {
+        const c = JSON.parse(s);
+        setConfig({ ...DEFAULT_CONFIG, ...c });
+        setMode(c.default_mode || "act");
+        setEffort(c.default_effort || "high");
+        setThinkingEnabled(c.thinking_enabled ?? true);
+        setAutoMode(c.auto_mode ?? false);
+      } catch { /* ignore parse errors */ }
+    }).catch(console.error);
   }, []);
 
   // Apply theme on mount and on change
@@ -210,7 +238,7 @@ export default function App() {
 
     try {
       await submitPrompt(
-        { prompt, reasoning_effort: reasoningEffort, thinking_enabled: thinkingEnabled },
+        { prompt, reasoning_effort: effort, thinking_enabled: thinkingEnabled, mode, auto_mode: autoMode, max_steps: config.max_steps },
         handlers,
       );
     } catch (err) {
@@ -223,14 +251,29 @@ export default function App() {
     running,
     addMessage,
     updateMessage,
-    reasoningEffort,
+    effort,
     thinkingEnabled,
+    mode,
+    autoMode,
+    config.max_steps,
   ]);
 
   const handleCancel = useCallback(async () => {
     await cancelRun();
     setRunning(false);
     setAgentStatus("ready");
+  }, []);
+
+  // Enhanced: model switching
+  const handleModelSwitch = useCallback(async (provider: string, model: string) => {
+    await switchModel(provider, model);
+    setCurrentModel(model);
+  }, []);
+
+  // Enhanced: config save
+  const handleSaveConfig = useCallback(async (newConfig: AppConfig) => {
+    setConfig(newConfig);
+    await saveConfig(newConfig);
   }, []);
 
   const handleNewSession = useCallback(async () => {
@@ -297,6 +340,9 @@ export default function App() {
       ? Math.round((sessionCache.hit / (sessionCache.hit + sessionCache.miss)) * 100)
       : 0;
 
+  const activeProvider = providers.find(p => p.connected) || providers[0];
+  const displayModel = currentModel || activeProvider?.model || "deepseek-v4";
+
   return (
     <div
       className="dp-shell"
@@ -306,7 +352,7 @@ export default function App() {
       <TitleBar
         title="DPronix"
         thinkingLabel={running ? "thinking" : undefined}
-        effort={reasoningEffort}
+        effort={effort}
         sideCollapsed={sideCollapsed}
         onToggleSidebar={() => setSideCollapsed((v) => !v)}
         onToggleContext={() => setContextCollapsed((v) => !v)}
@@ -316,11 +362,28 @@ export default function App() {
       <SidebarPanel
         sessions={sessions}
         skills={skills}
+        providers={providers}
+        mcpServers={mcpServers}
         collapsed={sideCollapsed}
         onNewSession={handleNewSession}
         running={running}
         messageCount={messages.length}
       />
+
+      <Suspense fallback={null}>
+        <ModeBar
+          mode={mode}
+          effort={effort}
+          thinking={thinkingEnabled}
+          autoMode={autoMode}
+          onModeChange={setMode}
+          onEffortChange={setEffort}
+          onThinkingChange={setThinkingEnabled}
+          onAutoModeChange={setAutoMode}
+          running={running}
+          caps={capabilities}
+        />
+      </Suspense>
 
       <main className="dp-main">
         <div className="dp-thread">
@@ -363,23 +426,30 @@ export default function App() {
       />
 
       <StatusBar
+        model={displayModel}
+        mode={mode}
         tokensUp={lastUsage?.prompt_tokens ?? 0}
         tokensDown={lastUsage?.completion_tokens ?? 0}
         cachePercent={cachePct}
+        cacheHit={sessionCache.hit}
         status={agentStatus}
       />
 
       {showSettings && (
         <SettingsPanel
+          config={config}
+          providers={providers}
+          mcpServers={mcpServers}
           thinkingEnabled={thinkingEnabled}
           onToggleThinking={() => setThinkingEnabled((v: boolean) => !v)}
-          effort={reasoningEffort}
-          onEffortChange={setReasoningEffort}
+          effort={effort}
+          onEffortChange={setEffort}
           effortLevels={
             capabilities?.reasoning_effort_levels ?? ["low", "medium", "high"]
           }
           theme={theme}
           onThemeChange={setTheme}
+          onSave={handleSaveConfig}
           onNewSession={handleNewSession}
           onClose={() => setShowSettings(false)}
         />

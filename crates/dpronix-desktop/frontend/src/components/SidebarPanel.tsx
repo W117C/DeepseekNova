@@ -1,15 +1,16 @@
 /**
- * SidebarPanel — three-tab panel (Sessions / Files / Skills).
+ * SidebarPanel — multi-tab panel (Sessions / Files / Skills / Providers / MCP).
  *
- * Uses dp-* design system classes. Replaces the old Sidebar.tsx which
- * used Reasonix DOM names (.sidebar / .side-head / .session-list).
+ * Uses dp-* design system classes.
  */
 import { useState } from "react";
-import type { SessionSummary, SkillSummary } from "../types";
+import type { SessionSummary, SkillSummary, ProviderSummary, McpServer } from "../types";
 
 interface SidebarPanelProps {
   sessions: SessionSummary[];
   skills?: SkillSummary[];
+  providers?: ProviderSummary[];
+  mcpServers?: McpServer[];
   collapsed?: boolean;
   onNewSession?: () => void;
   onSelectSession?: (id: string) => void;
@@ -17,11 +18,13 @@ interface SidebarPanelProps {
   messageCount?: number;
 }
 
-type Tab = "sessions" | "files" | "skills";
+type Tab = "sessions" | "files" | "skills" | "providers" | "mcp";
 
 export default function SidebarPanel({
   sessions,
   skills = [],
+  providers = [],
+  mcpServers = [],
   collapsed,
   onNewSession,
   onSelectSession,
@@ -73,6 +76,22 @@ export default function SidebarPanel({
         >
           Skills
         </button>
+        <button
+          role="tab"
+          aria-selected={activeTab === "providers"}
+          className={`tab${activeTab === "providers" ? " active" : ""}`}
+          onClick={() => setActiveTab("providers")}
+        >
+          Models
+        </button>
+        <button
+          role="tab"
+          aria-selected={activeTab === "mcp"}
+          className={`tab${activeTab === "mcp" ? " active" : ""}`}
+          onClick={() => setActiveTab("mcp")}
+        >
+          MCP
+        </button>
       </div>
 
       <div className="dp-list">
@@ -119,6 +138,46 @@ export default function SidebarPanel({
             ))
           ) : (
             <p className="dp-empty">No skills loaded.</p>
+          ))}
+
+        {activeTab === "providers" &&
+          (providers.length > 0 ? (
+            providers.map((p) => (
+              <div key={p.name} className="dp-list-item" style={{ flexDirection: "column", alignItems: "flex-start", gap: 2 }}>
+                <span style={{ display: "flex", alignItems: "center", gap: 8, width: "100%" }}>
+                  <span aria-hidden="true" style={{
+                    width: 8, height: 8, borderRadius: "50%",
+                    background: p.connected ? "var(--dp-success)" : "var(--dp-danger)",
+                    boxShadow: p.connected ? "0 0 4px var(--dp-success)" : undefined,
+                  }} />
+                  <span className="label">{p.name}</span>
+                </span>
+                <span style={{ fontSize: 11, color: "var(--dp-muted)", paddingLeft: 16 }}>
+                  {p.model || "default"}
+                </span>
+              </div>
+            ))
+          ) : (
+            <p className="dp-empty">No providers configured.</p>
+          ))}
+
+        {activeTab === "mcp" &&
+          (mcpServers.length > 0 ? (
+            mcpServers.map((m) => (
+              <div key={m.name} className="dp-list-item" style={{ flexDirection: "column", alignItems: "flex-start", gap: 2 }}>
+                <span style={{ display: "flex", alignItems: "center", gap: 8, width: "100%" }}>
+                  <span aria-hidden="true" style={{
+                    width: 8, height: 8, borderRadius: "50%",
+                    background: m.status === "connected" ? "var(--dp-success)" : m.status === "error" ? "var(--dp-danger)" : "var(--dp-muted)",
+                  }} />
+                  <span className="label">{m.name}</span>
+                  <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--dp-muted)" }}>{m.tool_count} tools</span>
+                </span>
+                {m.error && <span style={{ fontSize: 10, color: "var(--dp-danger)", paddingLeft: 16 }}>{m.error}</span>}
+              </div>
+            ))
+          ) : (
+            <p className="dp-empty">No MCP servers configured.</p>
           ))}
       </div>
 

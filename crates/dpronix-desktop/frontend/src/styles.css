@@ -1194,3 +1194,125 @@ html:not([data-platform="macos"]) .dp-traffic {
   font-weight: 600;
   margin-bottom: 2px;
 }
+
+/* ============================================================
+   13. MODE BAR (Plan/Act/YOLO + Effort + Thinking/Auto)
+   ============================================================ */
+
+.dp-modebar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 16px;
+  background: var(--dp-bg-2);
+  border-bottom: 1px solid var(--dp-border);
+  flex-shrink: 0;
+}
+.dp-modebar .dp-btn-group {
+  display: flex;
+  gap: 2px;
+  background: var(--dp-panel);
+  border: 1px solid var(--dp-border);
+  border-radius: var(--dp-radius-sm);
+  padding: 2px;
+}
+.dp-modebar .dp-pill {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border: none;
+  background: transparent;
+  color: var(--dp-muted);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: 4px;
+  transition: all 0.12s ease;
+  font-family: var(--dp-font-sans);
+}
+.dp-modebar .dp-pill:hover:not(:disabled) { color: var(--dp-fg); background: var(--dp-panel-2); }
+.dp-modebar .dp-pill.active { color: var(--dp-fg); }
+.dp-modebar .dp-pill.active.mode-plan { background: var(--dp-cyan-soft); color: var(--dp-cyan); }
+.dp-modebar .dp-pill.active.mode-act { background: var(--dp-accent-soft); color: var(--dp-accent); }
+.dp-modebar .dp-pill.active.mode-yolo { background: var(--dp-danger-soft); color: var(--dp-danger); }
+.dp-modebar .dp-pill:disabled { opacity: 0.4; cursor: not-allowed; }
+.dp-modebar .dp-pill-icon { font-size: 13px; }
+.dp-modebar .dp-pill-label { font-size: 11px; font-weight: 600; letter-spacing: 0.03em; }
+
+.dp-modebar .dp-btn-group.dp-toggles {
+  background: none;
+  border: none;
+  padding: 0;
+  gap: 4px;
+}
+.dp-modebar .dp-toggle {
+  width: 32px;
+  height: 28px;
+  border: 1px solid var(--dp-border);
+  border-radius: var(--dp-radius-sm);
+  background: var(--dp-panel);
+  cursor: pointer;
+  font-size: 14px;
+  transition: all 0.12s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.dp-modebar .dp-toggle.on {
+  background: var(--dp-accent);
+  color: #fff;
+  border-color: var(--dp-accent);
+}
+.dp-modebar .dp-toggle.off { opacity: 0.5; }
+.dp-modebar .dp-toggle:disabled { opacity: 0.3; cursor: not-allowed; }
+
+/* ============================================================
+   14. EXPANDED SETTINGS PANEL (tabbed)
+   ============================================================ */
+
+.dp-settings-wide {
+  width: 520px;
+  max-width: 90vw;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.dp-settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 0 8px 0;
+  border-bottom: 1px solid var(--dp-border);
+}
+
+.dp-settings-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--dp-border);
+}
+.dp-settings-tab {
+  padding: 6px 14px;
+  border: none;
+  background: none;
+  color: var(--dp-muted);
+  cursor: pointer;
+  font-size: 12px;
+  font-family: var(--dp-font-sans);
+  border-bottom: 2px solid transparent;
+  transition: all 0.12s ease;
+}
+.dp-settings-tab:hover { color: var(--dp-fg); }
+.dp-settings-tab.active { color: var(--dp-accent); border-bottom-color: var(--dp-accent); }
+
+.dp-settings-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 0;
+}
+
+.dp-settings-section {
+  font-size: 13px;
+}

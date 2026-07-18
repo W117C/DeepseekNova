@@ -1,13 +1,15 @@
 /**
  * bridge.ts — Tauri IPC bridge for DPronix desktop frontend.
  *
- * Architecture (inspired by DeepSeek-Reasonix):
+ * Enhanced with session management, MCP, config, and model switching.
+ *
+ * Architecture:
  *   Commands → invoke("command_name", args) → Rust handler
  *   Events  → Channel<WireEvent>.onmessage → React reducer
  *   Dev mock → when !window.__TAURI__, simulates a complete agent turn
  */
 
-import type { WireEvent, SubmitRequest, SkillSummary, ProviderSummary, UsageInfo } from "./types";
+import type { WireEvent, SubmitRequest, SkillSummary, ProviderSummary, UsageInfo, SessionSummary, McpServer, AppConfig } from "./types";
 
 // ---------------------------------------------------------------------------
 // Declare Tauri globals for strict TypeScript
@@ -39,6 +41,9 @@ export interface EventHandlers {
   onToolCallDelta?: (id: string, argsDelta: string) => void;
   onToolCallEnd?: (id: string, name: string, arguments_: string) => void;
   onToolResult?: (callId: string, result: string) => void;
+  onModeChange?: (mode: string, autoMode: boolean) => void;
+  onMcpStatus?: (server: string, status: string, tools: number) => void;
+  onSessionSaved?: (sessionId: string, title: string) => void;
   onUsage?: (usage: UsageInfo) => void;
   onTurnComplete?: () => void;
   onApprovalRequest?: (request: { id: string; title: string; description?: string }) => void;
@@ -184,6 +189,15 @@ export async function submitPrompt(
           reasoning_tokens: event.reasoning_tokens,
         });
         break;
+      case "mode_change":
+        handlers.onModeChange?.(event.mode, event.auto_mode);
+        break;
+      case "mcp_status":
+        handlers.onMcpStatus?.(event.server, event.status, event.tools);
+        break;
+      case "session_saved":
+        handlers.onSessionSaved?.(event.session_id, event.title);
+        break;
       case "turn_complete":
         handlers.onTurnComplete?.();
         break;
@@ -304,4 +318,66 @@ export async function deleteSession(id: string): Promise<void> {
   if (!isTauri()) return;
   await ensureTauriImports();
   await tauriInvoke("delete_session", { id });
+}
+
+// ── Enhanced: Session Management ────────────────────────────
+
+/** Load a session by ID. */
+export async function loadSession(id: string): Promise<{ messages: unknown[] }> {
+  if (!isTauri()) return { messages: [] };
+  await ensureTauriImports();
+  return await tauriInvoke("load_session", { id });
+}
+
+/** Export a session as markdown/JSON. */
+export async function exportSession(id: string): Promise<string> {
+  if (!isTauri()) return "";
+  await ensureTauriImports();
+  return await tauriInvoke("export_session", { id });
+}
+
+// ── Enhanced: Config Management ─────────────────────────────
+
+/** Save application config. */
+export async function saveConfig(config: AppConfig): Promise<void> {
+  if (!isTauri()) return;
+  await ensureTauriImports();
+  await tauriInvoke("save_config", { config });
+}
+
+// ── Enhanced: MCP Server Management ─────────────────────────
+
+/** List MCP servers. */
+export async function listMcpServers(): Promise<McpServer[]> {
+  if (!isTauri()) return [];
+  await ensureTauriImports();
+  return await tauriInvoke("list_mcp_servers");
+}
+
+/** Add an MCP server. */
+export async function addMcpServer(config: {
+  name: string;
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+}): Promise<void> {
+  if (!isTauri()) return;
+  await ensureTauriImports();
+  await tauriInvoke("add_mcp_server", { config });
+}
+
+/** Remove an MCP server by name. */
+export async function removeMcpServer(name: string): Promise<void> {
+  if (!isTauri()) return;
+  await ensureTauriImports();
+  await tauriInvoke("remove_mcp_server", { name });
+}
+
+// ── Enhanced: Model Switching ────────────────────────────────
+
+/** Switch the active model. */
+export async function switchModel(provider: string, model: string): Promise<void> {
+  if (!isTauri()) return;
+  await ensureTauriImports();
+  await tauriInvoke("switch_model", { provider, model });
 }
