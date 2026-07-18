@@ -30,6 +30,8 @@ export interface UsageInfo {
   total_tokens: number;
   cache_hit_tokens: number;
   cache_miss_tokens: number;
+  session_cache_hit_tokens: number;
+  session_cache_miss_tokens: number;
 }
 
 export interface SubmitRequest {

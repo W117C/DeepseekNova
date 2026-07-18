@@ -141,8 +141,10 @@ impl Memory {
                 let tail_len = threshold_chars - head_len;
 
                 let tlen = msg.content.len();
-                let head = &msg.content[..head_len];
-                let tail = &msg.content[tlen - tail_len..];
+                let head_end = msg.content.floor_char_boundary(head_len);
+                let head = &msg.content[..head_end];
+                let tail_start = msg.content.ceil_char_boundary(tlen.saturating_sub(tail_len));
+                let tail = &msg.content[tail_start..];
 
                 let omitted = msg.content.len() - head_len - tail_len;
                 msg.content = format!(

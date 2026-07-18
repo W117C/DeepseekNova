@@ -24,6 +24,8 @@ pub struct Agent {
     tools: HashMap<String, Arc<dyn Tool>>,
     max_steps: usize,
     system_prompt: Option<String>,
+    reasoning_effort: Option<String>,
+    thinking_enabled: Option<bool>,
     compaction_threshold_tokens: Option<u32>,
 }
 
@@ -34,12 +36,26 @@ impl Agent {
             tools: HashMap::new(),
             max_steps: if max_steps == 0 { 10 } else { max_steps },
             system_prompt: None,
+            reasoning_effort: None,
+            thinking_enabled: None,
             compaction_threshold_tokens: None,
         }
     }
 
     pub fn with_system_prompt(mut self, prompt: impl Into<String>) -> Self {
         self.system_prompt = Some(prompt.into());
+        self
+    }
+
+    /// Set the reasoning effort level (e.g. "low", "medium", "high", "max").
+    pub fn with_reasoning_effort(mut self, effort: impl Into<String>) -> Self {
+        self.reasoning_effort = Some(effort.into());
+        self
+    }
+
+    /// Enable or disable thinking mode.
+    pub fn with_thinking_enabled(mut self, enabled: bool) -> Self {
+        self.thinking_enabled = Some(enabled);
         self
     }
 
@@ -83,7 +99,9 @@ impl Runner for Agent {
         // This enables graceful interruption of the agent loop (e.g. Ctrl-C).
         let cancel = CancellationToken::new();
         let cancel_clone = cancel.clone();
-        tokio::spawn(async move {
+        // Signal handler: listens for Ctrl-C and cancels the agent.
+        // Fire-and-forget by design — cancelled when agent completes.
+        let _signal_handle = tokio::spawn(async move {
             loop {
                 tokio::select! {
                     _ = tokio::signal::ctrl_c() => {
@@ -256,6 +274,7 @@ async fn stream_and_process_turn(
     let mut stream = provider.stream(&messages, &tool_refs).await?;
 
     let mut text_buf = String::new();
+    let mut reasoning_buf = String::new();
     let mut usage: Option<Usage> = None;
     let mut pending_calls: Vec<PendingToolCall> = Vec::new();
 
@@ -276,6 +295,7 @@ async fn stream_and_process_turn(
                 tx.send(Ok(RunEvent::TextDelta(delta))).await.ok();
             }
             Chunk::ReasoningDelta { text, signature } => {
+                reasoning_buf.push_str(&text);
                 tx.send(Ok(RunEvent::ReasoningDelta { text, signature }))
                     .await
                     .ok();
@@ -338,7 +358,7 @@ async fn stream_and_process_turn(
             name: None,
             tool_calls: None,
             tool_call_id: None,
-            reasoning_content: None,
+            reasoning_content: if reasoning_buf.is_empty() { None } else { Some(reasoning_buf.clone()) },
         });
 
         let final_calls: Vec<ToolCall> = pending_calls
@@ -383,7 +403,7 @@ async fn stream_and_process_turn(
             name: None,
             tool_calls: Some(tool_calls_for_msg),
             tool_call_id: None,
-            reasoning_content: None,
+            reasoning_content: if reasoning_buf.is_empty() { None } else { Some(reasoning_buf.clone()) },
         });
 
         // Execute each tool call

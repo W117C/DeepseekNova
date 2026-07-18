@@ -127,14 +127,14 @@ pub struct InMemoryVectorStore {
     records: Vec<MemoryRecord>,
     config: MemoryConfig,
     /// Simple text → embedding cache.
-    embed_cache: HashMap<String, Vec<f32>>,
+    embed_cache: std::sync::Mutex<HashMap<String, Vec<f32>>>,
 }
 
 impl InMemoryVectorStore {
     pub fn new(config: MemoryConfig) -> Self {
         let mut store = Self {
             records: Vec::new(),
-            embed_cache: HashMap::new(),
+            embed_cache: std::sync::Mutex::new(HashMap::new()),
             config: config.clone(),
         };
 
@@ -158,14 +158,16 @@ impl InMemoryVectorStore {
     /// Compute a simple hash-based embedding from text.
     /// This is a placeholder — in production, use a real embedding model.
     fn text_to_embedding(&self, text: &str) -> Vec<f32> {
-        if let Some(cached) = self.embed_cache.get(text) {
-            return cached.clone();
+        {
+            let cache = self.embed_cache.lock().unwrap();
+            if let Some(cached) = cache.get(text) {
+                return cached.clone();
+            }
         }
 
         let dim = self.config.vector_dim;
         let mut embedding = vec![0.0_f32; dim];
 
-        // Simple character n-gram hashing to produce a pseudo-embedding
         let chars: Vec<char> = text.chars().collect();
         for window in chars.windows(3) {
             let hash = self::hash_chars(&window);
@@ -173,7 +175,6 @@ impl InMemoryVectorStore {
             embedding[idx] += 1.0;
         }
 
-        // Normalize
         let magnitude: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
         if magnitude > 0.0 {
             for val in embedding.iter_mut() {
@@ -181,9 +182,8 @@ impl InMemoryVectorStore {
             }
         }
 
-        let mut cache = self.embed_cache.clone();
+        let mut cache = self.embed_cache.lock().unwrap();
         cache.insert(text.to_string(), embedding.clone());
-        // Don't update self here — cache is rebuilt on mutation
 
         embedding
     }
@@ -223,7 +223,7 @@ impl VectorStore for InMemoryVectorStore {
         if self.records.len() >= self.config.max_records {
             // Remove lowest-importance record
             if let Some(min_idx) = self.records.iter().enumerate()
-                .min_by(|(_, a), (_, b)| a.importance.partial_cmp(&b.importance).unwrap())
+                .min_by(|(_, a), (_, b)| a.importance.partial_cmp(&b.importance).unwrap_or(std::cmp::Ordering::Equal))
                 .map(|(idx, _)| idx)
             {
                 self.records.remove(min_idx);

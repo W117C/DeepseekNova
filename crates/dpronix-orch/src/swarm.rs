@@ -15,7 +15,9 @@
 //! ```
 
 use crate::types::*;
-use dpronix_core::runner::RunInput;
+use dpronix_core::runner::{RunInput, Runner, RunOutput};
+use std::sync::Arc;
+use tokio::sync::Semaphore;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tracing::info;
@@ -46,6 +48,7 @@ pub struct SwarmCoordinator {
     config: SwarmConfig,
     task_tx: mpsc::Sender<SwarmMessage>,
     task_rx: mpsc::Receiver<SwarmMessage>,
+    runners: HashMap<String, Arc<dyn Runner>>,
 }
 
 impl SwarmCoordinator {
@@ -59,10 +62,16 @@ impl SwarmCoordinator {
             config,
             task_tx: tx,
             task_rx: rx,
+            runners: HashMap::new(),
         }
     }
 
     /// Register a worker agent in the swarm.
+    /// Register a runner for an agent (used during orchestration).
+    pub fn register_runner(&mut self, agent_id: &str, runner: Arc<dyn Runner>) {
+        self.runners.insert(agent_id.to_string(), runner);
+    }
+
     pub fn register_agent(&mut self, agent: SwarmAgent) {
         info!(name = %agent.name, role = ?agent.role, "agent registered");
         self.agents.insert(agent.id.clone(), agent);
@@ -96,6 +105,7 @@ impl SwarmCoordinator {
         }
 
         // Execute tasks in parallel (up to max_workers concurrent)
+        let semaphore = Arc::new(Semaphore::new(self.config.max_workers));
         let mut handles = Vec::new();
         for task in &tasks {
             if handles.len() >= self.config.max_workers {
@@ -106,15 +116,30 @@ impl SwarmCoordinator {
             if let Some(worker) = self.agents.get(&task.assigned_to) {
                 let worker_id = worker.id.clone();
                 let task_desc = task.description.clone();
+                let runner = self.runners.get(&worker.id).cloned();
+                let semaphore = semaphore.clone();
                 let handle = tokio::spawn(async move {
-                    // Execute the task via the worker
+                    let _permit = semaphore.acquire().await.ok()?;
                     let input = RunInput {
                         prompt: task_desc,
                         images: vec![],
                         model_override: None,
                     };
-                    // Note: in production, the worker's provider would be used here
-                    (worker_id, input.prompt)
+                    match runner {
+                        Some(r) => {
+                            match r.run(input).await {
+                                Ok(output) => (worker_id, Some(output.text)),
+                                Err(e) => {
+                                    tracing::error!(worker = %worker_id, error = %e, "task failed");
+                                    (worker_id, None)
+                                }
+                            }
+                        }
+                        None => {
+                            tracing::warn!(worker = %worker_id, "no runner registered");
+                            (worker_id, None)
+                        }
+                    }
                 });
                 handles.push(handle);
             }

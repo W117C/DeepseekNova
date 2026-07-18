@@ -5,7 +5,7 @@ import Transcript from "./components/Transcript";
 import Composer from "./components/Composer";
 
 function uid(): string {
-  return (Date.now() + Math.random()).toString(36);
+  return crypto.randomUUID();
 }
 
 export default function App() {
@@ -19,6 +19,7 @@ export default function App() {
   const [sessionCache, setSessionCache] = useState({ hit: 0, miss: 0 });
   const streamingText = useRef("");
   const streamingMsgId = useRef("");
+  const streamingReasoningId = useRef("");
 
   // Load capabilities + skills on mount
   useEffect(() => {
@@ -54,7 +55,12 @@ export default function App() {
         updateMessage(streamingMsgId.current, (m) => ({ ...m, content: streamingText.current }));
       },
       onReasoning(text: string) {
-        addMessage({ id: uid(), role: "reasoning", content: text, reasoningDone: false });
+        if (!streamingReasoningId.current) {
+          streamingReasoningId.current = uid();
+          addMessage({ id: streamingReasoningId.current, role: "reasoning", content: text, reasoningDone: false });
+        } else {
+          updateMessage(streamingReasoningId.current, (m) => ({ ...m, content: m.content + text }));
+        }
       },
       onToolCallStart(id: string, name: string) {
         addMessage({ id, role: "tool", content: "", toolName: name, toolId: id });
@@ -75,6 +81,10 @@ export default function App() {
         setSessionCache(prev => ({ hit: prev.hit + usage.cache_hit_tokens, miss: prev.miss + usage.cache_miss_tokens }));
       },
       onDone(text: string) {
+        if (streamingReasoningId.current) {
+          updateMessage(streamingReasoningId.current, (m) => ({ ...m, reasoningDone: true }));
+          streamingReasoningId.current = "";
+        }
         if (text && streamingMsgId.current) {
           updateMessage(streamingMsgId.current, (m) => ({ ...m, content: text }));
         }

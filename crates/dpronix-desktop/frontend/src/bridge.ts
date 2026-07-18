@@ -77,6 +77,8 @@ export async function submitPrompt(
       case "error":
         handlers.onError?.(event.message);
         break;
+      default:
+        console.warn("Unknown WireEvent kind:", (event as { kind: string }).kind);
     }
   };
 
