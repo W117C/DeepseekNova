@@ -929,7 +929,7 @@ mod tests {
                 assert_eq!(sub_agent, "spec-agent");
                 assert_eq!(goal, "Write the API spec");
             }
-            other => panic!("expected Delegate action, got {:?}", other),
+            other => panic!("expected Delegate action, got {:?}", other), // test-only
         }
     }
 

@@ -89,7 +89,7 @@ impl Default for ToolRegistry {
 // ---------------------------------------------------------------------------
 
 pub type ProviderFactory =
-    fn(crate::config::ProviderConfigData) -> anyhow::Result<Arc<dyn crate::runner::Runner>>;
+    Box<dyn Fn(crate::config::ProviderConfigData) -> anyhow::Result<Arc<dyn crate::runner::Runner>> + Send + Sync>;
 
 pub struct ProviderRegistry {
     factories: IndexMap<String, ProviderFactory>,
@@ -104,6 +104,11 @@ impl ProviderRegistry {
 
     pub fn register(&mut self, kind: impl Into<String>, factory: ProviderFactory) {
         self.factories.insert(kind.into(), factory);
+    }
+
+    /// Look up a factory by provider kind.
+    pub fn lookup(&self, kind: &str) -> Option<&ProviderFactory> {
+        self.factories.get(kind)
     }
 }
 

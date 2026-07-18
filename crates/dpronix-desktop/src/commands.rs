@@ -112,8 +112,16 @@ pub async fn submit_prompt(
 
     // Build agent with all tools
     let mut agent = dpronix_agent::Agent::new(provider.into(), config.agent.max_steps);
+    // Note: provider/agent creation could be cached in AppState.runner for reuse
     if let Some(ref sp) = config.agent.system_prompt {
         agent = agent.with_system_prompt(sp.clone());
+    }
+    // Apply reasoning effort and thinking mode from request
+    if let Some(ref effort) = request.reasoning_effort {
+        agent = agent.with_reasoning_effort(effort.clone());
+    }
+    if let Some(thinking) = request.thinking_enabled {
+        agent = agent.with_thinking_enabled(thinking);
     }
     for tool in dpronix_tools::all_builtin_tools() {
         agent.register_tool(tool);

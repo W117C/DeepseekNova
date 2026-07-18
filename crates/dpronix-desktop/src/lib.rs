@@ -66,7 +66,7 @@ pub fn run() {
             let menu = Menu::with_items(app, &[&show, &PredefinedMenuItem::separator(app)?, &quit])?;
 
             let _tray = TrayIconBuilder::new()
-                .icon(app.default_window_icon().cloned().unwrap())
+                .icon(app.default_window_icon().cloned().unwrap_or_else(|| tauri::image::Image::rgba(0, 0, 0, 0)))
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "quit" => app.exit(0),

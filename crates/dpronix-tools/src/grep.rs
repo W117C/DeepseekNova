@@ -127,7 +127,8 @@ fn search_file(
     for (line_num, line) in content.lines().enumerate() {
         if re.is_match(line) {
             let trimmed = if line.len() > 200 {
-                format!("{}...", &line[..200])
+                let end = line.floor_char_boundary(200);
+                format!("{}...", &line[..end])
             } else {
                 line.to_string()
             };

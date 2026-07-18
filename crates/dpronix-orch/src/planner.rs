@@ -400,7 +400,7 @@ Constraints:
             }
             Err(e) => {
                 warn!(action = %action.name, error = %e, "action failed");
-                Ok(false)
+                Err(e)
             }
         }
     }

@@ -44,7 +44,7 @@ impl Server {
     /// Start the server and block until it shuts down.
     pub async fn serve(self, addr: &str) -> anyhow::Result<()> {
         let cors = CorsLayer::new()
-            .allow_origin(Any)
+            .allow_origin(std::env::var("DPRONIX_CORS_ORIGIN").unwrap_or_else(|_| "127.0.0.1".to_string()).parse().unwrap_or_else(|_| "127.0.0.1".parse().unwrap()))
             .allow_methods(Any)
             .allow_headers(Any);
 
