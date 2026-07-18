@@ -78,3 +78,16 @@ export interface Message {
   toolResult?: string;
   reasoningDone?: boolean;
 }
+
+// ── Reasonix UI types ──
+export type ToolStatus = "running" | "success" | "error";
+export interface ToolCall {
+  id: string; command: string; status: ToolStatus; detail?: string; durationMs?: number;
+}
+export type PlanStepStatus = "done" | "active" | "pending";
+export interface PlanStep { id: string; title: string; status: PlanStepStatus; }
+export interface ApprovalRequest { id: string; title: string; description?: string; }
+export type FileChangeType = "added" | "modified" | "removed";
+export interface ContextFile { path: string; changeType?: FileChangeType; }
+export interface SessionSummary { id: string; title: string; active?: boolean; }
+export type AgentStatus = "ready" | "running";

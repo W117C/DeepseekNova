@@ -151,6 +151,29 @@ body[data-drag-over="1"]::after {
   --shadow-lg: 0 24px 60px -16px oklch(0% 0 0 / 0.65);
   --radius: 8px;
   --radius-lg: 12px;
+
+  /* --rx-* aliases for Reasonix UI component library */
+  --rx-surface-0: var(--bg);
+  --rx-surface-1: var(--bg-2);
+  --rx-surface-2: var(--card);
+  --rx-text-primary: var(--fg);
+  --rx-text-secondary: var(--fg-2);
+  --rx-text-muted: var(--muted);
+  --rx-border: var(--border);
+  --rx-border-strong: var(--border-strong);
+  --rx-accent: var(--accent);
+  --rx-accent-bg: var(--accent-soft);
+  --rx-success: var(--success);
+  --rx-success-bg: var(--success-soft);
+  --rx-warning: var(--warning);
+  --rx-warning-bg: var(--warning-soft);
+  --rx-danger: var(--danger);
+  --rx-danger-bg: var(--danger-soft);
+  --rx-radius-sm: 6px;
+  --rx-radius: var(--radius);
+  --rx-radius-lg: var(--radius-lg);
+  --rx-font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  --rx-font-mono: "SF Mono", "Fira Code", "Cascadia Code", monospace;
 }
 
 [data-theme-style="ember"] {
@@ -8095,3 +8118,100 @@ html[data-platform="macos"] .splash {
     grid-template-columns: 1fr;
   }
 }
+
+/* ============================================================
+   Reasonix UI component library styles (ported from Vue scoped)
+   ============================================================ */
+
+/* ── TitleBar ── */
+.titlebar .traffic-lights { display: flex; gap: 6px; }
+.titlebar .dot { width: 10px; height: 10px; border-radius: 50%; }
+.titlebar .dot-danger { background: var(--rx-danger); }
+.titlebar .dot-warning { background: var(--rx-warning); }
+.titlebar .dot-success { background: var(--rx-success); }
+.titlebar .title { font-weight: 500; font-size: 13px; color: var(--rx-text-primary); }
+.titlebar .badge { font-size: 11px; padding: 2px 8px; border-radius: var(--rx-radius); background: var(--rx-accent-bg); color: var(--rx-accent); }
+.titlebar .actions { margin-left: auto; display: flex; gap: 10px; }
+.titlebar .icon-button { background: none; border: none; cursor: pointer; color: var(--rx-text-secondary); font-size: 14px; line-height: 1; padding: 4px; -webkit-app-region: no-drag; }
+.titlebar .icon-button:hover { color: var(--rx-text-primary); }
+
+/* ── AppShell ── */
+.app-shell { display: flex; flex-direction: column; height: 100%; background: var(--rx-surface-0); color: var(--rx-text-primary); font-family: var(--rx-font-sans); }
+.app-shell .body { flex: 1; display: grid; grid-template-columns: 200px 1fr 240px; min-height: 0; }
+.app-shell .body.context-collapsed { grid-template-columns: 200px 1fr 0px; }
+.app-shell .main { display: flex; flex-direction: column; min-width: 0; padding: 12px; gap: 10px; }
+.app-shell .thread { flex: 1; display: flex; flex-direction: column; gap: 10px; overflow-y: auto; }
+.app-shell .composer { border-top: 1px solid var(--rx-border); padding-top: 10px; display: flex; gap: 8px; align-items: center; }
+.app-shell .composer textarea { flex: 1; resize: none; border: 1px solid var(--rx-border); border-radius: var(--rx-radius); padding: 8px 10px; font-family: inherit; font-size: 13px; background: var(--rx-surface-2); color: var(--rx-text-primary); outline: none; }
+.app-shell .composer textarea:focus { border-color: var(--rx-border-strong); }
+.app-shell .send { border: none; background: var(--rx-accent); color: white; border-radius: var(--rx-radius); padding: 0 14px; cursor: pointer; font-size: 14px; height: 34px; }
+.app-shell .send:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ── SidebarPanel ── */
+.sidebar { border-right: 1px solid var(--rx-border); background: var(--rx-surface-1); padding: 10px 8px; display: flex; flex-direction: column; gap: 12px; height: 100%; box-sizing: border-box; overflow: hidden; }
+.sidebar .tabs { display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
+.sidebar .tab { background: none; border: none; text-align: left; padding: 4px 0; color: var(--rx-text-secondary); cursor: pointer; font-size: 12px; }
+.sidebar .tab.active { color: var(--rx-accent); font-weight: 500; border-bottom: 2px solid var(--rx-accent); width: fit-content; }
+.sidebar .list { display: flex; flex-direction: column; gap: 4px; overflow-y: auto; flex: 1; }
+.sidebar .list-item { background: none; border: none; text-align: left; font-size: 12px; padding: 6px 8px; border-radius: var(--rx-radius); color: var(--rx-text-secondary); cursor: pointer; width: 100%; }
+.sidebar .list-item:hover { background: var(--rx-surface-2); }
+.sidebar .list-item.active { background: var(--rx-surface-2); color: var(--rx-text-primary); }
+.sidebar .empty { font-size: 12px; color: var(--rx-text-muted); padding: 8px; }
+
+/* ── ApprovalCard ── */
+.approval-card { border: 1px solid var(--rx-warning); background: var(--rx-warning-bg); border-radius: var(--rx-radius-lg); padding: 10px 12px; }
+.approval-card .label { margin: 0 0 6px; font-size: 12px; font-weight: 500; color: var(--rx-warning); }
+.approval-card .title { margin: 0 0 4px; font-size: 13px; color: var(--rx-text-primary); }
+.approval-card .description { margin: 0 0 8px; font-size: 12px; color: var(--rx-text-secondary); }
+.approval-card .actions { display: flex; gap: 8px; }
+.approval-card .btn { font-size: 12px; padding: 4px 10px; border-radius: var(--rx-radius); border: 1px solid var(--rx-border-strong); background: var(--rx-surface-2); cursor: pointer; }
+.approval-card .btn-approve { background: var(--rx-success); color: white; border: none; }
+
+/* ── ToolCallCard ── */
+.tool-card { border: 1px solid var(--rx-border); border-radius: var(--rx-radius-lg); overflow: hidden; }
+.tool-card .summary { width: 100%; display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: none; border: none; cursor: pointer; text-align: left; }
+.tool-card .chevron { color: var(--rx-text-muted); transition: transform 0.15s ease; font-size: 13px; }
+.tool-card .chevron.open { transform: rotate(90deg); }
+.tool-card .command { font-family: var(--rx-font-mono); font-size: 12px; color: var(--rx-text-primary); flex: 1; }
+.tool-card .status { font-size: 12px; }
+.tool-card .status.success { color: var(--rx-success); }
+.tool-card .status.error { color: var(--rx-danger); }
+.tool-card .status.running { color: var(--rx-text-muted); }
+.tool-card .detail { margin: 0; padding: 8px 12px; border-top: 1px solid var(--rx-border); background: var(--rx-surface-1); font-size: 12px; font-family: var(--rx-font-mono); white-space: pre-wrap; max-height: 240px; overflow-y: auto; }
+
+/* ── ReasoningDisclosure ── */
+.reasoning { border: 1px dashed var(--rx-border); border-radius: var(--rx-radius-lg); color: var(--rx-text-muted); }
+.reasoning .summary { width: 100%; display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: none; border: none; cursor: pointer; text-align: left; font-size: 12px; color: inherit; }
+.reasoning .chevron { transition: transform 0.15s ease; }
+.reasoning .chevron.open { transform: rotate(90deg); }
+.reasoning .content { padding: 0 12px 10px; font-size: 12px; line-height: 1.6; }
+
+/* ── PlanStepsCard ── */
+.plan-card { border: 1px solid var(--rx-border); border-radius: var(--rx-radius-lg); padding: 10px 12px; }
+.plan-card .title { margin: 0 0 8px; font-size: 12px; font-weight: 500; color: var(--rx-text-primary); }
+.plan-card .steps { display: flex; flex-direction: column; gap: 6px; }
+.plan-card .step { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.plan-card .icon { font-size: 13px; width: 14px; text-align: center; }
+.plan-card .icon.done { color: var(--rx-success); }
+.plan-card .icon.active { color: var(--rx-accent); }
+.plan-card .icon.pending { color: var(--rx-text-muted); }
+.plan-card .label.pending { color: var(--rx-text-muted); }
+.plan-card .label.done { color: var(--rx-text-secondary); }
+
+/* ── ContextPanel ── */
+.context-panel { border-left: 1px solid var(--rx-border); background: var(--rx-surface-1); padding: 10px; display: flex; flex-direction: column; gap: 14px; height: 100%; box-sizing: border-box; overflow-y: auto; }
+.context-panel .section { display: flex; flex-direction: column; gap: 4px; }
+.context-panel .heading { margin: 0; font-size: 11px; font-weight: 500; color: var(--rx-text-muted); }
+.context-panel .file-list { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.context-panel .file { color: var(--rx-text-secondary); }
+.context-panel .file.added { color: var(--rx-success); }
+.context-panel .file.modified { color: var(--rx-warning); }
+.context-panel .file.removed { color: var(--rx-danger); }
+.context-panel .memory-count { margin: 0; font-size: 12px; color: var(--rx-text-secondary); }
+
+/* ── StatusBar ── */
+.status-bar { display: flex; align-items: center; gap: 14px; padding: 6px 12px; border-top: 1px solid var(--rx-border); background: var(--rx-surface-1); font-size: 11px; color: var(--rx-text-secondary); }
+.status-bar .status { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+.status-bar .dot { width: 6px; height: 6px; border-radius: 50%; }
+.status-bar .dot.ready { background: var(--rx-success); }
+.status-bar .dot.running { background: var(--rx-accent); }
