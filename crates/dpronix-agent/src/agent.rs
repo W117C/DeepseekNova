@@ -358,7 +358,11 @@ async fn stream_and_process_turn(
             name: None,
             tool_calls: None,
             tool_call_id: None,
-            reasoning_content: if reasoning_buf.is_empty() { None } else { Some(reasoning_buf.clone()) },
+            reasoning_content: if reasoning_buf.is_empty() {
+                None
+            } else {
+                Some(reasoning_buf.clone())
+            },
         });
 
         let final_calls: Vec<ToolCall> = pending_calls
@@ -403,7 +407,11 @@ async fn stream_and_process_turn(
             name: None,
             tool_calls: Some(tool_calls_for_msg),
             tool_call_id: None,
-            reasoning_content: if reasoning_buf.is_empty() { None } else { Some(reasoning_buf.clone()) },
+            reasoning_content: if reasoning_buf.is_empty() {
+                None
+            } else {
+                Some(reasoning_buf.clone())
+            },
         });
 
         // Execute each tool call
