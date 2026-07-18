@@ -127,7 +127,12 @@ async fn main() -> anyhow::Result<()> {
                     model.as_deref(),
                     &config,
                     0, // no max_steps limit in chat mode
-                )?;
+                )?
+                // Per-session persistent memory so the REPL remembers prior
+                // turns (and DeepSeek-V4 reasoning_content replay spans turns).
+                // A fresh store per loop iteration means `/new` naturally
+                // resets the conversation.
+                .with_conversation_history(Arc::new(tokio::sync::Mutex::new(Vec::new())));
                 let restart = chat::run_chat_repl(&agent, model.clone()).await?;
                 if !restart {
                     break;
@@ -165,7 +170,9 @@ async fn main() -> anyhow::Result<()> {
             info!("no command provided — starting interactive chat");
             loop {
                 let provider = resolve_provider(&config, &None)?;
-                let agent = build_agent(Arc::clone(&provider), None, &config, 0)?;
+                let agent = build_agent(Arc::clone(&provider), None, &config, 0)?
+                    // Per-session persistent memory (see Chat arm above).
+                    .with_conversation_history(Arc::new(tokio::sync::Mutex::new(Vec::new())));
                 let restart = chat::run_chat_repl(&agent, None).await?;
                 if !restart {
                     break;

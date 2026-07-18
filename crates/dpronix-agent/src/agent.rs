@@ -947,4 +947,41 @@ mod tests {
             "system prompt must not be re-injected on a seeded run"
         );
     }
+
+    #[tokio::test]
+    async fn agent_persists_reasoning_content_across_turns() {
+        // Proves the DeepSeek-V4 adaptation: an assistant turn's
+        // reasoning_content is written into the shared history store, so a
+        // subsequent run can replay it (must_replay contract spanning turns).
+        let history = Arc::new(tokio::sync::Mutex::new(Vec::<Message>::new()));
+
+        let turn1 = vec![
+            Chunk::ReasoningDelta {
+                text: "let me think about q1".into(),
+                signature: Some("sig-1".into()),
+            },
+            Chunk::TextDelta("the answer".into()),
+            Chunk::Usage(Usage::default()),
+            Chunk::Done,
+        ];
+        let agent = Agent::new(Arc::new(MockProvider::new(turn1)), 3)
+            .with_conversation_history(history.clone());
+        let mut s = agent
+            .run_stream(RunInput {
+                prompt: "q1".into(),
+                images: vec![],
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while s.next().await.is_some() {}
+
+        let store = history.lock().await;
+        assert!(
+            store.iter().any(|m| m.role == Role::Assistant
+                && m.reasoning_content.as_deref() == Some("let me think about q1")),
+            "assistant reasoning_content must persist into the shared history \
+             so DeepSeek-V4 reasoning replay works across turns"
+        );
+    }
 }
