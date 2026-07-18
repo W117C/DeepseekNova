@@ -66,9 +66,27 @@ pub async fn submit_prompt(
     let security = dpronix_runtime::build_security_context(&config, &workspace_root)
         .map_err(|e| format!("security context error: {e}"))?;
 
-    // Resolve provider
+    // Resolve provider, applying the frontend's reasoning_effort /
+    // thinking_enabled preferences when the model supports them.
     let provider_cfg = config.providers.first().ok_or("no providers configured")?;
-    let provider = dpronix_provider::factory::create_provider(provider_cfg)
+
+    // Map the frontend's reasoning_effort string to an enum, then let
+    // thinking_enabled=false override it to Disabled.
+    let effort = {
+        let from_string = request
+            .reasoning_effort
+            .as_deref()
+            .and_then(dpronix_provider::factory::ReasoningEffort::from_config_str);
+        // If the user explicitly disabled thinking, force Disabled
+        // regardless of what the reasoning_effort string says.
+        if request.thinking_enabled == Some(false) {
+            Some(dpronix_provider::factory::ReasoningEffort::Disabled)
+        } else {
+            from_string
+        }
+    };
+
+    let provider = dpronix_provider::factory::create_provider_for_task(provider_cfg, effort)
         .map_err(|e| format!("provider error: {e}"))?;
 
     // Build agent wired through the composition root
