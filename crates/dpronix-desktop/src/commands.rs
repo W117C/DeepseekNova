@@ -66,9 +66,15 @@ pub async fn submit_prompt(
     let security = dpronix_runtime::build_security_context(&config, &workspace_root)
         .map_err(|e| format!("security context error: {e}"))?;
 
-    // Resolve provider, applying the frontend's reasoning_effort /
-    // thinking_enabled preferences when the model supports them.
-    let provider_cfg = config.providers.first().ok_or("no providers configured")?;
+    // Resolve the provider config. If the frontend specified a model name,
+    // look it up by name; otherwise use the first configured provider.
+    let provider_cfg = if let Some(ref model_name) = request.model {
+        config
+            .resolve_provider_for_model(model_name)
+            .ok_or_else(|| format!("provider '{model_name}' not found in config"))?
+    } else {
+        config.providers.first().ok_or("no providers configured")?
+    };
 
     // Map the frontend's reasoning_effort string to an enum, then let
     // thinking_enabled=false override it to Disabled.
