@@ -14,10 +14,10 @@ use tracing::info;
 
 /// PlanModeRunner analyzes a goal via an LLM and produces a structured plan.
 /// It **never** executes tools — it only plans. The plan is streamed back as
-/// [`dpronix_core::RunEvent::TextDelta`] events and the final plan text is returned in
-/// [`dpronix_core::RunOutput`].
+/// `RunEvent::TextDelta` events and the final plan text is returned in
+/// `RunOutput`.
 ///
-/// If a [`dpronix_core::registry::Planner`] is configured, an [`dpronix_core::graph::ExecutionGraph`] is also generated and
+/// If a `Planner` is configured, an `ExecutionGraph` is also generated and
 /// appended to the plan output.
 pub struct PlanModeRunner {
     provider: Arc<dyn Provider>,
@@ -34,7 +34,7 @@ impl PlanModeRunner {
         }
     }
 
-    /// Attach a planner that produces an [`dpronix_core::graph::ExecutionGraph`] for the goal.
+    /// Attach a planner that produces an `ExecutionGraph` for the goal.
     pub fn with_planner(mut self, planner: Arc<dyn Planner>) -> Self {
         self.planner = Some(planner);
         self
@@ -114,7 +114,12 @@ async fn run_plan_mode(
     ];
 
     // Stream from provider (read-only: NO tools)
-    let mut stream = provider.stream(&messages, &[]).await?;
+    let validated = dpronix_provider::ValidatedRequest::new(&messages, &[]);
+    let validated = match validated {
+        Ok(v) => v,
+        Err(e) => return Err(anyhow::anyhow!("validation failed: {e:?}")),
+    };
+    let mut stream = provider.stream(validated).await?;
     use tokio_stream::StreamExt;
 
     let mut plan_text = String::new();
@@ -181,7 +186,7 @@ async fn run_plan_mode(
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Render an [`dpronix_core::graph::ExecutionGraph`] as a human-readable Markdown outline.
+/// Render an `ExecutionGraph` as a human-readable Markdown outline.
 fn format_execution_graph(graph: &ExecutionGraph) -> String {
     let mut out = String::new();
     out.push_str(&format!("- **Entry point**: `{}`\n", graph.entry));
@@ -234,7 +239,6 @@ mod tests {
     use super::*;
     use dpronix_core::chunk::{Chunk, Usage};
     use dpronix_core::graph::{Action, ExecutionNode};
-    use dpronix_core::Tool;
     use dpronix_provider::Provider;
     use tokio_stream::StreamExt;
 
@@ -263,8 +267,7 @@ mod tests {
     impl Provider for MockProvider {
         async fn generate(
             &self,
-            _messages: &[Message],
-            _tools: &[&dyn Tool],
+            _validated: dpronix_provider::ValidatedRequest<'_>,
         ) -> anyhow::Result<Message> {
             Ok(Message {
                 role: Role::Assistant,
@@ -278,8 +281,7 @@ mod tests {
 
         async fn stream(
             &self,
-            _messages: &[Message],
-            _tools: &[&dyn Tool],
+            _validated: dpronix_provider::ValidatedRequest<'_>,
         ) -> anyhow::Result<dpronix_core::chunk::ChunkStream> {
             let chunks: Vec<anyhow::Result<Chunk>> =
                 self.chunks.clone().into_iter().map(Ok).collect();
