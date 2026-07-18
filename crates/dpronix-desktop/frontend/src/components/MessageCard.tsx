@@ -18,7 +18,7 @@ interface MessageCardProps {
 }
 
 export default function MessageCard({ message }: MessageCardProps) {
-  const { role, content, toolName, toolArgs, toolResult } = message;
+  const { role, content, toolName, toolArgs, toolResult, reasoningDone } = message;
 
   const className = `msg msg-${role}`;
 
@@ -27,16 +27,16 @@ export default function MessageCard({ message }: MessageCardProps) {
       {/* Role label */}
       <div className="msg-label">
         {role === "user" ? "You" :
-         role === "reasoning" ? "Reasoning" :
+         role === "reasoning" ? (reasoningDone ? "Thought" : "Reasoning") :
          role === "tool" ? (toolName ?? "Tool") :
          "DPronix"}
       </div>
 
-      {/* Reasoning — collapsible (DeepSeek thinking mode) */}
+      {/* Reasoning — collapsible (DeepSeek thinking mode); auto-collapses when done */}
       {role === "reasoning" ? (
         <div className="msg-reasoning-content">
-          <details open>
-            <summary>Thinking</summary>
+          <details open={!reasoningDone}>
+            <summary>{reasoningDone ? "Thinking (done)" : "Thinking…"}</summary>
             <pre>{content}</pre>
           </details>
         </div>

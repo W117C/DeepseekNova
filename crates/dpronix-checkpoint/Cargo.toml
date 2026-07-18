@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Transactional file-system checkpoint and rollback manager for safe agent file operations."
+readme = "README.md"
+documentation = "https://docs.rs/dpronix-checkpoint/0.3.0"
 
 [dependencies]
 anyhow = { workspace = true }

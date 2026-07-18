@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Policy-based allow/ask/deny permission gates for tool execution with per-tool rules and session caching."
+readme = "README.md"
+documentation = "https://docs.rs/dpronix-permission/0.3.0"
 
 [dependencies]
 anyhow = { workspace = true }

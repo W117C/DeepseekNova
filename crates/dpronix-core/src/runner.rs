@@ -133,6 +133,8 @@ pub enum WireEvent {
         total_tokens: u32,
         cache_hit_tokens: u32,
         cache_miss_tokens: u32,
+        /// DeepSeek-V4 billed reasoning (chain-of-thought) tokens.
+        reasoning_tokens: u32,
         session_cache_hit_tokens: u32,
         session_cache_miss_tokens: u32,
     },
@@ -153,6 +155,8 @@ pub struct WireUsageInfo {
     pub total_tokens: u32,
     pub cache_hit_tokens: u32,
     pub cache_miss_tokens: u32,
+    /// DeepSeek-V4 billed reasoning (chain-of-thought) tokens.
+    pub reasoning_tokens: u32,
     pub session_cache_hit_tokens: u32,
     pub session_cache_miss_tokens: u32,
 }
@@ -165,6 +169,7 @@ impl From<Usage> for WireUsageInfo {
             total_tokens: u.total_tokens,
             cache_hit_tokens: u.cache_hit_tokens,
             cache_miss_tokens: u.cache_miss_tokens,
+            reasoning_tokens: u.reasoning_tokens,
             session_cache_hit_tokens: 0,
             session_cache_miss_tokens: 0,
         }
@@ -200,6 +205,7 @@ impl From<RunEvent> for WireEvent {
                     total_tokens: usage_info.total_tokens,
                     cache_hit_tokens: usage_info.cache_hit_tokens,
                     cache_miss_tokens: usage_info.cache_miss_tokens,
+                    reasoning_tokens: usage_info.reasoning_tokens,
                     session_cache_hit_tokens: usage_info.session_cache_hit_tokens,
                     session_cache_miss_tokens: usage_info.session_cache_miss_tokens,
                 }

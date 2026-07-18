@@ -26,6 +26,39 @@ pub struct Message {
     pub reasoning_content: Option<String>,
 }
 
+impl Message {
+    /// Extract the reasoning block with its must_replay constraint.
+    ///
+    /// `must_replay` is true when the assistant message produced tool calls
+    /// AND has reasoning content — DeepSeek V4 requires this reasoning to be
+    /// present in all subsequent requests. History compaction must never
+    /// drop reasoning without also dropping the paired tool_calls + results.
+    pub fn reasoning_block(&self) -> Option<ReasoningBlock> {
+        self.reasoning_content.as_ref().map(|text| ReasoningBlock {
+            text: text.clone(),
+            must_replay: self
+                .tool_calls
+                .as_ref()
+                .map(|tc| !tc.is_empty())
+                .unwrap_or(false),
+        })
+    }
+}
+
+/// A reasoning block extracted from an assistant message.
+///
+/// Carries the `must_replay` constraint: when true, history compaction
+/// must either preserve the entire (reasoning + tool_calls + tool_results)
+/// triple together, or remove it atomically. Partial removal of reasoning
+/// while keeping tool calls causes DeepSeek V4 to return HTTP 400.
+#[derive(Debug, Clone)]
+pub struct ReasoningBlock {
+    pub text: String,
+    /// True when this reasoning is paired with tool calls in the same turn.
+    /// History compression must respect this — never drop reasoning alone.
+    pub must_replay: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,

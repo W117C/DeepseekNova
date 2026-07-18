@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Native desktop app for dpronix built with Tauri 2.x: Rust backend + React/TypeScript frontend."
+readme = "README.md"
+documentation = "https://docs.rs/dpronix-desktop/0.3.0"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

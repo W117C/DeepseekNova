@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Agent lifecycle event types and pub-sub event bus for tool calls, model responses, and errors."
+readme = "README.md"
+documentation = "https://docs.rs/dpronix-event/0.3.0"
 
 [dependencies]
 tokio = { workspace = true }

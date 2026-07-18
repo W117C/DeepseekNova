@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+readme = "README.md"
+documentation = "https://docs.rs/dpronix-telemetry/0.3.0"
 description = "OpenTelemetry integration for dpronix"
 
 [dependencies]

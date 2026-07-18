@@ -264,7 +264,7 @@ async fn run_sub_agent_loop(
                 let before = tokens;
                 match compact_with_provider(provider.as_ref(), &all_msgs).await {
                     Ok(digest) => {
-                        memory.compact(digest);
+                        memory.compact(digest, None);
                         let after = estimate_tokens(&memory.get_all());
                         info!("compacted {before} → {after} tokens");
                     }
@@ -274,7 +274,7 @@ async fn run_sub_agent_loop(
                             "Conversation summary ({} messages). Content truncated due to length.",
                             all_msgs.len()
                         );
-                        memory.compact(digest);
+                        memory.compact(digest, None);
                     }
                 }
             }
@@ -284,9 +284,24 @@ async fn run_sub_agent_loop(
         let tool_refs: Vec<&dyn Tool> = tools.iter().map(|t| t.as_ref()).collect();
         let messages = memory.get_all();
 
+        // DeepSeek V4 protocol — ValidatedRequest::new fails early with
+        // structured violations instead of corrupting provider state
+        let validated = dpronix_provider::ValidatedRequest::new(&messages, &tool_refs).map_err(
+            |violations| {
+                for v in &violations {
+                    tracing::error!(?v, "replay invariant violation in sub-agent");
+                }
+                anyhow::anyhow!(
+                    "history replay invariant violated in sub-agent: {} violation(s)",
+                    violations.len()
+                )
+            },
+        )?;
+
         // Stream from provider
-        let mut stream = provider.stream(&messages, &tool_refs).await?;
+        let mut stream = provider.stream(validated).await?;
         let mut text_buf = String::new();
+        let mut reasoning_buf = String::new();
         let mut usage: Option<Usage> = None;
 
         while let Some(chunk) = stream.next().await {
@@ -296,6 +311,7 @@ async fn run_sub_agent_loop(
                     tx.send(Ok(RunEvent::TextDelta(delta))).await.ok();
                 }
                 Chunk::ReasoningDelta { text, signature } => {
+                    reasoning_buf.push_str(&text);
                     tx.send(Ok(RunEvent::ReasoningDelta { text, signature }))
                         .await
                         .ok();
@@ -339,7 +355,11 @@ async fn run_sub_agent_loop(
                 name: None,
                 tool_calls: None,
                 tool_call_id: None,
-                reasoning_content: None,
+                reasoning_content: if reasoning_buf.is_empty() {
+                    None
+                } else {
+                    Some(reasoning_buf.clone())
+                },
             });
 
             let output = RunOutput {
@@ -364,7 +384,11 @@ async fn run_sub_agent_loop(
             name: None,
             tool_calls: None,
             tool_call_id: None,
-            reasoning_content: None,
+            reasoning_content: if reasoning_buf.is_empty() {
+                None
+            } else {
+                Some(reasoning_buf.clone())
+            },
         });
     }
 
@@ -380,7 +404,10 @@ async fn run_sub_agent_loop(
 
 /// Rough token count estimate from message content length.
 fn estimate_tokens(messages: &[Message]) -> u32 {
-    let char_count: usize = messages.iter().map(|m| m.content.len()).sum();
+    let char_count: usize = messages
+        .iter()
+        .map(|m| m.content.len() + m.reasoning_content.as_ref().map(|r| r.len()).unwrap_or(0))
+        .sum();
     (char_count as f32 / CHARS_PER_TOKEN).ceil() as u32
 }
 
@@ -399,7 +426,11 @@ async fn compact_with_provider(
         "Summarize the following conversation into a concise digest. \
          Keep key decisions, action items, and context. \
          The summary will replace these messages to save context space.\n\n\
-         <conversation>\n{conversation_text}\n</conversation>\n\n\
+         <conversation>
+{conversation_text}
+</conversation>
+
+\
          Provide a compact summary (under 500 words)."
     );
 
@@ -412,7 +443,9 @@ async fn compact_with_provider(
         reasoning_content: None,
     }];
 
-    let result = provider.generate(&summary_msgs, &[]).await?;
+    let validated = dpronix_provider::ValidatedRequest::new(&summary_msgs, &[])
+        .map_err(|v| anyhow::anyhow!("invariant violation in sub-agent summarize: {:?}", v))?;
+    let result = provider.generate(validated).await?;
     Ok(result.content)
 }
 
@@ -531,8 +564,7 @@ mod tests {
     impl Provider for MockProvider {
         async fn generate(
             &self,
-            _messages: &[Message],
-            _tools: &[&dyn Tool],
+            _validated: dpronix_provider::ValidatedRequest<'_>,
         ) -> anyhow::Result<Message> {
             Ok(Message {
                 role: Role::Assistant,

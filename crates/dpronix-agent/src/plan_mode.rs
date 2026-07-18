@@ -114,7 +114,17 @@ async fn run_plan_mode(
     ];
 
     // Stream from provider (read-only: NO tools)
-    let mut stream = provider.stream(&messages, &[]).await?;
+    let validated =
+        dpronix_provider::ValidatedRequest::new(&messages, &[]).map_err(|violations| {
+            for v in &violations {
+                tracing::error!(?v, "replay invariant violation in plan mode");
+            }
+            anyhow::anyhow!(
+                "history replay invariant violated: {} violation(s)",
+                violations.len()
+            )
+        })?;
+    let mut stream = provider.stream(validated).await?;
     use tokio_stream::StreamExt;
 
     let mut plan_text = String::new();
@@ -234,7 +244,6 @@ mod tests {
     use super::*;
     use dpronix_core::chunk::{Chunk, Usage};
     use dpronix_core::graph::{Action, ExecutionNode};
-    use dpronix_core::Tool;
     use dpronix_provider::Provider;
     use tokio_stream::StreamExt;
 
@@ -263,8 +272,7 @@ mod tests {
     impl Provider for MockProvider {
         async fn generate(
             &self,
-            _messages: &[Message],
-            _tools: &[&dyn Tool],
+            _validated: dpronix_provider::ValidatedRequest<'_>,
         ) -> anyhow::Result<Message> {
             Ok(Message {
                 role: Role::Assistant,
@@ -278,8 +286,7 @@ mod tests {
 
         async fn stream(
             &self,
-            _messages: &[Message],
-            _tools: &[&dyn Tool],
+            _validated: dpronix_provider::ValidatedRequest<'_>,
         ) -> anyhow::Result<dpronix_core::chunk::ChunkStream> {
             let chunks: Vec<anyhow::Result<Chunk>> =
                 self.chunks.clone().into_iter().map(Ok).collect();

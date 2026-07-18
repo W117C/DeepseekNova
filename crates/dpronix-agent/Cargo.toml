@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Agent implementations: main agent loop, coordinator, and plan-mode runners with tool use and streaming."
+readme = "README.md"
+documentation = "https://docs.rs/dpronix-agent/0.3.0"
 
 [dependencies]
 anyhow = { workspace = true }
@@ -18,3 +21,4 @@ uuid = { workspace = true }
 dpronix-core = { version = "0.3.0", path = "../dpronix-core" }
 dpronix-provider = { version = "0.3.0", path = "../dpronix-provider" }
 dpronix-security = { version = "0.3.0", path = "../dpronix-security" }
+dpronix-context = { version = "0.3.0", path = "../dpronix-context" }

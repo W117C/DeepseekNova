@@ -1,8 +1,8 @@
 use crate::types::{ChatCompletionResponse, OpenAIFunction, OpenAIRequestTool, StreamResponse};
-use crate::{Provider, ProviderError};
+use crate::{Provider, ProviderError, ValidatedRequest};
 use anyhow::Context;
 use async_trait::async_trait;
-use dpronix_core::chunk::{Chunk, ChunkStream, Usage};
+use dpronix_core::chunk::{Chunk, ChunkStream};
 use dpronix_core::{Message, Tool};
 use reqwest::Client;
 use std::env;
@@ -170,7 +170,9 @@ impl OpenAIProvider {
 
 #[async_trait]
 impl Provider for OpenAIProvider {
-    async fn generate(&self, messages: &[Message], tools: &[&dyn Tool]) -> anyhow::Result<Message> {
+    async fn generate(&self, validated: ValidatedRequest<'_>) -> anyhow::Result<Message> {
+        let messages = validated.messages;
+        let tools = validated.tools;
         let body = self.build_request(messages, tools, false);
         let response = self.send_request(&body).await?;
 
@@ -178,6 +180,21 @@ impl Provider for OpenAIProvider {
             .json()
             .await
             .context("failed to parse provider response")?;
+
+        // Surface DeepSeek token accounting for auxiliary (non-streaming) calls
+        // so context-cache efficiency and billed reasoning tokens stay visible
+        // even though this path returns only the message body.
+        if let Some(ref u) = resp_body.usage {
+            info!(
+                prompt_tokens = u.prompt_tokens,
+                completion_tokens = u.completion_tokens,
+                total_tokens = u.total_tokens,
+                cache_hit_tokens = u.cache_hit_tokens,
+                cache_miss_tokens = u.cache_miss_tokens,
+                reasoning_tokens = u.reasoning_tokens(),
+                "deepseek usage (non-streaming generate)"
+            );
+        }
 
         let choice = resp_body
             .choices
@@ -188,11 +205,9 @@ impl Provider for OpenAIProvider {
         Ok(choice.message)
     }
 
-    async fn stream(
-        &self,
-        messages: &[Message],
-        tools: &[&dyn Tool],
-    ) -> anyhow::Result<ChunkStream> {
+    async fn stream(&self, validated: ValidatedRequest<'_>) -> anyhow::Result<ChunkStream> {
+        let messages = validated.messages;
+        let tools = validated.tools;
         let body = self.build_request(messages, tools, true);
         let response = self.send_request(&body).await?;
 
@@ -299,18 +314,11 @@ async fn process_sse_line(
         return Ok(()); // skip unparseable lines (e.g. keepalive)
     };
 
-    // Final usage chunk
+    // Final usage chunk — map all DeepSeek-specific accounting (context-cache
+    // hit/miss and reasoning tokens) via the shared conversion so the stream
+    // never drops billed reasoning tokens.
     if let Some(ref u) = resp.usage {
-        let _ = tx
-            .send(Ok(Chunk::Usage(Usage {
-                prompt_tokens: u.prompt_tokens,
-                completion_tokens: u.completion_tokens,
-                total_tokens: u.total_tokens,
-                cache_hit_tokens: 0,
-                cache_miss_tokens: 0,
-                reasoning_tokens: 0,
-            })))
-            .await;
+        let _ = tx.send(Ok(Chunk::Usage(u.to_usage()))).await;
     }
 
     for choice in resp.choices {
@@ -585,5 +593,69 @@ data: [DONE]
             "should parse reasoning_content as ReasoningDelta"
         );
         assert!(has_text, "should parse content as TextDelta");
+    }
+
+    /// Verify the final DeepSeek usage frame is parsed into a Chunk::Usage that
+    /// preserves context-cache hit/miss tokens AND the billed reasoning tokens
+    /// nested under `completion_tokens_details`.
+    #[tokio::test]
+    async fn parse_sse_deepseek_usage_with_reasoning_tokens() {
+        let sse_data = r#"data: {"choices":[{"index":0,"delta":{"content":"hi"}}]}
+
+data: {"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":40,"total_tokens":140,"prompt_cache_hit_tokens":64,"prompt_cache_miss_tokens":36,"completion_tokens_details":{"reasoning_tokens":25}}}
+
+data: [DONE]
+"#;
+
+        let (tx, mut rx) = mpsc::channel(64);
+        let mut tool_acc = Vec::new();
+
+        for line in sse_data.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            process_sse_line(trimmed, &tx, &mut tool_acc).await.unwrap();
+        }
+
+        drop(tx);
+
+        let mut chunks = Vec::new();
+        while let Some(chunk) = rx.recv().await {
+            chunks.push(chunk.unwrap());
+        }
+
+        let usage = chunks
+            .iter()
+            .find_map(|c| match c {
+                Chunk::Usage(u) => Some(u),
+                _ => None,
+            })
+            .expect("should emit a Chunk::Usage");
+
+        assert_eq!(usage.prompt_tokens, 100);
+        assert_eq!(usage.completion_tokens, 40);
+        assert_eq!(usage.total_tokens, 140);
+        assert_eq!(usage.cache_hit_tokens, 64, "cache hit tokens must survive");
+        assert_eq!(
+            usage.cache_miss_tokens, 36,
+            "cache miss tokens must survive"
+        );
+        assert_eq!(
+            usage.reasoning_tokens, 25,
+            "billed reasoning tokens from completion_tokens_details must survive"
+        );
+    }
+
+    /// Usage frames without the nested `completion_tokens_details` object must
+    /// degrade gracefully to zero reasoning tokens (non-reasoning models).
+    #[test]
+    fn response_usage_reasoning_tokens_defaults_to_zero() {
+        let json = r#"{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}"#;
+        let usage: crate::types::ResponseUsage = serde_json::from_str(json).unwrap();
+        assert_eq!(usage.reasoning_tokens(), 0);
+        let mapped = usage.to_usage();
+        assert_eq!(mapped.reasoning_tokens, 0);
+        assert_eq!(mapped.total_tokens, 15);
     }
 }

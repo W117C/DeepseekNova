@@ -74,6 +74,22 @@ pub struct MemoryConfig {
     pub persist: bool,
     /// Path for persistence.
     pub persist_path: Option<PathBuf>,
+    /// Optional embedding API configuration (OpenAI-compatible).
+    pub embedding_api: Option<EmbeddingApiConfig>,
+}
+
+/// Configuration for an OpenAI-compatible embedding API.
+/// Supports DeepSeek-aligned providers and standard OpenAI endpoints.
+#[derive(Debug, Clone)]
+pub struct EmbeddingApiConfig {
+    /// Base URL (e.g. https://api.openai.com/v1).
+    pub base_url: String,
+    /// Embedding model name (e.g. text-embedding-3-small).
+    pub model: String,
+    /// Environment variable name for the API key.
+    pub api_key_env: String,
+    /// Vector dimension for this model.
+    pub vector_dim: usize,
 }
 
 impl Default for MemoryConfig {
@@ -84,6 +100,7 @@ impl Default for MemoryConfig {
             similarity_threshold: 0.6,
             persist: false,
             persist_path: None,
+            embedding_api: None,
         }
     }
 }
@@ -125,16 +142,30 @@ pub trait VectorStore: Send + Sync {
 pub struct InMemoryVectorStore {
     records: Vec<MemoryRecord>,
     config: MemoryConfig,
-    /// Simple text → embedding cache.
+    /// Simple text → embedding cache (used for both API and hash modes).
     embed_cache: HashMap<String, Vec<f32>>,
+    /// HTTP client for embedding API calls.
+    http_client: Option<reqwest::Client>,
+    /// API key for embedding API.
+    api_key: Option<String>,
 }
 
 impl InMemoryVectorStore {
     pub fn new(config: MemoryConfig) -> Self {
+        let (http_client, api_key) = if let Some(ref api_cfg) = config.embedding_api {
+            let key = std::env::var(&api_cfg.api_key_env).ok();
+            let client = reqwest::Client::new();
+            (Some(client), key)
+        } else {
+            (None, None)
+        };
+
         let mut store = Self {
             records: Vec::new(),
             embed_cache: HashMap::new(),
             config: config.clone(),
+            http_client,
+            api_key,
         };
 
         // Load persisted data if available
@@ -154,8 +185,10 @@ impl InMemoryVectorStore {
         store
     }
 
-    /// Compute a simple hash-based embedding from text.
-    /// This is a placeholder — in production, use a real embedding model.
+    /// Compute a "word-level hash embedding" that captures semantic similarity
+    /// better than raw character n-grams. Splits on whitespace/punctuation,
+    /// applies multiple hash projections per word, and uses idf-like weighting.
+    /// Falls back when no embedding API is configured.
     fn text_to_embedding(&self, text: &str) -> Vec<f32> {
         if let Some(cached) = self.embed_cache.get(text) {
             return cached.clone();
@@ -164,15 +197,51 @@ impl InMemoryVectorStore {
         let dim = self.config.vector_dim;
         let mut embedding = vec![0.0_f32; dim];
 
-        // Simple character n-gram hashing to produce a pseudo-embedding
-        let chars: Vec<char> = text.chars().collect();
-        for window in chars.windows(3) {
-            let hash = self::hash_chars(window);
-            let idx = (hash as usize) % dim;
-            embedding[idx] += 1.0;
+        let text_lower = text.to_lowercase();
+        let words: Vec<&str> = text_lower
+            .split(|c: char| c.is_whitespace() || c.is_ascii_punctuation())
+            .filter(|w| !w.is_empty())
+            .collect();
+
+        if words.is_empty() {
+            return embedding;
         }
 
-        // Normalize
+        // Word frequency for idf-like weighting
+        let mut word_counts: HashMap<&str, usize> = HashMap::new();
+        for w in &words {
+            *word_counts.entry(*w).or_insert(0) += 1;
+        }
+        let total = words.len() as f32;
+
+        for (pos, word) in words.iter().enumerate() {
+            let tf = *word_counts.get(word).unwrap_or(&1) as f32 / total;
+            let pos_weight = 1.0 - (pos as f32 / words.len() as f32) * 0.3; // slight positional decay
+
+            // Multiple hash projections per word for better dimension coverage
+            let h1 = hash_word(word, 0);
+            let h2 = hash_word(word, 1);
+            let h3 = hash_word(word, 2);
+
+            let idx1 = (h1 as usize) % dim;
+            let idx2 = (h2 as usize) % dim;
+            let idx3 = (h3 as usize) % dim;
+
+            let weight = tf * pos_weight;
+            embedding[idx1] += weight;
+            embedding[idx2] += weight * 0.7;
+            embedding[idx3] += weight * 0.5;
+
+            // Bigram context: hash adjacent word pairs for phrase awareness
+            if pos > 0 {
+                let bigram = format!("{}_{}", words[pos - 1], word);
+                let hb = hash_word(&bigram, 0);
+                let idx = (hb as usize) % dim;
+                embedding[idx] += weight * 0.4;
+            }
+        }
+
+        // Normalize to unit vector
         let magnitude: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
         if magnitude > 0.0 {
             for val in embedding.iter_mut() {
@@ -180,19 +249,64 @@ impl InMemoryVectorStore {
             }
         }
 
-        let mut cache = self.embed_cache.clone();
-        cache.insert(text.to_string(), embedding.clone());
-        // Don't update self here — cache is rebuilt on mutation
-
         embedding
+    }
+
+    /// Compute embedding via the configured API (async).
+    /// Returns the embedding vector, or empty vec on failure.
+    pub async fn embed_via_api(&self, text: &str) -> Vec<f32> {
+        if let Some(cached) = self.embed_cache.get(text) {
+            return cached.clone();
+        }
+
+        let (Some(client), Some(api_key), Some(ref api_cfg)) =
+            (&self.http_client, &self.api_key, &self.config.embedding_api)
+        else {
+            return self.text_to_embedding(text);
+        };
+
+        let url = format!("{}/embeddings", api_cfg.base_url.trim_end_matches('/'));
+        let body = serde_json::json!({
+            "model": api_cfg.model,
+            "input": text,
+        });
+
+        match client
+            .post(&url)
+            .bearer_auth(api_key)
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                if let Ok(json) = resp.json::<serde_json::Value>().await {
+                    if let Some(emb) = json["data"][0]["embedding"].as_array() {
+                        let vec: Vec<f32> = emb
+                            .iter()
+                            .filter_map(|v| v.as_f64())
+                            .map(|v| v as f32)
+                            .collect();
+                        if vec.len() == api_cfg.vector_dim {
+                            return vec;
+                        }
+                    }
+                }
+                // API failed — fall through to hash
+                tracing::warn!("embedding API call failed, falling back to hash embedding");
+            }
+            Err(e) => {
+                tracing::warn!("embedding API error: {e}, falling back to hash embedding");
+            }
+        }
+
+        self.text_to_embedding(text)
     }
 }
 
-/// Hash a character slice to a u64.
-fn hash_chars(chars: &[char]) -> u64 {
-    let s: String = chars.iter().collect();
-    let mut hash: u64 = 5381;
-    for b in s.bytes() {
+/// Hash a word with a seed for multiple projections.
+fn hash_word(word: &str, seed: u64) -> u64 {
+    let mut hash: u64 = 5381u64.wrapping_add(seed);
+    for b in word.bytes() {
         hash = hash.wrapping_mul(33).wrapping_add(b as u64);
     }
     hash

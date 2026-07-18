@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Foundation crate: core types, Runner/Tool traits, registry, and execution graph for the dpronix agent framework."
+readme = "README.md"
+documentation = "https://docs.rs/dpronix-core/0.3.0"
 
 [dependencies]
 anyhow = { workspace = true }

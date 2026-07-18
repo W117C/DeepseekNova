@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Composition root wiring registry, context, event bus, permission, security, and LLM provider into an agent runtime."
+readme = "README.md"
+documentation = "https://docs.rs/dpronix-runtime/0.3.0"
 
 [dependencies]
 anyhow = { workspace = true }

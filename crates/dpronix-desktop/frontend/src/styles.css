@@ -60,7 +60,7 @@ body {
 .header-left { display: flex; align-items: center; gap: 8px; }
 .header-logo { font-size: 15px; font-weight: 700; color: var(--accent); letter-spacing: -0.3px; }
 .header-badge { font-size: 11px; color: var(--text-muted); background: var(--bg); padding: 1px 6px; border-radius: var(--radius-sm); }
-.header-center { flex: 1; display: flex; justify-content: center; }
+.header-center { flex: 1; display: flex; justify-content: center; align-items: center; gap: 6px; }
 .header-right { display: flex; align-items: center; gap: 4px; -webkit-app-region: no-drag; }
 
 .chip {
@@ -71,6 +71,20 @@ body {
   border-radius: 12px;
   color: var(--text-secondary);
 }
+
+.chip-toggle { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; -webkit-app-region: no-drag; }
+.chip-toggle input { cursor: pointer; margin: 0; }
+.chip select {
+  font-size: 11px;
+  margin-left: 4px;
+  background: var(--bg);
+  color: var(--text-secondary);
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+.chip select:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .btn-icon {
   background: none;

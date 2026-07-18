@@ -97,6 +97,44 @@ fn e2e_missing_directory_returns_empty() {
     assert!(skills.is_empty());
 }
 
+/// Guards the Superpowers-core skills bundled at the workspace root
+/// (`.dpronix/skills/`). Every bundled `.md` must parse into a valid skill.
+#[test]
+fn e2e_bundled_superpowers_skills_all_parse() {
+    // crate dir is <workspace>/crates/dpronix-skills; skills live at <workspace>/.dpronix/skills
+    let bundled = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.dpronix/skills");
+    if !bundled.exists() {
+        // Bundled skills are optional in minimal checkouts; nothing to verify.
+        return;
+    }
+
+    let loader = SkillLoader::new(&bundled);
+    let skills = loader.load_all().unwrap();
+
+    let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+    for expected in [
+        "brainstorming",
+        "systematic-debugging",
+        "test-driven-development",
+        "writing-plans",
+        "verification-before-completion",
+    ] {
+        assert!(
+            names.contains(&expected),
+            "bundled skill '{expected}' failed to load (parsed: {names:?})"
+        );
+    }
+
+    // Every parsed skill must have a non-empty prompt body.
+    for s in &skills {
+        assert!(
+            !s.system_prompt.trim().is_empty(),
+            "bundled skill '{}' has empty system prompt",
+            s.name
+        );
+    }
+}
+
 #[tokio::test]
 async fn e2e_skill_tool_registry_compatible() {
     // Verify SkillTool satisfies the Tool trait at dispatch level

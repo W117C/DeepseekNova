@@ -72,7 +72,32 @@ impl Memory {
     /// Compact the conversation by replacing all messages with a single
     /// summary digest. Useful when the working set grows beyond the
     /// context window and a full history is no longer helpful.
-    pub fn compact(&mut self, digest: String) {
+    ///
+    /// `reasoning_summary` optionally preserves a condensed version of the
+    /// model's thinking from the compacted turns, which helps maintain
+    /// DeepSeek thinking mode continuity across compaction boundaries.
+    pub fn compact(&mut self, digest: String, reasoning_summary: Option<String>) {
+        // Safety: check for unresolved must_replay turns before compacting.
+        // If any assistant message with tool_calls still has reasoning that
+        // hasn't been consumed, compaction would break the DeepSeek V4
+        // reasoning_content contract, causing HTTP 400 on the next request.
+        let pending_replay: Vec<&Message> = self
+            .messages
+            .iter()
+            .filter(|m| {
+                m.reasoning_block()
+                    .map(|rb| rb.must_replay)
+                    .unwrap_or(false)
+            })
+            .collect();
+        if !pending_replay.is_empty() {
+            tracing::warn!(
+                count = pending_replay.len(),
+                "compacting while must_replay reasoning blocks exist — \
+                 this may break DeepSeek V4 tool call continuity"
+            );
+        }
+
         self.messages.clear();
         self.shrunk_messages.clear();
         self.call_counts.clear();
@@ -85,10 +110,20 @@ impl Memory {
             name: None,
             tool_calls: None,
             tool_call_id: None,
-            reasoning_content: None,
+            reasoning_content: reasoning_summary,
         });
 
         self.bump_activity();
+    }
+
+    /// Check whether the conversation has any unresolved must_replay
+    /// reasoning blocks that must not be compacted away.
+    pub fn has_pending_must_replay(&self) -> bool {
+        self.messages.iter().any(|m| {
+            m.reasoning_block()
+                .map(|rb| rb.must_replay)
+                .unwrap_or(false)
+        })
     }
 
     /// Return the duration since last activity, used by idle-compaction.

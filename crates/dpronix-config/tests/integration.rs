@@ -20,14 +20,14 @@ fn load_from_valid_toml() {
     std::fs::write(
         &path,
         r#"
-default_model = "deepseek-chat"
+default_model = "deepseek-v4-flash"
 default_max_steps = 15
 
 [[providers]]
 name = "deepseek"
 kind = "openai"
 base_url = "https://api.deepseek.com"
-model = "deepseek-chat"
+model = "deepseek-v4-flash"
 api_key_env = "DEEPSEEK_API_KEY"
 
 [agent]
@@ -45,7 +45,7 @@ mode = "ask"
     .unwrap();
 
     let cfg = Config::load_from_file(&path).unwrap();
-    assert_eq!(cfg.default_model.as_deref(), Some("deepseek-chat"));
+    assert_eq!(cfg.default_model.as_deref(), Some("deepseek-v4-flash"));
     assert_eq!(cfg.agent.max_steps, 20);
     assert!(cfg.agent.plan_mode_default);
     assert_eq!(cfg.permissions.default_mode, PermissionMode::Allow);
@@ -70,13 +70,14 @@ fn merge_preserves_provider_overrides() {
         name: "deepseek".into(),
         kind: "openai".into(),
         base_url: Some("https://api.deepseek.com".into()),
-        model: Some("deepseek-chat".into()),
+        model: Some("deepseek-v4-flash".into()),
         api_key_env: Some("DEEPSEEK_API_KEY".into()),
         api_key: None,
         timeout_secs: 120,
         max_retries: 3,
         headers: vec![],
         thinking_enabled: false,
+        reasoning_effort: None,
         extra_body: None,
     });
 
@@ -106,13 +107,14 @@ fn merge_overrides_non_default_providers() {
         name: "deepseek".into(),
         kind: "openai".into(),
         base_url: Some("https://api.deepseek.com".into()),
-        model: Some("deepseek-chat".into()),
+        model: Some("deepseek-v4-flash".into()),
         api_key_env: Some("DEEPSEEK_API_KEY".into()),
         api_key: None,
         timeout_secs: 120,
         max_retries: 3,
         headers: vec![],
         thinking_enabled: false,
+        reasoning_effort: None,
         extra_body: None,
     });
 
@@ -128,6 +130,7 @@ fn merge_overrides_non_default_providers() {
             max_retries: 2,
             headers: vec![],
             thinking_enabled: false,
+            reasoning_effort: None,
             extra_body: None,
         }],
         ..Default::default()
@@ -143,7 +146,7 @@ fn merge_overrides_non_default_providers() {
 fn find_model_by_name() {
     let cfg = Config {
         models: vec![ModelConfig {
-            name: "deepseek-chat".into(),
+            name: "deepseek-v4-flash".into(),
             provider: "deepseek".into(),
             context_window: Some(65536),
             max_tokens: Some(4096),
@@ -156,7 +159,7 @@ fn find_model_by_name() {
         ..Config::default()
     };
 
-    let model = cfg.find_model("deepseek-chat").unwrap();
+    let model = cfg.find_model("deepseek-v4-flash").unwrap();
     assert_eq!(model.provider, "deepseek");
     assert_eq!(model.context_window, Some(65536));
     assert!(cfg.find_model("nonexistent").is_none());
@@ -169,17 +172,18 @@ fn resolve_provider_for_model() {
             name: "deepseek".into(),
             kind: "openai".into(),
             base_url: Some("https://api.deepseek.com".into()),
-            model: Some("deepseek-chat".into()),
+            model: Some("deepseek-v4-flash".into()),
             api_key_env: Some("DEEPSEEK_API_KEY".into()),
             api_key: None,
             timeout_secs: 120,
             max_retries: 3,
             headers: vec![],
             thinking_enabled: false,
+            reasoning_effort: None,
             extra_body: None,
         }],
         models: vec![ModelConfig {
-            name: "deepseek-chat".into(),
+            name: "deepseek-v4-flash".into(),
             provider: "deepseek".into(),
             context_window: None,
             max_tokens: None,
@@ -192,7 +196,7 @@ fn resolve_provider_for_model() {
         ..Config::default()
     };
 
-    let provider = cfg.resolve_provider_for_model("deepseek-chat").unwrap();
+    let provider = cfg.resolve_provider_for_model("deepseek-v4-flash").unwrap();
     assert_eq!(provider.name, "deepseek");
 }
 

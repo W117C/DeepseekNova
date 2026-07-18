@@ -3,5 +3,12 @@
 .env
 dist/
 node_modules/
-.dpronix/
+
+# IDE / assistant caches
+.qoder/
+
+# Project-local runtime state (topic titles, autoresearch, etc.) is ignored,
+# but the bundled default skills under .dpronix/skills/ ship with the repo.
+.dpronix/*
+!.dpronix/skills/
 .reasonix/

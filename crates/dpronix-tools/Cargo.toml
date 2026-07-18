@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "13+ built-in agent tools: file I/O, glob, grep, shell, web fetch, task management, and MCP bridging."
+readme = "README.md"
+documentation = "https://docs.rs/dpronix-tools/0.3.0"
 
 [dependencies]
 anyhow = { workspace = true }

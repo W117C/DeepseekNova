@@ -285,9 +285,24 @@ async fn stream_and_process_turn(
     let tool_refs: Vec<&dyn Tool> = tools.iter().map(|t| t.as_ref()).collect();
     let messages = memory.get_all();
 
-    let mut stream = provider.stream(&messages, &tool_refs).await?;
+    // DeepSeek V4 protocol — ValidatedRequest::new fails early with
+    // structured violation list, preventing corrupt messages from
+    // ever reaching the provider
+    let validated =
+        dpronix_provider::ValidatedRequest::new(&messages, &tool_refs).map_err(|violations| {
+            for v in &violations {
+                tracing::error!(?v, "replay invariant violation before provider call");
+            }
+            anyhow::anyhow!(
+                "history replay invariant violated: {} violation(s) detected",
+                violations.len()
+            )
+        })?;
+
+    let mut stream = provider.stream(validated).await?;
 
     let mut text_buf = String::new();
+    let mut reasoning_buf = String::new();
     let mut usage: Option<Usage> = None;
     let mut pending_calls: Vec<PendingToolCall> = Vec::new();
 
@@ -308,6 +323,7 @@ async fn stream_and_process_turn(
                 tx.send(Ok(RunEvent::TextDelta(delta))).await.ok();
             }
             Chunk::ReasoningDelta { text, signature } => {
+                reasoning_buf.push_str(&text);
                 tx.send(Ok(RunEvent::ReasoningDelta { text, signature }))
                     .await
                     .ok();
@@ -376,7 +392,11 @@ async fn stream_and_process_turn(
             name: None,
             tool_calls: None,
             tool_call_id: None,
-            reasoning_content: None,
+            reasoning_content: if reasoning_buf.is_empty() {
+                None
+            } else {
+                Some(reasoning_buf.clone())
+            },
         });
 
         let final_calls: Vec<ToolCall> = pending_calls
@@ -421,7 +441,11 @@ async fn stream_and_process_turn(
             name: None,
             tool_calls: Some(tool_calls_for_msg),
             tool_call_id: None,
-            reasoning_content: None,
+            reasoning_content: if reasoning_buf.is_empty() {
+                None
+            } else {
+                Some(reasoning_buf.clone())
+            },
         });
 
         // Execute each tool call
@@ -502,7 +526,10 @@ async fn stream_and_process_turn(
 
 /// Rough token count estimate from message content length.
 pub fn estimate_tokens(messages: &[Message]) -> u32 {
-    let char_count: usize = messages.iter().map(|m| m.content.len()).sum();
+    let char_count: usize = messages
+        .iter()
+        .map(|m| m.content.len() + m.reasoning_content.as_ref().map(|r| r.len()).unwrap_or(0))
+        .sum();
     (char_count as f32 / CHARS_PER_TOKEN).ceil() as u32
 }
 

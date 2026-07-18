@@ -17,8 +17,12 @@ export default function App() {
   const [showSkills, setShowSkills] = useState(false);
   const [lastUsage, setLastUsage] = useState<UsageInfo | null>(null);
   const [sessionCache, setSessionCache] = useState({ hit: 0, miss: 0 });
+  const [reasoningEffort, setReasoningEffort] = useState("high");
+  const [thinkingEnabled, setThinkingEnabled] = useState(true);
   const streamingText = useRef("");
   const streamingMsgId = useRef("");
+  const streamingReasoning = useRef("");
+  const streamingReasoningMsgId = useRef("");
 
   // Load capabilities + skills on mount
   useEffect(() => {
@@ -41,11 +45,18 @@ export default function App() {
     setRunning(true);
     streamingText.current = "";
     streamingMsgId.current = "";
+    streamingReasoning.current = "";
+    streamingReasoningMsgId.current = "";
 
     addMessage({ id: uid(), role: "user", content: prompt });
 
     const handlers = {
       onText(text: string) {
+        // Thinking chain (if any) is complete once visible output starts.
+        if (streamingReasoningMsgId.current) {
+          updateMessage(streamingReasoningMsgId.current, (m) => ({ ...m, reasoningDone: true }));
+          streamingReasoningMsgId.current = "";
+        }
         streamingText.current += text;
         if (!streamingMsgId.current) {
           streamingMsgId.current = uid();
@@ -54,7 +65,23 @@ export default function App() {
         updateMessage(streamingMsgId.current, (m) => ({ ...m, content: streamingText.current }));
       },
       onReasoning(text: string) {
-        addMessage({ id: uid(), role: "reasoning", content: text, reasoningDone: false });
+        // Accumulate DeepSeek-V4 thinking deltas into a single collapsible card
+        // instead of one card per delta.
+        streamingReasoning.current += text;
+        if (!streamingReasoningMsgId.current) {
+          streamingReasoningMsgId.current = uid();
+          addMessage({
+            id: streamingReasoningMsgId.current,
+            role: "reasoning",
+            content: streamingReasoning.current,
+            reasoningDone: false,
+          });
+        } else {
+          updateMessage(streamingReasoningMsgId.current, (m) => ({
+            ...m,
+            content: streamingReasoning.current,
+          }));
+        }
       },
       onToolCallStart(id: string, name: string) {
         addMessage({ id, role: "tool", content: "", toolName: name, toolId: id });
@@ -75,6 +102,10 @@ export default function App() {
         setSessionCache(prev => ({ hit: prev.hit + usage.cache_hit_tokens, miss: prev.miss + usage.cache_miss_tokens }));
       },
       onDone(text: string) {
+        if (streamingReasoningMsgId.current) {
+          updateMessage(streamingReasoningMsgId.current, (m) => ({ ...m, reasoningDone: true }));
+          streamingReasoningMsgId.current = "";
+        }
         if (text && streamingMsgId.current) {
           updateMessage(streamingMsgId.current, (m) => ({ ...m, content: text }));
         }
@@ -88,12 +119,12 @@ export default function App() {
     };
 
     try {
-      await submitPrompt({ prompt, reasoning_effort: "high", thinking_enabled: true }, handlers);
+      await submitPrompt({ prompt, reasoning_effort: reasoningEffort, thinking_enabled: thinkingEnabled }, handlers);
     } catch (err) {
       addMessage({ id: uid(), role: "assistant", content: `Error: ${err}` });
       setRunning(false);
     }
-  }, [input, running, addMessage, updateMessage]);
+  }, [input, running, addMessage, updateMessage, reasoningEffort, thinkingEnabled]);
 
   const handleCancel = useCallback(async () => { await cancelRun(); setRunning(false); }, []);
 
@@ -106,8 +137,30 @@ export default function App() {
           <span className="header-badge">desktop v{capabilities?.version ?? "dev"}</span>
         </div>
         <div className="header-center">
+          {capabilities?.supports_thinking && (
+            <label className="chip chip-toggle" title="DeepSeek-V4 thinking mode">
+              <input
+                type="checkbox"
+                checked={thinkingEnabled}
+                disabled={running}
+                onChange={(e) => setThinkingEnabled(e.target.checked)}
+              />
+              thinking
+            </label>
+          )}
           {capabilities?.supports_reasoning_effort && (
-            <span className="chip">reasoning_effort: {capabilities.reasoning_effort_levels?.join("/")}</span>
+            <label className="chip" title="Reasoning effort passed to the model">
+              effort:
+              <select
+                value={reasoningEffort}
+                disabled={running || !thinkingEnabled}
+                onChange={(e) => setReasoningEffort(e.target.value)}
+              >
+                {(capabilities.reasoning_effort_levels ?? ["low", "medium", "high"]).map((lvl) => (
+                  <option key={lvl} value={lvl}>{lvl}</option>
+                ))}
+              </select>
+            </label>
           )}
         </div>
         <div className="header-right">
@@ -146,6 +199,11 @@ export default function App() {
         {lastUsage && (
           <span className="status-item" title="Token usage for last turn">
             {lastUsage.prompt_tokens}↑ {lastUsage.completion_tokens}↓
+            {lastUsage.reasoning_tokens > 0 && (
+              <span className="status-item" title="DeepSeek-V4 billed reasoning tokens">
+                🧠 {lastUsage.reasoning_tokens}
+              </span>
+            )}
             {sessionCache.hit + sessionCache.miss > 0 && (
               <span className="status-item" title="Session cache hit rate">
                 💡 cache {Math.round(sessionCache.hit / (sessionCache.hit + sessionCache.miss) * 100)}%

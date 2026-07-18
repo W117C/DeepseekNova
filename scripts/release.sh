@@ -39,25 +39,14 @@ echo "--- updating version to ${VERSION} ---"
 for crate_dir in crates/*/; do
     crate=$(basename "$crate_dir")
     toml_file="${crate_dir}Cargo.toml"
-    python3 -c "
-import re
-with open('$toml_file', 'r') as f:
-    content = f.read()
-content = re.sub(r'version\.workspace\s*=\s*true', f'version = \"{VERSION}\"', content)
-with open('$toml_file', 'w') as f:
-    f.write(content)
-"
+    # Replace version.workspace = true with hardcoded version for publishing
+    sed -i.bak -E 's/^version\.workspace = true$/version = "'"${VERSION}"'" /' "$toml_file"
+    rm -f "${toml_file}.bak"
 done
 
 # Update workspace package version
-python3 -c "
-import re
-with open('Cargo.toml', 'r') as f:
-    content = f.read()
-content = re.sub(r'version = \"[0-9.]+\"', f'version = \"{VERSION}\"', content, count=1)
-with open('Cargo.toml', 'w') as f:
-    f.write(content)
-"
+sed -i.bak -E 's/^version = "[0-9.]+"/version = "'"${VERSION}"'" /' Cargo.toml
+rm -f Cargo.toml.bak
 
 # 4. Dry-run publish (library crates first, then binary)
 echo ""
@@ -65,20 +54,22 @@ echo "--- cargo publish --dry-run (library crates) ---"
 LIBS=(
     "dpronix-core"
     "dpronix-config"
-    "dpronix-event"
-    "dpronix-permission"
-    "dpronix-context"
-    "dpronix-provider"
-    "dpronix-tools"
-    "dpronix-mcp"
-    "dpronix-checkpoint"
-    "dpronix-sandbox"
-    "dpronix-store"
-    "dpronix-skills"
     "dpronix-telemetry"
+    "dpronix-event"
+    "dpronix-store"
+    "dpronix-context"
+    "dpronix-sandbox"
+    "dpronix-security"
+    "dpronix-checkpoint"
+    "dpronix-skills"
     "dpronix-serve"
     "dpronix-tui"
+    "dpronix-permission"
+    "dpronix-provider"
+    "dpronix-mcp"
+    "dpronix-tools"
     "dpronix-agent"
+    "dpronix-orch"
     "dpronix-runtime"
 )
 for lib in "${LIBS[@]}"; do
@@ -105,7 +96,19 @@ elif [[ "$(uname -s)" == "Linux" ]]; then
     echo "  dist/dpronix-${VERSION}-x86_64-unknown-linux-gnu"
 fi
 
-# 6. Create git tag
+# 6. Restore version.workspace = true in all Cargo.toml files
+echo ""
+echo "--- restoring version.workspace = true ---"
+for crate_dir in crates/*/; do
+    toml_file="${crate_dir}Cargo.toml"
+    sed -i.bak -E 's/^version = "[0-9.]+"$/version.workspace = true/' "$toml_file"
+    rm -f "${toml_file}.bak"
+done
+# Restore workspace version placeholder (optional — keep the release version in root)
+# sed -i.bak -E 's/^version = "[0-9.]+"/version = "0.0.0-dev"/' Cargo.toml
+# rm -f Cargo.toml.bak
+
+# 7. Create git tag
 if [ -d .git ]; then
     echo ""
     echo "--- git tag v${VERSION} ---"

@@ -3,6 +3,8 @@
 //! Builds and maintains the agent's contextual understanding of the
 //! workspace: file trees, project memory (DPRONIX.md), and session state.
 
+pub mod history;
+
 use chrono::{DateTime, Utc};
 use dpronix_core::registry::Command;
 use dpronix_core::types::{Message, Role, ToolSchema};
@@ -232,6 +234,437 @@ impl PromptBuilder {
         }
 
         messages
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CacheAwarePromptBuilder — DeepSeek V4 prefix cache optimization
+// ---------------------------------------------------------------------------
+///
+/// DeepSeek V4 uses disk-level automatic prefix caching: identical byte-level
+/// prefixes across requests hit the cache, reducing input token cost by ~90%.
+/// This builder enforces the "stable prefix + volatile suffix" structure.
+///
+/// ```text
+/// [System Prompt — byte-level fixed]
+/// [Tool Schemas — fixed order, no per-request changes]
+/// [Project Memory — relatively stable]
+/// ─────────── CACHE PREFIX BOUNDARY ───────────
+/// [Conversation History]
+/// [Current User Input / Tool Results — most volatile]
+/// ```
+pub struct CacheAwarePromptBuilder {
+    /// SHA256 hash of the last stable prefix built.
+    last_prefix_hash: Option<String>,
+    /// Whether to emit tracing warnings on cache miss.
+    warn_on_cache_miss: bool,
+}
+
+impl CacheAwarePromptBuilder {
+    pub fn new(warn_on_cache_miss: bool) -> Self {
+        Self {
+            last_prefix_hash: None,
+            warn_on_cache_miss,
+        }
+    }
+
+    /// Build messages optimized for DeepSeek V4 prefix caching.
+    ///
+    /// Returns (messages, prefix_hash) where prefix_hash identifies the
+    /// stable portion of the prompt. Callers can compare across requests
+    /// to detect cache-invalidating changes.
+    pub fn build(
+        &mut self,
+        system_prompt: &str,
+        tools: &[ToolSchema],
+        project_memory: &ProjectMemory,
+        conversation: &[Message], // volatile: conversation history
+        user_input: &str,         // volatile: current user message
+    ) -> (Vec<Message>, String) {
+        use sha2::{Digest, Sha256};
+        let mut messages = Vec::new();
+
+        // ── STABLE PREFIX ──────────────────────────────────
+        let mut prefix_parts = Vec::new();
+
+        // 1. System prompt (most stable)
+        prefix_parts.push(system_prompt.to_string());
+
+        // 2. Tool schemas in fixed alphabetical order
+        let mut sorted_tools: Vec<&ToolSchema> = tools.iter().collect();
+        sorted_tools.sort_by(|a, b| a.name.cmp(&b.name));
+        let tools_text: String = sorted_tools
+            .iter()
+            .map(|t| format!("- {}: {}", t.name, t.description))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !tools_text.is_empty() {
+            prefix_parts.push(format!("## Available Tools\n\n{tools_text}"));
+        }
+
+        // 3. Project memory (DPRONIX.md — stable between config changes)
+        if let Some(ref dpronix_md) = project_memory.dpronix_md {
+            prefix_parts.push(format!("## Project Context\n\n{dpronix_md}"));
+        }
+
+        let prefix_content = prefix_parts.join("\n\n---\n\n");
+
+        // Compute prefix hash for cache diagnostics
+        let mut hasher = Sha256::new();
+        hasher.update(prefix_content.as_bytes());
+        let prefix_hash = hex::encode(hasher.finalize());
+
+        // Detect cache-invalidating prefix changes
+        if self.warn_on_cache_miss {
+            if let Some(ref last) = self.last_prefix_hash {
+                if last != &prefix_hash {
+                    tracing::warn!(
+                        previous = %last,
+                        current = %prefix_hash,
+                        "cache prefix changed — next request will be a cache miss"
+                    );
+                }
+            }
+        }
+        self.last_prefix_hash = Some(prefix_hash.clone());
+
+        // Push the stable prefix as system message
+        messages.push(Message {
+            role: Role::System,
+            content: prefix_content,
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        });
+
+        // ── VOLATILE SUFFIX ────────────────────────────────
+        // 4. Conversation history
+        messages.extend(conversation.iter().cloned());
+
+        // 5. Current user input (most volatile — always at the end)
+        if !user_input.is_empty() {
+            messages.push(Message {
+                role: Role::User,
+                content: user_input.to_string(),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            });
+        }
+
+        (messages, prefix_hash)
+    }
+
+    /// Returns the hash of the last stable prefix, if any.
+    pub fn last_prefix_hash(&self) -> Option<&str> {
+        self.last_prefix_hash.as_deref()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SectionStability — type-level ordering for cache prefix integrity
+// ---------------------------------------------------------------------------
+
+/// Each prompt section's position on the stability spectrum.
+/// The builder enforces non-decreasing stability order — once you've
+/// added volatile content, you can't go back and insert static content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SectionStability {
+    /// Byte-level identical for the entire session: system prompt.
+    Static = 0,
+    /// Identical for a given tool set (alphabetical order, no dynamic changes).
+    SemiStatic = 1,
+    /// Only grows, never shrinks or mutates: conversation history.
+    AppendOnly = 2,
+    /// Changes every request: current time, latest tool results.
+    Volatile = 3,
+}
+
+/// A section of the prompt with its stability classification.
+pub struct PromptSection {
+    pub stability: SectionStability,
+    pub bytes: Vec<u8>,
+}
+
+/// Error when inserting a section would break cache prefix structure.
+#[derive(Debug, thiserror::Error)]
+#[error("inserting {attempted:?} section after {last:?} — would break cache prefix ordering")]
+pub struct BuilderOrderError {
+    pub attempted: SectionStability,
+    pub last: SectionStability,
+}
+
+/// Enhanced prompt builder that enforces stability ordering at the type level.
+pub struct OrderedPromptBuilder {
+    sections: Vec<PromptSection>,
+}
+
+impl OrderedPromptBuilder {
+    pub fn new() -> Self {
+        Self {
+            sections: Vec::new(),
+        }
+    }
+
+    /// Add a section, enforcing that stability is non-decreasing.
+    /// This prevents the anti-pattern of inserting static content after
+    /// volatile content, which would break DeepSeek V4 prefix caching.
+    pub fn push_section(
+        &mut self,
+        stability: SectionStability,
+        bytes: Vec<u8>,
+    ) -> Result<(), BuilderOrderError> {
+        if let Some(last) = self.sections.last() {
+            if stability < last.stability {
+                return Err(BuilderOrderError {
+                    attempted: stability,
+                    last: last.stability,
+                });
+            }
+        }
+        self.sections.push(PromptSection { stability, bytes });
+        Ok(())
+    }
+
+    /// Build the final prompt.
+    ///
+    /// Returns both the full byte stream and the cache prefix
+    /// (everything up to but not including the first Volatile section).
+    pub fn build(&self) -> BuiltPrompt {
+        let cache_prefix_end: usize = self
+            .sections
+            .iter()
+            .take_while(|s| s.stability != SectionStability::Volatile)
+            .map(|s| s.bytes.len())
+            .sum();
+
+        let full: Vec<u8> = self.sections.iter().flat_map(|s| s.bytes.clone()).collect();
+
+        let cache_prefix = if cache_prefix_end <= full.len() {
+            full[..cache_prefix_end].to_vec()
+        } else {
+            full.clone()
+        };
+
+        BuiltPrompt {
+            cache_prefix,
+            full_bytes: full,
+        }
+    }
+}
+
+impl Default for OrderedPromptBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The output of building a cache-aware prompt.
+pub struct BuiltPrompt {
+    /// Bytes that form the cacheable prefix (Static + SemiStatic + AppendOnly).
+    pub cache_prefix: Vec<u8>,
+    /// Complete prompt bytes for the request.
+    pub full_bytes: Vec<u8>,
+}
+
+// ---------------------------------------------------------------------------
+// PromptCacheStabilityTracker — detect cache-invalidating changes
+// ---------------------------------------------------------------------------
+
+/// Tracks whether the cacheable prefix has changed between requests.
+///
+/// Use this to correlate predicted cache behavior with actual
+/// `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens` from the API.
+pub struct PromptCacheStabilityTracker {
+    last_prefix_hash: Option<u64>,
+    last_prefix_len: usize,
+}
+
+/// Result of checking prefix stability.
+pub enum CacheStabilityReport {
+    /// First call — no previous prefix to compare.
+    FirstCall,
+    /// Prefix unchanged since last call — cache hit expected.
+    Stable,
+    /// Prefix changed — next request will be a cache miss.
+    Changed {
+        previous_len: usize,
+        current_len: usize,
+    },
+}
+
+impl PromptCacheStabilityTracker {
+    pub fn new() -> Self {
+        Self {
+            last_prefix_hash: None,
+            last_prefix_len: 0,
+        }
+    }
+
+    /// Check the given prefix against the last known prefix.
+    pub fn check(&mut self, prefix: &[u8]) -> CacheStabilityReport {
+        let hash = hash_prefix_bytes(prefix);
+        let report = match self.last_prefix_hash {
+            None => CacheStabilityReport::FirstCall,
+            Some(prev) if prev == hash => CacheStabilityReport::Stable,
+            Some(_) => CacheStabilityReport::Changed {
+                previous_len: self.last_prefix_len,
+                current_len: prefix.len(),
+            },
+        };
+        self.last_prefix_hash = Some(hash);
+        self.last_prefix_len = prefix.len();
+        report
+    }
+
+    pub fn last_prefix_len(&self) -> usize {
+        self.last_prefix_len
+    }
+}
+
+impl Default for PromptCacheStabilityTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Fast, non-cryptographic hash for prefix comparison.
+fn hash_prefix_bytes(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 5381;
+    for &b in bytes {
+        hash = hash.wrapping_mul(33).wrapping_add(b as u64);
+    }
+    hash
+}
+
+// =========================================================================
+// Cache stability tests
+// =========================================================================
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    #[test]
+    fn identical_inputs_produce_identical_prefix() {
+        let mut b1 = OrderedPromptBuilder::new();
+        b1.push_section(
+            SectionStability::Static,
+            b"system: you are a coder".to_vec(),
+        )
+        .unwrap();
+        b1.push_section(SectionStability::Volatile, b"user: hello".to_vec())
+            .unwrap();
+        let p1 = b1.build();
+
+        let mut b2 = OrderedPromptBuilder::new();
+        b2.push_section(
+            SectionStability::Static,
+            b"system: you are a coder".to_vec(),
+        )
+        .unwrap();
+        b2.push_section(SectionStability::Volatile, b"user: hello".to_vec())
+            .unwrap();
+        let p2 = b2.build();
+
+        assert_eq!(p1.cache_prefix, p2.cache_prefix);
+    }
+
+    #[test]
+    fn inserting_static_after_volatile_is_rejected() {
+        let mut builder = OrderedPromptBuilder::new();
+        builder
+            .push_section(SectionStability::Volatile, b"user: hi".to_vec())
+            .unwrap();
+        let result = builder.push_section(SectionStability::Static, b"system: late".to_vec());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn history_growth_keeps_old_prefix_as_strict_prefix() {
+        let mut b1 = OrderedPromptBuilder::new();
+        b1.push_section(SectionStability::Static, b"sys".to_vec())
+            .unwrap();
+        b1.push_section(SectionStability::AppendOnly, b"turn1".to_vec())
+            .unwrap();
+        b1.push_section(SectionStability::Volatile, b"now".to_vec())
+            .unwrap();
+        let p1 = b1.build();
+
+        let mut b2 = OrderedPromptBuilder::new();
+        b2.push_section(SectionStability::Static, b"sys".to_vec())
+            .unwrap();
+        b2.push_section(SectionStability::AppendOnly, b"turn1".to_vec())
+            .unwrap();
+        b2.push_section(SectionStability::AppendOnly, b"turn2".to_vec())
+            .unwrap();
+        b2.push_section(SectionStability::Volatile, b"now".to_vec())
+            .unwrap();
+        let p2 = b2.build();
+
+        // Old prefix must be a strict prefix of new prefix (for cache reuse)
+        assert!(p2.cache_prefix.starts_with(&p1.cache_prefix));
+        assert!(p2.cache_prefix.len() > p1.cache_prefix.len());
+    }
+
+    #[test]
+    fn tracker_reports_stable_on_identical_prefix() {
+        let mut tracker = PromptCacheStabilityTracker::new();
+        let prefix = b"static prefix content";
+
+        let r1 = tracker.check(prefix);
+        assert!(matches!(r1, CacheStabilityReport::FirstCall));
+
+        let r2 = tracker.check(prefix);
+        assert!(matches!(r2, CacheStabilityReport::Stable));
+    }
+
+    #[test]
+    fn tracker_reports_changed_on_different_prefix() {
+        let mut tracker = PromptCacheStabilityTracker::new();
+        tracker.check(b"prefix v1");
+        let report = tracker.check(b"prefix v2 -- changed");
+        assert!(matches!(report, CacheStabilityReport::Changed { .. }));
+    }
+
+    #[test]
+    fn tool_schema_serialization_is_order_deterministic() {
+        // Verify that tool schemas sorted by name produce identical bytes
+        use dpronix_core::types::ToolSchema;
+        let tools = vec![
+            ToolSchema {
+                name: "zebra".into(),
+                description: "last".into(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+            ToolSchema {
+                name: "alpha".into(),
+                description: "first".into(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+        ];
+
+        let serialize = |t: &[ToolSchema]| -> Vec<u8> {
+            let mut sorted: Vec<&ToolSchema> = t.iter().collect();
+            sorted.sort_by(|a, b| a.name.cmp(&b.name));
+            sorted
+                .iter()
+                .map(|t| format!("{}:{}", t.name, t.description))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .into_bytes()
+        };
+
+        let b1 = serialize(&tools);
+        let b2 = serialize(&tools);
+        assert_eq!(b1, b2, "tool schema serialization must be deterministic");
+        // Verify order: alpha before zebra
+        let text = String::from_utf8(b1).unwrap();
+        let alpha_pos = text.find("alpha").unwrap();
+        let zebra_pos = text.find("zebra").unwrap();
+        assert!(alpha_pos < zebra_pos, "alpha must come before zebra");
     }
 }
 

@@ -109,4 +109,43 @@ pub struct ResponseUsage {
     /// DeepSeek context cache miss tokens (prompt_cache_miss_tokens in API response)
     #[serde(rename = "prompt_cache_miss_tokens", default)]
     pub cache_miss_tokens: u32,
+    /// DeepSeek reasoning-token accounting. The reasoning token count is
+    /// nested here under `completion_tokens_details.reasoning_tokens` — these
+    /// tokens are billed, so they must be surfaced for cost tracking.
+    #[serde(default)]
+    pub completion_tokens_details: Option<CompletionTokensDetails>,
+}
+
+/// Nested token-accounting detail returned by DeepSeek (and OpenAI o-series).
+#[derive(Debug, Deserialize, Default)]
+pub struct CompletionTokensDetails {
+    /// Tokens spent on the model's internal reasoning chain (billed).
+    #[serde(default)]
+    pub reasoning_tokens: u32,
+}
+
+impl ResponseUsage {
+    /// Reasoning token count, or `0` when the provider omits the nested
+    /// `completion_tokens_details` object.
+    pub fn reasoning_tokens(&self) -> u32 {
+        self.completion_tokens_details
+            .as_ref()
+            .map(|d| d.reasoning_tokens)
+            .unwrap_or(0)
+    }
+
+    /// Map this provider-native usage into the core [`Usage`] accounting type,
+    /// preserving every DeepSeek-specific field (context-cache hit/miss and
+    /// reasoning tokens). Centralising this mapping keeps the streaming and
+    /// non-streaming paths from drifting apart.
+    pub fn to_usage(&self) -> dpronix_core::chunk::Usage {
+        dpronix_core::chunk::Usage {
+            prompt_tokens: self.prompt_tokens,
+            completion_tokens: self.completion_tokens,
+            total_tokens: self.total_tokens,
+            cache_hit_tokens: self.cache_hit_tokens,
+            cache_miss_tokens: self.cache_miss_tokens,
+            reasoning_tokens: self.reasoning_tokens(),
+        }
+    }
 }

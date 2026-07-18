@@ -103,8 +103,16 @@ pub struct ProviderConfig {
 
     /// Enable DeepSeek thinking mode.
     /// When true, sends extra_body: {"thinking": {"type": "enabled"}}.
+    /// For DeepSeek providers, defaults to true in the provider factory
+    /// even when this field is absent from config.
     #[serde(default)]
     pub thinking_enabled: bool,
+
+    /// DeepSeek reasoning effort level: "low", "medium", "high", or "max".
+    /// Controls the depth of the model's internal reasoning chain.
+    /// Defaults to "high" for DeepSeek providers in the factory.
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
 
     /// Extra JSON body fields to include in every request to this provider.
     /// Merged into the request body at the top level.
@@ -131,7 +139,7 @@ pub struct HeaderEntry {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelConfig {
-    /// Model identifier (e.g. "deepseek-chat", "claude-sonnet-5-20251001").
+    /// Model identifier (e.g. "deepseek-v4-flash", "claude-sonnet-5-20251001").
     pub name: String,
 
     /// Which provider this model uses.
@@ -659,13 +667,14 @@ mod tests {
                 name: "deepseek".into(),
                 kind: "openai".into(),
                 base_url: Some("https://api.deepseek.com".into()),
-                model: Some("deepseek-chat".into()),
+                model: Some("deepseek-v4-flash".into()),
                 api_key_env: Some("DEEPSEEK_API_KEY".into()),
                 api_key: None,
                 timeout_secs: 120,
                 max_retries: 3,
                 headers: vec![],
                 thinking_enabled: false,
+                reasoning_effort: None,
                 extra_body: None,
             }],
             ..Config::default()

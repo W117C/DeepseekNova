@@ -47,7 +47,11 @@ async fn main() -> anyhow::Result<()> {
                     .executor_model
                     .clone()
                     .or_else(|| model_args.model.clone());
-                let executor_provider = resolve_provider(&config, &executor_model)?;
+                let executor_provider = resolve_provider_for_task(
+                    &config,
+                    &executor_model,
+                    Some(dpronix_provider::factory::ReasoningEffort::High),
+                )?;
                 let max_nodes = coordinator.max_graph_nodes;
 
                 let workspace_root = std::env::current_dir().unwrap_or_default();
@@ -134,7 +138,13 @@ async fn main() -> anyhow::Result<()> {
 
         Some(Commands::Serve { addr }) => {
             info!("serve command: addr={addr}");
-            println!("HTTP serve is coming in Phase 4.");
+
+            let provider = resolve_provider(&config, &None)?;
+            let agent = build_agent(Arc::clone(&provider), None, &config, 0)?;
+            let runner: Arc<dyn Runner> = Arc::new(agent);
+
+            let server = dpronix_serve::Server::new(runner);
+            server.serve(addr).await?;
         }
 
         Some(Commands::Setup { local }) => {
@@ -176,6 +186,21 @@ fn resolve_provider(
     config: &dpronix_config::Config,
     model: &Option<String>,
 ) -> anyhow::Result<Arc<dyn dpronix_provider::Provider>> {
+    resolve_provider_for_task(config, model, None)
+}
+
+/// Resolve a provider, applying a reasoning-effort task classification.
+///
+/// Used to cap per-node executor reasoning below the planner's depth: in the
+/// two-model coordinator the planner already performs the deep reasoning, so
+/// paying DeepSeek Max-effort reasoning tokens on every mechanical execution
+/// node is wasteful. A `High` ceiling keeps executor reasoning useful while
+/// preventing a `Max` config default from applying to each node.
+fn resolve_provider_for_task(
+    config: &dpronix_config::Config,
+    model: &Option<String>,
+    task: Option<dpronix_provider::factory::ReasoningEffort>,
+) -> anyhow::Result<Arc<dyn dpronix_provider::Provider>> {
     let provider_cfg = if let Some(ref model_name) = model {
         config
             .resolve_provider_for_model(model_name)
@@ -188,7 +213,7 @@ fn resolve_provider(
             .ok_or_else(|| anyhow::anyhow!("no providers configured"))?
     };
 
-    Ok(dpronix_provider::factory::create_provider(provider_cfg)?.into())
+    Ok(dpronix_provider::factory::create_provider_for_task(provider_cfg, task)?.into())
 }
 
 /// Build an agent with built-in tools registered.

@@ -479,7 +479,7 @@ async fn run_coordinator(
     // Build prompt depending on mode.
     let read_only_views: Vec<&dyn Tool> = read_only_tools.iter().map(|t| t.as_ref()).collect();
 
-    let plan_response = if goal_mode {
+    let plan_messages = if goal_mode {
         // In goal mode, the prompt field is JSON-encoded GoalContract.
         let contract: GoalContract = match serde_json::from_str::<GoalContract>(&input.prompt) {
             Ok(c) => c,
@@ -494,17 +494,19 @@ async fn run_coordinator(
                 }
             }
         };
-        planner
-            .generate(
-                &build_goal_planning_prompt(&contract, &read_only_views),
-                &[],
-            )
-            .await?
+        build_goal_planning_prompt(&contract, &read_only_views)
     } else {
-        planner
-            .generate(&build_planning_prompt(&input.prompt, &read_only_views), &[])
-            .await?
+        build_planning_prompt(&input.prompt, &read_only_views)
     };
+
+    let validated =
+        dpronix_provider::ValidatedRequest::new(&plan_messages, &[]).map_err(|violations| {
+            anyhow::anyhow!(
+                "planning prompt replay invariant violated: {} violation(s) detected",
+                violations.len()
+            )
+        })?;
+    let plan_response = planner.generate(validated).await?;
 
     tx.send(Ok(RunEvent::TextDelta(format!(
         "[PLAN]\n{}\n",
@@ -527,12 +529,16 @@ async fn run_coordinator(
     // ---- Phase 2: Execution ----
     info!("coordinator: execution phase");
 
+    // Capture planner reasoning for executor context
+    let planner_reasoning = plan_response.reasoning_content.clone();
+
     let callbacks = Arc::new(CoordinatorCallbacks {
         provider: executor,
         tools,
         sub_agent_runner,
         workspace_root,
         security,
+        planner_reasoning,
     });
 
     let think: Arc<dyn ThinkCallback> = callbacks.clone();
@@ -709,20 +715,44 @@ struct CoordinatorCallbacks {
     sub_agent_runner: Option<Arc<SubAgentRunner>>,
     workspace_root: PathBuf,
     security: SecurityContext,
+    /// Planner's reasoning content to pass as context to executor.
+    planner_reasoning: Option<String>,
 }
 
 #[async_trait::async_trait]
 impl ThinkCallback for CoordinatorCallbacks {
     async fn think(&self, prompt: &str) -> anyhow::Result<String> {
-        let messages = vec![Message {
+        let mut messages = Vec::new();
+        // Pass planner's reasoning as context so executor benefits from DeepSeek thinking
+        if let Some(ref reasoning) = self.planner_reasoning {
+            messages.push(Message {
+                role: Role::Assistant,
+                content: String::new(),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: Some(reasoning.clone()),
+            });
+        }
+        messages.push(Message {
             role: Role::User,
             content: prompt.to_string(),
             name: None,
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
-        }];
-        let result = self.provider.generate(&messages, &[]).await?;
+        });
+        let validated =
+            dpronix_provider::ValidatedRequest::new(&messages, &[]).map_err(|violations| {
+                for v in &violations {
+                    tracing::error!(?v, "replay invariant violation in coordinator generate");
+                }
+                anyhow::anyhow!(
+                    "history replay invariant violated: {} violation(s)",
+                    violations.len()
+                )
+            })?;
+        let result = self.provider.generate(validated).await?;
         Ok(result.content)
     }
 }
@@ -764,7 +794,18 @@ impl ReflectCallback for CoordinatorCallbacks {
             reasoning_content: None,
         }];
 
-        let result = self.provider.generate(&messages, &[]).await?;
+        let validated =
+            dpronix_provider::ValidatedRequest::new(&messages, &[]).map_err(|violations| {
+                for v in &violations {
+                    tracing::error!(?v, "replay invariant violation in coordinator reflect");
+                }
+                anyhow::anyhow!(
+                    "history replay invariant violated: {} violation(s)",
+                    violations.len()
+                )
+            })?;
+
+        let result = self.provider.generate(validated).await?;
 
         #[derive(Deserialize)]
         struct ReflectResponse {

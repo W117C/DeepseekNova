@@ -1,6 +1,7 @@
 .PHONY: all build check test clean run release \
         release-patch release-minor release-major \
-        check-all test-all clippy-fix example
+        check-all test-all clippy-fix example \
+        frontend desktop install dist audit
 
 # ── Default ─────────────────────────────────────────────────────
 all: build
@@ -65,3 +66,24 @@ clean:
 # ── Cross-compilation ──────────────────────────────────────────
 cross-linux:
 	cross build --target x86_64-unknown-linux-gnu --release
+
+# ── Frontend (Desktop) ─────────────────────────────────────────
+frontend:
+	cd crates/dpronix-desktop/frontend && npm ci && npm run build
+
+# ── Desktop app ────────────────────────────────────────────────
+desktop: frontend
+	cargo build -p dpronix-desktop --release
+
+# ── Install CLI binary ─────────────────────────────────────────
+install:
+	cargo install --path crates/dpronix-cli --force
+
+# ── Distribution package ───────────────────────────────────────
+dist: release
+	@echo "Release binary at target/release/dpronix-cli"
+	@echo "Run 'make desktop' for desktop app build"
+
+# ── Security audit ─────────────────────────────────────────────
+audit:
+	cargo audit || cargo install cargo-audit && cargo audit

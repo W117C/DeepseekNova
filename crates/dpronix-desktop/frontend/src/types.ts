@@ -19,6 +19,7 @@ export type WireEvent =
       total_tokens: number;
       cache_hit_tokens: number;
       cache_miss_tokens: number;
+      reasoning_tokens: number;
     }
   | { kind: "turn_complete" }
   | { kind: "done"; text: string; usage?: UsageInfo }
@@ -30,6 +31,7 @@ export interface UsageInfo {
   total_tokens: number;
   cache_hit_tokens: number;
   cache_miss_tokens: number;
+  reasoning_tokens: number;
 }
 
 export interface SubmitRequest {

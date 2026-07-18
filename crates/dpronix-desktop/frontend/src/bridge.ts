@@ -97,6 +97,7 @@ async function devMockSubmit(
     total_tokens: 770,
     cache_hit_tokens: 280,
     cache_miss_tokens: 172,
+    reasoning_tokens: 96,
   });
 
   // 6. Done
@@ -107,6 +108,7 @@ async function devMockSubmit(
     total_tokens: 770,
     cache_hit_tokens: 280,
     cache_miss_tokens: 172,
+    reasoning_tokens: 96,
   });
 }
 
@@ -167,6 +169,7 @@ export async function submitPrompt(
           total_tokens: event.total_tokens,
           cache_hit_tokens: event.cache_hit_tokens,
           cache_miss_tokens: event.cache_miss_tokens,
+          reasoning_tokens: event.reasoning_tokens,
         });
         break;
       case "turn_complete":

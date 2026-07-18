@@ -51,7 +51,7 @@ pub async fn run_setup_wizard(local: bool) -> anyhow::Result<()> {
         _ => (
             "openai",
             "https://api.deepseek.com",
-            "deepseek-chat",
+            "deepseek-v4-flash",
             "DEEPSEEK_API_KEY",
         ),
     };

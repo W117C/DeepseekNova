@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Unified LLM provider abstraction for OpenAI-compatible and Anthropic backends with streaming and tool calling."
+readme = "README.md"
+documentation = "https://docs.rs/dpronix-provider/0.3.0"
 
 [dependencies]
 anyhow = { workspace = true }
@@ -18,3 +21,4 @@ async-trait = { workspace = true }
 thiserror = { workspace = true }
 dpronix-core = { version = "0.3.0", path = "../dpronix-core" }
 dpronix-config = { version = "0.3.0", path = "../dpronix-config" }
+dpronix-context = { version = "0.3.0", path = "../dpronix-context" }

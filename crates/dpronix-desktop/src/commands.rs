@@ -61,13 +61,20 @@ pub async fn submit_prompt(
     // Load config
     let config = dpronix_config::Config::load().map_err(|e| format!("config error: {e}"))?;
 
+    // Build runtime — single shared composition root
+    let workspace_root = std::env::current_dir().unwrap_or_default();
+    let security = dpronix_runtime::build_security_context(&config, &workspace_root)
+        .map_err(|e| format!("security context error: {e}"))?;
+
     // Resolve provider
     let provider_cfg = config.providers.first().ok_or("no providers configured")?;
     let provider = dpronix_provider::factory::create_provider(provider_cfg)
         .map_err(|e| format!("provider error: {e}"))?;
 
-    // Build agent with all tools
-    let mut agent = dpronix_agent::Agent::new(provider.into(), config.agent.max_steps);
+    // Build agent wired through the composition root
+    let mut agent = dpronix_agent::Agent::new(provider.into(), config.agent.max_steps)
+        .with_workspace_root(workspace_root)
+        .with_security(security);
     if let Some(ref sp) = config.agent.system_prompt {
         agent = agent.with_system_prompt(sp.clone());
     }
@@ -95,20 +102,36 @@ pub async fn submit_prompt(
     tokio::spawn(async move {
         match agent.run_stream(input).await {
             Ok(mut stream) => {
-                let final_text = String::new();
-                let _final_output: Option<String> = None;
+                let mut final_text = String::new();
+                let mut final_usage: Option<dpronix_core::chunk::Usage> = None;
 
                 while let Some(event) = stream.next().await {
                     if cancel_clone.is_cancelled() {
                         let _ = on_event.send(WireEvent::Done {
-                            text: final_text.clone(),
-                            usage: None,
+                            text: final_text,
+                            usage: final_usage.map(Into::into),
                         });
                         return;
                     }
 
                     match event {
                         Ok(ev) => {
+                            // Accumulate text deltas for the final Done event
+                            if let dpronix_core::runner::RunEvent::TextDelta(ref text) = ev {
+                                final_text.push_str(text);
+                            }
+                            if let dpronix_core::runner::RunEvent::Usage(ref usage) = ev {
+                                final_usage = Some(usage.clone());
+                            }
+                            // Also capture text from the terminal Done event
+                            if let dpronix_core::runner::RunEvent::Done(ref output) = ev {
+                                if !output.text.is_empty() {
+                                    final_text = output.text.clone();
+                                }
+                                if output.usage.is_some() {
+                                    final_usage = output.usage.clone();
+                                }
+                            }
                             let wire: WireEvent = ev.into();
                             let _ = on_event.send(wire);
                         }
@@ -120,6 +143,12 @@ pub async fn submit_prompt(
                         }
                     }
                 }
+
+                // Stream ended normally — send final Done event
+                let _ = on_event.send(WireEvent::Done {
+                    text: final_text,
+                    usage: final_usage.map(Into::into),
+                });
             }
             Err(e) => {
                 let _ = on_event.send(WireEvent::Error {

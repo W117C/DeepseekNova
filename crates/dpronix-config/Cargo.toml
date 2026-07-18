@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Layered TOML configuration with merge semantics (defaults, user, project, env, CLI flags)."
+readme = "README.md"
+documentation = "https://docs.rs/dpronix-config/0.3.0"
 
 [dependencies]
 anyhow = { workspace = true }

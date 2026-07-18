@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "CLI frontend for the dpronix agent framework with chat, plan, serve, and setup subcommands."
+readme = "README.md"
+documentation = "https://docs.rs/dpronix-cli/0.3.0"
 
 [dependencies]
 anyhow = { workspace = true }
@@ -19,6 +22,7 @@ dpronix-agent = { version = "0.3.0", path = "../dpronix-agent" }
 dpronix-tools = { version = "0.3.0", path = "../dpronix-tools" }
 dpronix-runtime = { version = "0.3.0", path = "../dpronix-runtime" }
 dpronix-skills = { version = "0.3.0", path = "../dpronix-skills" }
+dpronix-serve = { version = "0.3.0", path = "../dpronix-serve" }
 dirs = { workspace = true }
 
 [dev-dependencies]
