@@ -10,6 +10,15 @@
 import type { WireEvent, SubmitRequest, SkillSummary, ProviderSummary, UsageInfo } from "./types";
 
 // ---------------------------------------------------------------------------
+// Declare Tauri globals for strict TypeScript
+// ---------------------------------------------------------------------------
+declare global {
+  interface Window {
+    __TAURI__?: unknown;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Detect Tauri shell
 // ---------------------------------------------------------------------------
 function isTauri(): boolean {
@@ -116,7 +125,8 @@ async function devMockSubmit(
 // Tauri IPC imports (lazy — only when in Tauri shell)
 // ---------------------------------------------------------------------------
 let tauriInvoke: any = null;
-let tauriChannel: any = null;
+type TauriChannelCtor = { new <T>(onmessage?: (response: T) => void): { onmessage: ((event: T) => void) | null } };
+let tauriChannel: TauriChannelCtor | null = null;
 
 async function ensureTauriImports() {
   if (!tauriInvoke) {
@@ -140,7 +150,8 @@ export async function submitPrompt(
   }
 
   await ensureTauriImports();
-  const channel = new tauriChannel<WireEvent>();
+  const Ctor = tauriChannel!;
+  const channel = new Ctor<WireEvent>();
 
   channel.onmessage = (event: WireEvent) => {
     switch (event.kind) {

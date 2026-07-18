@@ -19,8 +19,7 @@ interface CodeViewerProps {
   maxHeight?: string;
 }
 
-const CodeViewer: React.FC<CodeViewerProps> = ({ code, language, maxHeight }) => {
-  const ext = language ?? "";
+const CodeViewer: React.FC<CodeViewerProps> = ({ code, maxHeight }) => {
   const style: React.CSSProperties = {
     margin: 0,
     padding: "12px",
