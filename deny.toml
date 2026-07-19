@@ -8,10 +8,12 @@ allow = [
     "BSD-3-Clause",
     "ISC",
     "Unicode-DFS-2016",
+    "Unicode-3.0",
     "Zlib",
     "CC0-1.0",
     "MPL-2.0",
     "Unlicense",
+    "BSL-1.0",
 ]
 confidence-threshold = 0.8
 
@@ -23,10 +25,47 @@ skip = []
 [advisories]
 version = 2
 ignore = [
-    # RUSTSEC-2026-0002: lru IterMut unsoundness — only used by ratatui's internal
-    # scrollback cache, which does not call IterMut. No actionable impact.
-    # Removing this ignore requires upgrading ratatui to 0.30+ (which drops lru).
+    # RUSTSEC-2026-0002: lru 0.12.5 IterMut unsoundness — only used by ratatui's
+    # internal scrollback cache, which does not call IterMut. No actionable impact.
     "RUSTSEC-2026-0002",
+
+    # RUSTSEC-2026-0194, RUSTSEC-2026-0195: quick-xml 0.39.4 DoS vulnerabilities.
+    # Used transitively by some XML parsing deps. Upgrade to >=0.41.0 when possible.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+
+    # RUSTSEC-2024-0411 through 0420: gtk-rs GTK3 bindings unmaintained.
+    # These come from tauri's GTK3 deps on Linux. Tauri 2.x is moving to GTK4.
+    "RUSTSEC-2024-0411",
+    "RUSTSEC-2024-0412",
+    "RUSTSEC-2024-0413",
+    "RUSTSEC-2024-0414",
+    "RUSTSEC-2024-0415",
+    "RUSTSEC-2024-0416",
+    "RUSTSEC-2024-0417",
+    "RUSTSEC-2024-0418",
+    "RUSTSEC-2024-0419",
+    "RUSTSEC-2024-0420",
+
+    # RUSTSEC-2024-0429: glib 0.18.5 unmaintained — from gtk-rs/Tauri GTK3 deps.
+    "RUSTSEC-2024-0429",
+
+    # RUSTSEC-2024-0436: paste 1.0.15 unmaintained — used by ratatui.
+    "RUSTSEC-2024-0436",
+
+    # RUSTSEC-2024-0370: proc-macro-error 1.0.4 unmaintained — transitive dep.
+    "RUSTSEC-2024-0370",
+
+    # RUSTSEC-2025-0068: serde_yml 0.0.13 — transitive dep, no direct usage.
+    "RUSTSEC-2025-0068",
+
+    # RUSTSEC-2025-0075, 0080, 0081, 0098, 0100: unic-* crates unmaintained.
+    # Transitive deps from Unicode normalization libraries.
+    "RUSTSEC-2025-0075",
+    "RUSTSEC-2025-0080",
+    "RUSTSEC-2025-0081",
+    "RUSTSEC-2025-0098",
+    "RUSTSEC-2025-0100",
 ]
 
 [sources]
