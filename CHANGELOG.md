@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to dpronix-rs will be documented in this file.
+All notable changes to deepnova-rs will be documented in this file.
 
 ## [0.3.0] — 2026-07-13
 
@@ -12,16 +12,16 @@ All notable changes to dpronix-rs will be documented in this file.
 - 两处 ToolContext 生产创建点统一 `.with_workspace(workspace_root).with_extension(security)` 注入
 
 #### 可配置安全策略
-- `dpronix-config` 新增 `[security]` 配置段：`disabled_capabilities`、`allowed_paths`、`denied_paths`、`allowed_commands`、`allowed_domains`、`limits.*`（max_files/max_file_size/max_total_read_bytes/max_execution_time_secs/max_output_bytes/max_tool_calls），支持分层 merge
-- `dpronix-runtime` 新增 `build_security_context(config, workspace_root)` 作为安全组装中心；工作区根自动加入 allow-list 首条；`disabled_capabilities` 从全能力集合移除；未设置的限额保留库默认
-- `dpronix-cli` 的 `build_agent` 与 `CoordinatorRunner` 构建路径调用 `build_security_context` 注入受限策略；`build_agent` 改为返回 `anyhow::Result`
+- `deepnova-config` 新增 `[security]` 配置段：`disabled_capabilities`、`allowed_paths`、`denied_paths`、`allowed_commands`、`allowed_domains`、`limits.*`（max_files/max_file_size/max_total_read_bytes/max_execution_time_secs/max_output_bytes/max_tool_calls），支持分层 merge
+- `deepnova-runtime` 新增 `build_security_context(config, workspace_root)` 作为安全组装中心；工作区根自动加入 allow-list 首条；`disabled_capabilities` 从全能力集合移除；未设置的限额保留库默认
+- `deepnova-cli` 的 `build_agent` 与 `CoordinatorRunner` 构建路径调用 `build_security_context` 注入受限策略；`build_agent` 改为返回 `anyhow::Result`
 
 #### 测试
-- `dpronix-config` 新增 2 个 SecurityConfig merge 测试（默认值保持 + 白名单/限额覆盖）
-- `dpronix-runtime` 新增 3 个 build_security_context 测试（默认全能力 + 工作区根自动注入、disabled + 命令/域名/路径白名单 + denied_paths、limits.* 覆盖与默认保留）
+- `deepnova-config` 新增 2 个 SecurityConfig merge 测试（默认值保持 + 白名单/限额覆盖）
+- `deepnova-runtime` 新增 3 个 build_security_context 测试（默认全能力 + 工作区根自动注入、disabled + 命令/域名/路径白名单 + denied_paths、limits.* 覆盖与默认保留）
 
 #### 文档与仓库配置
-- `.gitignore` 追加 `.reasonix/`；`README.md` 新增「安全」段与 `dpronix-security` crate 条目；`CONTRIBUTING.md` 追加 `dpronix-security`；`CHANGELOG.md` 新增 `[0.3.0]`
+- `.gitignore` 追加 `.reasonix/`；`README.md` 新增「安全」段与 `deepnova-security` crate 条目；`CONTRIBUTING.md` 追加 `deepnova-security`；`CHANGELOG.md` 新增 `[0.3.0]`
 - 新增 `SECURITY.md`（漏洞披露与响应流程）；新增 `CODEOWNERS`
 
 ## [0.2.0] — 2026-07-12
@@ -40,11 +40,11 @@ All notable changes to dpronix-rs will be documented in this file.
 - 10+ slash commands: `/exit /new /clear /raw /model /skills /mcp /undo /help`
 - 3 display modes: normal (all), lite (hide reasoning), raw (chunk types)
 - `/new` session restart loop
-- Skills listing from `.dpronix/skills/` and `.agents/skills/`
+- Skills listing from `.deepnova/skills/` and `.agents/skills/`
 - DeepSeek reasoning content displayed in dim ANSI style
 
 #### Desktop App (Phase 3)
-- New `dpronix-desktop` crate: Tauri 2.x desktop application
+- New `deepnova-desktop` crate: Tauri 2.x desktop application
 - 7 Tauri Commands: `submit_prompt` (Channel streaming), `cancel_run`, `list_skills`, `list_providers`, `get_config`, `get_capabilities`, `health_check`
 - React/TypeScript frontend with streaming chat UI, dark theme, skills panel
 - System tray with hide/show/quit
@@ -54,7 +54,7 @@ All notable changes to dpronix-rs will be documented in this file.
 - Session-level cache hit rate display in status bar
 
 #### Multi-Agent Orchestration (Phase 4)
-- New `dpronix-orch` crate: GOAP Goal Planner + Swarm Coordinator
+- New `deepnova-orch` crate: GOAP Goal Planner + Swarm Coordinator
 - GoalPlanner: A* planner that decomposes goals into action DAGs using DeepSeek-V4 thinking mode
 - SwarmCoordinator: Queen-led multi-agent team coordination
 - VectorMemory: Cosine similarity search, text→embedding hashing, importance-based compaction, file persistence
@@ -89,35 +89,35 @@ All notable changes to dpronix-rs will be documented in this file.
 ### Added
 
 #### Foundation (Phase 0)
-- `dpronix-core`: Core type system — `Runner` trait, `Tool` trait, `ExecutionGraph`, `RegistryHub`, `Chunk`, `Usage`
-- `dpronix-provider`: LLM provider abstraction with OpenAI and Anthropic implementations, streaming support, retry, factory
-- `dpronix-agent`: Main agent loop with multi-step reasoning, memory compaction, plan mode runner, sub-agent runner, coordinator runner
-- `dpronix-tools`: 13 built-in tools — read_file, write_file, edit_file, move_file, ls, glob, grep, shell, web_fetch, todo_write, remember, forget, recall
-- `dpronix-mcp`: MCP client for connecting to external tool servers
-- `dpronix-config`: TOML-based config with multi-layer merging (default → user → project → env)
-- `dpronix-context`: Workspace indexing, working memory, project memory (DPRONIX.md + .dpronix/memory/)
-- `dpronix-permission`: Policy-based permission gating for tool execution (allow/ask/deny)
-- `dpronix-event`: Event bus for agent lifecycle events
-- `dpronix-runtime`: Composition root — wires registry, context, event, permission, and config together
-- `dpronix-cli`: CLI binary with subcommands: run, chat, serve, setup, init, config
+- `deepnova-core`: Core type system — `Runner` trait, `Tool` trait, `ExecutionGraph`, `RegistryHub`, `Chunk`, `Usage`
+- `deepnova-provider`: LLM provider abstraction with OpenAI and Anthropic implementations, streaming support, retry, factory
+- `deepnova-agent`: Main agent loop with multi-step reasoning, memory compaction, plan mode runner, sub-agent runner, coordinator runner
+- `deepnova-tools`: 13 built-in tools — read_file, write_file, edit_file, move_file, ls, glob, grep, shell, web_fetch, todo_write, remember, forget, recall
+- `deepnova-mcp`: MCP client for connecting to external tool servers
+- `deepnova-config`: TOML-based config with multi-layer merging (default → user → project → env)
+- `deepnova-context`: Workspace indexing, working memory, project memory (DPRONIX.md + .deepnova/memory/)
+- `deepnova-permission`: Policy-based permission gating for tool execution (allow/ask/deny)
+- `deepnova-event`: Event bus for agent lifecycle events
+- `deepnova-runtime`: Composition root — wires registry, context, event, permission, and config together
+- `deepnova-cli`: CLI binary with subcommands: run, chat, serve, setup, init, config
 
 #### Planning & Execution (Phase 2)
-- `dpronix-core::executor`: Graph executor with topological sort and concurrent execution
-- `dpronix-core::planner`: SimplePlanner and Planner trait
-- `dpronix-agent::plan_mode`: Plan-first execution (read-only planning → user approval → execute)
-- `dpronix-agent::sub_agent`: Sub-agent delegation with isolated contexts
-- `dpronix-agent::coordinator`: Two-model coordinator (planner + executor)
+- `deepnova-core::executor`: Graph executor with topological sort and concurrent execution
+- `deepnova-core::planner`: SimplePlanner and Planner trait
+- `deepnova-agent::plan_mode`: Plan-first execution (read-only planning → user approval → execute)
+- `deepnova-agent::sub_agent`: Sub-agent delegation with isolated contexts
+- `deepnova-agent::coordinator`: Two-model coordinator (planner + executor)
 
 #### Safety (Phase 3)
-- `dpronix-sandbox`: Sandbox trait with platform-specific impls (macOS Seatbelt, Linux bubblewrap)
-- `dpronix-checkpoint`: File checkpoint and rollback manager
-- `dpronix-store`: Session persistence (JSONL format)
+- `deepnova-sandbox`: Sandbox trait with platform-specific impls (macOS Seatbelt, Linux bubblewrap)
+- `deepnova-checkpoint`: File checkpoint and rollback manager
+- `deepnova-store`: Session persistence (JSONL format)
 
 #### Interface (Phase 4)
-- `dpronix-tui`: Terminal UI with ratatui — split-pane, streaming, color-coded output
-- `dpronix-serve`: HTTP server with axum — SSE streaming, OpenAI-compatible `/v1/chat` endpoint
-- `dpronix-skills`: Skill system — load markdown + YAML frontmatter from `.dpronix/skills/`
-- `dpronix-telemetry`: OpenTelemetry integration with OTLP/gRPC and stdout exporters
+- `deepnova-tui`: Terminal UI with ratatui — split-pane, streaming, color-coded output
+- `deepnova-serve`: HTTP server with axum — SSE streaming, OpenAI-compatible `/v1/chat` endpoint
+- `deepnova-skills`: Skill system — load markdown + YAML frontmatter from `.deepnova/skills/`
+- `deepnova-telemetry`: OpenTelemetry integration with OTLP/gRPC and stdout exporters
 
 #### Tooling
 - CI/CD: GitHub Actions with 6 jobs (check, clippy, fmt, test matrix, docs, release)

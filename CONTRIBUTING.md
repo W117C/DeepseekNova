@@ -1,10 +1,10 @@
-# Contributing to dpronix
+# Contributing to deepnova
 
 ## Setup
 
 ```bash
-git clone https://github.com/W117C/DPronix.git
-cd dpronix-rs
+git clone https://github.com/W117C/DeepNova.git
+cd deepnova-rs
 cargo build
 ```
 
@@ -36,24 +36,24 @@ Types: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`, `perf`, `ci`
 
 ```
 crates/
-├── dpronix-core/       # Foundation: types, traits, registry
-├── dpronix-agent/      # Agent loop, memory, plan mode
-├── dpronix-provider/   # LLM provider abstraction
-├── dpronix-tools/      # Built-in tools
-├── dpronix-mcp/        # MCP client
-├── dpronix-config/     # Configuration
-├── dpronix-context/    # Workspace indexing, context
-├── dpronix-permission/ # Permission gating
-├── dpronix-event/      # Event bus
-├── dpronix-runtime/    # Composition root
-├── dpronix-sandbox/    # Process sandbox
-├── dpronix-security/   # Security policy (capabilities/paths/commands/domains/limits)
-├── dpronix-checkpoint/ # File checkpoint/rollback
-├── dpronix-store/      # Session persistence
-├── dpronix-tui/        # Terminal UI
-├── dpronix-serve/      # HTTP server
-├── dpronix-skills/     # Skill system
-└── dpronix-cli/        # CLI binary
+├── deepnova-core/       # Foundation: types, traits, registry
+├── deepnova-agent/      # Agent loop, memory, plan mode
+├── deepnova-provider/   # LLM provider abstraction
+├── deepnova-tools/      # Built-in tools
+├── deepnova-mcp/        # MCP client
+├── deepnova-config/     # Configuration
+├── deepnova-context/    # Workspace indexing, context
+├── deepnova-permission/ # Permission gating
+├── deepnova-event/      # Event bus
+├── deepnova-runtime/    # Composition root
+├── deepnova-sandbox/    # Process sandbox
+├── deepnova-security/   # Security policy (capabilities/paths/commands/domains/limits)
+├── deepnova-checkpoint/ # File checkpoint/rollback
+├── deepnova-store/      # Session persistence
+├── deepnova-tui/        # Terminal UI
+├── deepnova-serve/      # HTTP server
+├── deepnova-skills/     # Skill system
+└── deepnova-cli/        # CLI binary
 ```
 
 ## Testing
@@ -62,7 +62,7 @@ crates/
 - **Integration tests**: `crates/<crate>/tests/` directories
 - **Run all tests**: `cargo test --all --workspace`
 - **Run specific crate tests**: `cargo test -p <crate-name>`
-- **Run benchmarks**: `cargo bench -p dpronix-core`
+- **Run benchmarks**: `cargo bench -p deepnova-core`
 
 ## Code Style
 

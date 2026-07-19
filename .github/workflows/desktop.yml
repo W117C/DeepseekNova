@@ -31,15 +31,15 @@ jobs:
           node-version: 22
 
       - name: Install frontend deps
-        working-directory: crates/dpronix-desktop/frontend
+        working-directory: crates/deepnova-desktop/frontend
         run: npm ci
 
       - name: TypeScript check
-        working-directory: crates/dpronix-desktop/frontend
+        working-directory: crates/deepnova-desktop/frontend
         run: npx tsc --noEmit
 
       - name: Build frontend
-        working-directory: crates/dpronix-desktop/frontend
+        working-directory: crates/deepnova-desktop/frontend
         run: npm run build
 
       - uses: dtolnay/rust-toolchain@stable
@@ -47,4 +47,4 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Rust check (compile verify, no link)
-        run: cargo check -p dpronix-desktop
+        run: cargo check -p deepnova-desktop

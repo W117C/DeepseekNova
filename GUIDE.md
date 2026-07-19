@@ -1,4 +1,4 @@
-# dpronix User Guide
+# deepnova User Guide
 
 ## Table of Contents
 
@@ -17,7 +17,7 @@
 
 ## Concepts
 
-dpronix is built around a few core abstractions:
+deepnova is built around a few core abstractions:
 
 ### Runner
 
@@ -65,22 +65,22 @@ When the context approaches token limits, older messages are summarized to make 
 ### Build from Source
 
 ```bash
-git clone https://github.com/W117C/DPronix.git
-cd dpronix-rs
+git clone https://github.com/W117C/DeepNova.git
+cd deepnova-rs
 cargo build --release
 ```
 
-The binary is at `target/release/dpronix`.
+The binary is at `target/release/deepnova`.
 
 ### Initialize a Project
 
 ```bash
-dpronix init
+deepnova init
 ```
 
-This creates a `.dpronix/` directory with:
+This creates a `.deepnova/` directory with:
 ```
-.dpronix/
+.deepnova/
 ├── config.toml        # Project configuration
 ├── skills/            # Custom skills (markdown + frontmatter)
 ├── commands/          # Custom slash commands
@@ -90,7 +90,7 @@ This creates a `.dpronix/` directory with:
 ### Setup Wizard
 
 ```bash
-dpronix setup
+deepnova setup
 ```
 
 Walks through provider selection, API key configuration, and tool preferences.
@@ -100,14 +100,14 @@ Walks through provider selection, API key configuration, and tool preferences.
 Configuration is merged from multiple sources (last wins):
 
 1. **Built-in defaults**
-2. **User config**: `~/.config/dpronix/config.toml`
-3. **Project config**: `.dpronix/config.toml`
+2. **User config**: `~/.config/deepnova/config.toml`
+3. **Project config**: `.deepnova/config.toml`
 4. **Environment variables**: `DPRONIX_PROVIDER_MODEL`, `DPRONIX_MAX_STEPS`, etc.
 
 ### Full Configuration Reference
 
 ```toml
-# .dpronix/config.toml
+# .deepnova/config.toml
 
 [default_provider]
 kind = "openai"                    # openai | anthropic | ollama
@@ -202,7 +202,7 @@ servers = [
 ## Skills
 
 Skills are reusable prompt templates that extend the agent's capabilities. They live in
-`.dpronix/skills/` as markdown files.
+`.deepnova/skills/` as markdown files.
 
 ### File Format
 
@@ -222,7 +222,7 @@ Detailed instructions for how the agent should behave when this skill is active.
 
 ### Built-in Skills
 
-Place skill files in `.dpronix/skills/`. The agent discovers them automatically on startup.
+Place skill files in `.deepnova/skills/`. The agent discovers them automatically on startup.
 When activated, the skill's system prompt is injected into the conversation.
 
 ### Example: Code Reviewer
@@ -260,7 +260,7 @@ Check for:
 Start the server:
 
 ```bash
-dpronix serve --port 3000 --host 127.0.0.1
+deepnova serve --port 3000 --host 127.0.0.1
 ```
 
 ### Endpoints
@@ -334,7 +334,7 @@ while (true) {
 Launch the interactive terminal UI:
 
 ```bash
-dpronix chat
+deepnova chat
 ```
 
 ### Layout
@@ -364,7 +364,7 @@ dpronix chat
 
 ## MCP Integration
 
-dpronix can connect to MCP (Model Context Protocol) servers for additional tools.
+deepnova can connect to MCP (Model Context Protocol) servers for additional tools.
 
 ### Configuration
 
@@ -388,7 +388,7 @@ Plan mode separates thinking from doing:
 
 ```bash
 # Enable plan mode
-dpronix run --plan "Refactor the auth module to use JWT"
+deepnova run --plan "Refactor the auth module to use JWT"
 ```
 
 ### Execution Graph Nodes
@@ -408,7 +408,7 @@ dpronix run --plan "Refactor the auth module to use JWT"
 For complex tasks, the agent can delegate to sub-agents with isolated contexts:
 
 ```bash
-dpronix run "Audit the entire codebase for security issues"
+deepnova run "Audit the entire codebase for security issues"
 ```
 
 The coordinator agent spawns sub-agents for independent work (e.g., one per module) and

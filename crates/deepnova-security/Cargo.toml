@@ -1,0 +1,17 @@
+[package]
+name = "deepnova-security"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Capability-based access control, path confinement, allow-lists, resource limits, and audit logging."
+readme = "README.md"
+documentation = "https://docs.rs/deepnova-security/0.3.0"
+
+[dependencies]
+anyhow = { workspace = true }
+tracing = { workspace = true }
+deepnova-core = { version = "0.3.0", path = "../deepnova-core" }
+
+[dev-dependencies]
+tempfile = { workspace = true }

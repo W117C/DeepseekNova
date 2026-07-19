@@ -1,4 +1,4 @@
-# AGENTS.md — DPronix 项目 Agent 指令
+# AGENTS.md — DeepNova 项目 Agent 指令
 
 > **本文件是项目级 Agent 工作指令。每次在此项目中工作时，必须优先遵守。**
 
@@ -26,31 +26,31 @@
 
 ## 2. 项目简介
 
-DPronix 是一个 Rust 编写的 AI Agent 框架，包含 22 个 crate。主要结构：
+DeepNova 是一个 Rust 编写的 AI Agent 框架，包含 22 个 crate。主要结构：
 
 ```
 crates/
-├── dpronix-cli/          # CLI 入口
-├── dpronix-agent/        # Agent 运行时（协调器、子代理、记忆）
-├── dpronix-core/         # 核心类型（事件、图谱、身份、规划器、前缀树、注册表、执行器、运行器、工具、插件）
-├── dpronix-config/       # 配置管理
-├── dpronix-provider/     # LLM 提供商（Anthropic、OpenAI）
-├── dpronix-tools/        # 工具集（fs、grep、shell、memory、web_fetch、todo）
-├── dpronix-mcp/          # MCP 协议客户端
-├── dpronix-context/      # 上下文管理
-├── dpronix-runtime/      # 运行时编排
-├── dpronix-permission/   # 权限系统
-├── dpronix-event/        # 事件系统
-├── dpronix-checkpoint/   # 检查点
-├── dpronix-store/        # 存储层
-├── dpronix-security/     # 安全审计、路径检查、策略
-├── dpronix-sandbox/      # 沙箱（bubblewrap、seatbelt）
-├── dpronix-skills/       # 技能加载
-├── dpronix-telemetry/    # 遥测
-├── dpronix-orch/         # 编排层（规划器、swarm、记忆）
-├── dpronix-serve/        # HTTP 服务
-├── dpronix-tui/          # TUI
-├── dpronix-desktop/      # Tauri 桌面端
+├── deepnova-cli/          # CLI 入口
+├── deepnova-agent/        # Agent 运行时（协调器、子代理、记忆）
+├── deepnova-core/         # 核心类型（事件、图谱、身份、规划器、前缀树、注册表、执行器、运行器、工具、插件）
+├── deepnova-config/       # 配置管理
+├── deepnova-provider/     # LLM 提供商（Anthropic、OpenAI）
+├── deepnova-tools/        # 工具集（fs、grep、shell、memory、web_fetch、todo）
+├── deepnova-mcp/          # MCP 协议客户端
+├── deepnova-context/      # 上下文管理
+├── deepnova-runtime/      # 运行时编排
+├── deepnova-permission/   # 权限系统
+├── deepnova-event/        # 事件系统
+├── deepnova-checkpoint/   # 检查点
+├── deepnova-store/        # 存储层
+├── deepnova-security/     # 安全审计、路径检查、策略
+├── deepnova-sandbox/      # 沙箱（bubblewrap、seatbelt）
+├── deepnova-skills/       # 技能加载
+├── deepnova-telemetry/    # 遥测
+├── deepnova-orch/         # 编排层（规划器、swarm、记忆）
+├── deepnova-serve/        # HTTP 服务
+├── deepnova-tui/          # TUI
+├── deepnova-desktop/      # Tauri 桌面端
 ```
 
 ---

@@ -1,0 +1,32 @@
+[package]
+name = "deepnova-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "13+ built-in agent tools: file I/O, glob, grep, shell, web fetch, task management, and MCP bridging."
+readme = "README.md"
+documentation = "https://docs.rs/deepnova-tools/0.3.0"
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+reqwest = { workspace = true }
+chrono = { workspace = true }
+glob = { workspace = true }
+regex = { workspace = true }
+url = { workspace = true }
+deepnova-core = { version = "0.3.0", path = "../deepnova-core" }
+deepnova-sandbox = { version = "0.3.0", path = "../deepnova-sandbox" }
+deepnova-checkpoint = { version = "0.3.0", path = "../deepnova-checkpoint" }
+deepnova-security = { version = "0.3.0", path = "../deepnova-security" }
+sha2 = { workspace = true }
+hex = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }

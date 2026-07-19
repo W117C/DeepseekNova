@@ -1,12 +1,12 @@
-# ── Cargo aliases for DPronix development ────────────────────────
+# ── Cargo aliases for DeepNova development ────────────────────────
 #
 # Usage: cargo <alias>   (e.g. `cargo check-all`)
 
 [alias]
-check-all   = "check --workspace --exclude dpronix-desktop --all-targets"
-test-all    = "test --workspace --exclude dpronix-desktop"
-clippy-all  = "clippy --workspace --exclude dpronix-desktop --all-targets -- -D warnings"
-doc-all     = "doc --workspace --exclude dpronix-desktop --no-deps --document-private-items"
-quickstart  = "run --example quickstart -p dpronix-cli"
+check-all   = "check --workspace --exclude deepnova-desktop --all-targets"
+test-all    = "test --workspace --exclude deepnova-desktop"
+clippy-all  = "clippy --workspace --exclude deepnova-desktop --all-targets -- -D warnings"
+doc-all     = "doc --workspace --exclude deepnova-desktop --no-deps --document-private-items"
+quickstart  = "run --example quickstart -p deepnova-cli"
 audit       = "deny --all-features check"
-coverage    = "llvm-cov --workspace --exclude dpronix-desktop"
+coverage    = "llvm-cov --workspace --exclude deepnova-desktop"

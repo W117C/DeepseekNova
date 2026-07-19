@@ -1,11 +1,11 @@
-# DPronix — DeepSeek-V4 原生 AI 编码代理框架
+# DeepNova — DeepSeek-V4 原生 AI 编码代理框架
 
-[![CI](https://github.com/W117C/DPronix/actions/workflows/ci.yml/badge.svg)](https://github.com/W117C/DPronix/actions/workflows/ci.yml)
+[![CI](https://github.com/W117C/DeepNova/actions/workflows/ci.yml/badge.svg)](https://github.com/W117C/DeepNova/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
 
-**DPronix**（原名 dpronix-rs）是一个深度适配 **DeepSeek-V4** 的模块化 AI 编码代理框架，支持思考模式、上下文缓存、工具调用和多 Agent 编排。提供 CLI、TUI、HTTP API 和 **Tauri 桌面端**四种交互方式。
+**DeepNova**（原名 deepnova-rs）是一个深度适配 **DeepSeek-V4** 的模块化 AI 编码代理框架，支持思考模式、上下文缓存、工具调用和多 Agent 编排。提供 CLI、TUI、HTTP API 和 **Tauri 桌面端**四种交互方式。
 
-> 从 esengine/DeepSeek-DPronix、deepcode-cli、Ruflo、ECC 等顶级项目吸取设计，围绕 DeepSeek 的 prefix cache 和 thinking mode 深度优化。
+> 从 esengine/DeepSeek-DeepNova、deepcode-cli、Ruflo、ECC 等顶级项目吸取设计，围绕 DeepSeek 的 prefix cache 和 thinking mode 深度优化。
 
 ## 系统编译依赖 (Linux)
 
@@ -39,21 +39,21 @@ sudo apt install -y \
 ## 架构
 
 ```
-                         dpronix-cli (binary)
+                         deepnova-cli (binary)
                               │
          ┌────────────────────┼────────────────────┐
          ▼                    ▼                    ▼
-  dpronix-runtime    dpronix-agent       dpronix-provider
+  deepnova-runtime    deepnova-agent       deepnova-provider
   (composition root)  (Runner impl)        (Provider trait)
          │                    │                    │
          └────────────────────┼────────────────────┘
                               │
-                       dpronix-core (foundation)
+                       deepnova-core (foundation)
            types / graph / runner / tool / registry
                               │
     ┌─────────┬─────────┬─────┼─────┬─────────┬─────────┬──────────┐
     ▼         ▼         ▼     │     ▼         ▼         ▼          ▼
-dpronix-  dpronix-  dpronix-│ dpronix-  dpronix-  dpronix-  dpronix-
+deepnova-  deepnova-  deepnova-│ deepnova-  deepnova-  deepnova-  deepnova-
 config     event      permission│ context    tools      mcp        orch (★)
                                                                     │
                                                    ┌────────────────┤
@@ -66,26 +66,26 @@ config     event      permission│ context    tools      mcp        orch (★)
 
 | Crate | 描述 |
 |---|---|
-| `dpronix-core` | 核心类型系统：Runner、Tool、ExecutionGraph、RegistryHub、Plugin |
-| `dpronix-agent` | Agent 循环、工具执行、记忆压缩、规划模式、子 Agent |
-| `dpronix-provider` | LLM Provider：OpenAI（SSE + thinking mode）、Anthropic |
-| `dpronix-tools` | 13 内置工具 + **Snippet 系统**（read→snippet_id→edit） |
-| `dpronix-orch` ★ | 编排层：**GOAP 规划器**、**Swarm 协调器**、**向量记忆** |
-| `dpronix-desktop` ★ | **Tauri 2.x 桌面端**（React/TS + Rust 后端） |
-| `dpronix-mcp` | MCP 客户端 |
-| `dpronix-config` | TOML 分层配置 |
-| `dpronix-context` | 工作区索引、项目记忆 |
-| `dpronix-permission` | 权限门控（allow/ask/deny） |
-| `dpronix-event` | 事件总线 |
-| `dpronix-runtime` | 组合根 |
-| `dpronix-sandbox` | 进程沙箱（macOS/Linux） |
-| `dpronix-checkpoint` | 文件检查点/回滚 |
-| `dpronix-store` | JSONL 会话持久化 |
-| `dpronix-tui` | ratatui 终端 UI |
-| `dpronix-serve` | axum HTTP/SSE 服务器 |
-| `dpronix-skills` | Skills 系统（Markdown + YAML） |
-| `dpronix-cli` | CLI 二进制 |
-| `dpronix-telemetry` | OpenTelemetry |
+| `deepnova-core` | 核心类型系统：Runner、Tool、ExecutionGraph、RegistryHub、Plugin |
+| `deepnova-agent` | Agent 循环、工具执行、记忆压缩、规划模式、子 Agent |
+| `deepnova-provider` | LLM Provider：OpenAI（SSE + thinking mode）、Anthropic |
+| `deepnova-tools` | 13 内置工具 + **Snippet 系统**（read→snippet_id→edit） |
+| `deepnova-orch` ★ | 编排层：**GOAP 规划器**、**Swarm 协调器**、**向量记忆** |
+| `deepnova-desktop` ★ | **Tauri 2.x 桌面端**（React/TS + Rust 后端） |
+| `deepnova-mcp` | MCP 客户端 |
+| `deepnova-config` | TOML 分层配置 |
+| `deepnova-context` | 工作区索引、项目记忆 |
+| `deepnova-permission` | 权限门控（allow/ask/deny） |
+| `deepnova-event` | 事件总线 |
+| `deepnova-runtime` | 组合根 |
+| `deepnova-sandbox` | 进程沙箱（macOS/Linux） |
+| `deepnova-checkpoint` | 文件检查点/回滚 |
+| `deepnova-store` | JSONL 会话持久化 |
+| `deepnova-tui` | ratatui 终端 UI |
+| `deepnova-serve` | axum HTTP/SSE 服务器 |
+| `deepnova-skills` | Skills 系统（Markdown + YAML） |
+| `deepnova-cli` | CLI 二进制 |
+| `deepnova-telemetry` | OpenTelemetry |
 
 ## 快速开始
 
@@ -97,8 +97,8 @@ config     event      permission│ context    tools      mcp        orch (★)
 ### 安装
 
 ```bash
-git clone https://github.com/W117C/DPronix.git
-cd dpronix-rs
+git clone https://github.com/W117C/DeepNova.git
+cd deepnova-rs
 cargo build --release
 ```
 
@@ -125,7 +125,7 @@ cargo run -- serve --port 3000
 ### 桌面端
 
 ```bash
-cd crates/dpronix-desktop
+cd crates/deepnova-desktop
 
 # 安装前端依赖
 cd frontend && npm install && cd ..
@@ -137,7 +137,7 @@ cargo run
 ### 配置
 
 ```toml
-# dpronix.toml
+# deepnova.toml
 [[providers]]
 name = "deepseek-flash"
 kind = "openai"
@@ -168,29 +168,29 @@ compaction_threshold_tokens = 32000
 ```
 .
 ├── Cargo.toml                    # Workspace 根
-├── dpronix.toml                 # 项目配置
+├── deepnova.toml                 # 项目配置
 ├── crates/
-│   ├── dpronix-core/            # 核心类型、Runner/Tool/Plugin traits
-│   ├── dpronix-agent/           # Agent 循环 + 工具执行
-│   ├── dpronix-provider/        # OpenAI/Anthropic Provider
-│   ├── dpronix-tools/           # 13 内置工具 + Snippet 系统
-│   ├── dpronix-orch/ ★          # GOAP Planner + Swarm + Vector Memory
-│   ├── dpronix-desktop/ ★       # Tauri 桌面端
-│   ├── dpronix-cli/             # CLI 二进制
-│   ├── dpronix-mcp/             # MCP 客户端
-│   ├── dpronix-config/          # 配置加载
-│   ├── dpronix-context/         # 上下文管理
-│   ├── dpronix-permission/      # 权限系统
-│   ├── dpronix-event/           # 事件总线
-│   ├── dpronix-runtime/         # 组合根
-│   ├── dpronix-sandbox/         # 沙箱
-│   ├── dpronix-security/        # 安全策略（能力/路径/命令/域名/资源限额）
-│   ├── dpronix-checkpoint/      # 检查点
-│   ├── dpronix-store/           # 会话持久化
-│   ├── dpronix-tui/             # TUI
-│   ├── dpronix-serve/           # HTTP 服务器
-│   ├── dpronix-skills/          # Skills
-│   └── dpronix-telemetry/       # 遥测
+│   ├── deepnova-core/            # 核心类型、Runner/Tool/Plugin traits
+│   ├── deepnova-agent/           # Agent 循环 + 工具执行
+│   ├── deepnova-provider/        # OpenAI/Anthropic Provider
+│   ├── deepnova-tools/           # 13 内置工具 + Snippet 系统
+│   ├── deepnova-orch/ ★          # GOAP Planner + Swarm + Vector Memory
+│   ├── deepnova-desktop/ ★       # Tauri 桌面端
+│   ├── deepnova-cli/             # CLI 二进制
+│   ├── deepnova-mcp/             # MCP 客户端
+│   ├── deepnova-config/          # 配置加载
+│   ├── deepnova-context/         # 上下文管理
+│   ├── deepnova-permission/      # 权限系统
+│   ├── deepnova-event/           # 事件总线
+│   ├── deepnova-runtime/         # 组合根
+│   ├── deepnova-sandbox/         # 沙箱
+│   ├── deepnova-security/        # 安全策略（能力/路径/命令/域名/资源限额）
+│   ├── deepnova-checkpoint/      # 检查点
+│   ├── deepnova-store/           # 会话持久化
+│   ├── deepnova-tui/             # TUI
+│   ├── deepnova-serve/           # HTTP 服务器
+│   ├── deepnova-skills/          # Skills
+│   └── deepnova-telemetry/       # 遥测
 ├── .github/workflows/            # CI/CD
 └── GUIDE.md                      # 用户指南
 ```
@@ -220,7 +220,7 @@ Licensed under either of [Apache License 2.0](LICENSE-APACHE) or [MIT License](L
 
 ## 安全
 
-dpronix 在 agent / coordinator 每一个工具执行点上，通过 [dpronix-security](crates/dpronix-security) 注入可配置的安全策略。策略通过 `dpronix.toml` 或 `~/.dpronix/config.toml` 的 `[security]` 段配置，启动时由 [dpronix-runtime](crates/dpronix-runtime) 组装成 [`SecurityContext`]，并注入每个 `ToolContext` 的 extensions。
+deepnova 在 agent / coordinator 每一个工具执行点上，通过 [deepnova-security](crates/deepnova-security) 注入可配置的安全策略。策略通过 `deepnova.toml` 或 `~/.deepnova/config.toml` 的 `[security]` 段配置，启动时由 [deepnova-runtime](crates/deepnova-runtime) 组装成 [`SecurityContext`]，并注入每个 `ToolContext` 的 extensions。
 
 ### 默认策略（开箱即用）
 
@@ -234,7 +234,7 @@ dpronix 在 agent / coordinator 每一个工具执行点上，通过 [dpronix-se
 ### 配置示例
 
 ```toml
-# ~/.dpronix/config.toml  或  ./dpronix.toml
+# ~/.deepnova/config.toml  或  ./deepnova.toml
 [security]
 disabled_capabilities = ["command_execute", "network_access"]
 allowed_paths  = ["/data/build"]
@@ -251,6 +251,6 @@ max_output_bytes        = 10485760     # 10 MB
 max_tool_calls          = 50
 ```
 
-`SecurityContext` 由 [dpronix-runtime](crates/dpronix-runtime) 运行时构建；`disabled_capabilities` 从全能力集合里移除；`allowed_paths` 自动预置工作区根（首条）；`denied_paths` 优先于全部 allow 规则。审计日志通过 `TracingAuditLogger` 输出到 tracing substrate。
+`SecurityContext` 由 [deepnova-runtime](crates/deepnova-runtime) 运行时构建；`disabled_capabilities` 从全能力集合里移除；`allowed_paths` 自动预置工作区根（首条）；`denied_paths` 优先于全部 allow 规则。审计日志通过 `TracingAuditLogger` 输出到 tracing substrate。
 
-[`SecurityContext`]: crates/dpronix-security/src/context.rs
+[`SecurityContext`]: crates/deepnova-security/src/context.rs

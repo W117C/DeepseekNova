@@ -1,0 +1,39 @@
+[package]
+name = "deepnova-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Native desktop app for deepnova built with Tauri 2.x: Rust backend + React/TypeScript frontend."
+readme = "README.md"
+documentation = "https://docs.rs/deepnova-desktop/0.3.0"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-shell = "2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+deepnova-core = { version = "0.3.0", path = "../deepnova-core" }
+deepnova-agent = { version = "0.3.0", path = "../deepnova-agent" }
+deepnova-config = { version = "0.3.0", path = "../deepnova-config" }
+deepnova-provider = { version = "0.3.0", path = "../deepnova-provider" }
+deepnova-tools = { version = "0.3.0", path = "../deepnova-tools" }
+deepnova-runtime = { version = "0.3.0", path = "../deepnova-runtime" }
+deepnova-store = { version = "0.3.0", path = "../deepnova-store" }
+deepnova-skills = { version = "0.3.0", path = "../deepnova-skills" }
+deepnova-event = { version = "0.3.0", path = "../deepnova-event" }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

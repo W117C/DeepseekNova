@@ -1,0 +1,21 @@
+[package]
+name = "deepnova-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+documentation = "https://docs.rs/deepnova-tui/0.3.0"
+description = "ratatui-based interactive terminal UI for deepnova"
+
+[dependencies]
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tracing = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+deepnova-core = { version = "0.3.0", path = "../deepnova-core" }
+
+[dev-dependencies]
+async-trait = { workspace = true }

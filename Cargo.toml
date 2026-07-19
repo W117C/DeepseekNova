@@ -1,49 +1,49 @@
 [workspace]
 members = [
-    "crates/dpronix-cli",
-    "crates/dpronix-config",
-    "crates/dpronix-provider",
-    "crates/dpronix-agent",
-    "crates/dpronix-tools",
-    "crates/dpronix-core",
-    "crates/dpronix-mcp",
-    "crates/dpronix-event",
-    "crates/dpronix-permission",
-    "crates/dpronix-context",
-    "crates/dpronix-runtime",
-    "crates/dpronix-sandbox",
-    "crates/dpronix-checkpoint",
-    "crates/dpronix-store",
-    "crates/dpronix-tui",
-    "crates/dpronix-serve",
-    "crates/dpronix-skills",
-    "crates/dpronix-telemetry",
-    "crates/dpronix-desktop",
-    "crates/dpronix-orch",
-    "crates/dpronix-security",
+    "crates/deepnova-cli",
+    "crates/deepnova-config",
+    "crates/deepnova-provider",
+    "crates/deepnova-agent",
+    "crates/deepnova-tools",
+    "crates/deepnova-core",
+    "crates/deepnova-mcp",
+    "crates/deepnova-event",
+    "crates/deepnova-permission",
+    "crates/deepnova-context",
+    "crates/deepnova-runtime",
+    "crates/deepnova-sandbox",
+    "crates/deepnova-checkpoint",
+    "crates/deepnova-store",
+    "crates/deepnova-tui",
+    "crates/deepnova-serve",
+    "crates/deepnova-skills",
+    "crates/deepnova-telemetry",
+    "crates/deepnova-desktop",
+    "crates/deepnova-orch",
+    "crates/deepnova-security",
 ]
 resolver = "2"
 default-members = [
-    "crates/dpronix-cli",
-    "crates/dpronix-config",
-    "crates/dpronix-provider",
-    "crates/dpronix-agent",
-    "crates/dpronix-tools",
-    "crates/dpronix-core",
-    "crates/dpronix-mcp",
-    "crates/dpronix-event",
-    "crates/dpronix-permission",
-    "crates/dpronix-context",
-    "crates/dpronix-runtime",
-    "crates/dpronix-sandbox",
-    "crates/dpronix-checkpoint",
-    "crates/dpronix-store",
-    "crates/dpronix-tui",
-    "crates/dpronix-serve",
-    "crates/dpronix-skills",
-    "crates/dpronix-telemetry",
-    "crates/dpronix-orch",
-    "crates/dpronix-security",
+    "crates/deepnova-cli",
+    "crates/deepnova-config",
+    "crates/deepnova-provider",
+    "crates/deepnova-agent",
+    "crates/deepnova-tools",
+    "crates/deepnova-core",
+    "crates/deepnova-mcp",
+    "crates/deepnova-event",
+    "crates/deepnova-permission",
+    "crates/deepnova-context",
+    "crates/deepnova-runtime",
+    "crates/deepnova-sandbox",
+    "crates/deepnova-checkpoint",
+    "crates/deepnova-store",
+    "crates/deepnova-tui",
+    "crates/deepnova-serve",
+    "crates/deepnova-skills",
+    "crates/deepnova-telemetry",
+    "crates/deepnova-orch",
+    "crates/deepnova-security",
 ]
 
 [workspace.lints.rust]
@@ -54,7 +54,7 @@ rustdoc_invalid_codeblock_attributes = "deny"
 version = "0.3.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/W117C/DPronix"
+repository = "https://github.com/W117C/DeepNova"
 
 [workspace.dependencies]
 anyhow = "1.0"
@@ -120,7 +120,7 @@ targets = [
     "x86_64-pc-windows-msvc",
 ]
 # The primary binary
-app-name = "dpronix-cli"
+app-name = "deepnova-cli"
 # Installer configurations
 installer = ["shell", "powershell", "npm"]
 # MSI not needed; npm covers the widest audience

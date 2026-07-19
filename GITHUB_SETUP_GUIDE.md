@@ -1,6 +1,6 @@
 # GitHub 仓库设置指引
 
-> 本指引用于在 [github.com/W117C/DPronix](https://github.com/W117C/DPronix) 上配置分支保护、Secrets 等安全设置。
+> 本指引用于在 [github.com/W117C/DeepNova](https://github.com/W117C/DeepNova) 上配置分支保护、Secrets 等安全设置。
 > 由于当前环境无 `gh` CLI，请通过 Web UI 操作。
 
 ---
@@ -10,7 +10,7 @@
 浏览器打开以下链接，GitHub 会自动识别分支并提示创建 PR：
 
 ```
-https://github.com/W117C/DPronix/compare/main...fix/ci-clippy-warnings
+https://github.com/W117C/DeepNova/compare/main...fix/ci-clippy-warnings
 ```
 
 或访问仓库页面 → **Pull requests** → **New pull request** → 选择 `fix/ci-clippy-warnings` → `main`。
@@ -24,19 +24,19 @@ feat(security): inject configurable security policy into tool execution
 ```markdown
 ## Summary
 - Fixes blocking bug: production `ToolContext` creation now injects `SecurityContext` + `workspace_root`, resolving the "SecurityContext extension not found" crash
-- Adds configurable `[security]` section to `dpronix.toml` (capabilities, paths, commands, domains, resource limits)
-- Adds `dpronix-security` crate with capability-based access control, path confinement, command/domain restrictions, resource limits, and audit logging
+- Adds configurable `[security]` section to `deepnova.toml` (capabilities, paths, commands, domains, resource limits)
+- Adds `deepnova-security` crate with capability-based access control, path confinement, command/domain restrictions, resource limits, and audit logging
 - Adds 5 new security regression tests (total ~253 tests workspace-wide)
 - Syncs docs: README Security section, CHANGELOG [0.3.0], SECURITY.md, CODEOWNERS
 
 ## Verification
-- [x] `cargo clippy --workspace --exclude dpronix-desktop --all-targets -- -D warnings` → 0 warnings
-- [x] `cargo test --workspace --exclude dpronix-desktop` → ~253 tests, 0 failures
+- [x] `cargo clippy --workspace --exclude deepnova-desktop --all-targets -- -D warnings` → 0 warnings
+- [x] `cargo test --workspace --exclude deepnova-desktop` → ~253 tests, 0 failures
 - [x] `cargo fmt --all -- --check` → clean
 
 ## Test plan
 - [ ] Review security policy defaults match deployment expectations
-- [ ] Verify `[security]` config section parses correctly in `dpronix.toml`
+- [ ] Verify `[security]` config section parses correctly in `deepnova.toml`
 - [ ] Confirm `build_security_context()` correctly assembles `SecurityContext` from config
 - [ ] Check audit logging output via `TracingAuditLogger`
 ```
@@ -61,7 +61,7 @@ feat(security): inject configurable security policy into tool execution
 | Restrict who can push to matching branches | 可选 | 限制直接推送 |
 
 **操作步骤**：
-1. 打开 https://github.com/W117C/DPronix/settings/branches
+1. 打开 https://github.com/W117C/DeepNova/settings/branches
 2. 点击 **Add rule**
 3. Branch name pattern 填 `main`
 4. 勾选上述选项
@@ -80,7 +80,7 @@ feat(security): inject configurable security policy into tool execution
 | `DOCKERHUB_TOKEN` | Docker Hub 访问 token | 仅容器化部署时需要 |
 
 **操作步骤**：
-1. 打开 https://github.com/W117C/DPronix/settings/secrets/actions
+1. 打开 https://github.com/W117C/DeepNova/settings/secrets/actions
 2. 点击 **New repository secret**
 3. 填写 Name 和 Secret
 4. 点击 **Add secret**
@@ -96,7 +96,7 @@ feat(security): inject configurable security policy into tool execution
 - `staging`：预发布环境
 
 **操作步骤**：
-1. 打开 https://github.com/W117C/DPronix/settings/environments
+1. 打开 https://github.com/W117C/DeepNova/settings/environments
 2. 点击 **New environment**
 3. 填写名称（如 `production`）
 4. 配置 protection rules（required reviewers、wait timer 等）
@@ -160,9 +160,9 @@ feat(security): inject configurable security policy into tool execution
 
 | 页面 | 链接 |
 |---|---|
-| 创建 PR | https://github.com/W117C/DPronix/compare/main...fix/ci-clippy-warnings |
-| 分支保护 | https://github.com/W117C/DPronix/settings/branches |
-| Secrets | https://github.com/W117C/DPronix/settings/secrets/actions |
-| Environments | https://github.com/W117C/DPronix/settings/environments |
-| Security | https://github.com/W117C/DPronix/settings/security |
-| Actions | https://github.com/W117C/DPronix/settings/actions |
+| 创建 PR | https://github.com/W117C/DeepNova/compare/main...fix/ci-clippy-warnings |
+| 分支保护 | https://github.com/W117C/DeepNova/settings/branches |
+| Secrets | https://github.com/W117C/DeepNova/settings/secrets/actions |
+| Environments | https://github.com/W117C/DeepNova/settings/environments |
+| Security | https://github.com/W117C/DeepNova/settings/security |
+| Actions | https://github.com/W117C/DeepNova/settings/actions |

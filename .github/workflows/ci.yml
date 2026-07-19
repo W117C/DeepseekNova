@@ -23,7 +23,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check --all-targets --workspace --exclude dpronix-desktop
+      - run: cargo check --all-targets --workspace --exclude deepnova-desktop
 
   # ── Clippy ────────────────────────────────────────────────────
   clippy:
@@ -35,7 +35,7 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --all-targets --workspace --exclude dpronix-desktop -- -D warnings
+      - run: cargo clippy --all-targets --workspace --exclude deepnova-desktop -- -D warnings
 
   # ── Format ────────────────────────────────────────────────────
   fmt:
@@ -59,7 +59,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --all --workspace --exclude dpronix-desktop
+      - run: cargo test --all --workspace --exclude deepnova-desktop
 
   # ── Coverage (Linux only) ────────────────────────────────────
   coverage:
@@ -76,7 +76,7 @@ jobs:
         with:
           tool: cargo-llvm-cov
       - name: Generate coverage report
-        run: cargo llvm-cov --workspace --exclude dpronix-desktop --lcov --output-path lcov.info
+        run: cargo llvm-cov --workspace --exclude deepnova-desktop --lcov --output-path lcov.info
       - name: Upload coverage to artifact
         uses: actions/upload-artifact@v4
         with:
@@ -92,7 +92,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo bench --workspace --exclude dpronix-desktop
+      - run: cargo bench --workspace --exclude deepnova-desktop
 
   # ── Docs ──────────────────────────────────────────────────────
   docs:
@@ -102,7 +102,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo doc --no-deps --workspace --exclude dpronix-desktop --document-private-items
+      - run: cargo doc --no-deps --workspace --exclude deepnova-desktop --document-private-items
         env:
           RUSTDOCFLAGS: -D warnings
 
@@ -126,9 +126,9 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release --target ${{ matrix.target }} -p dpronix-cli
+      - run: cargo build --release --target ${{ matrix.target }} -p deepnova-cli
       - uses: actions/upload-artifact@v4
         with:
-          name: dpronix-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/dpronix-cli*
+          name: deepnova-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/deepnova-cli*
           if-no-files-found: error

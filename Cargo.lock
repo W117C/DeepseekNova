@@ -1062,6 +1062,373 @@ dependencies = [
 ]
 
 [[package]]
+name = "deepnova-agent"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "deepnova-context",
+ "deepnova-core",
+ "deepnova-provider",
+ "deepnova-security",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "deepnova-checkpoint"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "deepnova-core",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tracing",
+ "walkdir",
+]
+
+[[package]]
+name = "deepnova-cli"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "deepnova-agent",
+ "deepnova-config",
+ "deepnova-core",
+ "deepnova-mcp",
+ "deepnova-orch",
+ "deepnova-provider",
+ "deepnova-runtime",
+ "deepnova-security",
+ "deepnova-serve",
+ "deepnova-skills",
+ "deepnova-tools",
+ "dirs",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "deepnova-config"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml 0.8.2",
+]
+
+[[package]]
+name = "deepnova-context"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "deepnova-core",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "deepnova-core"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "criterion",
+ "futures-core",
+ "hex",
+ "indexmap 2.14.0",
+ "rand",
+ "serde",
+ "serde_jcs",
+ "serde_json",
+ "sha2",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "deepnova-desktop"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "deepnova-agent",
+ "deepnova-config",
+ "deepnova-core",
+ "deepnova-event",
+ "deepnova-provider",
+ "deepnova-runtime",
+ "deepnova-skills",
+ "deepnova-store",
+ "deepnova-tools",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-clipboard-manager",
+ "tauri-plugin-dialog",
+ "tauri-plugin-shell",
+ "tauri-plugin-single-instance",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "deepnova-event"
+version = "0.3.0"
+dependencies = [
+ "deepnova-core",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "deepnova-mcp"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "deepnova-config",
+ "deepnova-core",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+]
+
+[[package]]
+name = "deepnova-orch"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "deepnova-agent",
+ "deepnova-config",
+ "deepnova-core",
+ "deepnova-event",
+ "deepnova-provider",
+ "deepnova-tools",
+ "rand",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "deepnova-permission"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "deepnova-config",
+ "deepnova-core",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "toml 0.8.2",
+ "tracing",
+]
+
+[[package]]
+name = "deepnova-provider"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "deepnova-config",
+ "deepnova-context",
+ "deepnova-core",
+ "futures",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+]
+
+[[package]]
+name = "deepnova-runtime"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "deepnova-agent",
+ "deepnova-config",
+ "deepnova-context",
+ "deepnova-core",
+ "deepnova-event",
+ "deepnova-permission",
+ "deepnova-provider",
+ "deepnova-security",
+ "deepnova-tools",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "deepnova-sandbox"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "deepnova-core",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "deepnova-security"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "deepnova-core",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
+name = "deepnova-serve"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum 0.8.9",
+ "deepnova-core",
+ "futures",
+ "futures-core",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tower 0.5.3",
+ "tower-http",
+ "tracing",
+]
+
+[[package]]
+name = "deepnova-skills"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "deepnova-core",
+ "serde",
+ "serde_json",
+ "serde_yml",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "walkdir",
+]
+
+[[package]]
+name = "deepnova-store"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "deepnova-core",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "deepnova-telemetry"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry-stdout",
+ "opentelemetry_sdk",
+ "tokio",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "deepnova-tools"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "deepnova-checkpoint",
+ "deepnova-core",
+ "deepnova-sandbox",
+ "deepnova-security",
+ "glob",
+ "hex",
+ "regex",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "deepnova-tui"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "crossterm",
+ "deepnova-core",
+ "ratatui",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+]
+
+[[package]]
 name = "deranged"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1196,373 +1563,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 dependencies = [
  "serde",
-]
-
-[[package]]
-name = "dpronix-agent"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "dpronix-context",
- "dpronix-core",
- "dpronix-provider",
- "dpronix-security",
- "serde",
- "serde_json",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "dpronix-checkpoint"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "chrono",
- "dpronix-core",
- "hex",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
- "tracing",
- "walkdir",
-]
-
-[[package]]
-name = "dpronix-cli"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "clap",
- "dirs",
- "dpronix-agent",
- "dpronix-config",
- "dpronix-core",
- "dpronix-mcp",
- "dpronix-orch",
- "dpronix-provider",
- "dpronix-runtime",
- "dpronix-security",
- "dpronix-serve",
- "dpronix-skills",
- "dpronix-tools",
- "serde_json",
- "tokio",
- "tokio-stream",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "dpronix-config"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "dirs",
- "serde",
- "serde_json",
- "tempfile",
- "toml 0.8.2",
-]
-
-[[package]]
-name = "dpronix-context"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "dpronix-core",
- "hex",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "dpronix-core"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "criterion",
- "futures-core",
- "hex",
- "indexmap 2.14.0",
- "rand",
- "serde",
- "serde_jcs",
- "serde_json",
- "sha2",
- "thiserror 1.0.69",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "dpronix-desktop"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "dpronix-agent",
- "dpronix-config",
- "dpronix-core",
- "dpronix-event",
- "dpronix-provider",
- "dpronix-runtime",
- "dpronix-skills",
- "dpronix-store",
- "dpronix-tools",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-clipboard-manager",
- "tauri-plugin-dialog",
- "tauri-plugin-shell",
- "tauri-plugin-single-instance",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "dpronix-event"
-version = "0.3.0"
-dependencies = [
- "dpronix-core",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "dpronix-mcp"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "dpronix-config",
- "dpronix-core",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tokio",
- "tokio-stream",
- "tracing",
-]
-
-[[package]]
-name = "dpronix-orch"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "dpronix-agent",
- "dpronix-config",
- "dpronix-core",
- "dpronix-event",
- "dpronix-provider",
- "dpronix-tools",
- "rand",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "dpronix-permission"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "dpronix-config",
- "dpronix-core",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "toml 0.8.2",
- "tracing",
-]
-
-[[package]]
-name = "dpronix-provider"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "dpronix-config",
- "dpronix-context",
- "dpronix-core",
- "futures",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tokio-stream",
- "tracing",
-]
-
-[[package]]
-name = "dpronix-runtime"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "dpronix-agent",
- "dpronix-config",
- "dpronix-context",
- "dpronix-core",
- "dpronix-event",
- "dpronix-permission",
- "dpronix-provider",
- "dpronix-security",
- "dpronix-tools",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "dpronix-sandbox"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "dpronix-core",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "dpronix-security"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "dpronix-core",
- "tempfile",
- "tracing",
-]
-
-[[package]]
-name = "dpronix-serve"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum 0.8.9",
- "dpronix-core",
- "futures",
- "futures-core",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tokio",
- "tokio-stream",
- "tower 0.5.3",
- "tower-http",
- "tracing",
-]
-
-[[package]]
-name = "dpronix-skills"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "dpronix-core",
- "serde",
- "serde_json",
- "serde_yml",
- "tempfile",
- "tokio",
- "tracing",
- "walkdir",
-]
-
-[[package]]
-name = "dpronix-store"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "chrono",
- "dpronix-core",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "dpronix-telemetry"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "opentelemetry",
- "opentelemetry-otlp",
- "opentelemetry-stdout",
- "opentelemetry_sdk",
- "tokio",
- "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "dpronix-tools"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "dpronix-checkpoint",
- "dpronix-core",
- "dpronix-sandbox",
- "dpronix-security",
- "glob",
- "hex",
- "regex",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tokio",
- "tracing",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "dpronix-tui"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "crossterm",
- "dpronix-core",
- "ratatui",
- "tokio",
- "tokio-stream",
- "tracing",
 ]
 
 [[package]]

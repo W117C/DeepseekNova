@@ -1,0 +1,32 @@
+[package]
+name = "deepnova-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CLI frontend for the deepnova agent framework with chat, plan, serve, and setup subcommands."
+readme = "README.md"
+documentation = "https://docs.rs/deepnova-cli/0.3.0"
+
+[dependencies]
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+deepnova-core = { version = "0.3.0", path = "../deepnova-core" }
+deepnova-config = { version = "0.3.0", path = "../deepnova-config" }
+deepnova-provider = { version = "0.3.0", path = "../deepnova-provider" }
+deepnova-agent = { version = "0.3.0", path = "../deepnova-agent" }
+deepnova-tools = { version = "0.3.0", path = "../deepnova-tools" }
+deepnova-runtime = { version = "0.3.0", path = "../deepnova-runtime" }
+deepnova-skills = { version = "0.3.0", path = "../deepnova-skills" }
+deepnova-serve = { version = "0.3.0", path = "../deepnova-serve" }
+dirs = { workspace = true }
+
+[dev-dependencies]
+deepnova-security = { version = "0.3.0", path = "../deepnova-security" }
+deepnova-mcp = { version = "0.3.0", path = "../deepnova-mcp" }
+deepnova-orch = { version = "0.3.0", path = "../deepnova-orch" }
+serde_json = { workspace = true }
