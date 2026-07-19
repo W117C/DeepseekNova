@@ -75,6 +75,22 @@ All notable changes to DeepseekNova will be documented in this file.
 - 提取 `Shared.tsx` (SettingRow/StatBox/Toggle) 供所有子组件复用
 - 每个设置分区独立文件，平均 50 行
 
+### 安全与隐私修复
+
+#### 数据泄露清理
+- `git rm --cached` 移除被意外追踪的 `.dpronix/desktop-topic-titles.json` 等 4 个运行时状态文件（包含用户对话主题）
+- 删除 `dpronix.toml`（旧项目名残留配置）
+- `.gitignore` 规则已覆盖 `.dpronix/*`（仅保留 `.dpronix/skills/`）
+
+#### 本机路径泄露
+- `AGENTS.md` 移除硬编码路径 `/Users/ze/.reasonix/...`（暴露本机用户名和环境结构）
+- 精简 AGENTS.md，移除仅适用于原作者本机环境的协议引用
+
+#### Mutex 中毒修复
+- `deepseeknova-core/src/memory/store.rs`: 6 处 `Mutex::lock().unwrap()` 改为 `unwrap_or_else(|e| e.into_inner())`
+- `deepseeknova-tools/src/memory.rs`: 3 处同上
+- 防止一次 panic 后 memory 存储级联崩溃
+
 ### 依赖维护
 - 关闭 12 个 Dependabot breaking change PR（opentelemetry-stdout/tracing-opentelemetry 升级导致 trait 不兼容）
 - 尝试 workspace dependencies pin 统一依赖版本，因 tonic 0.12 引入的旧版本导致编译失败已回退
@@ -112,7 +128,7 @@ All notable changes to DeepseekNova will be documented in this file.
 - `deepseeknova-runtime` 新增 3 个 build_security_context 测试（默认全能力 + 工作区根自动注入、disabled + 命令/域名/路径白名单 + denied_paths、limits.* 覆盖与默认保留）
 
 #### 文档与仓库配置
-- `.gitignore` 追加 `.reasonix/`；`README.md` 新增「安全」段与 `deepseeknova-security` crate 条目；`CONTRIBUTING.md` 追加 `deepseeknova-security`；`CHANGELOG.md` 新增 `[0.3.0]`
+- ``README.md` 新增「安全」段与 `deepseeknova-security` crate 条目；`CONTRIBUTING.md` 追加 `deepseeknova-security`；`CHANGELOG.md` 新增 `[0.3.0]`
 - 新增 `SECURITY.md`（漏洞披露与响应流程）；新增 `CODEOWNERS`
 
 ## [0.2.0] — 2026-07-12

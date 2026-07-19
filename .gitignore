@@ -11,4 +11,3 @@ node_modules/
 # but the bundled default skills under .dpronix/skills/ ship with the repo.
 .dpronix/*
 !.dpronix/skills/
-.reasonix/

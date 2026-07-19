@@ -241,7 +241,7 @@ impl Tool for RememberTool {
         }
 
         let store = store();
-        let mut guard = store.lock().unwrap();
+        let mut guard = store.lock().unwrap_or_else(|e| e.into_inner());
         let existed = guard.entries.contains_key(&parsed.key);
         guard.remember(parsed.key.clone(), parsed.value, parsed.tags);
 
@@ -297,7 +297,7 @@ impl Tool for ForgetTool {
         }
 
         let store = store();
-        let mut guard = store.lock().unwrap();
+        let mut guard = store.lock().unwrap_or_else(|e| e.into_inner());
         match guard.forget(&parsed.key) {
             Some(entry) => Ok(format!(
                 "removed memory entry '{}' (stored at {})",
@@ -366,7 +366,7 @@ impl Tool for RecallTool {
         }
 
         let store = store();
-        let guard = store.lock().unwrap();
+        let guard = store.lock().unwrap_or_else(|e| e.into_inner());
 
         let results = guard.recall(&parsed.query, parsed.top_k);
 

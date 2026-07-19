@@ -1,8 +1,4 @@
-#![allow(
-    clippy::unwrap_used,
-    clippy::needless_borrow,
-    clippy::needless_borrows_for_generic_args
-)]
+#![allow(clippy::needless_borrow, clippy::needless_borrows_for_generic_args)]
 //! # Memory Store — SQLite + FTS5 backed persistent memory
 //!
 //! Provides full-text search across all memory entries using SQLite FTS5.
@@ -129,7 +125,7 @@ impl MemoryStore {
 
     /// Store a memory entry.
     pub fn store(&self, entry: &MemoryEntry) -> Result<()> {
-        let db = self.db.lock().unwrap();
+        let db = self.db.lock().unwrap_or_else(|e| e.into_inner());
         let tags_str = entry.tags.join(" ");
         // Delete existing entry with same id first (upsert pattern)
         db.execute(
@@ -154,7 +150,7 @@ impl MemoryStore {
 
     /// Search memories by full-text query. Returns ranked results.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<MemorySearchResult>> {
-        let db = self.db.lock().unwrap();
+        let db = self.db.lock().unwrap_or_else(|e| e.into_inner());
 
         // Build FTS5 MATCH query — split into tokens and join with OR for broad matching
         let tokens: Vec<String> = query
@@ -228,7 +224,7 @@ impl MemoryStore {
         category: MemoryCategory,
         limit: usize,
     ) -> Result<Vec<MemorySearchResult>> {
-        let db = self.db.lock().unwrap();
+        let db = self.db.lock().unwrap_or_else(|e| e.into_inner());
         let tokens: Vec<String> = query
             .split_whitespace()
             .filter(|t| !t.is_empty())
@@ -292,7 +288,7 @@ impl MemoryStore {
 
     /// Delete a memory by ID.
     pub fn delete(&self, id: &str) -> Result<bool> {
-        let db = self.db.lock().unwrap();
+        let db = self.db.lock().unwrap_or_else(|e| e.into_inner());
         let rows = db.execute(
             "DELETE FROM memory_fts WHERE id = ?1",
             rusqlite::params![id],
@@ -302,7 +298,7 @@ impl MemoryStore {
 
     /// Get all memories in a category.
     pub fn list_category(&self, category: MemoryCategory) -> Result<Vec<MemoryEntry>> {
-        let db = self.db.lock().unwrap();
+        let db = self.db.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = db.prepare(
             "SELECT id, content, tags, category, source, created_at, importance
              FROM memory_fts
@@ -347,7 +343,7 @@ impl MemoryStore {
 
     /// Count total memories.
     pub fn count(&self) -> Result<usize> {
-        let db = self.db.lock().unwrap();
+        let db = self.db.lock().unwrap_or_else(|e| e.into_inner());
         let count: i64 = db.query_row("SELECT COUNT(*) FROM memory_fts", [], |row| row.get(0))?;
         Ok(count as usize)
     }

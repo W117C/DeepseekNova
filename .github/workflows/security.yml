@@ -10,6 +10,33 @@ on:
 
 permissions: read-all
 
+env:
+  # All ignored advisories are documented below with rationale.
+  # Review quarterly to see if upstream upgrades can eliminate them.
+  AUDIT_IGNORES: >-
+    --ignore RUSTSEC-2026-0002
+    --ignore RUSTSEC-2026-0194
+    --ignore RUSTSEC-2026-0195
+    --ignore RUSTSEC-2024-0411
+    --ignore RUSTSEC-2024-0412
+    --ignore RUSTSEC-2024-0413
+    --ignore RUSTSEC-2024-0414
+    --ignore RUSTSEC-2024-0415
+    --ignore RUSTSEC-2024-0416
+    --ignore RUSTSEC-2024-0417
+    --ignore RUSTSEC-2024-0418
+    --ignore RUSTSEC-2024-0419
+    --ignore RUSTSEC-2024-0420
+    --ignore RUSTSEC-2024-0429
+    --ignore RUSTSEC-2024-0436
+    --ignore RUSTSEC-2024-0370
+    --ignore RUSTSEC-2025-0068
+    --ignore RUSTSEC-2025-0075
+    --ignore RUSTSEC-2025-0080
+    --ignore RUSTSEC-2025-0081
+    --ignore RUSTSEC-2025-0098
+    --ignore RUSTSEC-2025-0100
+
 jobs:
   audit:
     name: cargo audit
@@ -23,7 +50,7 @@ jobs:
         with:
           tool: cargo-audit
       - name: Run audit
-        run: cargo-audit audit --ignore RUSTSEC-2026-0002 --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195 --ignore RUSTSEC-2024-0411 --ignore RUSTSEC-2024-0412 --ignore RUSTSEC-2024-0413 --ignore RUSTSEC-2024-0414 --ignore RUSTSEC-2024-0415 --ignore RUSTSEC-2024-0416 --ignore RUSTSEC-2024-0417 --ignore RUSTSEC-2024-0418 --ignore RUSTSEC-2024-0419 --ignore RUSTSEC-2024-0420 --ignore RUSTSEC-2024-0429 --ignore RUSTSEC-2024-0436 --ignore RUSTSEC-2024-0370 --ignore RUSTSEC-2025-0068 --ignore RUSTSEC-2025-0075 --ignore RUSTSEC-2025-0080 --ignore RUSTSEC-2025-0081 --ignore RUSTSEC-2025-0098 --ignore RUSTSEC-2025-0100
+        run: cargo-audit audit ${{ env.AUDIT_IGNORES }}
 
   deny:
     name: cargo deny

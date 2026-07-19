@@ -134,7 +134,7 @@ codegen-units = 1
 [workspace.metadata.dist]
 # Binary crate(s) to produce
 cargo-dist-version = "0.28.0"
-rust-toolchain-version = "1.82.0"
+rust-toolchain-version = "stable"
 ci = "github"
 targets = [
     "aarch64-apple-darwin",

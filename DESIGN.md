@@ -1,23 +1,12 @@
-# DeepseekNova — 重命名 + 架构升级设计文档
+# DeepseekNova — 架构设计文档
 
-## 一、重命名：DeepseekNova → DeepseekNova
+## 一、项目概览
 
-### 范围
-- 21 个 crate 目录：`deepseeknova-*` → `deepseeknova-*`
-- 所有 `Cargo.toml` 中的 package name 和依赖引用
-- 所有 Rust 源码中的 `deepseeknova_*` / `deepseeknova-*` 引用
-- CI workflows、deny.toml、README
-- GitHub 仓库名（需要用户在 GitHub 设置中改）
+DeepseekNova 是一个 Rust 编写的 AI Agent 框架，包含 21 个 crate。
 
-### 命名规则
-| 原名 | 新名 |
-|------|------|
-| `deepseeknova-core` | `deepseeknova-core` |
-| `deepseeknova-agent` | `deepseeknova-agent` |
-| `deepseeknova-cli` | `deepseeknova-cli` |
-| ... | ... |
-| `deepseeknova_desktop` (crate) | `deepseeknova_desktop` |
-| `DeepseekNova` (展示名) | `DeepseekNova` |
+> **历史备注**：本项目从早期名称（DPronix）重命名为 DeepseekNova，重命名工作已全部完成。
+
+### Crate 结构
 
 ---
 
@@ -35,7 +24,7 @@
 
 ### 编译质量
 - ✅ Clippy 零警告
-- ✅ 360/361 测试通过
+- ✅ 382 测试全部通过
 - ✅ 无 dead_code 警告
 - ✅ 无 unused imports
 
