@@ -455,3 +455,152 @@ input:checked + .toggle-slider:before {
 .theme-btn { padding: 2px 8px; font-size: 11px; border: 1px solid var(--border-1); border-radius: var(--radius-sm); background: var(--bg-2); color: var(--text-3); cursor: pointer; transition: all 0.15s; }
 .theme-btn:hover { color: var(--text-1); }
 .theme-btn.active { background: var(--accent-dim); color: var(--accent); border-color: var(--accent); }
+
+/* ---------- 多标签页（Reasonix 风格） ---------- */
+.header-tabs {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 12px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+.header-tabs::-webkit-scrollbar { display: none; }
+
+.header-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  color: var(--text-3);
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+.header-tab:hover { background: var(--bg-2); color: var(--text-1); }
+.header-tab.active {
+  background: var(--bg-3);
+  color: var(--text-1);
+  border-color: var(--border-1);
+}
+.header-tab-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+.header-tab.active .header-tab-dot { background: var(--accent); }
+.header-tab-title { max-width: 120px; overflow: hidden; text-overflow: ellipsis; }
+.header-tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 10px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.header-tab-close:hover { background: var(--red-dim); color: var(--red); }
+.header-tab-add {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-3);
+  font-size: 16px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.header-tab-add:hover { background: var(--bg-2); color: var(--accent); }
+
+/* ---------- 输入区组合（Composer + ControlBar） ---------- */
+.composer-zone {
+  border-top: 1px solid var(--border-1);
+  background: var(--bg-1);
+}
+.composer-zone .composer {
+  border-top: none;
+}
+
+/* ---------- 文件面板分区（Reasonix 风格） ---------- */
+.file-section-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-3);
+}
+.file-section-icon { font-size: 12px; }
+.file-section-count {
+  margin-left: auto;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: var(--bg-3);
+  color: var(--text-3);
+  font-size: 10px;
+}
+
+.file-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+.file-item:hover { background: var(--bg-2); }
+.file-item-status {
+  width: 16px;
+  text-align: center;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+}
+.file-item-name {
+  flex: 1;
+  font-size: 12px;
+  color: var(--text-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.file-item-size {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.file-modified { border-left: 2px solid var(--amber); }
+.file-read { border-left: 2px solid var(--blue); }
+
+/* ---------- 文件预览（Hermes 风格） ---------- */
+.file-preview-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-1);
+  background: var(--bg-2);
+}
+.file-preview-content {
+  flex: 1;
+  overflow: auto;
+  padding: 12px;
+}
