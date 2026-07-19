@@ -2,26 +2,6 @@
 //!
 //! Native desktop application for the deepseeknova AI agent framework.
 //! Built with Tauri 2.x — Rust backend with a React/TypeScript frontend.
-//!
-//! ## Architecture
-//!
-//! ```text
-//! ┌─────────────────────────────────────────────┐
-//! │  Webview (React + TS, Vite)                  │
-//! │    bridge.ts ──invoke──▶ Tauri Commands      │
-//! │    bridge.ts ◀─Channel── agent:event stream   │
-//! └───────────────▲──────────────────────────────┘
-//!         commands │                  events
-//! ┌───────────────┴──────────────────────────────┐
-//! │  commands.rs  (Tauri command handlers)        │
-//! │    └── runner::run_stream() → Channel         │
-//! └───────────────▲──────────────────────────────┘
-//!                 │
-//! ┌───────────────┴──────────────────────────────┐
-//! │  deepseeknova-runtime / deepseeknova-agent (Rust)     │
-//! │  (same kernel as CLI, TUI, HTTP server)       │
-//! └──────────────────────────────────────────────┘
-//! ```
 
 mod commands;
 
@@ -31,21 +11,14 @@ use tauri::{
     Manager,
 };
 
-/// Application state shared across commands.
 pub struct AppState {
     pub runner: tokio::sync::Mutex<Option<Box<dyn deepseeknova_core::Runner + Send>>>,
     pub cancel: tokio::sync::Mutex<Option<tokio_util::sync::CancellationToken>>,
-    /// Channel for delivering approval responses to a waiting agent.
     pub approval_tx:
         std::sync::Arc<tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<(String, bool)>>>>,
-    /// Persistent conversation store for the current session. Shared across
-    /// successive `submit_prompt` calls so the agent remembers prior turns
-    /// (and DeepSeek-V4 reasoning replay spans user turns). Cleared by
-    /// `new_session`.
     pub history: std::sync::Arc<tokio::sync::Mutex<Vec<deepseeknova_core::Message>>>,
 }
 
-/// Run the Tauri desktop application.
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -61,26 +34,89 @@ pub fn run() {
             history: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         })
         .invoke_handler(tauri::generate_handler![
+            // Core
             commands::submit_prompt,
             commands::cancel_run,
             commands::new_session,
-            commands::list_skills,
-            commands::list_providers,
+            commands::respond_approval,
+            commands::health_check,
             commands::get_config,
             commands::get_capabilities,
-            commands::health_check,
-            commands::respond_approval,
-            commands::get_workspace_files,
+
+            // Sessions
             commands::list_sessions,
             commands::create_session,
             commands::delete_session,
+
+            // Skills & Providers
+            commands::list_skills,
+            commands::list_providers,
+
+            // Workspace
+            commands::get_workspace_files,
+            commands::get_file_diff,
+
+            // Sandbox
+            commands::get_sandbox_config,
+            commands::set_sandbox_config,
+
+            // Network
+            commands::get_network_config,
+            commands::set_network_config,
+            commands::network_diagnostics,
+
+            // Permissions
+            commands::get_permissions,
+            commands::set_permission_rule,
+
+            // Hooks
+            commands::get_hooks,
+            commands::set_hook,
+            commands::delete_hook,
+
+            // MCP
+            commands::list_mcp_servers,
+            commands::add_mcp_server,
+            commands::remove_mcp_server,
+            commands::toggle_mcp_server,
+
+            // Sub-Agents
+            commands::list_subagents,
+
+            // Diagnostics
+            commands::run_diagnostics,
+
+            // Billing
+            commands::get_billing_stats,
+
+            // Knowledge Base
+            commands::get_wiki_pages,
+            commands::get_knowledge_cards,
+
+            // Memory
+            commands::get_memories,
+            commands::add_memory,
+            commands::delete_memory,
+
+            // Settings
+            commands::save_settings,
+            commands::load_settings,
+
+            // Shortcuts
+            commands::get_shortcuts,
+
+            // Update
+            commands::check_for_updates,
+
+            // Tabs
+            commands::list_tabs,
+            commands::create_tab,
+            commands::close_tab,
         ])
         .setup(|app| {
-            // Build system tray
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let show = MenuItem::with_id(app, "show", "Show Window", true, None::<&str>)?;
-            let menu =
-                Menu::with_items(app, &[&show, &PredefinedMenuItem::separator(app)?, &quit])?;
+            let menu = Menu::with_items(app, &[&show, &PredefinedMenuItem::separator(app)?, &quit])?;
 
             let _tray = TrayIconBuilder::new()
                 .icon(
@@ -104,7 +140,6 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // Minimize to tray instead of closing
             if let tauri::WindowEvent::CloseRequested { .. } = event {
                 let _ = window.hide();
             }
