@@ -5,6 +5,7 @@
 
 import { useState } from "react";
 import { useStore } from "../store";
+import { useTheme } from "../store/theme";
 
 export default function SettingsModal() {
   const setShowSettings = useStore((s) => s.setShowSettings);
@@ -15,6 +16,7 @@ export default function SettingsModal() {
   const sections = [
     { id: "general", label: "通用", icon: "⚙️" },
     { id: "provider", label: "API", icon: "🔌" },
+    { id: "appearance", label: "外观", icon: "🎨" },
     { id: "skills", label: "技能", icon: "⚡" },
     { id: "memory", label: "记忆", icon: "🧠" },
     { id: "shortcuts", label: "快捷键", icon: "⌨️" },
@@ -111,6 +113,61 @@ export default function SettingsModal() {
                   <input className="input" defaultValue="deepseek-chat" style={{ marginTop: "4px" }} />
                 </div>
                 <button className="btn btn-primary">测试连接</button>
+              </>
+            )}
+
+            {activeSection === "appearance" && (
+              <>
+                <h4 style={{ marginBottom: "8px" }}>外观设置</h4>
+                <div style={{ marginBottom: "12px" }}>
+                  <label style={{ fontSize: "12px", color: "var(--text-3)", display: "block", marginBottom: "6px" }}>主题模式</label>
+                  <div style={{ display: "flex", gap: "8px" }}>
+                    <button
+                      className="btn"
+                      style={{ flex: 1, justifyContent: "center" }}
+                      onClick={() => useTheme.getState().setTheme("light")}
+                    >☀️ 浅色</button>
+                    <button
+                      className="btn"
+                      style={{ flex: 1, justifyContent: "center" }}
+                      onClick={() => useTheme.getState().setTheme("dark")}
+                    >🌙 深色</button>
+                    <button
+                      className="btn"
+                      style={{ flex: 1, justifyContent: "center" }}
+                      onClick={() => useTheme.getState().setTheme("system")}
+                    >🖥️ 跟随系统</button>
+                  </div>
+                </div>
+                <div className="divider" />
+                <div style={{ marginBottom: "12px" }}>
+                  <label style={{ fontSize: "12px", color: "var(--text-3)", display: "block", marginBottom: "6px" }}>显示模式</label>
+                  <div style={{ display: "flex", gap: "8px" }}>
+                    <button
+                      className="btn"
+                      style={{ flex: 1, justifyContent: "center" }}
+                      onClick={() => useTheme.getState().setDisplayMode("icon")}
+                    >📦 图标模式</button>
+                    <button
+                      className="btn"
+                      style={{ flex: 1, justifyContent: "center" }}
+                      onClick={() => useTheme.getState().setDisplayMode("text")}
+                    >Aa 文字模式</button>
+                  </div>
+                </div>
+                <div className="divider" />
+                <label className="todo-item">
+                  <input type="checkbox" defaultChecked />
+                  <span className="todo-text">平滑过渡动画</span>
+                </label>
+                <label className="todo-item">
+                  <input type="checkbox" defaultChecked />
+                  <span className="todo-text">代码块语法高亮</span>
+                </label>
+                <label className="todo-item">
+                  <input type="checkbox" />
+                  <span className="todo-text">紧凑模式（减少间距）</span>
+                </label>
               </>
             )}
 

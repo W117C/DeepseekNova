@@ -235,9 +235,14 @@ export default function Composer() {
 
         {/* 模式提示 */}
         <span className="tag" style={{ opacity: 0.7 }}>
-          {mode === "plan" && "🔒 Plan"}
-          {mode === "act" && "✋ Act"}
-          {mode === "yolo" && "🚀 YOLO"}
+          <span className="icon-only">
+            {mode === "plan" && "🔒 Plan"}
+            {mode === "act" && "✋ Act"}
+            {mode === "yolo" && "🚀 YOLO"}
+          </span>
+          <span className="text-only">
+            模式: {mode.toUpperCase()}
+          </span>
         </span>
 
         {/* 发送/停止按钮 */}
