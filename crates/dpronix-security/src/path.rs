@@ -68,12 +68,15 @@ pub fn secure_resolve(root: &Path, input: &Path) -> Result<PathBuf> {
                 return Err(e.into());
             }
         };
-        if !canonical.starts_with(root) {
+        // On Windows, canonicalize returns a UNC path (\\?\C:\...).
+        // Normalize root the same way for a fair comparison.
+        let canonical_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+        if !canonical.starts_with(&canonical_root) {
             tracing::warn!(
                 security_event = "path_escape_attempt",
                 requested = ?input.display(),
                 resolved = ?canonical.display(),
-                workspace = ?root.display(),
+                workspace = ?canonical_root.display(),
                 reason = "escapes workspace root via symlink"
             );
             bail!("path escapes workspace root via symlink: {:?}", input);
