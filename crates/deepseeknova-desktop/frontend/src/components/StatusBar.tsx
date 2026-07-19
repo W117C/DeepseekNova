@@ -1,10 +1,6 @@
 /**
- * StatusBar.tsx — 底部成本仪表盘（参考 Reasonix）
- *
- * Reasonix 特色：常驻显示缓存命中率、Token 消耗、会话时长
- * 去除与控制栏重复的信息（模型名、模式），只保留成本相关数据
- *
- * 布局：[状态指示灯] [缓存命中率+颜色] [Token 用量] [会话时长] ─── [显示模式切换] [品牌]
+ * StatusBar.tsx — 底部成本仪表盘（Reasonix 风格）
+ * 缓存命中率(带颜色) | Token 用量 | 推理 Token | 会话时长
  */
 
 import { useStore } from "../store";
@@ -21,74 +17,46 @@ export default function StatusBar() {
   const toggleDisplayMode = useTheme((s) => s.toggleDisplayMode);
   const isIcon = displayMode === "icon";
 
-  // 会话时长计时器
   const [sessionDuration, setSessionDuration] = useState(0);
   useEffect(() => {
     const start = Date.now();
-    const timer = setInterval(() => {
-      setSessionDuration(Math.floor((Date.now() - start) / 1000));
-    }, 1000);
+    const timer = setInterval(() => setSessionDuration(Math.floor((Date.now() - start) / 1000)), 1000);
     return () => clearInterval(timer);
   }, []);
 
-  const formatDuration = (seconds: number) => {
-    if (seconds < 60) return `${seconds}s`;
-    const m = Math.floor(seconds / 60);
-    const s = seconds % 60;
-    return `${m}m ${s}s`;
-  };
+  const fmtDur = (s: number) => s < 60 ? `${s}s` : `${Math.floor(s/60)}m ${s%60}s`;
 
-  // 缓存命中率
   const totalCache = sessionCache.hit + sessionCache.miss;
   const cacheRate = totalCache > 0 ? Math.round((sessionCache.hit / totalCache) * 100) : 0;
-  const cacheColor =
-    cacheRate >= 80 ? "var(--green)" : cacheRate >= 50 ? "var(--amber)" : "var(--red)";
-
-  // Token 用量
-  const promptTokens = lastUsage?.prompt_tokens ?? 0;
-  const completionTokens = lastUsage?.completion_tokens ?? 0;
-  const reasoningTokens = lastUsage?.reasoning_tokens ?? 0;
+  const cacheColor = cacheRate >= 80 ? "var(--green)" : cacheRate >= 50 ? "var(--amber)" : "var(--red)";
 
   return (
     <footer className="status-bar">
-      {/* 状态指示灯 */}
       <span className={`status-dot ${status}`} />
-      <span className="status-item" style={{ minWidth: 48 }}>
-        {status === "ready" ? "就绪" : status === "running" ? "运行中" : "错误"}
-      </span>
+      <span className="status-item">{status === "ready" ? "就绪" : status === "running" ? "运行中" : "错误"}</span>
       <span className="status-sep">│</span>
 
-      {/* 缓存命中率（Reasonix 特色） */}
-      {totalCache > 0 ? (
+      {totalCache > 0 && (
         <>
-          <span className="status-item" title={`命中 ${sessionCache.hit} / 共 ${totalCache}`}>
+          <span className="status-item" title={`命中 ${sessionCache.hit}/${totalCache}`}>
             {isIcon ? "💡" : "缓存:"}
-            <span style={{ color: cacheColor, fontWeight: 600, margin: "0 2px" }}>
-              {cacheRate}%
-            </span>
-            {isIcon && (
-              <span style={{ color: "var(--text-muted)", fontSize: 10 }}>
-                ({sessionCache.hit}/{totalCache})
-              </span>
-            )}
+            <span style={{ color: cacheColor, fontWeight: 600 }}>{cacheRate}%</span>
           </span>
           <span className="status-sep">│</span>
         </>
-      ) : null}
+      )}
 
-      {/* Token 用量 */}
       {lastUsage ? (
         <>
-          <span className="status-item" title="上一轮 Token 消耗">
+          <span className="status-item" title="Token">
             {isIcon ? "↑↓" : "Token:"}
             <span style={{ color: "var(--text-2)" }}>
-              {promptTokens.toLocaleString()}↑ {completionTokens.toLocaleString()}↓
+              {lastUsage.prompt_tokens.toLocaleString()}↑{lastUsage.completion_tokens.toLocaleString()}↓
             </span>
           </span>
-          {reasoningTokens > 0 && (
-            <span className="status-item" title="推理 Token">
-              <span style={{ color: "var(--amber)" }}>🧠</span>
-              {reasoningTokens.toLocaleString()}
+          {lastUsage.reasoning_tokens > 0 && (
+            <span className="status-item" title="推理">
+              <span style={{ color: "var(--amber)" }}>🧠</span>{lastUsage.reasoning_tokens.toLocaleString()}
             </span>
           )}
           <span className="status-sep">│</span>
@@ -99,35 +67,19 @@ export default function StatusBar() {
         </span>
       )}
 
-      {/* 会话累计 Token */}
       {totalTokens > 0 && (
         <>
-          <span className="status-item" title="会话累计 Token">
-            {isIcon ? "Σ" : "总计:"}
-            {totalTokens.toLocaleString()}
-          </span>
+          <span className="status-item" title="总计">{isIcon ? "Σ" : "总计:"}{totalTokens.toLocaleString()}</span>
           <span className="status-sep">│</span>
         </>
       )}
 
-      {/* 会话时长 */}
-      <span className="status-item" title="会话时长">
-        {isIcon ? "⏱" : "时长:"}
-        {formatDuration(sessionDuration)}
-      </span>
+      <span className="status-item" title="时长">{isIcon ? "⏱" : "时长:"}{fmtDur(sessionDuration)}</span>
 
       <span className="status-spacer" />
-
-      {/* 显示模式切换 */}
-      <button className="status-toggle-btn" onClick={toggleDisplayMode} title={isIcon ? "切换到文字模式" : "切换到图标模式"}>
-        {isIcon ? "Aa" : "📦"}
-      </button>
+      <button className="status-toggle-btn" onClick={toggleDisplayMode}>{isIcon ? "Aa" : "📦"}</button>
       <span className="status-sep">│</span>
-
-      {/* 品牌 */}
-      <span className="status-item" style={{ color: "var(--text-3)" }}>
-        DeepseekNova · DeepSeek 原生
-      </span>
+      <span className="status-item" style={{ color: "var(--text-3)" }}>DeepseekNova</span>
     </footer>
   );
 }
