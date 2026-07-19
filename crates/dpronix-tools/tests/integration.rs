@@ -123,13 +123,7 @@ async fn write_and_read_roundtrips() {
     let target = f.path().join("output.txt");
 
     write_tool
-        .execute(
-            &ctx,
-            &format!(
-                r#"{{"path":"{}","content":"hello disk"}}"#,
-                target.display()
-            ),
-        )
+        .execute(&ctx, &path_extra_json(&target, r#""content":"hello disk""#))
         .await
         .unwrap();
 
@@ -180,7 +174,7 @@ async fn edit_file_replaces_text() {
             &ctx,
             &format!(
                 r#"{{"path":"{}","search":"println!(\"hello\")","replace":"println!(\"hi\")","snippet_id":"{}"}}"#,
-                path.display(),
+                json_path(&path),
                 snippet_id
             ),
         )
@@ -204,7 +198,7 @@ async fn edit_file_errors_when_search_not_found() {
             &ctx,
             &format!(
                 r#"{{"path":"{}","search":"not_there","replace":"nope"}}"#,
-                path.display()
+                json_path(&path)
             ),
         )
         .await;
@@ -324,8 +318,8 @@ async fn move_file_renames() {
             &ctx,
             &format!(
                 r#"{{"source":"{}","destination":"{}"}}"#,
-                src.display(),
-                dst.display()
+                json_path(&src),
+                json_path(&dst)
             ),
         )
         .await;
