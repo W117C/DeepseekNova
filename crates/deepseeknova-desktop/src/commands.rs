@@ -614,7 +614,7 @@ pub async fn set_hook(event: String, command: String, enabled: bool) -> Result<(
         h.command = command.clone();
         h.enabled = enabled;
     } else {
-        hooks.push(Hook { event, command, enabled });
+        hooks.push(Hook { event: event.clone(), command, enabled });
     }
 
     if let Some(dir) = path.parent() {
