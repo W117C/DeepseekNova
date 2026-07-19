@@ -1,6 +1,80 @@
 # Changelog
 
-All notable changes to deepseeknova-rs will be documented in this file.
+All notable changes to DeepseekNova will be documented in this file.
+
+## [0.4.0] — 2026-07-19
+
+### 桌面前端完善
+
+#### 设置面板 — 14 大分区
+- 新增沙箱配置（白名单/黑名单路径、环境隔离、CSP）
+- 新增网络配置（代理、超时、重试、SSL、网络诊断）
+- 新增权限规则（12 条规则，每条独立开关）
+- 新增钩子管理（事件钩子 CRUD + 变量支持）
+- 新增 MCP 服务器管理（list/add/remove/toggle）
+- 新增子智能体列表
+- 新增诊断体检（12 项系统检查）
+- 新增账单统计（Token/费用/缓存/历史）
+- 新增知识库（Wiki 页 + 知识卡片）
+- 新增记忆 CRUD（项目/用户/全局/会话四层）
+- 新增设置持久化（save/load settings）
+- 新增快捷键管理
+- 新增更新检查
+- 新增标签页管理（list/create/close）
+
+#### 右侧面板 — 5 标签 + 三色进度条
+- 文件标签：分修改/创建/读取三区，每区可折叠，显示 diff 行数
+- 知识库标签：Wiki + 知识卡片 + 记忆三子标签
+- 工具标签：MCP 工具列表 + 已加载技能
+- 记忆标签：四类筛选 + 添加记忆表单
+- 规则标签：8 条权限规则，每条带开关
+
+### 后端完善
+
+#### 47 个 Tauri 命令
+- 核心命令：submit_prompt / cancel_run / new_session / respond_approval / health_check / get_config / get_capabilities
+- 会话命令：list_sessions / create_session / delete_session
+- 技能/Provider：list_skills / list_providers
+- 工作区：get_workspace_files / get_file_diff
+- 沙箱：get/set_sandbox_config
+- 网络：get/set_network_config / network_diagnostics
+- 权限：get_permissions / set_permission_rule
+- 钩子：get_hooks / set_hook / delete_hook
+- MCP：list/add/remove/toggle_mcp_server
+- 子智能体：list_subagents
+- 诊断：run_diagnostics
+- 账单：get_billing_stats
+- 知识库：get_wiki_pages / get_knowledge_cards
+- 记忆：get_memories / add_memory / delete_memory
+- 设置：save_settings / load_settings
+- 快捷键：get_shortcuts
+- 更新：check_for_updates
+- 标签页：list/create/close_tab
+
+#### bridge.ts 完整桥接
+- 全部 47 个命令的 TypeScript 接口和类型定义
+- EventHandlers 回调系统（text/reasoning/tool/usage/done/error）
+
+### 依赖优化
+- reqwest 从 default-tls (OpenSSL) 切换到 rustls-tls，减少系统依赖
+- 配置中科大 crates.io 镜像加速
+
+### 代码质量
+- 修复 clippy type_complexity 警告（提取 ApprovalSender / ApprovalChannel 类型别名）
+- 修复 set_hook 中 event move 后借用错误
+- cargo fmt 全格式化
+
+### CI/CD
+- 新增 check-desktop job（安装 Tauri 系统依赖 + 前端构建 + cargo check）
+- 新增 frontend job（Node 22 + npm ci + npm run build）
+- 修复 cargo deny (CDLA-Permissive-2.0 许可证)
+- 14 个 CI job 全绿（含三平台 release build）
+
+### README
+- 重写自述文件，突出 5 大核心特点
+- 新增 ASCII 架构图
+- 21 个 crate 一览表
+- 移除桌面截图
 
 ## [0.3.0] — 2026-07-13
 
@@ -27,109 +101,22 @@ All notable changes to deepseeknova-rs will be documented in this file.
 ## [0.2.0] — 2026-07-12
 
 ### Added
+- Initial workspace structure with 21 crates
+- Core types: Runner/Tool traits, WireEvent, RunInput
+- Agent loop with streaming and tool use
+- DeepSeek provider with reasoning effort support
+- TUI (ratatui) and CLI (clap) frontends
+- axum HTTP server with SSE streaming
+- MCP client (stdio + HTTP)
+- Sandbox (Seatbelt + bubblewrap)
+- Permission gate (allow/ask/deny)
+- Session store (JSONL + rotation)
+- Skill loader (.deepseeknova/skills)
+- OpenTelemetry integration
+- File checkpoint/rollback
+- GOAP planner + swarm coordination
+- Tauri 2.0 desktop app scaffolding
 
-#### Core Engine Fixes (Phase 1)
-- True SSE streaming: switched from `response.text()` buffering to `response.bytes_stream()` line-by-line parsing
-- Agent tool execution loop: agent now actually runs tools when model calls them, feeds results back into memory
-- DeepSeek thinking mode: `reasoning_effort` parameter, `reasoning_content` streamed as `ReasoningDelta`
-- Proper reasoning_content passthrough: `Message` struct now has `reasoning_content` field (required by DeepSeek-V4 when tool calls are involved)
-- `extra_body` support: `ChatCompletionRequest` can pass DeepSeek-specific params like `{"thinking": {"type": "enabled"}}`
-- Ctrl-C cancellation: `CancellationToken` wired to `tokio::signal::ctrl_c()` for graceful agent interruption
+## [0.1.0] — 2026-07-10
 
-#### CLI & TUI (Phase 2)
-- 10+ slash commands: `/exit /new /clear /raw /model /skills /mcp /undo /help`
-- 3 display modes: normal (all), lite (hide reasoning), raw (chunk types)
-- `/new` session restart loop
-- Skills listing from `.deepseeknova/skills/` and `.agents/skills/`
-- DeepSeek reasoning content displayed in dim ANSI style
-
-#### Desktop App (Phase 3)
-- New `deepseeknova-desktop` crate: Tauri 2.x desktop application
-- 7 Tauri Commands: `submit_prompt` (Channel streaming), `cancel_run`, `list_skills`, `list_providers`, `get_config`, `get_capabilities`, `health_check`
-- React/TypeScript frontend with streaming chat UI, dark theme, skills panel
-- System tray with hide/show/quit
-- Single-instance lock
-- Window close→hide to tray behavior
-- Frontend: components extracted (Transcript, MessageCard, Composer)
-- Session-level cache hit rate display in status bar
-
-#### Multi-Agent Orchestration (Phase 4)
-- New `deepseeknova-orch` crate: GOAP Goal Planner + Swarm Coordinator
-- GoalPlanner: A* planner that decomposes goals into action DAGs using DeepSeek-V4 thinking mode
-- SwarmCoordinator: Queen-led multi-agent team coordination
-- VectorMemory: Cosine similarity search, text→embedding hashing, importance-based compaction, file persistence
-
-#### DeepSeek-V4 Optimizations
-- `reasoning_effort` config (low/medium/high/max)
-- `thinking_enabled` provider config flag
-- `cache_hit_tokens` / `cache_miss_tokens` parsed from API responses with DeepSeek field names
-- `ResponseUsage` updated with `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens` serde aliases
-
-#### Snippet System (Phase 5)
-- New snippet module: ReadFileTool returns `[SNIPPED ID: xxx]` for edit validation
-- EditFileTool accepts optional `snippet_id`, validates file hasn't changed since read
-- Stale edits return current content instead of hard failure
-- SHA256 content hashing, global singleton tracker
-
-#### Release Pipeline
-- Cargo-dist configuration with multi-target builds
-- GitHub Actions release workflow (CLI + Desktop)
-- npm installer config
-
-### Fixed
-- `blocking_send` in tokio async context → all uses `tx.send().await`
-- UTF-8 corruption across TCP chunk boundaries → raw `Vec<u8>` accumulation
-- Tool error messages leaking file paths → 500-char truncation with `floor_char_boundary()`
-- `&s[..max]` UTF-8 slice panics → `floor_char_boundary()` everywhere
-- `[redacted]` placeholder corruption across 29+ source files
-- TypeScript `[redacted]` → `number` type fixes in types.ts
-
-## [0.1.0] — 2026-07-03
-
-### Added
-
-#### Foundation (Phase 0)
-- `deepseeknova-core`: Core type system — `Runner` trait, `Tool` trait, `ExecutionGraph`, `RegistryHub`, `Chunk`, `Usage`
-- `deepseeknova-provider`: LLM provider abstraction with OpenAI and Anthropic implementations, streaming support, retry, factory
-- `deepseeknova-agent`: Main agent loop with multi-step reasoning, memory compaction, plan mode runner, sub-agent runner, coordinator runner
-- `deepseeknova-tools`: 13 built-in tools — read_file, write_file, edit_file, move_file, ls, glob, grep, shell, web_fetch, todo_write, remember, forget, recall
-- `deepseeknova-mcp`: MCP client for connecting to external tool servers
-- `deepseeknova-config`: TOML-based config with multi-layer merging (default → user → project → env)
-- `deepseeknova-context`: Workspace indexing, working memory, project memory (DPRONIX.md + .deepseeknova/memory/)
-- `deepseeknova-permission`: Policy-based permission gating for tool execution (allow/ask/deny)
-- `deepseeknova-event`: Event bus for agent lifecycle events
-- `deepseeknova-runtime`: Composition root — wires registry, context, event, permission, and config together
-- `deepseeknova-cli`: CLI binary with subcommands: run, chat, serve, setup, init, config
-
-#### Planning & Execution (Phase 2)
-- `deepseeknova-core::executor`: Graph executor with topological sort and concurrent execution
-- `deepseeknova-core::planner`: SimplePlanner and Planner trait
-- `deepseeknova-agent::plan_mode`: Plan-first execution (read-only planning → user approval → execute)
-- `deepseeknova-agent::sub_agent`: Sub-agent delegation with isolated contexts
-- `deepseeknova-agent::coordinator`: Two-model coordinator (planner + executor)
-
-#### Safety (Phase 3)
-- `deepseeknova-sandbox`: Sandbox trait with platform-specific impls (macOS Seatbelt, Linux bubblewrap)
-- `deepseeknova-checkpoint`: File checkpoint and rollback manager
-- `deepseeknova-store`: Session persistence (JSONL format)
-
-#### Interface (Phase 4)
-- `deepseeknova-tui`: Terminal UI with ratatui — split-pane, streaming, color-coded output
-- `deepseeknova-serve`: HTTP server with axum — SSE streaming, OpenAI-compatible `/v1/chat` endpoint
-- `deepseeknova-skills`: Skill system — load markdown + YAML frontmatter from `.deepseeknova/skills/`
-- `deepseeknova-telemetry`: OpenTelemetry integration with OTLP/gRPC and stdout exporters
-
-#### Tooling
-- CI/CD: GitHub Actions with 6 jobs (check, clippy, fmt, test matrix, docs, release)
-- Release profile: `opt-level="s"`, LTO, strip, single codegen unit
-- Cross-platform builds: x86_64 Linux, aarch64 macOS, x86_64 Windows
-
-### Testing
-- 232 tests (180 unit + 52 integration) across all crates
-- Integration tests: Agent loop, tool chains (TempDir), HTTP serve (live server), skills E2E, config merge, memory lifecycle, Runner contracts
-- 0 clippy warnings, clean compilation
-
-### Documentation
-- Crate-level docs with examples for all public modules
-- README with architecture diagram, quick start, and development guide
-- GUIDE.md — full user guide covering configuration, tools, skills, API, TUI, MCP, plan mode, sandbox
+- Initial release

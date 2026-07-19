@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 description = "Multi-agent orchestration: GOAP planning, swarm coordination, and agent federation for DeepSeek-V4."
 readme = "README.md"
-documentation = "https://docs.rs/deepseeknova-orch/0.3.0"
+documentation = "https://docs.rs/deepseeknova-orch/0.4.0"
 
 [dependencies]
 anyhow = { workspace = true }
@@ -21,9 +21,9 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true }
-deepseeknova-core = { version = "0.3.0", path = "../deepseeknova-core" }
-deepseeknova-agent = { version = "0.3.0", path = "../deepseeknova-agent" }
-deepseeknova-provider = { version = "0.3.0", path = "../deepseeknova-provider" }
-deepseeknova-config = { version = "0.3.0", path = "../deepseeknova-config" }
-deepseeknova-tools = { version = "0.3.0", path = "../deepseeknova-tools" }
-deepseeknova-event = { version = "0.3.0", path = "../deepseeknova-event" }
+deepseeknova-core = { version = "0.4.0", path = "../deepseeknova-core" }
+deepseeknova-agent = { version = "0.4.0", path = "../deepseeknova-agent" }
+deepseeknova-provider = { version = "0.4.0", path = "../deepseeknova-provider" }
+deepseeknova-config = { version = "0.4.0", path = "../deepseeknova-config" }
+deepseeknova-tools = { version = "0.4.0", path = "../deepseeknova-tools" }
+deepseeknova-event = { version = "0.4.0", path = "../deepseeknova-event" }

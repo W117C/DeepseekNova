@@ -6,18 +6,18 @@ license.workspace = true
 repository.workspace = true
 description = "Composition root wiring registry, context, event bus, permission, security, and LLM provider into an agent runtime."
 readme = "README.md"
-documentation = "https://docs.rs/deepseeknova-runtime/0.3.0"
+documentation = "https://docs.rs/deepseeknova-runtime/0.4.0"
 
 [dependencies]
 anyhow = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
-deepseeknova-core = { version = "0.3.0", path = "../deepseeknova-core" }
-deepseeknova-config = { version = "0.3.0", path = "../deepseeknova-config" }
-deepseeknova-provider = { version = "0.3.0", path = "../deepseeknova-provider" }
-deepseeknova-agent = { version = "0.3.0", path = "../deepseeknova-agent" }
-deepseeknova-tools = { version = "0.3.0", path = "../deepseeknova-tools" }
-deepseeknova-permission = { version = "0.3.0", path = "../deepseeknova-permission" }
-deepseeknova-context = { version = "0.3.0", path = "../deepseeknova-context" }
-deepseeknova-event = { version = "0.3.0", path = "../deepseeknova-event" }
-deepseeknova-security = { version = "0.3.0", path = "../deepseeknova-security" }
+deepseeknova-core = { version = "0.4.0", path = "../deepseeknova-core" }
+deepseeknova-config = { version = "0.4.0", path = "../deepseeknova-config" }
+deepseeknova-provider = { version = "0.4.0", path = "../deepseeknova-provider" }
+deepseeknova-agent = { version = "0.4.0", path = "../deepseeknova-agent" }
+deepseeknova-tools = { version = "0.4.0", path = "../deepseeknova-tools" }
+deepseeknova-permission = { version = "0.4.0", path = "../deepseeknova-permission" }
+deepseeknova-context = { version = "0.4.0", path = "../deepseeknova-context" }
+deepseeknova-event = { version = "0.4.0", path = "../deepseeknova-event" }
+deepseeknova-security = { version = "0.4.0", path = "../deepseeknova-security" }

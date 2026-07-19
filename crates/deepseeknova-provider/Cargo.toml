@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 description = "Unified LLM provider abstraction for OpenAI-compatible and Anthropic backends with streaming and tool calling."
 readme = "README.md"
-documentation = "https://docs.rs/deepseeknova-provider/0.3.0"
+documentation = "https://docs.rs/deepseeknova-provider/0.4.0"
 
 [dependencies]
 anyhow = { workspace = true }
@@ -19,6 +19,6 @@ futures = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
-deepseeknova-core = { version = "0.3.0", path = "../deepseeknova-core" }
-deepseeknova-config = { version = "0.3.0", path = "../deepseeknova-config" }
-deepseeknova-context = { version = "0.3.0", path = "../deepseeknova-context" }
+deepseeknova-core = { version = "0.4.0", path = "../deepseeknova-core" }
+deepseeknova-config = { version = "0.4.0", path = "../deepseeknova-config" }
+deepseeknova-context = { version = "0.4.0", path = "../deepseeknova-context" }

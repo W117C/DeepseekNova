@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 description = "Native desktop app for deepseeknova built with Tauri 2.x: Rust backend + React/TypeScript frontend."
 readme = "README.md"
-documentation = "https://docs.rs/deepseeknova-desktop/0.3.0"
+documentation = "https://docs.rs/deepseeknova-desktop/0.4.0"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -24,15 +24,15 @@ tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
-deepseeknova-core = { version = "0.3.0", path = "../deepseeknova-core" }
-deepseeknova-agent = { version = "0.3.0", path = "../deepseeknova-agent" }
-deepseeknova-config = { version = "0.3.0", path = "../deepseeknova-config" }
-deepseeknova-provider = { version = "0.3.0", path = "../deepseeknova-provider" }
-deepseeknova-tools = { version = "0.3.0", path = "../deepseeknova-tools" }
-deepseeknova-runtime = { version = "0.3.0", path = "../deepseeknova-runtime" }
-deepseeknova-store = { version = "0.3.0", path = "../deepseeknova-store" }
-deepseeknova-skills = { version = "0.3.0", path = "../deepseeknova-skills" }
-deepseeknova-event = { version = "0.3.0", path = "../deepseeknova-event" }
+deepseeknova-core = { version = "0.4.0", path = "../deepseeknova-core" }
+deepseeknova-agent = { version = "0.4.0", path = "../deepseeknova-agent" }
+deepseeknova-config = { version = "0.4.0", path = "../deepseeknova-config" }
+deepseeknova-provider = { version = "0.4.0", path = "../deepseeknova-provider" }
+deepseeknova-tools = { version = "0.4.0", path = "../deepseeknova-tools" }
+deepseeknova-runtime = { version = "0.4.0", path = "../deepseeknova-runtime" }
+deepseeknova-store = { version = "0.4.0", path = "../deepseeknova-store" }
+deepseeknova-skills = { version = "0.4.0", path = "../deepseeknova-skills" }
+deepseeknova-event = { version = "0.4.0", path = "../deepseeknova-event" }
 
 [features]
 default = ["custom-protocol"]

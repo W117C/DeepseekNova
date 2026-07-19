@@ -11,11 +11,15 @@ use tauri::{
     Manager,
 };
 
+/// Type alias for the approval channel sender.
+type ApprovalSender = tokio::sync::oneshot::Sender<(String, bool)>;
+/// Type alias for the shared approval channel.
+type ApprovalChannel = std::sync::Arc<tokio::sync::Mutex<Option<ApprovalSender>>>;
+
 pub struct AppState {
     pub runner: tokio::sync::Mutex<Option<Box<dyn deepseeknova_core::Runner + Send>>>,
     pub cancel: tokio::sync::Mutex<Option<tokio_util::sync::CancellationToken>>,
-    pub approval_tx:
-        std::sync::Arc<tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<(String, bool)>>>>,
+    pub approval_tx: ApprovalChannel,
     pub history: std::sync::Arc<tokio::sync::Mutex<Vec<deepseeknova_core::Message>>>,
 }
 

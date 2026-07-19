@@ -51,7 +51,7 @@ rustdoc_broken_intra_doc_links = "deny"
 rustdoc_invalid_codeblock_attributes = "deny"
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/W117C/DeepseekNova"

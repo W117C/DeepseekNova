@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 description = "Foundation crate: core types, Runner/Tool traits, registry, and execution graph for the deepseeknova agent framework."
 readme = "README.md"
-documentation = "https://docs.rs/deepseeknova-core/0.3.0"
+documentation = "https://docs.rs/deepseeknova-core/0.4.0"
 
 [dependencies]
 anyhow = { workspace = true }

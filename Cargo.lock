@@ -1079,7 +1079,7 @@ dependencies = [
 
 [[package]]
 name = "deepseeknova-agent"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1098,7 +1098,7 @@ dependencies = [
 
 [[package]]
 name = "deepseeknova-checkpoint"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1114,7 +1114,7 @@ dependencies = [
 
 [[package]]
 name = "deepseeknova-cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1139,7 +1139,7 @@ dependencies = [
 
 [[package]]
 name = "deepseeknova-config"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "dirs",
@@ -1151,7 +1151,7 @@ dependencies = [
 
 [[package]]
 name = "deepseeknova-context"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1169,7 +1169,7 @@ dependencies = [
 
 [[package]]
 name = "deepseeknova-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1196,7 +1196,7 @@ dependencies = [
 
 [[package]]
 name = "deepseeknova-desktop"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "deepseeknova-agent",
@@ -1224,7 +1224,7 @@ dependencies = [
 
 [[package]]
 name = "deepseeknova-event"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "deepseeknova-core",
  "serde",
@@ -1234,7 +1234,7 @@ dependencies = [
 
 [[package]]
 name = "deepseeknova-mcp"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1250,7 +1250,7 @@ dependencies = [
 
 [[package]]
 name = "deepseeknova-orch"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1274,7 +1274,7 @@ dependencies = [
 
 [[package]]
 name = "deepseeknova-permission"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "deepseeknova-config",
@@ -1289,7 +1289,7 @@ dependencies = [
 
 [[package]]
 name = "deepseeknova-provider"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1308,7 +1308,7 @@ dependencies = [
 
 [[package]]
 name = "deepseeknova-runtime"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "deepseeknova-agent",
@@ -1326,7 +1326,7 @@ dependencies = [
 
 [[package]]
 name = "deepseeknova-sandbox"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "deepseeknova-core",
@@ -1336,7 +1336,7 @@ dependencies = [
 
 [[package]]
 name = "deepseeknova-security"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "deepseeknova-core",
@@ -1346,7 +1346,7 @@ dependencies = [
 
 [[package]]
 name = "deepseeknova-serve"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1366,7 +1366,7 @@ dependencies = [
 
 [[package]]
 name = "deepseeknova-skills"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1382,7 +1382,7 @@ dependencies = [
 
 [[package]]
 name = "deepseeknova-store"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1395,7 +1395,7 @@ dependencies = [
 
 [[package]]
 name = "deepseeknova-telemetry"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "opentelemetry",
@@ -1410,7 +1410,7 @@ dependencies = [
 
 [[package]]
 name = "deepseeknova-tools"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1435,7 +1435,7 @@ dependencies = [
 
 [[package]]
 name = "deepseeknova-tui"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",

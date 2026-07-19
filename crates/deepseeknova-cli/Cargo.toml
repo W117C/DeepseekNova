@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 description = "CLI frontend for the deepseeknova agent framework with chat, plan, serve, and setup subcommands."
 readme = "README.md"
-documentation = "https://docs.rs/deepseeknova-cli/0.3.0"
+documentation = "https://docs.rs/deepseeknova-cli/0.4.0"
 
 [dependencies]
 anyhow = { workspace = true }
@@ -15,18 +15,18 @@ tokio-stream = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-deepseeknova-core = { version = "0.3.0", path = "../deepseeknova-core" }
-deepseeknova-config = { version = "0.3.0", path = "../deepseeknova-config" }
-deepseeknova-provider = { version = "0.3.0", path = "../deepseeknova-provider" }
-deepseeknova-agent = { version = "0.3.0", path = "../deepseeknova-agent" }
-deepseeknova-tools = { version = "0.3.0", path = "../deepseeknova-tools" }
-deepseeknova-runtime = { version = "0.3.0", path = "../deepseeknova-runtime" }
-deepseeknova-skills = { version = "0.3.0", path = "../deepseeknova-skills" }
-deepseeknova-serve = { version = "0.3.0", path = "../deepseeknova-serve" }
+deepseeknova-core = { version = "0.4.0", path = "../deepseeknova-core" }
+deepseeknova-config = { version = "0.4.0", path = "../deepseeknova-config" }
+deepseeknova-provider = { version = "0.4.0", path = "../deepseeknova-provider" }
+deepseeknova-agent = { version = "0.4.0", path = "../deepseeknova-agent" }
+deepseeknova-tools = { version = "0.4.0", path = "../deepseeknova-tools" }
+deepseeknova-runtime = { version = "0.4.0", path = "../deepseeknova-runtime" }
+deepseeknova-skills = { version = "0.4.0", path = "../deepseeknova-skills" }
+deepseeknova-serve = { version = "0.4.0", path = "../deepseeknova-serve" }
 dirs = { workspace = true }
 
 [dev-dependencies]
-deepseeknova-security = { version = "0.3.0", path = "../deepseeknova-security" }
-deepseeknova-mcp = { version = "0.3.0", path = "../deepseeknova-mcp" }
-deepseeknova-orch = { version = "0.3.0", path = "../deepseeknova-orch" }
+deepseeknova-security = { version = "0.4.0", path = "../deepseeknova-security" }
+deepseeknova-mcp = { version = "0.4.0", path = "../deepseeknova-mcp" }
+deepseeknova-orch = { version = "0.4.0", path = "../deepseeknova-orch" }
 serde_json = { workspace = true }

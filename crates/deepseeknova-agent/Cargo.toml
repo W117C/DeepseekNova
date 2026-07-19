@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 description = "Agent implementations: main agent loop, coordinator, and plan-mode runners with tool use and streaming."
 readme = "README.md"
-documentation = "https://docs.rs/deepseeknova-agent/0.3.0"
+documentation = "https://docs.rs/deepseeknova-agent/0.4.0"
 
 [dependencies]
 anyhow = { workspace = true }
@@ -18,7 +18,7 @@ tokio-util = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
 uuid = { workspace = true }
-deepseeknova-core = { version = "0.3.0", path = "../deepseeknova-core" }
-deepseeknova-provider = { version = "0.3.0", path = "../deepseeknova-provider" }
-deepseeknova-security = { version = "0.3.0", path = "../deepseeknova-security" }
-deepseeknova-context = { version = "0.3.0", path = "../deepseeknova-context" }
+deepseeknova-core = { version = "0.4.0", path = "../deepseeknova-core" }
+deepseeknova-provider = { version = "0.4.0", path = "../deepseeknova-provider" }
+deepseeknova-security = { version = "0.4.0", path = "../deepseeknova-security" }
+deepseeknova-context = { version = "0.4.0", path = "../deepseeknova-context" }
