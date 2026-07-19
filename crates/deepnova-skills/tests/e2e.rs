@@ -167,6 +167,7 @@ fn e2e_builtin_skills_load() {
         "loop-engineering",
         "first-principles",
         "adversarial-review",
+        "dna-spec",
     ] {
         assert!(
             names.contains(&expected),
