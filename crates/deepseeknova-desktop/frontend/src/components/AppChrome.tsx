@@ -1,5 +1,12 @@
 /**
- * AppChrome.tsx — 三栏布局外壳
+ * AppChrome.tsx — 三栏布局外壳（重构版）
+ *
+ * 参考 Reasonix + Hermes WebUI 的布局优点：
+ * - 顶栏：多标签页（每个标签=独立会话）+ 面板控制
+ * - 左侧：会话/技能/任务导航
+ * - 中间：对话流 + 输入区 + 工具栏（紧凑分组）
+ * - 右侧：文件面板（读/改分区）+ 上下文 + 记忆
+ * - 底部：成本仪表盘（缓存率/Token/费用/时长）
  */
 
 import { useStore } from "../store";
@@ -31,8 +38,10 @@ export default function AppChrome() {
       <Sidebar />
       <main className="main-area">
         <Transcript />
-        <Composer />
-        <ControlBar />
+        <div className="composer-zone">
+          <Composer />
+          <ControlBar />
+        </div>
       </main>
       <RightPanel />
       <StatusBar />

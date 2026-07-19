@@ -1,6 +1,11 @@
 /**
- * ControlBar.tsx — 输入区下方的控制栏
- * 模型选择器 | 模式切换 | Effort切换 | 知识库 | 主题切换 | 设置
+ * ControlBar.tsx — 输入区下方的控制栏（重构版）
+ *
+ * 参考 Reasonix + Hermes 的控制栏设计：
+ * - 左侧：模型选择 | 模式 | Effort（核心交互控件）
+ * - 右侧：知识库 | 主题 | 显示模式 | 设置（辅助控件）
+ * - 用分隔线分组，不再挤在一起
+ * - 更紧凑的视觉
  */
 
 import { useState } from "react";
@@ -25,6 +30,7 @@ export default function ControlBar() {
   return (
     <>
       <div className="control-bar">
+        {/* === 左侧：核心交互控件 === */}
         <div className="control-bar-left">
           <ModelSelector />
           <div className="control-sep" />
@@ -47,6 +53,7 @@ export default function ControlBar() {
           </button>
         </div>
 
+        {/* === 右侧：辅助控件 === */}
         <div className="control-bar-right">
           {/* 主题选择器 */}
           <div className="theme-selector" title="主题模式">
