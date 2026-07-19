@@ -46,7 +46,7 @@ export async function submitPrompt(
         handlers.onText?.(event.text);
         break;
       case "reasoning_delta":
-        handlers.onReasoning?.(event.text, event.signature);
+        handlers.onReasoning?.(event.text, event.signature ?? undefined);
         break;
       case "tool_call_start":
         handlers.onToolCallStart?.(event.id, event.name);

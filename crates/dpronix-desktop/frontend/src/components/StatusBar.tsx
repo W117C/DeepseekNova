@@ -19,7 +19,6 @@ export default function StatusBar({
   tokensUp,
   tokensDown,
   cachePercent,
-  cacheHit,
   status,
 }: StatusBarProps) {
   const modeColor = mode === "plan" ? "var(--dp-success)" : mode === "act" ? "var(--dp-accent)" : "var(--dp-danger)";

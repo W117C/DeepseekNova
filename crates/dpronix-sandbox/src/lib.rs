@@ -3,7 +3,9 @@
 //! Restricts subprocess execution via platform-specific sandboxes:
 //! macOS Seatbelt (`sandbox-exec`) and Linux bubblewrap (`bwrap`).
 
+#[cfg(target_os = "linux")]
 pub mod bubblewrap;
+#[cfg(target_os = "macos")]
 pub mod seatbelt;
 
 /// Trait for sandboxing shell command execution.

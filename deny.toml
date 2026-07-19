@@ -23,7 +23,12 @@ skip = []
 
 [advisories]
 version = 2
-ignore = []
+ignore = [
+    # RUSTSEC-2026-0002: lru IterMut unsoundness — only used by ratatui's internal
+    # scrollback cache, which does not call IterMut. No actionable impact.
+    # Removing this ignore requires upgrading ratatui to 0.30+ (which drops lru).
+    "RUSTSEC-2026-0002",
+]
 
 [sources]
 unknown-registry = "deny"

@@ -61,7 +61,7 @@ export default function Transcript({
       {pendingApproval && onApprove && onReject && (
         <ApprovalCard
           title={pendingApproval.title}
-          description={pendingApproval.description}
+          description={pendingApproval.description ?? undefined}
           onApprove={onApprove}
           onReject={onReject}
         />

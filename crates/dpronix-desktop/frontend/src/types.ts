@@ -55,6 +55,7 @@ export interface ProviderSummary {
   kind: string;
   model?: string;
   base_url?: string;
+  connected?: boolean;
 }
 
 export interface Capabilities {
@@ -89,4 +90,48 @@ export interface ApprovalRequest {
   description: string | null;
   toolName?: string;
   toolArgs?: string;
+}
+
+// ── Desktop-only types (UI state, not wire protocol) ──────────────────────
+
+/** Agent execution mode. */
+export type Mode = "plan" | "act" | "yolo";
+
+/** Reasoning effort level. */
+export type Effort = "low" | "medium" | "high" | "max";
+
+/** Agent runtime status. */
+export type AgentStatus = "ready" | "running";
+
+/** File change type for context panel badges. */
+export type FileChangeType = "added" | "removed" | "modified";
+
+/** A file entry in the context panel. */
+export interface ContextFile {
+  path: string;
+  changeType?: FileChangeType;
+}
+
+/** A session summary for the sidebar. */
+export interface SessionSummary {
+  id: string;
+  title: string;
+  active?: boolean;
+}
+
+/** MCP server status for settings/sidebar. */
+export interface McpServer {
+  name: string;
+  status: "connected" | "disconnected" | "error";
+  command: string;
+  args: string[];
+  tool_count: number;
+  error?: string;
+}
+
+/** App config for settings panel. */
+export interface AppConfig {
+  default_mode: Mode;
+  max_steps: number;
+  auto_mode: boolean;
 }
