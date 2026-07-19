@@ -10,6 +10,22 @@ use std::path::PathBuf;
 
 use std::sync::Once;
 
+/// Escape backslashes in a path for safe inclusion in JSON string literals.
+/// On Windows, paths use `\` which would break JSON parsing.
+fn json_path(path: impl AsRef<std::path::Path>) -> String {
+    path.as_ref().display().to_string().replace('\\', "\\\\")
+}
+
+/// Build a JSON argument string with a "path" field.
+fn path_json(path: impl AsRef<std::path::Path>) -> String {
+    format!(r#"{{"path":"{}"}}"#, json_path(path))
+}
+
+/// Build a JSON argument string with "path" and an extra field.
+fn path_extra_json(path: impl AsRef<std::path::Path>, extra: &str) -> String {
+    format!(r#"{{"path":"{}",{}}}"#, json_path(path), extra)
+}
+
 static INIT: Once = Once::new();
 
 fn init_test_workspace() {
@@ -73,10 +89,7 @@ async fn read_file_returns_content() {
     let tool = ReadFileTool;
 
     let result = tool
-        .execute(
-            &ctx,
-            &format!(r#"{{"path":"{}"}}"#, f.path().join("hello.txt").display()),
-        )
+        .execute(&ctx, &path_json(f.path().join("hello.txt")))
         .await
         .unwrap();
 
@@ -91,10 +104,7 @@ async fn read_file_errors_on_missing() {
     let tool = ReadFileTool;
 
     let result = tool
-        .execute(
-            &ctx,
-            &format!(r#"{{"path":"{}"}}"#, f.path().join("nope.txt").display()),
-        )
+        .execute(&ctx, &path_json(f.path().join("nope.txt")))
         .await;
 
     assert!(result.is_err());
@@ -123,10 +133,7 @@ async fn write_and_read_roundtrips() {
         .await
         .unwrap();
 
-    let content = read_tool
-        .execute(&ctx, &format!(r#"{{"path":"{}"}}"#, target.display()))
-        .await
-        .unwrap();
+    let content = read_tool.execute(&ctx, &path_json(&target)).await.unwrap();
     assert!(
         content.contains("hello disk"),
         "should contain file content"
@@ -141,10 +148,7 @@ async fn write_creates_parent_dirs() {
     let target = f.path().join("a/b/c/deep.txt");
 
     let result = tool
-        .execute(
-            &ctx,
-            &format!(r#"{{"path":"{}","content":"deep"}}"#, target.display()),
-        )
+        .execute(&ctx, &path_extra_json(&target, r#""content":"deep""#))
         .await;
     assert!(result.is_ok());
     assert!(target.exists());
@@ -162,10 +166,7 @@ async fn edit_file_replaces_text() {
 
     // First, read the file to establish a valid snippet
     let read_tool = crate::ReadFileTool;
-    let read_result = read_tool
-        .execute(&ctx, &format!(r#"{{"path":"{}"}}"#, path.display()))
-        .await
-        .unwrap();
+    let read_result = read_tool.execute(&ctx, &path_json(&path)).await.unwrap();
     // Extract snippet_id from the read result: ends with "[SNIPPED ID: snip_xxx]"
     let snippet_id = read_result
         .lines()
@@ -225,10 +226,7 @@ async fn ls_lists_directory() {
     let ctx = test_ctx(f.path());
     let tool = LsTool;
 
-    let result = tool
-        .execute(&ctx, &format!(r#"{{"path":"{}"}}"#, f.path().display()))
-        .await
-        .unwrap();
+    let result = tool.execute(&ctx, &path_json(f.path())).await.unwrap();
 
     assert!(result.contains("a.txt"));
     assert!(result.contains("b.rs"));
@@ -250,10 +248,7 @@ async fn glob_matches_pattern() {
     let tool = GlobTool;
 
     let result = tool
-        .execute(
-            &ctx,
-            &format!(r#"{{"path":"{}","pattern":"**/*.rs"}}"#, f.path().display()),
-        )
+        .execute(&ctx, &path_extra_json(f.path(), r#""pattern":"**/*.rs""#))
         .await
         .unwrap();
 
@@ -281,7 +276,7 @@ async fn grep_finds_matches() {
     let result = tool
         .execute(
             &ctx,
-            &format!(r#"{{"pattern":"TODO","path":"{}"}}"#, auth_path.display()),
+            &format!(r#"{{"pattern":"TODO","path":"{}"}}"#, json_path(auth_path)),
         )
         .await
         .unwrap();
@@ -300,7 +295,10 @@ async fn grep_no_matches_returns_info() {
     let result = tool
         .execute(
             &ctx,
-            &format!(r#"{{"pattern":"NONEXISTENT","path":"{}"}}"#, path.display()),
+            &format!(
+                r#"{{"pattern":"NONEXISTENT","path":"{}"}}"#,
+                json_path(path)
+            ),
         )
         .await
         .unwrap();
