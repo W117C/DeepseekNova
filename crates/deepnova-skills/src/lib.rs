@@ -25,6 +25,28 @@ mod loader;
 
 pub use loader::SkillLoader;
 
+/// Path to the built-in skills bundled with this crate.
+pub const BUILTIN_SKILLS_DIR: &str = "builtin";
+
+/// Load all built-in skills shipped with the deepnova-skills crate.
+///
+/// These are the default cognitive frameworks that every DeepNova
+/// agent starts with:
+/// - `frontend-developer` — UI/UX design and code generation
+/// - `coding-copilot` — multi-language coding assistant
+/// - `loop-engineering` — iterative improvement loop
+/// - `first-principles` — first-principles reasoning
+/// - `adversarial-review` — hostile red-team review
+pub fn load_builtin_skills() -> Vec<Skill> {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let builtin_path = std::path::Path::new(manifest_dir).join(BUILTIN_SKILLS_DIR);
+    let loader = SkillLoader::new(&builtin_path);
+    loader.load_all().unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "failed to load builtin skills");
+        Vec::new()
+    })
+}
+
 use async_trait::async_trait;
 use deepnova_core::registry::Skill;
 use deepnova_core::{Tool, ToolContext, ToolSchema};

@@ -154,3 +154,37 @@ async fn e2e_skill_tool_registry_compatible() {
     assert!(result.contains("Do the thing."));
     assert!(tool.read_only());
 }
+
+#[test]
+fn e2e_builtin_skills_load() {
+    let skills = deepnova_skills::load_builtin_skills();
+    assert!(!skills.is_empty(), "builtin skills should load");
+
+    let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+    for expected in [
+        "frontend-developer",
+        "coding-copilot",
+        "loop-engineering",
+        "first-principles",
+        "adversarial-review",
+    ] {
+        assert!(
+            names.contains(&expected),
+            "builtin skill '{expected}' not found (got: {names:?})"
+        );
+    }
+
+    // Every builtin must have a non-empty prompt
+    for s in &skills {
+        assert!(
+            !s.system_prompt.trim().is_empty(),
+            "builtin skill '{}' has empty system prompt",
+            s.name
+        );
+        assert!(
+            !s.description.trim().is_empty(),
+            "builtin skill '{}' has empty description",
+            s.name
+        );
+    }
+}
