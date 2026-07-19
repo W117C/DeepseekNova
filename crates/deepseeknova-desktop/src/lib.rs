@@ -42,72 +42,55 @@ pub fn run() {
             commands::health_check,
             commands::get_config,
             commands::get_capabilities,
-
             // Sessions
             commands::list_sessions,
             commands::create_session,
             commands::delete_session,
-
             // Skills & Providers
             commands::list_skills,
             commands::list_providers,
-
             // Workspace
             commands::get_workspace_files,
             commands::get_file_diff,
-
             // Sandbox
             commands::get_sandbox_config,
             commands::set_sandbox_config,
-
             // Network
             commands::get_network_config,
             commands::set_network_config,
             commands::network_diagnostics,
-
             // Permissions
             commands::get_permissions,
             commands::set_permission_rule,
-
             // Hooks
             commands::get_hooks,
             commands::set_hook,
             commands::delete_hook,
-
             // MCP
             commands::list_mcp_servers,
             commands::add_mcp_server,
             commands::remove_mcp_server,
             commands::toggle_mcp_server,
-
             // Sub-Agents
             commands::list_subagents,
-
             // Diagnostics
             commands::run_diagnostics,
-
             // Billing
             commands::get_billing_stats,
-
             // Knowledge Base
             commands::get_wiki_pages,
             commands::get_knowledge_cards,
-
             // Memory
             commands::get_memories,
             commands::add_memory,
             commands::delete_memory,
-
             // Settings
             commands::save_settings,
             commands::load_settings,
-
             // Shortcuts
             commands::get_shortcuts,
-
             // Update
             commands::check_for_updates,
-
             // Tabs
             commands::list_tabs,
             commands::create_tab,
@@ -116,7 +99,8 @@ pub fn run() {
         .setup(|app| {
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let show = MenuItem::with_id(app, "show", "Show Window", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &PredefinedMenuItem::separator(app)?, &quit])?;
+            let menu =
+                Menu::with_items(app, &[&show, &PredefinedMenuItem::separator(app)?, &quit])?;
 
             let _tray = TrayIconBuilder::new()
                 .icon(

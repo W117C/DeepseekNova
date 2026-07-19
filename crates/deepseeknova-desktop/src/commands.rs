@@ -229,7 +229,10 @@ fn save_sessions(sessions: &[SessionInfo]) {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let _ = std::fs::write(&path, serde_json::to_string_pretty(sessions).unwrap_or_default());
+    let _ = std::fs::write(
+        &path,
+        serde_json::to_string_pretty(sessions).unwrap_or_default(),
+    );
 }
 
 fn generate_id() -> String {
@@ -364,8 +367,11 @@ pub async fn get_workspace_files() -> Result<Vec<String>, String> {
     {
         let path = entry.path();
         let display = if path.is_dir() {
-            format!("/{}/",
-                path.file_name().map(|s| s.to_string_lossy()).unwrap_or_default()
+            format!(
+                "/{}/",
+                path.file_name()
+                    .map(|s| s.to_string_lossy())
+                    .unwrap_or_default()
             )
         } else {
             path.file_name()
@@ -423,7 +429,8 @@ pub async fn set_sandbox_config(config: SandboxConfig) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let data = serde_json::to_string_pretty(&config).map_err(|e| format!("serialize error: {e}"))?;
+    let data =
+        serde_json::to_string_pretty(&config).map_err(|e| format!("serialize error: {e}"))?;
     std::fs::write(&path, data).map_err(|e| format!("write error: {e}"))?;
     info!("sandbox config updated");
     Ok(())
@@ -474,7 +481,8 @@ pub async fn set_network_config(config: NetworkConfig) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let data = serde_json::to_string_pretty(&config).map_err(|e| format!("serialize error: {e}"))?;
+    let data =
+        serde_json::to_string_pretty(&config).map_err(|e| format!("serialize error: {e}"))?;
     std::fs::write(&path, data).map_err(|e| format!("write error: {e}"))?;
     info!("network config updated");
     Ok(())
@@ -517,18 +525,78 @@ pub async fn get_permissions() -> Result<Vec<PermissionRule>, String> {
         serde_json::from_str(&data).map_err(|e| format!("parse error: {e}"))
     } else {
         Ok(vec![
-            PermissionRule { name: "目录沙箱".into(), description: "所有工具仅能访问启动时的项目目录".into(), enabled: true, rule_type: "文件".into() },
-            PermissionRule { name: "Plan 模式".into(), description: "AI 只能读，不能写，必须先提交计划".into(), enabled: false, rule_type: "执行".into() },
-            PermissionRule { name: "Review 审批".into(), description: "写操作进入审核队列，每次确认".into(), enabled: true, rule_type: "执行".into() },
-            PermissionRule { name: "Shell 命令确认".into(), description: "所有 Shell 命令都需要用户确认".into(), enabled: true, rule_type: "执行".into() },
-            PermissionRule { name: "自动提交".into(), description: "Agent 完成任务后自动 git commit".into(), enabled: false, rule_type: "Git".into() },
-            PermissionRule { name: "网络访问".into(), description: "允许 Agent 访问网络".into(), enabled: true, rule_type: "网络".into() },
-            PermissionRule { name: "文件删除".into(), description: "允许 Agent 删除文件".into(), enabled: false, rule_type: "文件".into() },
-            PermissionRule { name: "文件大小限制".into(), description: "单文件读写最大 10MB".into(), enabled: true, rule_type: "限制".into() },
-            PermissionRule { name: "Token 预算".into(), description: "单会话 Token 上限 500K".into(), enabled: true, rule_type: "限制".into() },
-            PermissionRule { name: "敏感文件保护".into(), description: "禁止访问 .env、.ssh、.aws 等".into(), enabled: true, rule_type: "安全".into() },
-            PermissionRule { name: "多标签隔离".into(), description: "标签之间完全隔离".into(), enabled: true, rule_type: "隔离".into() },
-            PermissionRule { name: "剪贴板访问".into(), description: "允许 Agent 读取剪贴板".into(), enabled: false, rule_type: "隐私".into() },
+            PermissionRule {
+                name: "目录沙箱".into(),
+                description: "所有工具仅能访问启动时的项目目录".into(),
+                enabled: true,
+                rule_type: "文件".into(),
+            },
+            PermissionRule {
+                name: "Plan 模式".into(),
+                description: "AI 只能读，不能写，必须先提交计划".into(),
+                enabled: false,
+                rule_type: "执行".into(),
+            },
+            PermissionRule {
+                name: "Review 审批".into(),
+                description: "写操作进入审核队列，每次确认".into(),
+                enabled: true,
+                rule_type: "执行".into(),
+            },
+            PermissionRule {
+                name: "Shell 命令确认".into(),
+                description: "所有 Shell 命令都需要用户确认".into(),
+                enabled: true,
+                rule_type: "执行".into(),
+            },
+            PermissionRule {
+                name: "自动提交".into(),
+                description: "Agent 完成任务后自动 git commit".into(),
+                enabled: false,
+                rule_type: "Git".into(),
+            },
+            PermissionRule {
+                name: "网络访问".into(),
+                description: "允许 Agent 访问网络".into(),
+                enabled: true,
+                rule_type: "网络".into(),
+            },
+            PermissionRule {
+                name: "文件删除".into(),
+                description: "允许 Agent 删除文件".into(),
+                enabled: false,
+                rule_type: "文件".into(),
+            },
+            PermissionRule {
+                name: "文件大小限制".into(),
+                description: "单文件读写最大 10MB".into(),
+                enabled: true,
+                rule_type: "限制".into(),
+            },
+            PermissionRule {
+                name: "Token 预算".into(),
+                description: "单会话 Token 上限 500K".into(),
+                enabled: true,
+                rule_type: "限制".into(),
+            },
+            PermissionRule {
+                name: "敏感文件保护".into(),
+                description: "禁止访问 .env、.ssh、.aws 等".into(),
+                enabled: true,
+                rule_type: "安全".into(),
+            },
+            PermissionRule {
+                name: "多标签隔离".into(),
+                description: "标签之间完全隔离".into(),
+                enabled: true,
+                rule_type: "隔离".into(),
+            },
+            PermissionRule {
+                name: "剪贴板访问".into(),
+                description: "允许 Agent 读取剪贴板".into(),
+                enabled: false,
+                rule_type: "隐私".into(),
+            },
         ])
     }
 }
@@ -587,12 +655,36 @@ pub async fn get_hooks() -> Result<Vec<Hook>, String> {
         serde_json::from_str(&data).map_err(|e| format!("parse error: {e}"))
     } else {
         Ok(vec![
-            Hook { event: "on_session_start".into(), command: "echo 'Session started'".into(), enabled: true },
-            Hook { event: "on_session_end".into(), command: "git add -A && git stash".into(), enabled: true },
-            Hook { event: "on_tool_call".into(), command: "logger -t deepseeknova 'Tool: $TOOL'".into(), enabled: true },
-            Hook { event: "on_approval_request".into(), command: "paplay /usr/share/sounds/alert.wav".into(), enabled: true },
-            Hook { event: "on_task_complete".into(), command: "notify-send 'Done' 'Task completed'".into(), enabled: true },
-            Hook { event: "on_budget_exceeded".into(), command: "notify-send 'Budget!' 'Check billing'".into(), enabled: true },
+            Hook {
+                event: "on_session_start".into(),
+                command: "echo 'Session started'".into(),
+                enabled: true,
+            },
+            Hook {
+                event: "on_session_end".into(),
+                command: "git add -A && git stash".into(),
+                enabled: true,
+            },
+            Hook {
+                event: "on_tool_call".into(),
+                command: "logger -t deepseeknova 'Tool: $TOOL'".into(),
+                enabled: true,
+            },
+            Hook {
+                event: "on_approval_request".into(),
+                command: "paplay /usr/share/sounds/alert.wav".into(),
+                enabled: true,
+            },
+            Hook {
+                event: "on_task_complete".into(),
+                command: "notify-send 'Done' 'Task completed'".into(),
+                enabled: true,
+            },
+            Hook {
+                event: "on_budget_exceeded".into(),
+                command: "notify-send 'Budget!' 'Check billing'".into(),
+                enabled: true,
+            },
         ])
     }
 }
@@ -614,7 +706,11 @@ pub async fn set_hook(event: String, command: String, enabled: bool) -> Result<(
         h.command = command.clone();
         h.enabled = enabled;
     } else {
-        hooks.push(Hook { event: event.clone(), command, enabled });
+        hooks.push(Hook {
+            event: event.clone(),
+            command,
+            enabled,
+        });
     }
 
     if let Some(dir) = path.parent() {
@@ -675,10 +771,34 @@ pub async fn list_mcp_servers() -> Result<Vec<McpServer>, String> {
         serde_json::from_str(&data).map_err(|e| format!("parse error: {e}"))
     } else {
         Ok(vec![
-            McpServer { name: "filesystem".into(), command: "npx".into(), args: "@modelcontextprotocol/server-filesystem".into(), transport: "stdio".into(), status: "running".into() },
-            McpServer { name: "git".into(), command: "npx".into(), args: "@modelcontextprotocol/server-git".into(), transport: "stdio".into(), status: "running".into() },
-            McpServer { name: "shell".into(), command: "npx".into(), args: "@modelcontextprotocol/server-shell".into(), transport: "stdio".into(), status: "running".into() },
-            McpServer { name: "web-search".into(), command: "npx".into(), args: "@modelcontextprotocol/server-brave-search".into(), transport: "stdio".into(), status: "stopped".into() },
+            McpServer {
+                name: "filesystem".into(),
+                command: "npx".into(),
+                args: "@modelcontextprotocol/server-filesystem".into(),
+                transport: "stdio".into(),
+                status: "running".into(),
+            },
+            McpServer {
+                name: "git".into(),
+                command: "npx".into(),
+                args: "@modelcontextprotocol/server-git".into(),
+                transport: "stdio".into(),
+                status: "running".into(),
+            },
+            McpServer {
+                name: "shell".into(),
+                command: "npx".into(),
+                args: "@modelcontextprotocol/server-shell".into(),
+                transport: "stdio".into(),
+                status: "running".into(),
+            },
+            McpServer {
+                name: "web-search".into(),
+                command: "npx".into(),
+                args: "@modelcontextprotocol/server-brave-search".into(),
+                transport: "stdio".into(),
+                status: "stopped".into(),
+            },
         ])
     }
 }
@@ -698,7 +818,8 @@ pub async fn add_mcp_server(server: McpServer) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let data = serde_json::to_string_pretty(&servers).map_err(|e| format!("serialize error: {e}"))?;
+    let data =
+        serde_json::to_string_pretty(&servers).map_err(|e| format!("serialize error: {e}"))?;
     std::fs::write(&path, data).map_err(|e| format!("write error: {e}"))?;
     info!("MCP server added");
     Ok(())
@@ -719,7 +840,8 @@ pub async fn remove_mcp_server(name: String) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let data = serde_json::to_string_pretty(&servers).map_err(|e| format!("serialize error: {e}"))?;
+    let data =
+        serde_json::to_string_pretty(&servers).map_err(|e| format!("serialize error: {e}"))?;
     std::fs::write(&path, data).map_err(|e| format!("write error: {e}"))?;
     info!("MCP server '{name}' removed");
     Ok(())
@@ -738,15 +860,23 @@ pub async fn toggle_mcp_server(name: String, start: bool) -> Result<(), String> 
     };
     for s in &mut servers {
         if s.name == name {
-            s.status = if start { "running".into() } else { "stopped".into() };
+            s.status = if start {
+                "running".into()
+            } else {
+                "stopped".into()
+            };
         }
     }
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let data = serde_json::to_string_pretty(&servers).map_err(|e| format!("serialize error: {e}"))?;
+    let data =
+        serde_json::to_string_pretty(&servers).map_err(|e| format!("serialize error: {e}"))?;
     std::fs::write(&path, data).map_err(|e| format!("write error: {e}"))?;
-    info!("MCP server '{name}' {}", if start { "started" } else { "stopped" });
+    info!(
+        "MCP server '{name}' {}",
+        if start { "started" } else { "stopped" }
+    );
     Ok(())
 }
 
@@ -766,12 +896,48 @@ pub struct SubAgent {
 #[tauri::command]
 pub async fn list_subagents() -> Result<Vec<SubAgent>, String> {
     Ok(vec![
-        SubAgent { name: "code-reviewer".into(), description: "代码审查专家".into(), model: "deepseek-v4-pro".into(), status: "idle".into(), tasks: 12 },
-        SubAgent { name: "bug-hunter".into(), description: "Bug 检测和根因分析".into(), model: "deepseek-v4-pro".into(), status: "idle".into(), tasks: 5 },
-        SubAgent { name: "test-generator".into(), description: "自动生成测试用例".into(), model: "deepseek-v4-flash".into(), status: "idle".into(), tasks: 8 },
-        SubAgent { name: "refactor-assistant".into(), description: "代码重构建议".into(), model: "deepseek-v4-pro".into(), status: "running".into(), tasks: 3 },
-        SubAgent { name: "frontend-design".into(), description: "前端 UI/UX 设计".into(), model: "deepseek-v4-flash".into(), status: "idle".into(), tasks: 7 },
-        SubAgent { name: "doc-generator".into(), description: "文档生成".into(), model: "deepseek-v4-flash".into(), status: "idle".into(), tasks: 15 },
+        SubAgent {
+            name: "code-reviewer".into(),
+            description: "代码审查专家".into(),
+            model: "deepseek-v4-pro".into(),
+            status: "idle".into(),
+            tasks: 12,
+        },
+        SubAgent {
+            name: "bug-hunter".into(),
+            description: "Bug 检测和根因分析".into(),
+            model: "deepseek-v4-pro".into(),
+            status: "idle".into(),
+            tasks: 5,
+        },
+        SubAgent {
+            name: "test-generator".into(),
+            description: "自动生成测试用例".into(),
+            model: "deepseek-v4-flash".into(),
+            status: "idle".into(),
+            tasks: 8,
+        },
+        SubAgent {
+            name: "refactor-assistant".into(),
+            description: "代码重构建议".into(),
+            model: "deepseek-v4-pro".into(),
+            status: "running".into(),
+            tasks: 3,
+        },
+        SubAgent {
+            name: "frontend-design".into(),
+            description: "前端 UI/UX 设计".into(),
+            model: "deepseek-v4-flash".into(),
+            status: "idle".into(),
+            tasks: 7,
+        },
+        SubAgent {
+            name: "doc-generator".into(),
+            description: "文档生成".into(),
+            model: "deepseek-v4-flash".into(),
+            status: "idle".into(),
+            tasks: 15,
+        },
     ])
 }
 
@@ -880,9 +1046,24 @@ pub async fn get_memories() -> Result<Vec<MemoryEntry>, String> {
         serde_json::from_str(&data).map_err(|e| format!("parse error: {e}"))
     } else {
         Ok(vec![
-            MemoryEntry { id: "1".into(), memory_type: "project".into(), text: "项目使用 Rust + Tauri 2.0 构建".into(), created_at: "2 天前".into() },
-            MemoryEntry { id: "2".into(), memory_type: "user".into(), text: "用户偏好 VS Code 和深色主题".into(), created_at: "1 天前".into() },
-            MemoryEntry { id: "3".into(), memory_type: "global".into(), text: "Flash 用于日常，Pro 用于复杂推理".into(), created_at: "3 天前".into() },
+            MemoryEntry {
+                id: "1".into(),
+                memory_type: "project".into(),
+                text: "项目使用 Rust + Tauri 2.0 构建".into(),
+                created_at: "2 天前".into(),
+            },
+            MemoryEntry {
+                id: "2".into(),
+                memory_type: "user".into(),
+                text: "用户偏好 VS Code 和深色主题".into(),
+                created_at: "1 天前".into(),
+            },
+            MemoryEntry {
+                id: "3".into(),
+                memory_type: "global".into(),
+                text: "Flash 用于日常，Pro 用于复杂推理".into(),
+                created_at: "3 天前".into(),
+            },
         ])
     }
 }
@@ -910,7 +1091,8 @@ pub async fn add_memory(memory_type: String, text: String) -> Result<MemoryEntry
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let data = serde_json::to_string_pretty(&memories).map_err(|e| format!("serialize error: {e}"))?;
+    let data =
+        serde_json::to_string_pretty(&memories).map_err(|e| format!("serialize error: {e}"))?;
     std::fs::write(&path, data).map_err(|e| format!("write error: {e}"))?;
     info!("memory added");
     Ok(entry)
@@ -931,7 +1113,8 @@ pub async fn delete_memory(id: String) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let data = serde_json::to_string_pretty(&memories).map_err(|e| format!("serialize error: {e}"))?;
+    let data =
+        serde_json::to_string_pretty(&memories).map_err(|e| format!("serialize error: {e}"))?;
     std::fs::write(&path, data).map_err(|e| format!("write error: {e}"))?;
     info!("memory {id} deleted");
     Ok(())
@@ -954,7 +1137,8 @@ pub async fn save_settings(settings: serde_json::Value) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let data = serde_json::to_string_pretty(&settings).map_err(|e| format!("serialize error: {e}"))?;
+    let data =
+        serde_json::to_string_pretty(&settings).map_err(|e| format!("serialize error: {e}"))?;
     std::fs::write(&path, data).map_err(|e| format!("write error: {e}"))?;
     info!("settings saved");
     Ok(())
@@ -1047,7 +1231,10 @@ pub async fn list_tabs() -> Result<Vec<TabInfo>, String> {
         let data = std::fs::read_to_string(&path).map_err(|e| format!("read error: {e}"))?;
         serde_json::from_str(&data).map_err(|e| format!("parse error: {e}"))
     } else {
-        Ok(vec![TabInfo { id: "1".into(), title: "主会话".into() }])
+        Ok(vec![TabInfo {
+            id: "1".into(),
+            title: "主会话".into(),
+        }])
     }
 }
 
@@ -1060,10 +1247,16 @@ pub async fn create_tab(title: String) -> Result<TabInfo, String> {
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default()
     } else {
-        vec![TabInfo { id: "1".into(), title: "主会话".into() }]
+        vec![TabInfo {
+            id: "1".into(),
+            title: "主会话".into(),
+        }]
     };
 
-    let tab = TabInfo { id: generate_id(), title };
+    let tab = TabInfo {
+        id: generate_id(),
+        title,
+    };
     tabs.push(tab.clone());
 
     if let Some(dir) = path.parent() {
@@ -1088,7 +1281,10 @@ pub async fn close_tab(id: String) -> Result<(), String> {
     };
     tabs.retain(|t| t.id != id);
     if tabs.is_empty() {
-        tabs.push(TabInfo { id: "1".into(), title: "主会话".into() });
+        tabs.push(TabInfo {
+            id: "1".into(),
+            title: "主会话".into(),
+        });
     }
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
