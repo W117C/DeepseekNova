@@ -4,18 +4,20 @@
 
 import { useState } from "react";
 import { useStore } from "../store";
+import { useTheme } from "../store/theme";
 
 export default function ModelSelector() {
   const model = useStore((s) => s.model);
   const setModel = useStore((s) => s.setModel);
-  const capabilities = useStore((s) => s.capabilities);
+  const displayMode = useTheme((s) => s.displayMode);
   const [open, setOpen] = useState(false);
 
-  // 可用模型列表（从 capabilities 或默认）
+  // DeepSeek 模型列表
   const models = [
-    { id: "deepseek-chat", label: "DeepSeek Chat" },
-    { id: "deepseek-reasoner", label: "DeepSeek Reasoner (R1)" },
-    { id: "deepseek-coder", label: "DeepSeek Coder" },
+    { id: "deepseek-v4-flash", label: "DeepSeek v4 Flash", desc: "快速响应，低成本" },
+    { id: "deepseek-v4-pro", label: "DeepSeek v4 Pro", desc: "高级推理，复杂任务" },
+    { id: "deepseek-coder", label: "DeepSeek Coder", desc: "代码专用模型" },
+    { id: "deepseek-reasoner", label: "DeepSeek Reasoner", desc: "R1 推理模型" },
   ];
 
   const current = models.find((m) => m.id === model) || models[0];
@@ -23,9 +25,9 @@ export default function ModelSelector() {
   return (
     <div style={{ position: "relative" }}>
       <button
-        className="btn-ghost btn"
+        className="btn btn-ghost"
         onClick={() => setOpen(!open)}
-        style={{ gap: "4px", fontSize: "12px" }}
+        style={{ gap: "4px", fontSize: "12px", padding: "4px 8px" }}
       >
         <span style={{ color: "var(--accent)" }}>●</span>
         {current?.label || model}
@@ -52,30 +54,31 @@ export default function ModelSelector() {
               boxShadow: "var(--shadow-md)",
               zIndex: 100,
               overflow: "hidden",
-              minWidth: "200px",
+              minWidth: "240px",
             }}
           >
+            <div style={{ padding: "8px 12px", fontSize: "11px", color: "var(--text-3)", borderBottom: "1px solid var(--border-1)" }}>
+              选择模型
+            </div>
             {models.map((m) => (
               <div
                 key={m.id}
                 className="sidebar-item"
-                style={{ padding: "8px 12px" }}
+                style={{ padding: "10px 12px" }}
                 onClick={() => {
                   setModel(m.id);
                   setOpen(false);
                 }}
               >
-                <span className="sidebar-item-title">{m.label}</span>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: "13px", color: "var(--text-1)" }}>{m.label}</div>
+                  {displayMode === "text" && <div style={{ fontSize: "11px", color: "var(--text-3)" }}>{m.desc}</div>}
+                </div>
                 {m.id === model && (
                   <span style={{ color: "var(--accent)", fontSize: "12px" }}>✓</span>
                 )}
               </div>
             ))}
-            {capabilities?.supports_reasoning_effort && (
-              <div style={{ padding: "4px 12px", fontSize: "11px", color: "var(--text-3)" }}>
-                支持推理深度调节
-              </div>
-            )}
           </div>
         </>
       )}

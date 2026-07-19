@@ -105,7 +105,84 @@ html, body, #root {
 ::-webkit-scrollbar-thumb { background: var(--border-1); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--border-2); }
 
-/* ---------- 通用组件 ---------- */
+/* ---------- 控制栏 ---------- */
+.control-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: var(--bg-1);
+  border-top: 1px solid var(--border-1);
+  font-size: 13px;
+  gap: 8px;
+}
+
+.control-bar-left,
+.control-bar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.control-sep {
+  width: 1px;
+  height: 20px;
+  background: var(--border-1);
+}
+
+/* ---------- 开关组件 ---------- */
+.toggle-switch {
+  position: relative;
+  display: inline-block;
+  width: 40px;
+  height: 20px;
+}
+
+.toggle-switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.toggle-slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: var(--bg-3);
+  transition: 0.3s;
+  border-radius: 20px;
+}
+
+.toggle-slider:before {
+  position: absolute;
+  content: "";
+  height: 14px;
+  width: 14px;
+  left: 3px;
+  bottom: 3px;
+  background-color: var(--text-2);
+  transition: 0.3s;
+  border-radius: 50%;
+}
+
+input:checked + .toggle-slider {
+  background-color: var(--accent);
+}
+
+input:checked + .toggle-slider:before {
+  transform: translateX(20px);
+  background-color: var(--text-1);
+}
+
+/* ---------- 激活的标签 ---------- */
+.tag-active {
+  background: var(--accent-dim);
+  color: var(--accent);
+  border: 1px solid var(--accent);
+}
 .btn {
   display: inline-flex; align-items: center; gap: 6px;
   padding: 6px 14px; border: 1px solid var(--border-1); border-radius: var(--radius-sm);

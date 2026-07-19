@@ -7,6 +7,7 @@ import Sidebar from "./Sidebar";
 import RightPanel from "./RightPanel";
 import Transcript from "./Transcript";
 import Composer from "./Composer";
+import ControlBar from "./ControlBar";
 import TitleBar from "./TitleBar";
 import StatusBar from "./StatusBar";
 import SettingsModal from "./SettingsModal";
@@ -31,6 +32,7 @@ export default function AppChrome() {
       <main className="main-area">
         <Transcript />
         <Composer />
+        <ControlBar />
       </main>
       <RightPanel />
       <StatusBar />

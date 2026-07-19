@@ -124,7 +124,7 @@ export const useStore = create<Store>()(
     status: "ready",
     mode: "act",
     effort: "high",
-    model: "deepseek-chat",
+    model: "deepseek-v4-flash",
     pendingApproval: null,
 
     // ── 初始使用量 ──
