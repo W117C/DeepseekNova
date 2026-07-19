@@ -47,6 +47,14 @@ jobs:
             libdbus-1-dev \
             libsoup-3.0-dev \
             libjavascriptcoregtk-4.1-dev
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build frontend
+        working-directory: crates/deepseeknova-desktop/frontend
+        run: |
+          npm ci
+          npm run build
       - uses: Swatinem/rust-cache@v2
       - run: cargo check -p deepseeknova-desktop
 
