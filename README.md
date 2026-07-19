@@ -20,7 +20,7 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 - 工具调用全链路流式：start → delta → end → result，前端实时渲染
 
 ### ⚡ Prefix-Cache 三层架构
-- **会话级缓存** — 跨轮次 prompt prefix 命中，命中率 94%+
+- **会话级缓存** — 跨轮次 prompt prefix 命中，实时统计命中率
 - **Token 追踪** — 实时统计输入/输出/推理/缓存 token，精确成本计算
 - **预算控制** — 单会话 Token 上限，超额自动停止
 

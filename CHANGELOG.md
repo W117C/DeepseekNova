@@ -92,6 +92,25 @@ All notable changes to DeepseekNova will be documented in this file.
 - `deepseeknova-tools/src/memory.rs`: 3 处同上
 - 防止一次 panic 后 memory 存储级联崩溃
 
+### Mock 数据修复
+
+#### billing.rs — 接入真实数据
+- 不再返回硬编码 JSON，改为从 AppState 的 CumulativeUsage 读取真实 token 统计
+- submit_prompt 每次运行结束后累计 usage 到 AppState
+- 成本按 DeepSeek 实际定价计算（input $0.27/1M, cached $0.07/1M, output $1.10/1M）
+- README 中"命中率 94%+"改为"实时统计命中率"（该数字来自 mock 数据，非真实压测）
+
+#### memory.rs — 接入 core 的 MemoryStore
+- 不再使用简化版 JSON 文件存储，改为调用 deepseeknova-core 的 SQLite FTS5 MemoryStore
+- 删除 memory_config_path() 和 MemoryEntry struct（desktop 专有）
+- get_memories / add_memory / delete_memory 全部走 SQLite，与后端测试覆盖的同一套代码
+
+#### 其他命令 — 标注 mock
+- diagnostics.rs: 所有检查项标为 "pending"，明确 "未实际检测"
+- knowledge.rs: 返回空数组 + mock: true
+- subagents.rs: 返回空数组 + mock: true
+- misc.rs check_for_updates: 改为调用 GitHub Releases API 做真实版本检查
+
 ### 依赖维护
 - 关闭 12 个 Dependabot breaking change PR（opentelemetry-stdout/tracing-opentelemetry 升级导致 trait 不兼容）
 - 尝试 workspace dependencies pin 统一依赖版本，因 tonic 0.12 引入的旧版本导致编译失败已回退

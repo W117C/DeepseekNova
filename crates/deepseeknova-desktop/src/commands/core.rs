@@ -64,6 +64,7 @@ pub async fn submit_prompt(
     };
 
     let cancel_clone = cancel.clone();
+    let usage_arc = state.usage.clone();
     tokio::spawn(async move {
         match agent.run_stream(input).await {
             Ok(mut stream) => {
@@ -105,6 +106,18 @@ pub async fn submit_prompt(
                             return;
                         }
                     }
+                }
+
+                // Accumulate usage into AppState for billing stats
+                if let Some(ref u) = final_usage {
+                    let mut usage_state = usage_arc.lock().await;
+                    usage_state.prompt_tokens += u.prompt_tokens as u64;
+                    usage_state.completion_tokens += u.completion_tokens as u64;
+                    usage_state.total_tokens += u.total_tokens as u64;
+                    usage_state.cache_hit_tokens += u.cache_hit_tokens as u64;
+                    usage_state.cache_miss_tokens += u.cache_miss_tokens as u64;
+                    usage_state.reasoning_tokens += u.reasoning_tokens as u64;
+                    usage_state.run_count += 1;
                 }
 
                 let _ = on_event.send(WireEvent::Done {

@@ -208,15 +208,6 @@ fn mcp_config_path() -> std::path::PathBuf {
 // Commands — 子智能体 (Sub-Agents)
 // ===========================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubAgent {
-    pub name: String,
-    pub description: String,
-    pub model: String,
-    pub status: String,
-    pub tasks: u64,
-}
-
 // ===========================================================================
 // Commands — 诊断 (Diagnostics)
 // ===========================================================================
@@ -230,23 +221,8 @@ pub struct SubAgent {
 // ===========================================================================
 
 // ===========================================================================
-// Commands — 记忆 CRUD (Memory)
+// Commands — 记忆 (Memory — uses core's SQLite FTS5 MemoryStore)
 // ===========================================================================
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MemoryEntry {
-    pub id: String,
-    pub memory_type: String,
-    pub text: String,
-    pub created_at: String,
-}
-
-fn memory_config_path() -> std::path::PathBuf {
-    let mut p = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    p.push(".deepseeknova");
-    p.push("memory.json");
-    p
-}
 
 // ===========================================================================
 // Commands — 设置持久化 (Settings)

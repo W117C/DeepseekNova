@@ -1208,6 +1208,8 @@ dependencies = [
  "deepseeknova-skills",
  "deepseeknova-store",
  "deepseeknova-tools",
+ "dirs",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tauri",

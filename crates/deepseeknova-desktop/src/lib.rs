@@ -16,11 +16,24 @@ type ApprovalSender = tokio::sync::oneshot::Sender<(String, bool)>;
 /// Type alias for the shared approval channel.
 type ApprovalChannel = std::sync::Arc<tokio::sync::Mutex<Option<ApprovalSender>>>;
 
+/// Cumulative usage statistics gathered from all agent runs.
+#[derive(Debug, Default, Clone, serde::Serialize)]
+pub struct CumulativeUsage {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+    pub cache_hit_tokens: u64,
+    pub cache_miss_tokens: u64,
+    pub reasoning_tokens: u64,
+    pub run_count: u64,
+}
+
 pub struct AppState {
     pub runner: tokio::sync::Mutex<Option<Box<dyn deepseeknova_core::Runner + Send>>>,
     pub cancel: tokio::sync::Mutex<Option<tokio_util::sync::CancellationToken>>,
     pub approval_tx: ApprovalChannel,
     pub history: std::sync::Arc<tokio::sync::Mutex<Vec<deepseeknova_core::Message>>>,
+    pub usage: std::sync::Arc<tokio::sync::Mutex<CumulativeUsage>>,
 }
 
 pub fn run() {
@@ -36,6 +49,7 @@ pub fn run() {
             cancel: tokio::sync::Mutex::new(None),
             approval_tx: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             history: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            usage: std::sync::Arc::new(tokio::sync::Mutex::new(CumulativeUsage::default())),
         })
         .invoke_handler(tauri::generate_handler![
             // Core
