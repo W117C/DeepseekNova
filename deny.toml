@@ -25,6 +25,8 @@ skip = []
 
 [advisories]
 version = 2
+# Review quarterly — remove items when upstream upgrades resolve them.
+# Each entry below has a comment explaining why it's ignored.
 ignore = [
     # RUSTSEC-2026-0002: lru 0.12.5 IterMut unsoundness — only used by ratatui's
     # internal scrollback cache, which does not call IterMut. No actionable impact.
