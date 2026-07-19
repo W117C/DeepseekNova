@@ -1,12 +1,6 @@
 /**
- * AppChrome.tsx — 三栏布局外壳（重构版）
- *
- * 参考 Reasonix + Hermes WebUI 的布局优点：
- * - 顶栏：多标签页（每个标签=独立会话）+ 面板控制
- * - 左侧：会话/技能/任务导航
- * - 中间：对话流 + 输入区 + 工具栏（紧凑分组）
- * - 右侧：文件面板（读/改分区）+ 上下文 + 记忆
- * - 底部：成本仪表盘（缓存率/Token/费用/时长）
+ * AppChrome.tsx — 布局外壳
+ * 顶栏(多标签) + 左侧(会话) + 中间(对话+输入+控制) + 右侧(文件/知识库/记忆) + 底部(成本仪表盘)
  */
 
 import { useStore } from "../store";
@@ -26,11 +20,8 @@ export default function AppChrome() {
   const showSettings = useStore((s) => s.showSettings);
   const showCommandPalette = useStore((s) => s.showCommandPalette);
 
-  const shellClass = [
-    "app-shell",
-    sidebarCollapsed && "sidebar-collapsed",
-    rightCollapsed && "right-collapsed",
-  ].filter(Boolean).join(" ");
+  const shellClass = ["app-shell", sidebarCollapsed && "sidebar-collapsed", rightCollapsed && "right-collapsed"]
+    .filter(Boolean).join(" ");
 
   return (
     <div className={shellClass}>
@@ -45,7 +36,6 @@ export default function AppChrome() {
       </main>
       <RightPanel />
       <StatusBar />
-
       {showSettings && <SettingsModal />}
       {showCommandPalette && <CommandPalette />}
     </div>

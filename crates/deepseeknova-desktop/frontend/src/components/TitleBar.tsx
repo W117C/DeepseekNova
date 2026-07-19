@@ -1,22 +1,10 @@
 /**
- * TitleBar.tsx — 顶部导航栏（多标签版）
- *
- * 参考 Reasonix 的多标签设计：
- * - 每个标签 = 独立会话，可并行处理不同项目
- * - 标签之间完全隔离
- * - 重启后自动恢复
- *
- * 布局：[侧边栏切换] [Logo] [标签页1 标签页2 +] ──── [命令面板] [右侧面板切换]
+ * TitleBar.tsx — Reasonix 风格多标签顶栏
+ * [侧边栏切换] [Logo] [标签1 标签2 +] ─── [⌘P] [右侧面板]
  */
 
 import { useStore } from "../store";
 import { useState } from "react";
-
-interface Tab {
-  id: string;
-  title: string;
-  sessionId?: string;
-}
 
 export default function TitleBar() {
   const capabilities = useStore((s) => s.capabilities);
@@ -26,10 +14,7 @@ export default function TitleBar() {
   const rightCollapsed = useStore((s) => s.rightCollapsed);
   const setShowCommandPalette = useStore((s) => s.setShowCommandPalette);
 
-  // 多标签会话（模拟数据，后续接入 store）
-  const [tabs, setTabs] = useState<Tab[]>([
-    { id: "1", title: "主会话" },
-  ]);
+  const [tabs, setTabs] = useState([{ id: "1", title: "主会话" }]);
   const [activeTabId, setActiveTabId] = useState("1");
 
   const addTab = () => {
@@ -40,34 +25,23 @@ export default function TitleBar() {
 
   const closeTab = (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    const newTabs = tabs.filter((t) => t.id !== id);
-    if (newTabs.length === 0) {
-      // 至少保留一个标签
-      setTabs([{ id: "1", title: "主会话" }]);
-      setActiveTabId("1");
-    } else {
-      setTabs(newTabs);
-      if (activeTabId === id) {
-        setActiveTabId(newTabs[0].id);
-      }
-    }
+    const next = tabs.filter((t) => t.id !== id);
+    setTabs(next.length ? next : [{ id: "1", title: "主会话" }]);
+    if (activeTabId === id && next.length) setActiveTabId(next[0].id);
   };
 
   return (
     <header className="app-header">
-      {/* 左侧：侧边栏切换 + Logo */}
       <div className="header-left">
-        <button className="btn-icon" onClick={toggleSidebar} title={sidebarCollapsed ? "展开侧边栏" : "折叠侧边栏"}>
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <rect x="3" y="3" width="18" height="18" rx="2"/>
-            <line x1="9" y1="3" x2="9" y2="21"/>
+        <button className="btn-icon" onClick={toggleSidebar} title={sidebarCollapsed ? "展开" : "折叠"}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/>
           </svg>
         </button>
         <span className="header-logo">DeepseekNova</span>
         {capabilities && <span className="header-badge">v{capabilities.version}</span>}
       </div>
 
-      {/* 中间：多标签页 */}
       <div className="header-tabs">
         {tabs.map((tab) => (
           <div
@@ -78,36 +52,21 @@ export default function TitleBar() {
             <span className="header-tab-dot" />
             <span className="header-tab-title">{tab.title}</span>
             {tabs.length > 1 && (
-              <button
-                className="header-tab-close"
-                onClick={(e) => closeTab(tab.id, e)}
-                title="关闭标签"
-              >
-                ✕
-              </button>
+              <button className="header-tab-close" onClick={(e) => closeTab(tab.id, e)}>✕</button>
             )}
           </div>
         ))}
-        <button className="header-tab-add" onClick={addTab} title="新建标签">
-          +
-        </button>
+        <button className="header-tab-add" onClick={addTab}>+</button>
       </div>
 
-      {/* 右侧：命令面板 + 面板控制 */}
       <div className="header-right">
-        <button
-          className="btn btn-ghost"
-          onClick={() => setShowCommandPalette(true)}
-          style={{ fontSize: "12px", padding: "4px 12px" }}
-          title="命令面板 (Ctrl+P)"
-        >
+        <button className="btn btn-ghost" onClick={() => setShowCommandPalette(true)} style={{ fontSize: 11, padding: "2px 8px" }} title="命令面板">
           <span className="icon-only">⌘P</span>
-          <span className="text-only">命令面板</span>
+          <span className="text-only">命令</span>
         </button>
-        <button className="btn-icon" onClick={toggleRightPanel} title={rightCollapsed ? "展开右侧面板" : "折叠右侧面板"}>
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <rect x="3" y="3" width="18" height="18" rx="2"/>
-            <line x1="15" y1="3" x2="15" y2="21"/>
+        <button className="btn-icon" onClick={toggleRightPanel} title={rightCollapsed ? "展开面板" : "折叠面板"}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <rect x="3" y="3" width="18" height="18" rx="2"/><line x1="15" y1="3" x2="15" y2="21"/>
           </svg>
         </button>
       </div>
