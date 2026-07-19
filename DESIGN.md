@@ -1,23 +1,23 @@
-# DeepNova — 重命名 + 架构升级设计文档
+# DeepseekNova — 重命名 + 架构升级设计文档
 
-## 一、重命名：DeepNova → DeepNova
+## 一、重命名：DeepseekNova → DeepseekNova
 
 ### 范围
-- 21 个 crate 目录：`deepnova-*` → `deepnova-*`
+- 21 个 crate 目录：`deepseeknova-*` → `deepseeknova-*`
 - 所有 `Cargo.toml` 中的 package name 和依赖引用
-- 所有 Rust 源码中的 `deepnova_*` / `deepnova-*` 引用
+- 所有 Rust 源码中的 `deepseeknova_*` / `deepseeknova-*` 引用
 - CI workflows、deny.toml、README
 - GitHub 仓库名（需要用户在 GitHub 设置中改）
 
 ### 命名规则
 | 原名 | 新名 |
 |------|------|
-| `deepnova-core` | `deepnova-core` |
-| `deepnova-agent` | `deepnova-agent` |
-| `deepnova-cli` | `deepnova-cli` |
+| `deepseeknova-core` | `deepseeknova-core` |
+| `deepseeknova-agent` | `deepseeknova-agent` |
+| `deepseeknova-cli` | `deepseeknova-cli` |
 | ... | ... |
-| `deepnova_desktop` (crate) | `deepnova_desktop` |
-| `DeepNova` (展示名) | `DeepNova` |
+| `deepseeknova_desktop` (crate) | `deepseeknova_desktop` |
+| `DeepseekNova` (展示名) | `DeepseekNova` |
 
 ---
 
@@ -28,10 +28,10 @@
 
 | 文件 | 状态 | 建议 |
 |------|------|------|
-| `deepnova-core/src/identity/merkle/mod.rs` | 1行 `pub mod tree;` | 检查 tree.rs 是否有实现 |
-| `deepnova-agent/src/budget/mod.rs` | 1行 `pub mod controller;` | 转发模块，保留 |
-| `deepnova-core/src/memory/lifecycle.rs` | 9行 enum | 可填充或保留为占位 |
-| `deepnova-core/src/prefix/mod.rs` | 7个子模块声明 | 检查子模块是否有实现 |
+| `deepseeknova-core/src/identity/merkle/mod.rs` | 1行 `pub mod tree;` | 检查 tree.rs 是否有实现 |
+| `deepseeknova-agent/src/budget/mod.rs` | 1行 `pub mod controller;` | 转发模块，保留 |
+| `deepseeknova-core/src/memory/lifecycle.rs` | 9行 enum | 可填充或保留为占位 |
+| `deepseeknova-core/src/prefix/mod.rs` | 7个子模块声明 | 检查子模块是否有实现 |
 
 ### 编译质量
 - ✅ Clippy 零警告
@@ -44,14 +44,14 @@
 ## 三、内置 Skill 设计
 
 ### 设计理念
-DeepNova 的 Skill 不是静态文档，而是 **可执行的认知框架** — 每个 Skill 定义了一种思考方式和工作流程。
+DeepseekNova 的 Skill 不是静态文档，而是 **可执行的认知框架** — 每个 Skill 定义了一种思考方式和工作流程。
 
 ### 内置 Skill 列表
 
 #### 1. `frontend-developer` — 前端开发
 - **触发**: 用户要求构建网页、UI 组件、dashboard
 - **能力**: HTML/CSS/JS/React/Vue/Svelte 代码生成，设计系统，响应式布局
-- **实现**: 复用现有 `deepnova-tools` 的 write_file/edit_file + 设计规范知识库
+- **实现**: 复用现有 `deepseeknova-tools` 的 write_file/edit_file + 设计规范知识库
 
 #### 2. `coding-copilot` — 编程助手
 - **触发**: 用户要求写代码、重构、修 bug
@@ -107,7 +107,7 @@ DeepNova 的 Skill 不是静态文档，而是 **可执行的认知框架** — 
   - 有效模式（什么方法奏效）
   - 失败教训（什么方法不奏效）
   - 项目上下文（用于后续项目）
-- 存入 DeepNova 的长期记忆系统
+- 存入 DeepseekNova 的长期记忆系统
 
 ---
 
@@ -135,16 +135,16 @@ DeepNova 的 Skill 不是静态文档，而是 **可执行的认知框架** — 
 - Agent 主动 "推自己一把" 持久化重要信息
 - 兼容 agentskills.io 开放标准
 
-### DeepNova 适配方案
+### DeepseekNova 适配方案
 
 ```
 ┌─────────────────────────────────────────────────┐
-│              DeepNova Memory Architecture         │
+│              DeepseekNova Memory Architecture         │
 ├─────────────────────────────────────────────────┤
 │                                                  │
 │  ┌──────────┐  ┌──────────┐  ┌──────────────┐ │
 │  │ 短期记忆  │  │ 任务记忆  │  │ 技能库(Skills) │ │
-│  │ Context  │  │ Session  │  │ ~/.deepnova/  │ │
+│  │ Context  │  │ Session  │  │ ~/.deepseeknova/  │ │
 │  │ Window   │  │ History  │  │   skills/     │ │
 │  └──────────┘  └──────────┘  └──────────────┘ │
 │        │              │              │          │
@@ -165,7 +165,7 @@ DeepNova 的 Skill 不是静态文档，而是 **可执行的认知框架** — 
 ```
 
 **实现步骤:**
-1. 在 `deepnova-core/src/memory/` 下实现四层记忆
+1. 在 `deepseeknova-core/src/memory/` 下实现四层记忆
 2. 任务完成后自动评估是否值得创建 Skill
 3. Skill 格式: Markdown + YAML frontmatter (兼容 agentskills.io)
 4. 使用 SQLite FTS5 做全文检索
@@ -184,9 +184,9 @@ DeepNova 的 Skill 不是静态文档，而是 **可执行的认知框架** — 
 3. **经验不积累** — 每次 from scratch，不学习
 4. **没有项目闭环** — 做完就结束，不总结、不文档化、不沉淀
 
-### DeepNova 的规范设计
+### DeepseekNova 的规范设计
 
-#### DeepNova Agent 工作规范 (DNA Spec)
+#### DeepseekNova Agent 工作规范 (DNA Spec)
 
 ```
 Phase 1: 理解 (Understand)
@@ -228,7 +228,7 @@ Phase 5: 沉淀 (Distill) ← 这是大多数 Agent 缺失的
 
 | 优先级 | 任务 | 预计工作量 |
 |--------|------|-----------|
-| P0 | 重命名 DeepNova → DeepNova | 机械替换，1次提交 |
+| P0 | 重命名 DeepseekNova → DeepseekNova | 机械替换，1次提交 |
 | P1 | 实现自动记忆系统 | 新模块，2-3个文件 |
 | P2 | 内置 5 个 Skill | Skill 定义文件 |
 | P3 | 项目后置产出 | Wiki/卡片/记忆生成 |

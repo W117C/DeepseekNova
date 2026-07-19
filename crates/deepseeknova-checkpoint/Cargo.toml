@@ -1,0 +1,21 @@
+[package]
+name = "deepseeknova-checkpoint"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Transactional file-system checkpoint and rollback manager for safe agent file operations."
+readme = "README.md"
+documentation = "https://docs.rs/deepseeknova-checkpoint/0.3.0"
+
+[dependencies]
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+walkdir = { workspace = true }
+deepseeknova-core = { version = "0.3.0", path = "../deepseeknova-core" }

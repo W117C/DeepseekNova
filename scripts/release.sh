@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# deepnova-rs release script
+# deepseeknova-rs release script
 # Usage: ./scripts/release.sh 0.1.0
 
 VERSION="${1:?Usage: $0 <version> (e.g. 0.1.0)}"
 
-echo "=== deepnova-rs release v${VERSION} ==="
+echo "=== deepseeknova-rs release v${VERSION} ==="
 
 # 1. Verify clean working tree
 if [ -d .git ]; then
@@ -52,25 +52,25 @@ rm -f Cargo.toml.bak
 echo ""
 echo "--- cargo publish --dry-run (library crates) ---"
 LIBS=(
-    "deepnova-core"
-    "deepnova-config"
-    "deepnova-telemetry"
-    "deepnova-event"
-    "deepnova-store"
-    "deepnova-context"
-    "deepnova-sandbox"
-    "deepnova-security"
-    "deepnova-checkpoint"
-    "deepnova-skills"
-    "deepnova-serve"
-    "deepnova-tui"
-    "deepnova-permission"
-    "deepnova-provider"
-    "deepnova-mcp"
-    "deepnova-tools"
-    "deepnova-agent"
-    "deepnova-orch"
-    "deepnova-runtime"
+    "deepseeknova-core"
+    "deepseeknova-config"
+    "deepseeknova-telemetry"
+    "deepseeknova-event"
+    "deepseeknova-store"
+    "deepseeknova-context"
+    "deepseeknova-sandbox"
+    "deepseeknova-security"
+    "deepseeknova-checkpoint"
+    "deepseeknova-skills"
+    "deepseeknova-serve"
+    "deepseeknova-tui"
+    "deepseeknova-permission"
+    "deepseeknova-provider"
+    "deepseeknova-mcp"
+    "deepseeknova-tools"
+    "deepseeknova-agent"
+    "deepseeknova-orch"
+    "deepseeknova-runtime"
 )
 for lib in "${LIBS[@]}"; do
     echo "  checking $lib..."
@@ -79,21 +79,21 @@ done
 
 echo ""
 echo "--- cargo publish --dry-run (cli binary) ---"
-cargo publish -p deepnova-cli --dry-run --allow-dirty
+cargo publish -p deepseeknova-cli --dry-run --allow-dirty
 
 # 5. Build release artifacts
 echo ""
 echo "--- building release artifacts ---"
-cargo build --release -p deepnova-cli
+cargo build --release -p deepseeknova-cli
 
 # Copy to dist/
 mkdir -p dist
 if [[ "$(uname -s)" == "Darwin" ]]; then
-    cp target/release/deepnova dist/deepnova-${VERSION}-aarch64-apple-darwin
-    echo "  dist/deepnova-${VERSION}-aarch64-apple-darwin"
+    cp target/release/deepseeknova dist/deepseeknova-${VERSION}-aarch64-apple-darwin
+    echo "  dist/deepseeknova-${VERSION}-aarch64-apple-darwin"
 elif [[ "$(uname -s)" == "Linux" ]]; then
-    cp target/release/deepnova dist/deepnova-${VERSION}-x86_64-unknown-linux-gnu
-    echo "  dist/deepnova-${VERSION}-x86_64-unknown-linux-gnu"
+    cp target/release/deepseeknova dist/deepseeknova-${VERSION}-x86_64-unknown-linux-gnu
+    echo "  dist/deepseeknova-${VERSION}-x86_64-unknown-linux-gnu"
 fi
 
 # 6. Restore version.workspace = true in all Cargo.toml files
@@ -124,4 +124,4 @@ echo "=== Release v${VERSION} complete ==="
 echo "Next steps:"
 echo "  1. Review: git diff HEAD~1"
 echo "  2. Push:   git push origin main v${VERSION}"
-echo "  3. Publish: cargo publish -p deepnova-core && ... && cargo publish -p deepnova-cli"
+echo "  3. Publish: cargo publish -p deepseeknova-core && ... && cargo publish -p deepseeknova-cli"

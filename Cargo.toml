@@ -1,49 +1,49 @@
 [workspace]
 members = [
-    "crates/deepnova-cli",
-    "crates/deepnova-config",
-    "crates/deepnova-provider",
-    "crates/deepnova-agent",
-    "crates/deepnova-tools",
-    "crates/deepnova-core",
-    "crates/deepnova-mcp",
-    "crates/deepnova-event",
-    "crates/deepnova-permission",
-    "crates/deepnova-context",
-    "crates/deepnova-runtime",
-    "crates/deepnova-sandbox",
-    "crates/deepnova-checkpoint",
-    "crates/deepnova-store",
-    "crates/deepnova-tui",
-    "crates/deepnova-serve",
-    "crates/deepnova-skills",
-    "crates/deepnova-telemetry",
-    "crates/deepnova-desktop",
-    "crates/deepnova-orch",
-    "crates/deepnova-security",
+    "crates/deepseeknova-cli",
+    "crates/deepseeknova-config",
+    "crates/deepseeknova-provider",
+    "crates/deepseeknova-agent",
+    "crates/deepseeknova-tools",
+    "crates/deepseeknova-core",
+    "crates/deepseeknova-mcp",
+    "crates/deepseeknova-event",
+    "crates/deepseeknova-permission",
+    "crates/deepseeknova-context",
+    "crates/deepseeknova-runtime",
+    "crates/deepseeknova-sandbox",
+    "crates/deepseeknova-checkpoint",
+    "crates/deepseeknova-store",
+    "crates/deepseeknova-tui",
+    "crates/deepseeknova-serve",
+    "crates/deepseeknova-skills",
+    "crates/deepseeknova-telemetry",
+    "crates/deepseeknova-desktop",
+    "crates/deepseeknova-orch",
+    "crates/deepseeknova-security",
 ]
 resolver = "2"
 default-members = [
-    "crates/deepnova-cli",
-    "crates/deepnova-config",
-    "crates/deepnova-provider",
-    "crates/deepnova-agent",
-    "crates/deepnova-tools",
-    "crates/deepnova-core",
-    "crates/deepnova-mcp",
-    "crates/deepnova-event",
-    "crates/deepnova-permission",
-    "crates/deepnova-context",
-    "crates/deepnova-runtime",
-    "crates/deepnova-sandbox",
-    "crates/deepnova-checkpoint",
-    "crates/deepnova-store",
-    "crates/deepnova-tui",
-    "crates/deepnova-serve",
-    "crates/deepnova-skills",
-    "crates/deepnova-telemetry",
-    "crates/deepnova-orch",
-    "crates/deepnova-security",
+    "crates/deepseeknova-cli",
+    "crates/deepseeknova-config",
+    "crates/deepseeknova-provider",
+    "crates/deepseeknova-agent",
+    "crates/deepseeknova-tools",
+    "crates/deepseeknova-core",
+    "crates/deepseeknova-mcp",
+    "crates/deepseeknova-event",
+    "crates/deepseeknova-permission",
+    "crates/deepseeknova-context",
+    "crates/deepseeknova-runtime",
+    "crates/deepseeknova-sandbox",
+    "crates/deepseeknova-checkpoint",
+    "crates/deepseeknova-store",
+    "crates/deepseeknova-tui",
+    "crates/deepseeknova-serve",
+    "crates/deepseeknova-skills",
+    "crates/deepseeknova-telemetry",
+    "crates/deepseeknova-orch",
+    "crates/deepseeknova-security",
 ]
 
 [workspace.lints.rust]
@@ -54,7 +54,7 @@ rustdoc_invalid_codeblock_attributes = "deny"
 version = "0.3.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/W117C/DeepNova"
+repository = "https://github.com/W117C/DeepseekNova"
 
 [workspace.dependencies]
 anyhow = "1.0"
@@ -120,7 +120,7 @@ targets = [
     "x86_64-pc-windows-msvc",
 ]
 # The primary binary
-app-name = "deepnova-cli"
+app-name = "deepseeknova-cli"
 # Installer configurations
 installer = ["shell", "powershell", "npm"]
 # MSI not needed; npm covers the widest audience

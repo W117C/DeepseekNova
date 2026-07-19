@@ -1,0 +1,20 @@
+[package]
+name = "deepseeknova-permission"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Policy-based allow/ask/deny permission gates for tool execution with per-tool rules and session caching."
+readme = "README.md"
+documentation = "https://docs.rs/deepseeknova-permission/0.3.0"
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+toml = { workspace = true }
+deepseeknova-core = { version = "0.3.0", path = "../deepseeknova-core" }
+deepseeknova-config = { version = "0.3.0", path = "../deepseeknova-config" }

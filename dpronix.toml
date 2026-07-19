@@ -1,5 +1,5 @@
-# DeepNova Configuration — deepnova.toml
-# Place in project root or ~/.deepnova/config.toml
+# DeepseekNova Configuration — deepseeknova.toml
+# Place in project root or ~/.deepseeknova/config.toml
 # DeepSeek-V4 is the default provider with thinking mode enabled by default.
 
 # ── Providers ──────────────────────────────────────────────────
@@ -76,4 +76,4 @@ max_steps = 25
 # max_records = 10000
 # similarity_threshold = 0.6
 # persist = false
-# persistence_path = ".deepnova/memory.json"
+# persistence_path = ".deepseeknova/memory.json"

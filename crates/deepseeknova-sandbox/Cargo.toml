@@ -1,0 +1,15 @@
+[package]
+name = "deepseeknova-sandbox"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+documentation = "https://docs.rs/deepseeknova-sandbox/0.3.0"
+description = "Sandbox trait and platform-specific sandbox implementations"
+
+[dependencies]
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+deepseeknova-core = { version = "0.3.0", path = "../deepseeknova-core" }

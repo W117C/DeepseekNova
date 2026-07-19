@@ -1,10 +1,10 @@
-# Contributing to deepnova
+# Contributing to deepseeknova
 
 ## Setup
 
 ```bash
-git clone https://github.com/W117C/DeepNova.git
-cd deepnova-rs
+git clone https://github.com/W117C/DeepseekNova.git
+cd deepseeknova-rs
 cargo build
 ```
 
@@ -36,24 +36,24 @@ Types: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`, `perf`, `ci`
 
 ```
 crates/
-├── deepnova-core/       # Foundation: types, traits, registry
-├── deepnova-agent/      # Agent loop, memory, plan mode
-├── deepnova-provider/   # LLM provider abstraction
-├── deepnova-tools/      # Built-in tools
-├── deepnova-mcp/        # MCP client
-├── deepnova-config/     # Configuration
-├── deepnova-context/    # Workspace indexing, context
-├── deepnova-permission/ # Permission gating
-├── deepnova-event/      # Event bus
-├── deepnova-runtime/    # Composition root
-├── deepnova-sandbox/    # Process sandbox
-├── deepnova-security/   # Security policy (capabilities/paths/commands/domains/limits)
-├── deepnova-checkpoint/ # File checkpoint/rollback
-├── deepnova-store/      # Session persistence
-├── deepnova-tui/        # Terminal UI
-├── deepnova-serve/      # HTTP server
-├── deepnova-skills/     # Skill system
-└── deepnova-cli/        # CLI binary
+├── deepseeknova-core/       # Foundation: types, traits, registry
+├── deepseeknova-agent/      # Agent loop, memory, plan mode
+├── deepseeknova-provider/   # LLM provider abstraction
+├── deepseeknova-tools/      # Built-in tools
+├── deepseeknova-mcp/        # MCP client
+├── deepseeknova-config/     # Configuration
+├── deepseeknova-context/    # Workspace indexing, context
+├── deepseeknova-permission/ # Permission gating
+├── deepseeknova-event/      # Event bus
+├── deepseeknova-runtime/    # Composition root
+├── deepseeknova-sandbox/    # Process sandbox
+├── deepseeknova-security/   # Security policy (capabilities/paths/commands/domains/limits)
+├── deepseeknova-checkpoint/ # File checkpoint/rollback
+├── deepseeknova-store/      # Session persistence
+├── deepseeknova-tui/        # Terminal UI
+├── deepseeknova-serve/      # HTTP server
+├── deepseeknova-skills/     # Skill system
+└── deepseeknova-cli/        # CLI binary
 ```
 
 ## Testing
@@ -62,7 +62,7 @@ crates/
 - **Integration tests**: `crates/<crate>/tests/` directories
 - **Run all tests**: `cargo test --all --workspace`
 - **Run specific crate tests**: `cargo test -p <crate-name>`
-- **Run benchmarks**: `cargo bench -p deepnova-core`
+- **Run benchmarks**: `cargo bench -p deepseeknova-core`
 
 ## Code Style
 

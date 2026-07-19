@@ -1,6 +1,6 @@
-# DeepNova 编译与构建说明
+# DeepseekNova 编译与构建说明
 
-本项目包含 **Tauri 桌面端** (`deepnova-desktop`)，因此在编译整个工作区或在 Linux 环境下运行本地开发测试时，需要安装相关的系统原生库。
+本项目包含 **Tauri 桌面端** (`deepseeknova-desktop`)，因此在编译整个工作区或在 Linux 环境下运行本地开发测试时，需要安装相关的系统原生库。
 
 ## Ubuntu / Debian 依赖安装
 

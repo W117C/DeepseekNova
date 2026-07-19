@@ -1,4 +1,4 @@
-# AGENTS.md — DeepNova 项目 Agent 指令
+# AGENTS.md — DeepseekNova 项目 Agent 指令
 
 > **本文件是项目级 Agent 工作指令。每次在此项目中工作时，必须优先遵守。**
 
@@ -26,31 +26,31 @@
 
 ## 2. 项目简介
 
-DeepNova 是一个 Rust 编写的 AI Agent 框架，包含 22 个 crate。主要结构：
+DeepseekNova 是一个 Rust 编写的 AI Agent 框架，包含 22 个 crate。主要结构：
 
 ```
 crates/
-├── deepnova-cli/          # CLI 入口
-├── deepnova-agent/        # Agent 运行时（协调器、子代理、记忆）
-├── deepnova-core/         # 核心类型（事件、图谱、身份、规划器、前缀树、注册表、执行器、运行器、工具、插件）
-├── deepnova-config/       # 配置管理
-├── deepnova-provider/     # LLM 提供商（Anthropic、OpenAI）
-├── deepnova-tools/        # 工具集（fs、grep、shell、memory、web_fetch、todo）
-├── deepnova-mcp/          # MCP 协议客户端
-├── deepnova-context/      # 上下文管理
-├── deepnova-runtime/      # 运行时编排
-├── deepnova-permission/   # 权限系统
-├── deepnova-event/        # 事件系统
-├── deepnova-checkpoint/   # 检查点
-├── deepnova-store/        # 存储层
-├── deepnova-security/     # 安全审计、路径检查、策略
-├── deepnova-sandbox/      # 沙箱（bubblewrap、seatbelt）
-├── deepnova-skills/       # 技能加载
-├── deepnova-telemetry/    # 遥测
-├── deepnova-orch/         # 编排层（规划器、swarm、记忆）
-├── deepnova-serve/        # HTTP 服务
-├── deepnova-tui/          # TUI
-├── deepnova-desktop/      # Tauri 桌面端
+├── deepseeknova-cli/          # CLI 入口
+├── deepseeknova-agent/        # Agent 运行时（协调器、子代理、记忆）
+├── deepseeknova-core/         # 核心类型（事件、图谱、身份、规划器、前缀树、注册表、执行器、运行器、工具、插件）
+├── deepseeknova-config/       # 配置管理
+├── deepseeknova-provider/     # LLM 提供商（Anthropic、OpenAI）
+├── deepseeknova-tools/        # 工具集（fs、grep、shell、memory、web_fetch、todo）
+├── deepseeknova-mcp/          # MCP 协议客户端
+├── deepseeknova-context/      # 上下文管理
+├── deepseeknova-runtime/      # 运行时编排
+├── deepseeknova-permission/   # 权限系统
+├── deepseeknova-event/        # 事件系统
+├── deepseeknova-checkpoint/   # 检查点
+├── deepseeknova-store/        # 存储层
+├── deepseeknova-security/     # 安全审计、路径检查、策略
+├── deepseeknova-sandbox/      # 沙箱（bubblewrap、seatbelt）
+├── deepseeknova-skills/       # 技能加载
+├── deepseeknova-telemetry/    # 遥测
+├── deepseeknova-orch/         # 编排层（规划器、swarm、记忆）
+├── deepseeknova-serve/        # HTTP 服务
+├── deepseeknova-tui/          # TUI
+├── deepseeknova-desktop/      # Tauri 桌面端
 ```
 
 ---

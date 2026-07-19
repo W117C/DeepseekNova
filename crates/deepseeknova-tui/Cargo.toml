@@ -1,0 +1,21 @@
+[package]
+name = "deepseeknova-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+documentation = "https://docs.rs/deepseeknova-tui/0.3.0"
+description = "ratatui-based interactive terminal UI for deepseeknova"
+
+[dependencies]
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tracing = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+deepseeknova-core = { version = "0.3.0", path = "../deepseeknova-core" }
+
+[dev-dependencies]
+async-trait = { workspace = true }

@@ -1,7 +1,7 @@
 # Release workflow — triggered by version tags (v*)
 # Builds and publishes:
-#   1. CLI binary (deepnova-cli) for 3 platforms
-#   2. Desktop app (deepnova-desktop) for macOS + Linux
+#   1. CLI binary (deepseeknova-cli) for 3 platforms
+#   2. Desktop app (deepseeknova-desktop) for macOS + Linux
 #   3. npm package with prebuilt binaries
 #
 # Uses the existing cargo-dist configuration from Cargo.toml
@@ -36,13 +36,13 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            binary: deepnova-cli
+            binary: deepseeknova-cli
           - os: macos-latest
             target: aarch64-apple-darwin
-            binary: deepnova-cli
+            binary: deepseeknova-cli
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            binary: deepnova-cli.exe
+            binary: deepseeknova-cli.exe
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -51,7 +51,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }} -p deepnova-cli
+        run: cargo build --release --target ${{ matrix.target }} -p deepseeknova-cli
 
       - name: Package
         shell: bash
@@ -59,16 +59,16 @@ jobs:
           cd target/${{ matrix.target }}/release
           mkdir -p /tmp/artifacts
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            7z a -tzip /tmp/artifacts/deepnova-cli-${{ matrix.target }}.zip deepnova-cli.exe
+            7z a -tzip /tmp/artifacts/deepseeknova-cli-${{ matrix.target }}.zip deepseeknova-cli.exe
           else
-            tar czf /tmp/artifacts/deepnova-cli-${{ matrix.target }}.tar.gz deepnova-cli
+            tar czf /tmp/artifacts/deepseeknova-cli-${{ matrix.target }}.tar.gz deepseeknova-cli
           fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: deepnova-cli-${{ matrix.target }}
-          path: /tmp/artifacts/deepnova-cli-${{ matrix.target }}.*
+          name: deepseeknova-cli-${{ matrix.target }}
+          path: /tmp/artifacts/deepseeknova-cli-${{ matrix.target }}.*
           if-no-files-found: error
 
   # ── Desktop Release (macOS + Linux) ─────────────────────────────
@@ -81,10 +81,10 @@ jobs:
         include:
           - os: macos-latest
             target: aarch64-apple-darwin
-            binary: deepnova-desktop
+            binary: deepseeknova-desktop
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            binary: deepnova-desktop
+            binary: deepseeknova-desktop
     steps:
       - uses: actions/checkout@v4
       - name: Install native dependencies (Linux)
@@ -101,14 +101,14 @@ jobs:
 
       - name: Build frontend
         run: |
-          cd crates/deepnova-desktop/frontend
+          cd crates/deepseeknova-desktop/frontend
           npm ci
           npm run build
 
       - uses: Swatinem/rust-cache@v2
 
       - name: Build desktop app
-        run: cargo build --release -p deepnova-desktop
+        run: cargo build --release -p deepseeknova-desktop
 
       - name: Package desktop
         shell: bash
@@ -116,16 +116,16 @@ jobs:
           mkdir -p /tmp/artifacts
           cd target/release
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            7z a -tzip /tmp/artifacts/deepnova-desktop-${{ matrix.target }}.zip *.exe
+            7z a -tzip /tmp/artifacts/deepseeknova-desktop-${{ matrix.target }}.zip *.exe
           else
-            tar czf /tmp/artifacts/deepnova-desktop-${{ matrix.target }}.tar.gz ${{ matrix.binary }}
+            tar czf /tmp/artifacts/deepseeknova-desktop-${{ matrix.target }}.tar.gz ${{ matrix.binary }}
           fi
 
       - name: Upload desktop artifact
         uses: actions/upload-artifact@v4
         with:
-          name: deepnova-desktop-${{ matrix.target }}
-          path: /tmp/artifacts/deepnova-desktop-${{ matrix.target }}.*
+          name: deepseeknova-desktop-${{ matrix.target }}
+          path: /tmp/artifacts/deepseeknova-desktop-${{ matrix.target }}.*
           if-no-files-found: error
 
   # ── GitHub Release (publish artifacts) ──────────────────────────
@@ -159,7 +159,7 @@ jobs:
         with:
           name: Release ${{ github.ref_name }}
           body: |
-            ## DeepNova ${{ github.ref_name }}
+            ## DeepseekNova ${{ github.ref_name }}
 
             ### Downloads
             See artifacts attached to this release.

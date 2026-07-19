@@ -1,0 +1,24 @@
+[package]
+name = "deepseeknova-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Agent implementations: main agent loop, coordinator, and plan-mode runners with tool use and streaming."
+readme = "README.md"
+documentation = "https://docs.rs/deepseeknova-agent/0.3.0"
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+uuid = { workspace = true }
+deepseeknova-core = { version = "0.3.0", path = "../deepseeknova-core" }
+deepseeknova-provider = { version = "0.3.0", path = "../deepseeknova-provider" }
+deepseeknova-security = { version = "0.3.0", path = "../deepseeknova-security" }
+deepseeknova-context = { version = "0.3.0", path = "../deepseeknova-context" }

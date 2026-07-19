@@ -2,14 +2,14 @@
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability in DeepNova, please report it responsibly.
+If you discover a security vulnerability in DeepseekNova, please report it responsibly.
 
 **Please do NOT open a public issue for security vulnerabilities.**
 
 Instead, please report via one of the following channels:
 
 1. **GitHub Security Advisory** (preferred):
-   - Go to the [Security Advisories](https://github.com/W117C/DeepNova/security/advisories) page
+   - Go to the [Security Advisories](https://github.com/W117C/DeepseekNova/security/advisories) page
    - Click "Report a vulnerability"
    - Fill in the details
 
@@ -34,7 +34,7 @@ Please include in your report:
 
 ## Security Features
 
-DeepNova implements defense-in-depth through multiple layers:
+DeepseekNova implements defense-in-depth through multiple layers:
 
 ### Capability-Based Access Control
 Tools must hold the required `Capability` to execute. Capabilities include:
@@ -44,7 +44,7 @@ Tools must hold the required `Capability` to execute. Capabilities include:
 - `McpInvoke` — MCP server invocation
 - `MemoryRead` / `MemoryWrite` — persistent memory access
 
-Administrators can disable capabilities via `[security] disabled_capabilities` in `deepnova.toml`.
+Administrators can disable capabilities via `[security] disabled_capabilities` in `deepseeknova.toml`.
 
 ### Path Confinement
 - Workspace root automatically added to allow-list

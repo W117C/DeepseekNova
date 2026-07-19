@@ -1062,15 +1062,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "deepnova-agent"
+name = "deepseeknova-agent"
 version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "deepnova-context",
- "deepnova-core",
- "deepnova-provider",
- "deepnova-security",
+ "deepseeknova-context",
+ "deepseeknova-core",
+ "deepseeknova-provider",
+ "deepseeknova-security",
  "serde",
  "serde_json",
  "tokio",
@@ -1081,12 +1081,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "deepnova-checkpoint"
+name = "deepseeknova-checkpoint"
 version = "0.3.0"
 dependencies = [
  "anyhow",
  "chrono",
- "deepnova-core",
+ "deepseeknova-core",
  "hex",
  "serde",
  "serde_json",
@@ -1097,22 +1097,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "deepnova-cli"
+name = "deepseeknova-cli"
 version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
- "deepnova-agent",
- "deepnova-config",
- "deepnova-core",
- "deepnova-mcp",
- "deepnova-orch",
- "deepnova-provider",
- "deepnova-runtime",
- "deepnova-security",
- "deepnova-serve",
- "deepnova-skills",
- "deepnova-tools",
+ "deepseeknova-agent",
+ "deepseeknova-config",
+ "deepseeknova-core",
+ "deepseeknova-mcp",
+ "deepseeknova-orch",
+ "deepseeknova-provider",
+ "deepseeknova-runtime",
+ "deepseeknova-security",
+ "deepseeknova-serve",
+ "deepseeknova-skills",
+ "deepseeknova-tools",
  "dirs",
  "serde_json",
  "tokio",
@@ -1122,7 +1122,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "deepnova-config"
+name = "deepseeknova-config"
 version = "0.3.0"
 dependencies = [
  "anyhow",
@@ -1134,13 +1134,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "deepnova-context"
+name = "deepseeknova-context"
 version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
- "deepnova-core",
+ "deepseeknova-core",
  "hex",
  "serde",
  "serde_json",
@@ -1152,7 +1152,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "deepnova-core"
+name = "deepseeknova-core"
 version = "0.3.0"
 dependencies = [
  "anyhow",
@@ -1179,19 +1179,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "deepnova-desktop"
+name = "deepseeknova-desktop"
 version = "0.3.0"
 dependencies = [
  "anyhow",
- "deepnova-agent",
- "deepnova-config",
- "deepnova-core",
- "deepnova-event",
- "deepnova-provider",
- "deepnova-runtime",
- "deepnova-skills",
- "deepnova-store",
- "deepnova-tools",
+ "deepseeknova-agent",
+ "deepseeknova-config",
+ "deepseeknova-core",
+ "deepseeknova-event",
+ "deepseeknova-provider",
+ "deepseeknova-runtime",
+ "deepseeknova-skills",
+ "deepseeknova-store",
+ "deepseeknova-tools",
  "serde",
  "serde_json",
  "tauri",
@@ -1207,23 +1207,23 @@ dependencies = [
 ]
 
 [[package]]
-name = "deepnova-event"
+name = "deepseeknova-event"
 version = "0.3.0"
 dependencies = [
- "deepnova-core",
+ "deepseeknova-core",
  "serde",
  "serde_json",
  "tokio",
 ]
 
 [[package]]
-name = "deepnova-mcp"
+name = "deepseeknova-mcp"
 version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "deepnova-config",
- "deepnova-core",
+ "deepseeknova-config",
+ "deepseeknova-core",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -1233,18 +1233,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "deepnova-orch"
+name = "deepseeknova-orch"
 version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
- "deepnova-agent",
- "deepnova-config",
- "deepnova-core",
- "deepnova-event",
- "deepnova-provider",
- "deepnova-tools",
+ "deepseeknova-agent",
+ "deepseeknova-config",
+ "deepseeknova-core",
+ "deepseeknova-event",
+ "deepseeknova-provider",
+ "deepseeknova-tools",
  "rand",
  "reqwest 0.12.28",
  "serde",
@@ -1257,12 +1257,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "deepnova-permission"
+name = "deepseeknova-permission"
 version = "0.3.0"
 dependencies = [
  "anyhow",
- "deepnova-config",
- "deepnova-core",
+ "deepseeknova-config",
+ "deepseeknova-core",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -1272,14 +1272,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "deepnova-provider"
+name = "deepseeknova-provider"
 version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "deepnova-config",
- "deepnova-context",
- "deepnova-core",
+ "deepseeknova-config",
+ "deepseeknova-context",
+ "deepseeknova-core",
  "futures",
  "reqwest 0.12.28",
  "serde",
@@ -1291,51 +1291,51 @@ dependencies = [
 ]
 
 [[package]]
-name = "deepnova-runtime"
+name = "deepseeknova-runtime"
 version = "0.3.0"
 dependencies = [
  "anyhow",
- "deepnova-agent",
- "deepnova-config",
- "deepnova-context",
- "deepnova-core",
- "deepnova-event",
- "deepnova-permission",
- "deepnova-provider",
- "deepnova-security",
- "deepnova-tools",
+ "deepseeknova-agent",
+ "deepseeknova-config",
+ "deepseeknova-context",
+ "deepseeknova-core",
+ "deepseeknova-event",
+ "deepseeknova-permission",
+ "deepseeknova-provider",
+ "deepseeknova-security",
+ "deepseeknova-tools",
  "tokio",
  "tracing",
 ]
 
 [[package]]
-name = "deepnova-sandbox"
+name = "deepseeknova-sandbox"
 version = "0.3.0"
 dependencies = [
  "anyhow",
- "deepnova-core",
+ "deepseeknova-core",
  "tokio",
  "tracing",
 ]
 
 [[package]]
-name = "deepnova-security"
+name = "deepseeknova-security"
 version = "0.3.0"
 dependencies = [
  "anyhow",
- "deepnova-core",
+ "deepseeknova-core",
  "tempfile",
  "tracing",
 ]
 
 [[package]]
-name = "deepnova-serve"
+name = "deepseeknova-serve"
 version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "axum 0.8.9",
- "deepnova-core",
+ "deepseeknova-core",
  "futures",
  "futures-core",
  "reqwest 0.12.28",
@@ -1349,12 +1349,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "deepnova-skills"
+name = "deepseeknova-skills"
 version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "deepnova-core",
+ "deepseeknova-core",
  "serde",
  "serde_json",
  "serde_yml",
@@ -1365,12 +1365,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "deepnova-store"
+name = "deepseeknova-store"
 version = "0.3.0"
 dependencies = [
  "anyhow",
  "chrono",
- "deepnova-core",
+ "deepseeknova-core",
  "serde",
  "serde_json",
  "tokio",
@@ -1378,7 +1378,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "deepnova-telemetry"
+name = "deepseeknova-telemetry"
 version = "0.3.0"
 dependencies = [
  "anyhow",
@@ -1393,16 +1393,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "deepnova-tools"
+name = "deepseeknova-tools"
 version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
- "deepnova-checkpoint",
- "deepnova-core",
- "deepnova-sandbox",
- "deepnova-security",
+ "deepseeknova-checkpoint",
+ "deepseeknova-core",
+ "deepseeknova-sandbox",
+ "deepseeknova-security",
  "glob",
  "hex",
  "regex",
@@ -1418,13 +1418,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "deepnova-tui"
+name = "deepseeknova-tui"
 version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "crossterm",
- "deepnova-core",
+ "deepseeknova-core",
  "ratatui",
  "tokio",
  "tokio-stream",

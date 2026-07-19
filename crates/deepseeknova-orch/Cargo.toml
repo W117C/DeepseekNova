@@ -1,0 +1,29 @@
+[package]
+name = "deepseeknova-orch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Multi-agent orchestration: GOAP planning, swarm coordination, and agent federation for DeepSeek-V4."
+readme = "README.md"
+documentation = "https://docs.rs/deepseeknova-orch/0.3.0"
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+rand = { workspace = true }
+reqwest = { workspace = true }
+deepseeknova-core = { version = "0.3.0", path = "../deepseeknova-core" }
+deepseeknova-agent = { version = "0.3.0", path = "../deepseeknova-agent" }
+deepseeknova-provider = { version = "0.3.0", path = "../deepseeknova-provider" }
+deepseeknova-config = { version = "0.3.0", path = "../deepseeknova-config" }
+deepseeknova-tools = { version = "0.3.0", path = "../deepseeknova-tools" }
+deepseeknova-event = { version = "0.3.0", path = "../deepseeknova-event" }

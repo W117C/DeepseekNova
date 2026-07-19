@@ -1,0 +1,24 @@
+[package]
+name = "deepseeknova-provider"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Unified LLM provider abstraction for OpenAI-compatible and Anthropic backends with streaming and tool calling."
+readme = "README.md"
+documentation = "https://docs.rs/deepseeknova-provider/0.3.0"
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+reqwest = { workspace = true, features = ["stream"] }
+futures = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+deepseeknova-core = { version = "0.3.0", path = "../deepseeknova-core" }
+deepseeknova-config = { version = "0.3.0", path = "../deepseeknova-config" }
+deepseeknova-context = { version = "0.3.0", path = "../deepseeknova-context" }
