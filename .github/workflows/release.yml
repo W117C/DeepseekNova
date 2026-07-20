@@ -56,20 +56,21 @@ jobs:
       - name: Package
         shell: bash
         run: |
+          ARTIFACT_DIR="$RUNNER_TEMP/artifacts"
+          mkdir -p "$ARTIFACT_DIR"
           cd target/${{ matrix.target }}/release
-          mkdir -p /tmp/artifacts
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            7z a -tzip /tmp/artifacts/deepseeknova-cli-${{ matrix.target }}.zip deepseeknova-cli.exe
+            7z a -tzip "$ARTIFACT_DIR/deepseeknova-cli-${{ matrix.target }}.zip" deepseeknova-cli.exe
           else
-            tar czf /tmp/artifacts/deepseeknova-cli-${{ matrix.target }}.tar.gz deepseeknova-cli
+            tar czf "$ARTIFACT_DIR/deepseeknova-cli-${{ matrix.target }}.tar.gz" deepseeknova-cli
           fi
+          echo "ARTIFACT_DIR=$ARTIFACT_DIR" >> $GITHUB_ENV
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: deepseeknova-cli-${{ matrix.target }}
-          path: /tmp/artifacts/deepseeknova-cli-${{ matrix.target }}.*
-          if-no-files-found: error
+          path: ${{ env.ARTIFACT_DIR }}/deepseeknova-cli-${{ matrix.target }}.*
 
   # ── Desktop Release (macOS + Linux) ─────────────────────────────
   desktop-release:
@@ -113,20 +114,21 @@ jobs:
       - name: Package desktop
         shell: bash
         run: |
-          mkdir -p /tmp/artifacts
+          ARTIFACT_DIR="$RUNNER_TEMP/artifacts"
+          mkdir -p "$ARTIFACT_DIR"
           cd target/release
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            7z a -tzip /tmp/artifacts/deepseeknova-desktop-${{ matrix.target }}.zip *.exe
+            7z a -tzip "$ARTIFACT_DIR/deepseeknova-desktop-${{ matrix.target }}.zip" *.exe
           else
-            tar czf /tmp/artifacts/deepseeknova-desktop-${{ matrix.target }}.tar.gz ${{ matrix.binary }}
+            tar czf "$ARTIFACT_DIR/deepseeknova-desktop-${{ matrix.target }}.tar.gz" ${{ matrix.binary }}
           fi
+          echo "ARTIFACT_DIR=$ARTIFACT_DIR" >> $GITHUB_ENV
 
       - name: Upload desktop artifact
         uses: actions/upload-artifact@v4
         with:
           name: deepseeknova-desktop-${{ matrix.target }}
-          path: /tmp/artifacts/deepseeknova-desktop-${{ matrix.target }}.*
-          if-no-files-found: error
+          path: ${{ env.ARTIFACT_DIR }}/deepseeknova-desktop-${{ matrix.target }}.*
 
   # ── GitHub Release (publish artifacts) ──────────────────────────
   publish:
