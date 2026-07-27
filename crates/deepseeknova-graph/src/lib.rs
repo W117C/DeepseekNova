@@ -5,6 +5,7 @@
 
 pub mod model;
 pub mod parser;
+pub mod rank;
 pub mod store;
 
 pub use model::*;
