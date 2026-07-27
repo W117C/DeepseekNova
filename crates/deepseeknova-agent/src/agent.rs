@@ -75,8 +75,7 @@ pub type RepoMapProvider = Arc<dyn Fn() -> Option<String> + Send + Sync>;
 
 /// Type-erased closure that inserts a build-time extension value into a
 /// ToolContext's `ExtensionRegistry`.
-type ExtensionApplier =
-    dyn Fn(&mut deepseeknova_core::tool::ExtensionRegistry) + Send + Sync;
+type ExtensionApplier = dyn Fn(&mut deepseeknova_core::tool::ExtensionRegistry) + Send + Sync;
 
 impl Agent {
     pub fn new(provider: Arc<dyn Provider>, max_steps: usize) -> Self {
@@ -1416,8 +1415,7 @@ mod tests {
             }
         }
 
-        let agent =
-            Agent::new(Arc::new(MockProvider::text("ok")), 3).with_extension(Marker(42));
+        let agent = Agent::new(Arc::new(MockProvider::text("ok")), 3).with_extension(Marker(42));
         let ctx = agent.make_tool_context("call-1", CancellationToken::new());
         let out = ProbeTool.execute(&ctx, "{}").await.unwrap();
         assert_eq!(out, "marker=42");

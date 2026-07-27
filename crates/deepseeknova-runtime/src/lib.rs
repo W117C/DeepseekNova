@@ -331,14 +331,13 @@ pub fn build_agent(
                 let budget = config.graph.repo_map_tokens;
                 if budget > 0 {
                     let map_handle = handle.clone();
-                    let provider: deepseeknova_agent::RepoMapProvider =
-                        Arc::new(move || {
-                            map_handle
-                                .lock()
-                                .ok()
-                                .and_then(|idx| idx.repo_map(budget, &[]).ok())
-                                .filter(|s| !s.is_empty())
-                        });
+                    let provider: deepseeknova_agent::RepoMapProvider = Arc::new(move || {
+                        map_handle
+                            .lock()
+                            .ok()
+                            .and_then(|idx| idx.repo_map(budget, &[]).ok())
+                            .filter(|s| !s.is_empty())
+                    });
                     agent = agent.with_repo_map_provider(provider);
                 }
             }

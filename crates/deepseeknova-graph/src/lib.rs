@@ -27,25 +27,45 @@ impl GraphIndex {
         let root = root.as_ref().to_path_buf();
         let db = root.join(".deepseeknova").join("graph.db");
         let store = store::Store::open(&db)?;
-        Ok(Self { store, root, max_file_size })
+        Ok(Self {
+            store,
+            root,
+            max_file_size,
+        })
     }
 
     /// 增量刷新并重算 PageRank（分数写回 nodes.score）。
     pub fn refresh(&mut self) -> Result<store::RefreshReport, GraphError> {
         let report = self.store.refresh(&self.root, self.max_file_size)?;
         let nodes: Vec<String> = self.store.all_nodes()?.into_iter().map(|n| n.id).collect();
-        let edges: Vec<(String, String)> =
-            self.store.all_edges()?.into_iter().map(|e| (e.src, e.dst)).collect();
+        let edges: Vec<(String, String)> = self
+            .store
+            .all_edges()?
+            .into_iter()
+            .map(|e| (e.src, e.dst))
+            .collect();
         let scores = rank::pagerank(&nodes, &edges, &[], 0.85, 50);
-        self.store.set_scores(&scores.into_iter().collect::<Vec<_>>())?;
+        self.store
+            .set_scores(&scores.into_iter().collect::<Vec<_>>())?;
         Ok(report)
     }
 
-    pub fn search(&self, query: &str, kind: Option<NodeKind>, limit: usize)
-        -> Result<Vec<Node>, GraphError> { self.store.search(query, kind, limit) }
+    pub fn search(
+        &self,
+        query: &str,
+        kind: Option<NodeKind>,
+        limit: usize,
+    ) -> Result<Vec<Node>, GraphError> {
+        self.store.search(query, kind, limit)
+    }
 
-    pub fn neighbors(&self, entity: &str, kinds: &[EdgeKind], dir: Direction, hops: usize)
-        -> Result<Vec<Node>, GraphError> {
+    pub fn neighbors(
+        &self,
+        entity: &str,
+        kinds: &[EdgeKind],
+        dir: Direction,
+        hops: usize,
+    ) -> Result<Vec<Node>, GraphError> {
         let id = self.resolve(entity)?;
         self.store.neighbors(&id, kinds, dir, hops)
     }
@@ -53,10 +73,16 @@ impl GraphIndex {
     /// 骨架视图：doc + 签名 + 直接子实体签名。
     pub fn skeleton(&self, entity: &str) -> Result<String, GraphError> {
         let id = self.resolve(entity)?;
-        let node = self.store.get(&id)?.ok_or_else(|| GraphError::EntityNotFound(entity.into()))?;
+        let node = self
+            .store
+            .get(&id)?
+            .ok_or_else(|| GraphError::EntityNotFound(entity.into()))?;
         let mut out = String::new();
-        if !node.doc.is_empty() { out.push_str(&format!("// {}\n", node.doc)); }
-        out.push_str(&node.signature); out.push('\n');
+        if !node.doc.is_empty() {
+            out.push_str(&format!("// {}\n", node.doc));
+        }
+        out.push_str(&node.signature);
+        out.push('\n');
         for child in self.store.children(&id)? {
             out.push_str(&format!("  {}\n", child.signature));
         }
@@ -66,24 +92,44 @@ impl GraphIndex {
     /// 该实体的 (path, start_line, end_line)，供 retrieve_entity(full) 精确取码。
     pub fn location(&self, entity: &str) -> Result<(String, u32, u32), GraphError> {
         let id = self.resolve(entity)?;
-        let n = self.store.get(&id)?.ok_or_else(|| GraphError::EntityNotFound(entity.into()))?;
+        let n = self
+            .store
+            .get(&id)?
+            .ok_or_else(|| GraphError::EntityNotFound(entity.into()))?;
         Ok((n.path, n.start_line, n.end_line))
     }
 
     /// token 预算内的 repo map；personalization 为种子符号名/路径。
-    pub fn repo_map(&self, token_budget: usize, personalization: &[String])
-        -> Result<String, GraphError> {
-        if token_budget == 0 { return Ok(String::new()); }
+    pub fn repo_map(
+        &self,
+        token_budget: usize,
+        personalization: &[String],
+    ) -> Result<String, GraphError> {
+        if token_budget == 0 {
+            return Ok(String::new());
+        }
         let mut nodes = self.store.all_nodes()?;
         if !personalization.is_empty() {
             let ids: Vec<String> = nodes.iter().map(|n| n.id.clone()).collect();
-            let edges: Vec<(String, String)> =
-                self.store.all_edges()?.into_iter().map(|e| (e.src, e.dst)).collect();
-            let seeds: Vec<String> = nodes.iter()
-                .filter(|n| personalization.iter().any(|p| &n.name == p || n.path.contains(p.as_str())))
-                .map(|n| n.id.clone()).collect();
+            let edges: Vec<(String, String)> = self
+                .store
+                .all_edges()?
+                .into_iter()
+                .map(|e| (e.src, e.dst))
+                .collect();
+            let seeds: Vec<String> = nodes
+                .iter()
+                .filter(|n| {
+                    personalization
+                        .iter()
+                        .any(|p| &n.name == p || n.path.contains(p.as_str()))
+                })
+                .map(|n| n.id.clone())
+                .collect();
             let scores = rank::pagerank(&ids, &edges, &seeds, 0.85, 50);
-            for n in nodes.iter_mut() { n.score = *scores.get(&n.id).unwrap_or(&0.0); }
+            for n in nodes.iter_mut() {
+                n.score = *scores.get(&n.id).unwrap_or(&0.0);
+            }
         }
         nodes.retain(|n| !n.signature.is_empty());
         Ok(repomap::render_repo_map(&nodes, token_budget))
@@ -91,7 +137,9 @@ impl GraphIndex {
 
     /// entity 支持 `id`（含 `#`）或 `path:name` 或裸 `name`。
     fn resolve(&self, entity: &str) -> Result<String, GraphError> {
-        if entity.contains('#') { return Ok(entity.to_string()); }
+        if entity.contains('#') {
+            return Ok(entity.to_string());
+        }
         let (name, path_hint) = match entity.split_once(':') {
             Some((p, n)) => (n, Some(p)),
             None => (entity, None),
@@ -99,9 +147,14 @@ impl GraphIndex {
         let hits = self.store.find_by_name(name)?;
         let pick = match path_hint {
             Some(p) => hits.into_iter().find(|n| n.path.contains(p)),
-            None => hits.into_iter().max_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal)),
+            None => hits.into_iter().max_by(|a, b| {
+                a.score
+                    .partial_cmp(&b.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            }),
         };
-        pick.map(|n| n.id).ok_or_else(|| GraphError::EntityNotFound(entity.into()))
+        pick.map(|n| n.id)
+            .ok_or_else(|| GraphError::EntityNotFound(entity.into()))
     }
 }
 
@@ -125,7 +178,14 @@ mod tests {
         assert!(hits.iter().any(|n| n.name == "build_agent"));
 
         // neighbors：permission_gate_for 的 callers 含 build_agent
-        let callers = idx.neighbors("permission_gate_for", &[EdgeKind::Calls], Direction::Callers, 2).unwrap();
+        let callers = idx
+            .neighbors(
+                "permission_gate_for",
+                &[EdgeKind::Calls],
+                Direction::Callers,
+                2,
+            )
+            .unwrap();
         assert!(callers.iter().any(|n| n.name == "build_agent"));
 
         // skeleton 含签名与 doc

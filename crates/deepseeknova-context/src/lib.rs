@@ -1107,7 +1107,8 @@ mod tests {
         let mut pm = ProjectMemory::new();
         pm.deepseeknova_md = Some("This is a Rust project.".into());
 
-        let messages = PromptBuilder::build("You are helpful.", &[], &WorkingMemory::new(), &pm, None);
+        let messages =
+            PromptBuilder::build("You are helpful.", &[], &WorkingMemory::new(), &pm, None);
         assert!(messages[0].content.contains("## Project Context"));
         assert!(messages[0].content.contains("Rust project"));
     }
@@ -1146,7 +1147,13 @@ mod tests {
 
     #[test]
     fn prompt_builder_none_map_is_noop() {
-        let msgs = PromptBuilder::build("SYS", &[], &WorkingMemory::new(), &ProjectMemory::new(), None);
+        let msgs = PromptBuilder::build(
+            "SYS",
+            &[],
+            &WorkingMemory::new(),
+            &ProjectMemory::new(),
+            None,
+        );
         assert!(!msgs[0].content.contains("Repo Map"));
     }
 

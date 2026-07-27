@@ -5,7 +5,12 @@ use tree_sitter::{Language, Node as TsNode, Parser};
 
 /// 支持的源语言。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Lang { Rust, Python, JavaScript, TypeScript }
+pub enum Lang {
+    Rust,
+    Python,
+    JavaScript,
+    TypeScript,
+}
 
 impl Lang {
     /// 按文件扩展名判定语言；不识别的扩展返回 None。
@@ -47,7 +52,10 @@ pub struct FileParse {
 }
 
 fn parse_err(path: &str, lang: Lang) -> GraphError {
-    GraphError::Parse { path: path.into(), lang: lang.as_str() }
+    GraphError::Parse {
+        path: path.into(),
+        lang: lang.as_str(),
+    }
 }
 
 /// 判定定义实体的 NodeKind；非实体返回 None。
@@ -104,7 +112,10 @@ fn entity_name(node: TsNode, src: &str) -> Option<String> {
     }
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        if matches!(child.kind(), "identifier" | "type_identifier" | "property_identifier") {
+        if matches!(
+            child.kind(),
+            "identifier" | "type_identifier" | "property_identifier"
+        ) {
             return child.utf8_text(src.as_bytes()).ok().map(str::to_string);
         }
     }
@@ -136,7 +147,9 @@ fn extract_signature(lang: Lang, node: TsNode, src: &str) -> String {
 
 /// 定义前紧邻注释的首行，去掉注释标记后 trim；无则空串。
 fn extract_doc(node: TsNode, src: &str) -> String {
-    let Some(prev) = node.prev_sibling() else { return String::new() };
+    let Some(prev) = node.prev_sibling() else {
+        return String::new();
+    };
     if !prev.kind().contains("comment") {
         return String::new();
     }
@@ -183,7 +196,9 @@ pub fn parse_source(lang: Lang, path: &str, src: &str) -> Result<FileParse, Grap
     parser
         .set_language(&lang.language())
         .map_err(|_| parse_err(path, lang))?;
-    let tree = parser.parse(src, None).ok_or_else(|| parse_err(path, lang))?;
+    let tree = parser
+        .parse(src, None)
+        .ok_or_else(|| parse_err(path, lang))?;
 
     let mut nodes: Vec<Node> = Vec::new();
     let mut calls: Vec<(String, String)> = Vec::new();
@@ -209,8 +224,7 @@ pub fn parse_source(lang: Lang, path: &str, src: &str) -> Result<FileParse, Grap
                     }
                 }
                 if is_call(lang, kind) {
-                    if let (Some(caller), Some(callee)) =
-                        (def_stack.last(), callee_name(node, src))
+                    if let (Some(caller), Some(callee)) = (def_stack.last(), callee_name(node, src))
                     {
                         calls.push((caller.clone(), callee));
                     }
@@ -235,7 +249,9 @@ pub fn parse_source(lang: Lang, path: &str, src: &str) -> Result<FileParse, Grap
                     }
                 }
                 ancestor_kinds.push(kind);
-                work.push(Step::Exit { pop_def: pushed_def });
+                work.push(Step::Exit {
+                    pop_def: pushed_def,
+                });
                 for i in (0..node.child_count()).rev() {
                     if let Some(child) = node.child(i) {
                         work.push(Step::Enter(child));
@@ -245,7 +261,11 @@ pub fn parse_source(lang: Lang, path: &str, src: &str) -> Result<FileParse, Grap
         }
     }
 
-    Ok(FileParse { nodes, calls, imports })
+    Ok(FileParse {
+        nodes,
+        calls,
+        imports,
+    })
 }
 
 #[cfg(test)]
@@ -280,7 +300,10 @@ fn helper(w: Widget) -> Widget { w }\n";
     #[test]
     fn extracts_rust_calls_and_imports() {
         let fp = parse_source(Lang::Rust, "src/w.rs", RUST_SRC).unwrap();
-        assert!(fp.calls.iter().any(|(caller, callee)| caller == "make" && callee == "helper"));
+        assert!(fp
+            .calls
+            .iter()
+            .any(|(caller, callee)| caller == "make" && callee == "helper"));
         assert!(fp.imports.iter().any(|i| i.contains("HashMap")));
     }
 
@@ -296,12 +319,23 @@ fn helper(w: Widget) -> Widget { w }\n";
 
     #[test]
     fn parses_python_and_js() {
-        let py = parse_source(Lang::Python, "a.py",
-            "class Foo:\n    def bar(self):\n        return baz()\n\ndef baz():\n    return 1\n").unwrap();
-        assert!(py.nodes.iter().any(|n| n.kind == NodeKind::Class && n.name == "Foo"));
+        let py = parse_source(
+            Lang::Python,
+            "a.py",
+            "class Foo:\n    def bar(self):\n        return baz()\n\ndef baz():\n    return 1\n",
+        )
+        .unwrap();
+        assert!(py
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Class && n.name == "Foo"));
         assert!(py.nodes.iter().any(|n| n.name == "bar"));
-        let js = parse_source(Lang::JavaScript, "a.js",
-            "function greet() { return hi(); }\nfunction hi() { return 1; }\n").unwrap();
+        let js = parse_source(
+            Lang::JavaScript,
+            "a.js",
+            "function greet() { return hi(); }\nfunction hi() { return 1; }\n",
+        )
+        .unwrap();
         assert!(js.nodes.iter().any(|n| n.name == "greet"));
         assert!(js.calls.iter().any(|(c, e)| c == "greet" && e == "hi"));
     }

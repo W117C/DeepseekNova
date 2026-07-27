@@ -23,7 +23,11 @@ pub fn pagerank(
     if n == 0 {
         return HashMap::new();
     }
-    let idx: HashMap<&str, usize> = nodes.iter().enumerate().map(|(i, s)| (s.as_str(), i)).collect();
+    let idx: HashMap<&str, usize> = nodes
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.as_str(), i))
+        .collect();
 
     let mut out: Vec<Vec<usize>> = vec![Vec::new(); n];
     for (s, d) in edges {
@@ -75,8 +79,11 @@ mod tests {
 
     #[test]
     fn ranks_sum_to_one_and_hub_wins() {
-        let edges = vec![("a".to_string(),"c".to_string()), ("b".to_string(),"c".to_string())];
-        let nodes = vec!["a".to_string(),"b".to_string(),"c".to_string()];
+        let edges = vec![
+            ("a".to_string(), "c".to_string()),
+            ("b".to_string(), "c".to_string()),
+        ];
+        let nodes = vec!["a".to_string(), "b".to_string(), "c".to_string()];
         let scores = pagerank(&nodes, &edges, &[], 0.85, 50);
         let sum: f64 = scores.values().sum();
         assert!((sum - 1.0).abs() < 1e-6, "sum={sum}");
@@ -86,8 +93,8 @@ mod tests {
 
     #[test]
     fn personalization_boosts_seed() {
-        let edges = vec![("a".to_string(),"b".to_string())];
-        let nodes = vec!["a".to_string(),"b".to_string()];
+        let edges = vec![("a".to_string(), "b".to_string())];
+        let nodes = vec!["a".to_string(), "b".to_string()];
         let base = pagerank(&nodes, &edges, &[], 0.85, 50);
         let seeded = pagerank(&nodes, &edges, &["a".to_string()], 0.85, 50);
         assert!(seeded["a"] > base["a"], "seed should raise its own score");

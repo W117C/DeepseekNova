@@ -309,7 +309,9 @@ impl Tool for RetrieveEntityTool {
             let content = match std::fs::read_to_string(&abs) {
                 Ok(c) => c,
                 Err(e) => {
-                    return Ok(format!("failed to read {rel_path}: {e}; index may be stale"));
+                    return Ok(format!(
+                        "failed to read {rel_path}: {e}; index may be stale"
+                    ));
                 }
             };
             let lines: Vec<String> = content
@@ -357,19 +359,32 @@ mod tests {
         let dir = tempdir().unwrap();
         let root = dir.path();
         std::fs::create_dir_all(root.join("src")).unwrap();
-        std::fs::write(root.join("src/lib.rs"),
-            "pub fn build_agent() { permission_gate_for(); }\npub fn permission_gate_for() {}\n").unwrap();
+        std::fs::write(
+            root.join("src/lib.rs"),
+            "pub fn build_agent() { permission_gate_for(); }\npub fn permission_gate_for() {}\n",
+        )
+        .unwrap();
         let ctx = ctx_with_index(root);
 
-        let s = SearchCodeTool.execute(&ctx, r#"{"query":"build_agent"}"#).await.unwrap();
+        let s = SearchCodeTool
+            .execute(&ctx, r#"{"query":"build_agent"}"#)
+            .await
+            .unwrap();
         assert!(s.contains("build_agent"));
 
-        let t = TraverseGraphTool.execute(&ctx,
-            r#"{"entity":"permission_gate_for","direction":"callers"}"#).await.unwrap();
+        let t = TraverseGraphTool
+            .execute(
+                &ctx,
+                r#"{"entity":"permission_gate_for","direction":"callers"}"#,
+            )
+            .await
+            .unwrap();
         assert!(t.contains("build_agent"));
 
-        let r = RetrieveEntityTool.execute(&ctx,
-            r#"{"entity":"permission_gate_for","view":"full"}"#).await.unwrap();
+        let r = RetrieveEntityTool
+            .execute(&ctx, r#"{"entity":"permission_gate_for","view":"full"}"#)
+            .await
+            .unwrap();
         assert!(r.contains("pub fn permission_gate_for"));
     }
 
@@ -377,7 +392,10 @@ mod tests {
     async fn degrades_without_index() {
         let ctx = ToolContext::new("c2")
             .with_extension(deepseeknova_security::context::SecurityContext::with_safe_defaults());
-        let out = SearchCodeTool.execute(&ctx, r#"{"query":"x"}"#).await.unwrap();
+        let out = SearchCodeTool
+            .execute(&ctx, r#"{"query":"x"}"#)
+            .await
+            .unwrap();
         assert!(out.contains("索引") || out.to_lowercase().contains("index"));
     }
 }

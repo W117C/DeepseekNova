@@ -10,7 +10,11 @@ use std::time::UNIX_EPOCH;
 
 /// 邻居遍历方向。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Direction { Callers, Callees, Both }
+pub enum Direction {
+    Callers,
+    Callees,
+    Both,
+}
 
 /// refresh 统计报告。
 #[derive(Debug, Clone, Default)]
@@ -85,7 +89,11 @@ impl Store {
     }
 
     /// 增量刷新：mtime/sha256 双级判定，仅重解析变更文件。
-    pub fn refresh(&mut self, root: &Path, max_file_size: u64) -> Result<RefreshReport, GraphError> {
+    pub fn refresh(
+        &mut self,
+        root: &Path,
+        max_file_size: u64,
+    ) -> Result<RefreshReport, GraphError> {
         let ignores = load_gitignore(root);
         let mut files: Vec<(std::path::PathBuf, String)> = Vec::new();
         collect_files(root, root, &ignores, &mut files);
@@ -96,8 +104,12 @@ impl Store {
         let tx = self.conn.transaction()?;
 
         for (abs_path, rel_path) in &files {
-            let Some(lang) = Lang::from_path(rel_path) else { continue };
-            let Ok(meta) = std::fs::metadata(abs_path) else { continue };
+            let Some(lang) = Lang::from_path(rel_path) else {
+                continue;
+            };
+            let Ok(meta) = std::fs::metadata(abs_path) else {
+                continue;
+            };
             if meta.len() > max_file_size {
                 continue;
             }
@@ -134,7 +146,10 @@ impl Store {
             if let Some((_, known_hash)) = &known {
                 if *known_hash == hash {
                     // 内容未变（仅 touch），只更新 mtime
-                    tx.execute("UPDATE files SET mtime = ?1 WHERE path = ?2", (mtime, rel_path))?;
+                    tx.execute(
+                        "UPDATE files SET mtime = ?1 WHERE path = ?2",
+                        (mtime, rel_path),
+                    )?;
                     continue;
                 }
             }
@@ -195,7 +210,11 @@ impl Store {
                 "SELECT name, id, path FROM nodes WHERE kind NOT IN ('file', 'directory')\n                 ORDER BY path, start_line",
             )?;
             let rows = stmt.query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
             })?;
             for row in rows {
                 let (name, id, path) = row?;
@@ -205,9 +224,13 @@ impl Store {
         for pend in &pending {
             for (caller_name, callee_name) in &pend.calls {
                 let caller_id = by_name.get(caller_name).and_then(|ids| {
-                    ids.iter().find(|(_, p)| *p == pend.rel_path).map(|(id, _)| id)
+                    ids.iter()
+                        .find(|(_, p)| *p == pend.rel_path)
+                        .map(|(id, _)| id)
                 });
-                let callee_id = by_name.get(callee_name).and_then(|ids| ids.first().map(|(id, _)| id));
+                let callee_id = by_name
+                    .get(callee_name)
+                    .and_then(|ids| ids.first().map(|(id, _)| id));
                 if let (Some(src), Some(dst)) = (caller_id, callee_id) {
                     tx.execute(
                         "INSERT INTO edges(src, dst, kind) VALUES(?1, ?2, ?3)",
@@ -236,7 +259,12 @@ impl Store {
     }
 
     /// FTS5 BM25 检索；名称精确匹配（忽略大小写）稳定置前。
-    pub fn search(&self, query: &str, kind: Option<NodeKind>, limit: usize) -> Result<Vec<Node>, GraphError> {
+    pub fn search(
+        &self,
+        query: &str,
+        kind: Option<NodeKind>,
+        limit: usize,
+    ) -> Result<Vec<Node>, GraphError> {
         let tokens: Vec<String> = query
             .split_whitespace()
             .filter(|t| !t.is_empty())
@@ -265,8 +293,9 @@ impl Store {
             }
         }
         // 名称精确命中稳定置前（partition 保持相对顺序）
-        let (mut exact, rest): (Vec<Node>, Vec<Node>) =
-            hits.into_iter().partition(|n| n.name.eq_ignore_ascii_case(query.trim()));
+        let (mut exact, rest): (Vec<Node>, Vec<Node>) = hits
+            .into_iter()
+            .partition(|n| n.name.eq_ignore_ascii_case(query.trim()));
         exact.extend(rest);
         Ok(exact)
     }
@@ -284,27 +313,33 @@ impl Store {
         let mut frontier: Vec<String> = vec![id.to_string()];
         let mut found: Vec<String> = Vec::new();
 
-        let mut callers_stmt = self.conn.prepare("SELECT src, kind FROM edges WHERE dst = ?1")?;
-        let mut callees_stmt = self.conn.prepare("SELECT dst, kind FROM edges WHERE src = ?1")?;
+        let mut callers_stmt = self
+            .conn
+            .prepare("SELECT src, kind FROM edges WHERE dst = ?1")?;
+        let mut callees_stmt = self
+            .conn
+            .prepare("SELECT dst, kind FROM edges WHERE src = ?1")?;
 
         for _ in 0..hops {
             let mut next: Vec<String> = Vec::new();
             for cur in &frontier {
-                let expand = |stmt: &mut rusqlite::Statement<'_>| -> Result<Vec<String>, GraphError> {
-                    let rows = stmt.query_map([cur], |row| {
-                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                    })?;
-                    let mut out = Vec::new();
-                    for row in rows {
-                        let (other, kind_s) = row?;
-                        let matches_kind = edge_kinds.is_empty()
-                            || EdgeKind::parse(&kind_s).is_some_and(|k| edge_kinds.contains(&k));
-                        if matches_kind {
-                            out.push(other);
+                let expand =
+                    |stmt: &mut rusqlite::Statement<'_>| -> Result<Vec<String>, GraphError> {
+                        let rows = stmt.query_map([cur], |row| {
+                            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                        })?;
+                        let mut out = Vec::new();
+                        for row in rows {
+                            let (other, kind_s) = row?;
+                            let matches_kind = edge_kinds.is_empty()
+                                || EdgeKind::parse(&kind_s)
+                                    .is_some_and(|k| edge_kinds.contains(&k));
+                            if matches_kind {
+                                out.push(other);
+                            }
                         }
-                    }
-                    Ok(out)
-                };
+                        Ok(out)
+                    };
                 let mut candidates: Vec<String> = Vec::new();
                 if matches!(dir, Direction::Callers | Direction::Both) {
                     candidates.extend(expand(&mut callers_stmt)?);
@@ -331,7 +366,11 @@ impl Store {
                 nodes.push(node);
             }
         }
-        nodes.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        nodes.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         Ok(nodes)
     }
 
@@ -392,7 +431,11 @@ impl Store {
     pub fn all_edges(&self) -> Result<Vec<EdgeRec>, GraphError> {
         let mut stmt = self.conn.prepare("SELECT src, dst, kind FROM edges")?;
         let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
         })?;
         let mut out = Vec::new();
         for row in rows {
@@ -406,7 +449,9 @@ impl Store {
 
     /// 批量更新 nodes.score。
     pub fn set_scores(&self, scores: &[(String, f64)]) -> Result<(), GraphError> {
-        let mut stmt = self.conn.prepare("UPDATE nodes SET score = ?1 WHERE id = ?2")?;
+        let mut stmt = self
+            .conn
+            .prepare("UPDATE nodes SET score = ?1 WHERE id = ?2")?;
         for (id, score) in scores {
             stmt.execute((score, id))?;
         }
@@ -456,7 +501,9 @@ fn collect_files(
     ignores: &[String],
     out: &mut Vec<(std::path::PathBuf, String)>,
 ) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
@@ -498,7 +545,11 @@ mod tests {
     fn full_then_incremental_refresh() {
         let dir = tempdir().unwrap();
         let root = dir.path();
-        write(root, "src/a.rs", "pub fn alpha() { beta(); }\npub fn beta() {}\n");
+        write(
+            root,
+            "src/a.rs",
+            "pub fn alpha() { beta(); }\npub fn beta() {}\n",
+        );
         write(root, "src/b.rs", "pub fn gamma() {}\n");
         let mut store = Store::open(&root.join(".deepseeknova/graph.db")).unwrap();
 
@@ -506,7 +557,9 @@ mod tests {
         assert!(n1.files_indexed >= 2);
         let beta_id = store.find_by_name("beta").unwrap()[0].id.clone();
 
-        let callers = store.neighbors(&beta_id, &[EdgeKind::Calls], Direction::Callers, 1).unwrap();
+        let callers = store
+            .neighbors(&beta_id, &[EdgeKind::Calls], Direction::Callers, 1)
+            .unwrap();
         assert!(callers.iter().any(|n| n.name == "alpha"));
 
         std::thread::sleep(std::time::Duration::from_millis(1100));
@@ -521,7 +574,11 @@ mod tests {
     fn fts_search_ranks_name_match() {
         let dir = tempdir().unwrap();
         let root = dir.path();
-        write(root, "src/a.rs", "/// permission gate\npub struct PermissionGate {}\npub fn unrelated() {}\n");
+        write(
+            root,
+            "src/a.rs",
+            "/// permission gate\npub struct PermissionGate {}\npub fn unrelated() {}\n",
+        );
         let mut store = Store::open(&root.join(".deepseeknova/graph.db")).unwrap();
         store.refresh(root, 1_048_576).unwrap();
         let hits = store.search("PermissionGate", None, 10).unwrap();
