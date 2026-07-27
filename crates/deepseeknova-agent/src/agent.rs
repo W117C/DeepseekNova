@@ -91,6 +91,15 @@ impl Agent {
         self
     }
 
+    /// Append text to the system prompt (used to inject retrieval strategy hints).
+    pub fn with_appended_system_prompt(mut self, extra: impl AsRef<str>) -> Self {
+        match self.system_prompt {
+            Some(ref mut s) => s.push_str(extra.as_ref()),
+            None => self.system_prompt = Some(extra.as_ref().to_string()),
+        }
+        self
+    }
+
     pub fn with_compaction_threshold(mut self, tokens: Option<u32>) -> Self {
         self.compaction_threshold_tokens = tokens;
         self
