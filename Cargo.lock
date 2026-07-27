@@ -1085,6 +1085,7 @@ dependencies = [
  "async-trait",
  "deepseeknova-context",
  "deepseeknova-core",
+ "deepseeknova-permission",
  "deepseeknova-provider",
  "deepseeknova-security",
  "serde",
@@ -1199,11 +1200,13 @@ name = "deepseeknova-desktop"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "deepseeknova-agent",
  "deepseeknova-config",
  "deepseeknova-core",
  "deepseeknova-event",
  "deepseeknova-orch",
+ "deepseeknova-permission",
  "deepseeknova-provider",
  "deepseeknova-runtime",
  "deepseeknova-skills",
@@ -1281,6 +1284,7 @@ name = "deepseeknova-permission"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "deepseeknova-config",
  "deepseeknova-core",
  "serde",
@@ -1322,6 +1326,7 @@ dependencies = [
  "deepseeknova-event",
  "deepseeknova-permission",
  "deepseeknova-provider",
+ "deepseeknova-sandbox",
  "deepseeknova-security",
  "deepseeknova-tools",
  "tokio",
