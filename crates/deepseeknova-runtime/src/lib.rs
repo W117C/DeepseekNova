@@ -18,6 +18,14 @@ use deepseeknova_security::context::SecurityContext;
 use deepseeknova_security::limits::ResourceLimits;
 use deepseeknova_security::policy::SecurityPolicy;
 
+/// Retrieval-strategy hint appended to the system prompt when the code graph
+/// is enabled, steering the model toward graph tools over brute-force grep.
+const GRAPH_RETRIEVAL_HINT: &str = "\n\n## 代码检索策略\n\
+定位代码时优先使用图检索工具，避免全片 grep 或整文件读取：\n\
+1. `search_code` 按符号名/关键词定位候选实体；\n\
+2. `traverse_graph` 查看调用者/被调用者关系；\n\
+3. `retrieve_entity`（view=skeleton）看骨架，确认目标后再 view=full 或 read_file 取实现。";
+
 /// Runtime is the composition root. It wires registry, context, events,
 /// and permission together. Agent, Planner, SubAgent, Server all share
 /// one Runtime.
@@ -256,13 +264,21 @@ pub fn build_agent(
     // Tools — sandboxed shell only when explicitly enabled. Tools disabled via
     // `config.tools.overrides` (e.g. the desktop settings toggles) are skipped
     // at registration so the model never sees their schemas.
-    let disabled: std::collections::HashSet<&str> = config
+    let mut disabled: std::collections::HashSet<&str> = config
         .tools
         .overrides
         .iter()
         .filter(|o| o.disabled)
         .map(|o| o.name.as_str())
         .collect();
+    // Graph retrieval tools only exist when the code graph is enabled. When
+    // disabled, exclude them from registration so the model never sees their
+    // schemas (they'd otherwise degrade with a "graph unavailable" message).
+    if !config.graph.enabled {
+        disabled.insert("search_code");
+        disabled.insert("traverse_graph");
+        disabled.insert("retrieve_entity");
+    }
     let register = |agent: &mut deepseeknova_agent::Agent,
                     tools: Vec<Arc<dyn deepseeknova_core::Tool>>| {
         for tool in tools {
@@ -286,6 +302,49 @@ pub fn build_agent(
         register(&mut agent, deepseeknova_tools::all_builtin_tools());
     }
 
+    // ── 代码图：可选、后台构建、注入检索工具句柄与检索策略提示 ──
+    // Open the on-disk index synchronously (cheap: just opens SQLite), then
+    // refresh it on a blocking thread so the expensive tree-sitter parse never
+    // stalls build_agent's return or the tokio worker pool. A refresh failure
+    // only warns — the agent still runs, graph tools just degrade gracefully.
+    if config.graph.enabled {
+        match deepseeknova_graph::GraphIndex::open(&workspace_root, config.graph.max_file_size) {
+            Ok(index) => {
+                let handle: deepseeknova_tools::GraphHandle =
+                    Arc::new(std::sync::Mutex::new(index));
+                let bg = handle.clone();
+                tokio::task::spawn_blocking(move || match bg.lock() {
+                    Ok(mut idx) => {
+                        if let Err(e) = idx.refresh() {
+                            tracing::warn!("graph index refresh failed: {e}");
+                        }
+                    }
+                    Err(_) => tracing::warn!("graph index lock poisoned during refresh"),
+                });
+                agent = agent.with_extension(handle.clone());
+                agent = agent.with_appended_system_prompt(GRAPH_RETRIEVAL_HINT);
+
+                // Feed a global repo map into the agent's system prompt at run
+                // start. Uses an empty personalization seed (global map); per-
+                // turn personalized seeds are a future enhancement.
+                // TODO(graph): personalized seeds from user input
+                let budget = config.graph.repo_map_tokens;
+                if budget > 0 {
+                    let map_handle = handle.clone();
+                    let provider: deepseeknova_agent::RepoMapProvider = Arc::new(move || {
+                        map_handle
+                            .lock()
+                            .ok()
+                            .and_then(|idx| idx.repo_map(budget, &[]).ok())
+                            .filter(|s| !s.is_empty())
+                    });
+                    agent = agent.with_repo_map_provider(provider);
+                }
+            }
+            Err(e) => tracing::warn!("graph index unavailable, tools will degrade: {e}"),
+        }
+    }
+
     Ok(agent)
 }
 
@@ -295,6 +354,60 @@ mod tests {
     use deepseeknova_config::Config;
     use deepseeknova_context::ContextEngine;
     use deepseeknova_security::capability::Capability;
+
+    // Minimal Provider stub: never actually called by these tests (they only
+    // assert on the synchronously-registered tool set), but build_agent needs
+    // a concrete provider to construct the agent.
+    struct StubProvider;
+
+    #[async_trait::async_trait]
+    impl deepseeknova_provider::Provider for StubProvider {
+        async fn generate(
+            &self,
+            _validated: deepseeknova_provider::ValidatedRequest<'_>,
+        ) -> anyhow::Result<deepseeknova_core::Message> {
+            Ok(deepseeknova_core::Message {
+                role: deepseeknova_core::Role::Assistant,
+                content: String::new(),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            })
+        }
+    }
+
+    fn stub_provider() -> StubProvider {
+        StubProvider
+    }
+
+    #[tokio::test]
+    async fn build_agent_wires_graph_when_enabled() {
+        let mut config = Config::default();
+        config.graph.enabled = true;
+        let root = std::env::temp_dir().join(format!("dnv-graph-wire-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/x.rs"), "pub fn foo() {}\n").unwrap();
+
+        let provider = std::sync::Arc::new(stub_provider());
+        let agent = build_agent(&config, root.clone(), provider, 5, None).unwrap();
+        let names = agent.tool_names();
+        assert!(names.iter().any(|n| n == "search_code"));
+        assert!(names.iter().any(|n| n == "traverse_graph"));
+        assert!(names.iter().any(|n| n == "retrieve_entity"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn build_agent_skips_graph_when_disabled() {
+        let mut config = Config::default();
+        config.graph.enabled = false;
+        let provider = std::sync::Arc::new(stub_provider());
+        let agent = build_agent(&config, std::env::temp_dir(), provider, 5, None).unwrap();
+        assert!(!agent.tool_names().iter().any(|n| n == "search_code"));
+        assert!(!agent.tool_names().iter().any(|n| n == "traverse_graph"));
+        assert!(!agent.tool_names().iter().any(|n| n == "retrieve_entity"));
+    }
 
     #[test]
     fn build_security_context_default_grants_all_capabilities() {

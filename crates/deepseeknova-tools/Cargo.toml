@@ -24,6 +24,7 @@ deepseeknova-core = { workspace = true }
 deepseeknova-sandbox = { workspace = true }
 deepseeknova-checkpoint = { workspace = true }
 deepseeknova-security = { workspace = true }
+deepseeknova-graph = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 

@@ -57,7 +57,25 @@ pub struct Agent {
 
     /// Optional approval responder used to resolve `Ask` decisions.
     approval: Option<Arc<dyn ApprovalResponder>>,
+
+    /// Build-time registered extensions injected into every ToolContext.
+    /// Stored as closures to erase the concrete type while staying Clone-free.
+    extensions: Vec<Arc<ExtensionApplier>>,
+
+    /// Optional repo-map provider. When set, `run_stream` invokes it at the
+    /// start of a fresh conversation to produce a code-graph "repo map" that is
+    /// appended to the system prompt (stable prefix region). Returns `None`
+    /// when no map is available (e.g. empty budget or index unavailable). This
+    /// is wired by the runtime from a shared `GraphHandle` + token budget.
+    repo_map_provider: Option<RepoMapProvider>,
 }
+
+/// Type-erased provider that yields the current repo-map text (or `None`).
+pub type RepoMapProvider = Arc<dyn Fn() -> Option<String> + Send + Sync>;
+
+/// Type-erased closure that inserts a build-time extension value into a
+/// ToolContext's `ExtensionRegistry`.
+type ExtensionApplier = dyn Fn(&mut deepseeknova_core::tool::ExtensionRegistry) + Send + Sync;
 
 impl Agent {
     pub fn new(provider: Arc<dyn Provider>, max_steps: usize) -> Self {
@@ -73,11 +91,22 @@ impl Agent {
             history: None,
             permission: None,
             approval: None,
+            extensions: Vec::new(),
+            repo_map_provider: None,
         }
     }
 
     pub fn with_system_prompt(mut self, prompt: impl Into<String>) -> Self {
         self.system_prompt = Some(prompt.into());
+        self
+    }
+
+    /// Append text to the system prompt (used to inject retrieval strategy hints).
+    pub fn with_appended_system_prompt(mut self, extra: impl AsRef<str>) -> Self {
+        match self.system_prompt {
+            Some(ref mut s) => s.push_str(extra.as_ref()),
+            None => self.system_prompt = Some(extra.as_ref().to_string()),
+        }
         self
     }
 
@@ -125,10 +154,69 @@ impl Agent {
         self
     }
 
+    /// Register an arbitrary extension value that will be injected into the
+    /// `ExtensionRegistry` of every tool execution context. Used e.g. to hand
+    /// a shared code-graph index to graph tools.
+    pub fn with_extension<T: std::any::Any + Send + Sync + Clone>(mut self, ext: T) -> Self {
+        self.extensions
+            .push(Arc::new(move |reg| reg.insert(ext.clone())));
+        self
+    }
+
+    /// Attach a repo-map provider closure. At the start of a fresh conversation,
+    /// the agent calls this to obtain a code-graph repo map that is appended to
+    /// the system prompt (in the stable prefix region, preserving prefix cache
+    /// semantics). Returning `None` skips injection.
+    pub fn with_repo_map_provider(mut self, provider: RepoMapProvider) -> Self {
+        self.repo_map_provider = Some(provider);
+        self
+    }
+
     pub fn register_tool(&mut self, tool: Arc<dyn Tool>) {
         let name = tool.schema().name.clone();
         self.tools.insert(name, tool);
     }
+
+    /// Names of all registered tools (for diagnostics/tests).
+    pub fn tool_names(&self) -> Vec<String> {
+        self.tools.keys().cloned().collect()
+    }
+
+    /// Build the ToolContext for a tool call, injecting security + all
+    /// build-time registered extensions. Shared by run_stream and tests.
+    #[allow(dead_code)] // exercised from tests today; Task 9/10 consume it in-crate
+    pub(crate) fn make_tool_context(
+        &self,
+        call_id: &str,
+        cancel: CancellationToken,
+    ) -> ToolContext {
+        build_tool_context(
+            call_id,
+            cancel,
+            &self.workspace_root,
+            &self.security,
+            &self.extensions,
+        )
+    }
+}
+
+/// Shared ToolContext construction used by both `Agent::make_tool_context`
+/// and the spawned agent loop (which cannot borrow `self`). Keeps the
+/// injection set (workspace + security + registered extensions) in one place.
+fn build_tool_context(
+    call_id: &str,
+    cancel: CancellationToken,
+    workspace_root: &std::path::Path,
+    security: &SecurityContext,
+    extensions: &[Arc<ExtensionApplier>],
+) -> ToolContext {
+    let mut ctx = ToolContext::with_cancellation(call_id, cancel)
+        .with_workspace(workspace_root.to_path_buf());
+    ctx.extensions.insert(security.clone());
+    for apply in extensions {
+        apply(&mut ctx.extensions);
+    }
+    ctx
 }
 
 #[async_trait::async_trait]
@@ -146,6 +234,8 @@ impl Runner for Agent {
         let history = self.history.clone();
         let permission = self.permission.clone();
         let approval = self.approval.clone();
+        let extensions = self.extensions.clone();
+        let repo_map_provider = self.repo_map_provider.clone();
 
         // Create a cancellation token and wire Ctrl-C (SIGINT) to cancel it.
         // This enables graceful interruption of the agent loop (e.g. Ctrl-C).
@@ -186,9 +276,25 @@ impl Runner for Agent {
             // them and re-injecting it would duplicate it.
             if !seeded {
                 if let Some(ref sp) = system_prompt {
+                    // Build the system prompt content, appending the code-graph
+                    // repo map (if any) in the stable prefix region — after the
+                    // base prompt, before the volatile conversation — mirroring
+                    // context::PromptBuilder's Repo Map format so prefix-cache
+                    // semantics hold.
+                    // TODO(graph): personalized seeds from user input
+                    let mut content = sp.clone();
+                    if let Some(ref provider) = repo_map_provider {
+                        if let Some(map) = provider() {
+                            if !map.is_empty() {
+                                content.push_str("\n\n---\n## Repo Map\n\n```\n");
+                                content.push_str(&map);
+                                content.push_str("\n```\n");
+                            }
+                        }
+                    }
                     memory.add_message(Message {
                         role: Role::System,
-                        content: sp.clone(),
+                        content,
                         name: None,
                         tool_calls: None,
                         tool_call_id: None,
@@ -210,6 +316,7 @@ impl Runner for Agent {
                 security,
                 permission,
                 approval,
+                extensions,
             )
             .await;
 
@@ -257,6 +364,7 @@ async fn run_agent_loop(
     security: SecurityContext,
     permission: Option<Arc<PermissionGate>>,
     approval: Option<Arc<dyn ApprovalResponder>>,
+    extensions: Vec<Arc<ExtensionApplier>>,
 ) -> anyhow::Result<()> {
     // Add user prompt
     memory.add_message(Message {
@@ -351,6 +459,7 @@ async fn run_agent_loop(
             &mut tool_calls_made,
             permission.as_ref(),
             approval.as_ref(),
+            &extensions,
         )
         .await?;
 
@@ -403,6 +512,7 @@ async fn stream_and_process_turn(
     tool_calls_made: &mut usize,
     permission: Option<&Arc<PermissionGate>>,
     approval: Option<&Arc<dyn ApprovalResponder>>,
+    extensions: &[Arc<ExtensionApplier>],
 ) -> anyhow::Result<StepOutcome> {
     // Build tool refs for provider
     let tool_refs: Vec<&dyn Tool> = tools.iter().map(|t| t.as_ref()).collect();
@@ -629,9 +739,13 @@ async fn stream_and_process_turn(
             let result = if let Some(reason) = gate_block {
                 format!("Error: tool '{}' {}", call.name, reason)
             } else {
-                let ctx = ToolContext::with_cancellation(&call.id, cancel.child_token())
-                    .with_workspace(workspace_root.to_path_buf())
-                    .with_extension(security.clone());
+                let ctx = build_tool_context(
+                    &call.id,
+                    cancel.child_token(),
+                    workspace_root,
+                    security,
+                    extensions,
+                );
                 if let Some(tool) = tool_map.get(&call.name) {
                     info!(tool = %call.name, id = %call.id, "executing tool");
                     match tool.execute(&ctx, &call.arguments).await {
@@ -938,6 +1052,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_repo_map_provider_injected_into_system_prompt() {
+        // A shared persistent store lets us observe the system message that the
+        // agent builds at run start (it is persisted verbatim on turn 1).
+        let history = Arc::new(tokio::sync::Mutex::new(Vec::<Message>::new()));
+        let provider = Arc::new(MockProvider::text("ok"));
+        let repo_map: RepoMapProvider =
+            Arc::new(|| Some("crates/x/src/a.rs:\n│ pub fn foo()\n⋮".to_string()));
+        let agent = Agent::new(provider, 3)
+            .with_system_prompt("you are a test bot")
+            .with_repo_map_provider(repo_map)
+            .with_conversation_history(history.clone());
+
+        let mut stream = agent
+            .run_stream(RunInput {
+                prompt: "who are you".into(),
+                images: vec![],
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+
+        let store = history.lock().await;
+        let sys = store
+            .iter()
+            .find(|m| m.role == Role::System)
+            .expect("system message should be persisted");
+        assert!(sys.content.contains("you are a test bot"));
+        assert!(sys.content.contains("Repo Map"));
+        assert!(sys.content.contains("pub fn foo()"));
+    }
+
+    #[tokio::test]
     async fn agent_compaction_threshold_triggers() {
         let provider = Arc::new(MockProvider::text("compacted"));
         let agent = Agent::new(provider, 3).with_compaction_threshold(Some(1));
@@ -1239,5 +1386,48 @@ mod tests {
             ran.load(Ordering::SeqCst),
             "without a gate the tool must execute (behavior unchanged)"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Extension injection hook (Task 8)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn injects_custom_extension_into_tool_context() {
+        #[derive(Clone)]
+        struct Marker(u32);
+        struct ProbeTool;
+        #[async_trait::async_trait]
+        impl Tool for ProbeTool {
+            fn schema(&self) -> ToolSchema {
+                ToolSchema {
+                    name: "probe".into(),
+                    description: "d".into(),
+                    parameters: serde_json::json!({"type":"object","properties":{}}),
+                }
+            }
+            fn read_only(&self) -> bool {
+                true
+            }
+            async fn execute(&self, ctx: &ToolContext, _args: &str) -> anyhow::Result<String> {
+                let m = ctx.extensions.get::<Marker>().map(|m| m.0).unwrap_or(0);
+                Ok(format!("marker={m}"))
+            }
+        }
+
+        let agent = Agent::new(Arc::new(MockProvider::text("ok")), 3).with_extension(Marker(42));
+        let ctx = agent.make_tool_context("call-1", CancellationToken::new());
+        let out = ProbeTool.execute(&ctx, "{}").await.unwrap();
+        assert_eq!(out, "marker=42");
+    }
+
+    #[test]
+    fn tool_names_lists_registered() {
+        let mut agent = Agent::new(Arc::new(MockProvider::text("ok")), 3);
+        agent.register_tool(Arc::new(SpyTool {
+            name: "probe2",
+            result: "r".into(),
+        }));
+        assert!(agent.tool_names().iter().any(|n| n == "probe2"));
     }
 }

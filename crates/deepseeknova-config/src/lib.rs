@@ -39,6 +39,10 @@ pub struct Config {
     #[serde(default)]
     pub tools: ToolsConfig,
 
+    /// 代码图索引配置。
+    #[serde(default)]
+    pub graph: GraphConfig,
+
     /// Agent behaviour tuning.
     #[serde(default)]
     pub agent: AgentConfig,
@@ -198,6 +202,40 @@ pub struct ToolOverride {
     pub timeout_secs: Option<u64>,
     #[serde(default)]
     pub max_file_size: Option<u64>,
+}
+
+// ---------------------------------------------------------------------------
+// Graph (code index)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphConfig {
+    /// 主开关。false 时不构建索引、不注入 repo map，行为等同现状。
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// repo map 的 token 预算。0 = 不注入 map（仅保留检索工具）。
+    #[serde(default = "default_repo_map_tokens")]
+    pub repo_map_tokens: usize,
+    /// 单文件解析大小上限（字节），超过跳过。
+    #[serde(default = "default_graph_max_file_size")]
+    pub max_file_size: u64,
+}
+
+fn default_repo_map_tokens() -> usize {
+    1024
+}
+fn default_graph_max_file_size() -> u64 {
+    524_288
+}
+
+impl Default for GraphConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            repo_map_tokens: 1024,
+            max_file_size: 524_288,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -743,5 +781,22 @@ mod tests {
         assert_eq!(base.security.limits.max_execution_time_secs, Some(60));
         // 未覆盖的字段保持未设置
         assert!(base.security.limits.max_file_size.is_none());
+    }
+
+    #[test]
+    fn graph_config_defaults() {
+        let c = Config::default();
+        assert!(c.graph.enabled);
+        assert_eq!(c.graph.repo_map_tokens, 1024);
+        assert_eq!(c.graph.max_file_size, 524_288);
+    }
+
+    #[test]
+    fn graph_config_parses_from_toml() {
+        let toml = "[graph]\nenabled = false\nrepo_map_tokens = 0\n";
+        let c: Config = toml::from_str(toml).unwrap();
+        assert!(!c.graph.enabled);
+        assert_eq!(c.graph.repo_map_tokens, 0);
+        assert_eq!(c.graph.max_file_size, 524_288);
     }
 }
