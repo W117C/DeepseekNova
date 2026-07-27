@@ -116,7 +116,7 @@ fn prompt_builder_basic_output() {
 
     let wm = WorkingMemory::new();
     let pm = ProjectMemory::new();
-    let messages = PromptBuilder::build("you are a helpful bot", &schemas, &wm, &pm);
+    let messages = PromptBuilder::build("you are a helpful bot", &schemas, &wm, &pm, None);
 
     assert!(!messages.is_empty());
     let system = &messages[0];
@@ -137,7 +137,7 @@ fn prompt_builder_injects_project_memory() {
     pm.load_deepseeknova_md(dir.path());
 
     let wm = WorkingMemory::new();
-    let messages = PromptBuilder::build("you are a bot", &[], &wm, &pm);
+    let messages = PromptBuilder::build("you are a bot", &[], &wm, &pm, None);
 
     let system = &messages[0];
     assert!(system.content.contains("My Project"));
@@ -164,7 +164,7 @@ fn prompt_builder_includes_conversation_history() {
     });
 
     let pm = ProjectMemory::new();
-    let messages = PromptBuilder::build("system prompt", &[], &wm, &pm);
+    let messages = PromptBuilder::build("system prompt", &[], &wm, &pm, None);
 
     assert!(messages.iter().any(|m| m.content == "user question"));
     assert!(messages.iter().any(|m| m.content == "assistant answer"));

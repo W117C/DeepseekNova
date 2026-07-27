@@ -61,7 +61,17 @@ pub struct Agent {
     /// Build-time registered extensions injected into every ToolContext.
     /// Stored as closures to erase the concrete type while staying Clone-free.
     extensions: Vec<Arc<ExtensionApplier>>,
+
+    /// Optional repo-map provider. When set, `run_stream` invokes it at the
+    /// start of a fresh conversation to produce a code-graph "repo map" that is
+    /// appended to the system prompt (stable prefix region). Returns `None`
+    /// when no map is available (e.g. empty budget or index unavailable). This
+    /// is wired by the runtime from a shared `GraphHandle` + token budget.
+    repo_map_provider: Option<RepoMapProvider>,
 }
+
+/// Type-erased provider that yields the current repo-map text (or `None`).
+pub type RepoMapProvider = Arc<dyn Fn() -> Option<String> + Send + Sync>;
 
 /// Type-erased closure that inserts a build-time extension value into a
 /// ToolContext's `ExtensionRegistry`.
@@ -83,6 +93,7 @@ impl Agent {
             permission: None,
             approval: None,
             extensions: Vec::new(),
+            repo_map_provider: None,
         }
     }
 
@@ -153,6 +164,15 @@ impl Agent {
         self
     }
 
+    /// Attach a repo-map provider closure. At the start of a fresh conversation,
+    /// the agent calls this to obtain a code-graph repo map that is appended to
+    /// the system prompt (in the stable prefix region, preserving prefix cache
+    /// semantics). Returning `None` skips injection.
+    pub fn with_repo_map_provider(mut self, provider: RepoMapProvider) -> Self {
+        self.repo_map_provider = Some(provider);
+        self
+    }
+
     pub fn register_tool(&mut self, tool: Arc<dyn Tool>) {
         let name = tool.schema().name.clone();
         self.tools.insert(name, tool);
@@ -216,6 +236,7 @@ impl Runner for Agent {
         let permission = self.permission.clone();
         let approval = self.approval.clone();
         let extensions = self.extensions.clone();
+        let repo_map_provider = self.repo_map_provider.clone();
 
         // Create a cancellation token and wire Ctrl-C (SIGINT) to cancel it.
         // This enables graceful interruption of the agent loop (e.g. Ctrl-C).
@@ -256,9 +277,25 @@ impl Runner for Agent {
             // them and re-injecting it would duplicate it.
             if !seeded {
                 if let Some(ref sp) = system_prompt {
+                    // Build the system prompt content, appending the code-graph
+                    // repo map (if any) in the stable prefix region — after the
+                    // base prompt, before the volatile conversation — mirroring
+                    // context::PromptBuilder's Repo Map format so prefix-cache
+                    // semantics hold.
+                    // TODO(graph): personalized seeds from user input
+                    let mut content = sp.clone();
+                    if let Some(ref provider) = repo_map_provider {
+                        if let Some(map) = provider() {
+                            if !map.is_empty() {
+                                content.push_str("\n\n---\n## Repo Map\n\n```\n");
+                                content.push_str(&map);
+                                content.push_str("\n```\n");
+                            }
+                        }
+                    }
                     memory.add_message(Message {
                         role: Role::System,
-                        content: sp.clone(),
+                        content,
                         name: None,
                         tool_calls: None,
                         tool_call_id: None,
@@ -1013,6 +1050,39 @@ mod tests {
             result.is_ok(),
             "agent with system prompt should run without error"
         );
+    }
+
+    #[tokio::test]
+    async fn agent_repo_map_provider_injected_into_system_prompt() {
+        // A shared persistent store lets us observe the system message that the
+        // agent builds at run start (it is persisted verbatim on turn 1).
+        let history = Arc::new(tokio::sync::Mutex::new(Vec::<Message>::new()));
+        let provider = Arc::new(MockProvider::text("ok"));
+        let repo_map: RepoMapProvider =
+            Arc::new(|| Some("crates/x/src/a.rs:\n│ pub fn foo()\n⋮".to_string()));
+        let agent = Agent::new(provider, 3)
+            .with_system_prompt("you are a test bot")
+            .with_repo_map_provider(repo_map)
+            .with_conversation_history(history.clone());
+
+        let mut stream = agent
+            .run_stream(RunInput {
+                prompt: "who are you".into(),
+                images: vec![],
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+
+        let store = history.lock().await;
+        let sys = store
+            .iter()
+            .find(|m| m.role == Role::System)
+            .expect("system message should be persisted");
+        assert!(sys.content.contains("you are a test bot"));
+        assert!(sys.content.contains("Repo Map"));
+        assert!(sys.content.contains("pub fn foo()"));
     }
 
     #[tokio::test]

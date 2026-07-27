@@ -181,6 +181,7 @@ impl PromptBuilder {
         tools: &[ToolSchema],
         working_memory: &WorkingMemory,
         project_memory: &ProjectMemory,
+        repo_map: Option<&str>,
     ) -> Vec<Message> {
         let mut messages = Vec::new();
 
@@ -192,6 +193,15 @@ impl PromptBuilder {
         if let Some(ref deepseeknova_md) = project_memory.deepseeknova_md {
             system_content.push_str("\n\n---\n## Project Context\n\n");
             system_content.push_str(deepseeknova_md);
+        }
+
+        // Inject repo map (stable prefix region: after project context, before tools).
+        if let Some(map) = repo_map {
+            if !map.is_empty() {
+                system_content.push_str("\n\n---\n## Repo Map\n\n```\n");
+                system_content.push_str(map);
+                system_content.push_str("\n```\n");
+            }
         }
 
         // Inject tool descriptions
@@ -278,6 +288,7 @@ impl CacheAwarePromptBuilder {
         system_prompt: &str,
         tools: &[ToolSchema],
         project_memory: &ProjectMemory,
+        repo_map: Option<&str>,   // stable: global code graph repo map
         conversation: &[Message], // volatile: conversation history
         user_input: &str,         // volatile: current user message
     ) -> (Vec<Message>, String) {
@@ -305,6 +316,14 @@ impl CacheAwarePromptBuilder {
         // 3. Project memory (DEEPSEEKNOVA.md — stable between config changes)
         if let Some(ref deepseeknova_md) = project_memory.deepseeknova_md {
             prefix_parts.push(format!("## Project Context\n\n{deepseeknova_md}"));
+        }
+
+        // 4. Repo map (global code graph — stable within an index generation).
+        //    Part of the cache prefix so it does not invalidate the volatile suffix.
+        if let Some(map) = repo_map {
+            if !map.is_empty() {
+                prefix_parts.push(format!("## Repo Map\n\n```\n{map}\n```"));
+            }
         }
 
         let prefix_content = prefix_parts.join("\n\n---\n\n");
@@ -1076,6 +1095,7 @@ mod tests {
             &tools,
             &WorkingMemory::new(),
             &ProjectMemory::new(),
+            None,
         );
         assert_eq!(messages.len(), 1);
         assert!(messages[0].content.contains("## Available Tools"));
@@ -1087,7 +1107,7 @@ mod tests {
         let mut pm = ProjectMemory::new();
         pm.deepseeknova_md = Some("This is a Rust project.".into());
 
-        let messages = PromptBuilder::build("You are helpful.", &[], &WorkingMemory::new(), &pm);
+        let messages = PromptBuilder::build("You are helpful.", &[], &WorkingMemory::new(), &pm, None);
         assert!(messages[0].content.contains("## Project Context"));
         assert!(messages[0].content.contains("Rust project"));
     }
@@ -1105,10 +1125,29 @@ mod tests {
         });
         wm.compaction_digest = Some("summary of earlier conversation".into());
 
-        let messages = PromptBuilder::build("system", &[], &wm, &ProjectMemory::new());
+        let messages = PromptBuilder::build("system", &[], &wm, &ProjectMemory::new(), None);
         // system msg + digest + conversation (1 user msg)
         assert_eq!(messages.len(), 3);
         assert!(messages[1].content.contains("conversation-summary"));
+    }
+
+    #[test]
+    fn prompt_builder_injects_repo_map_after_project_context() {
+        let mut pm = ProjectMemory::new();
+        pm.deepseeknova_md = Some("PROJECT_CTX".into());
+        let map = "crates/x/src/a.rs:\n│ pub fn foo()\n⋮";
+        let msgs = PromptBuilder::build("SYS", &[], &WorkingMemory::new(), &pm, Some(map));
+        let sys = &msgs[0].content;
+        assert!(sys.contains("PROJECT_CTX"));
+        assert!(sys.contains("Repo Map"));
+        assert!(sys.contains("pub fn foo()"));
+        assert!(sys.find("PROJECT_CTX").unwrap() < sys.find("pub fn foo()").unwrap());
+    }
+
+    #[test]
+    fn prompt_builder_none_map_is_noop() {
+        let msgs = PromptBuilder::build("SYS", &[], &WorkingMemory::new(), &ProjectMemory::new(), None);
+        assert!(!msgs[0].content.contains("Repo Map"));
     }
 
     #[test]
@@ -1117,7 +1156,7 @@ mod tests {
         wm.compaction_digest = Some("summary".into());
         // No conversation messages -> no digest injection
 
-        let messages = PromptBuilder::build("system", &[], &wm, &ProjectMemory::new());
+        let messages = PromptBuilder::build("system", &[], &wm, &ProjectMemory::new(), None);
         // Only the system message, no digest inserted
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].role, Role::System);

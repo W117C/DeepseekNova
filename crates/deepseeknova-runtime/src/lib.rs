@@ -321,8 +321,26 @@ pub fn build_agent(
                     }
                     Err(_) => tracing::warn!("graph index lock poisoned during refresh"),
                 });
-                agent = agent.with_extension(handle);
+                agent = agent.with_extension(handle.clone());
                 agent = agent.with_appended_system_prompt(GRAPH_RETRIEVAL_HINT);
+
+                // Feed a global repo map into the agent's system prompt at run
+                // start. Uses an empty personalization seed (global map); per-
+                // turn personalized seeds are a future enhancement.
+                // TODO(graph): personalized seeds from user input
+                let budget = config.graph.repo_map_tokens;
+                if budget > 0 {
+                    let map_handle = handle.clone();
+                    let provider: deepseeknova_agent::RepoMapProvider =
+                        Arc::new(move || {
+                            map_handle
+                                .lock()
+                                .ok()
+                                .and_then(|idx| idx.repo_map(budget, &[]).ok())
+                                .filter(|s| !s.is_empty())
+                        });
+                    agent = agent.with_repo_map_provider(provider);
+                }
             }
             Err(e) => tracing::warn!("graph index unavailable, tools will degrade: {e}"),
         }
