@@ -1446,6 +1446,7 @@ dependencies = [
  "chrono",
  "deepseeknova-checkpoint",
  "deepseeknova-core",
+ "deepseeknova-graph",
  "deepseeknova-sandbox",
  "deepseeknova-security",
  "glob",

@@ -6,6 +6,7 @@
 
 pub mod fs;
 pub mod glob;
+pub mod graph_tools;
 pub mod grep;
 pub mod ls;
 pub mod memory;
@@ -16,6 +17,7 @@ pub mod web_fetch;
 
 pub use fs::*;
 pub use glob::*;
+pub use graph_tools::*;
 pub use grep::*;
 pub use ls::*;
 pub use memory::*;
@@ -49,5 +51,8 @@ pub fn all_builtin_tools_with_sandbox(sandbox: Arc<dyn Sandbox>) -> Vec<Arc<dyn 
         Arc::new(RememberTool),
         Arc::new(ForgetTool),
         Arc::new(RecallTool),
+        Arc::new(SearchCodeTool),
+        Arc::new(TraverseGraphTool),
+        Arc::new(RetrieveEntityTool),
     ]
 }
