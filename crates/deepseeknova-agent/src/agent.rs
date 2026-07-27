@@ -57,7 +57,16 @@ pub struct Agent {
 
     /// Optional approval responder used to resolve `Ask` decisions.
     approval: Option<Arc<dyn ApprovalResponder>>,
+
+    /// Build-time registered extensions injected into every ToolContext.
+    /// Stored as closures to erase the concrete type while staying Clone-free.
+    extensions: Vec<Arc<ExtensionApplier>>,
 }
+
+/// Type-erased closure that inserts a build-time extension value into a
+/// ToolContext's `ExtensionRegistry`.
+type ExtensionApplier =
+    dyn Fn(&mut deepseeknova_core::tool::ExtensionRegistry) + Send + Sync;
 
 impl Agent {
     pub fn new(provider: Arc<dyn Provider>, max_steps: usize) -> Self {
@@ -73,6 +82,7 @@ impl Agent {
             history: None,
             permission: None,
             approval: None,
+            extensions: Vec::new(),
         }
     }
 
@@ -125,10 +135,60 @@ impl Agent {
         self
     }
 
+    /// Register an arbitrary extension value that will be injected into the
+    /// `ExtensionRegistry` of every tool execution context. Used e.g. to hand
+    /// a shared code-graph index to graph tools.
+    pub fn with_extension<T: std::any::Any + Send + Sync + Clone>(mut self, ext: T) -> Self {
+        self.extensions
+            .push(Arc::new(move |reg| reg.insert(ext.clone())));
+        self
+    }
+
     pub fn register_tool(&mut self, tool: Arc<dyn Tool>) {
         let name = tool.schema().name.clone();
         self.tools.insert(name, tool);
     }
+
+    /// Names of all registered tools (for diagnostics/tests).
+    pub fn tool_names(&self) -> Vec<String> {
+        self.tools.keys().cloned().collect()
+    }
+
+    /// Build the ToolContext for a tool call, injecting security + all
+    /// build-time registered extensions. Shared by run_stream and tests.
+    #[allow(dead_code)] // exercised from tests today; Task 9/10 consume it in-crate
+    pub(crate) fn make_tool_context(
+        &self,
+        call_id: &str,
+        cancel: CancellationToken,
+    ) -> ToolContext {
+        build_tool_context(
+            call_id,
+            cancel,
+            &self.workspace_root,
+            &self.security,
+            &self.extensions,
+        )
+    }
+}
+
+/// Shared ToolContext construction used by both `Agent::make_tool_context`
+/// and the spawned agent loop (which cannot borrow `self`). Keeps the
+/// injection set (workspace + security + registered extensions) in one place.
+fn build_tool_context(
+    call_id: &str,
+    cancel: CancellationToken,
+    workspace_root: &std::path::Path,
+    security: &SecurityContext,
+    extensions: &[Arc<ExtensionApplier>],
+) -> ToolContext {
+    let mut ctx = ToolContext::with_cancellation(call_id, cancel)
+        .with_workspace(workspace_root.to_path_buf());
+    ctx.extensions.insert(security.clone());
+    for apply in extensions {
+        apply(&mut ctx.extensions);
+    }
+    ctx
 }
 
 #[async_trait::async_trait]
@@ -146,6 +206,7 @@ impl Runner for Agent {
         let history = self.history.clone();
         let permission = self.permission.clone();
         let approval = self.approval.clone();
+        let extensions = self.extensions.clone();
 
         // Create a cancellation token and wire Ctrl-C (SIGINT) to cancel it.
         // This enables graceful interruption of the agent loop (e.g. Ctrl-C).
@@ -210,6 +271,7 @@ impl Runner for Agent {
                 security,
                 permission,
                 approval,
+                extensions,
             )
             .await;
 
@@ -257,6 +319,7 @@ async fn run_agent_loop(
     security: SecurityContext,
     permission: Option<Arc<PermissionGate>>,
     approval: Option<Arc<dyn ApprovalResponder>>,
+    extensions: Vec<Arc<ExtensionApplier>>,
 ) -> anyhow::Result<()> {
     // Add user prompt
     memory.add_message(Message {
@@ -351,6 +414,7 @@ async fn run_agent_loop(
             &mut tool_calls_made,
             permission.as_ref(),
             approval.as_ref(),
+            &extensions,
         )
         .await?;
 
@@ -403,6 +467,7 @@ async fn stream_and_process_turn(
     tool_calls_made: &mut usize,
     permission: Option<&Arc<PermissionGate>>,
     approval: Option<&Arc<dyn ApprovalResponder>>,
+    extensions: &[Arc<ExtensionApplier>],
 ) -> anyhow::Result<StepOutcome> {
     // Build tool refs for provider
     let tool_refs: Vec<&dyn Tool> = tools.iter().map(|t| t.as_ref()).collect();
@@ -629,9 +694,13 @@ async fn stream_and_process_turn(
             let result = if let Some(reason) = gate_block {
                 format!("Error: tool '{}' {}", call.name, reason)
             } else {
-                let ctx = ToolContext::with_cancellation(&call.id, cancel.child_token())
-                    .with_workspace(workspace_root.to_path_buf())
-                    .with_extension(security.clone());
+                let ctx = build_tool_context(
+                    &call.id,
+                    cancel.child_token(),
+                    workspace_root,
+                    security,
+                    extensions,
+                );
                 if let Some(tool) = tool_map.get(&call.name) {
                     info!(tool = %call.name, id = %call.id, "executing tool");
                     match tool.execute(&ctx, &call.arguments).await {
@@ -1239,5 +1308,49 @@ mod tests {
             ran.load(Ordering::SeqCst),
             "without a gate the tool must execute (behavior unchanged)"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Extension injection hook (Task 8)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn injects_custom_extension_into_tool_context() {
+        #[derive(Clone)]
+        struct Marker(u32);
+        struct ProbeTool;
+        #[async_trait::async_trait]
+        impl Tool for ProbeTool {
+            fn schema(&self) -> ToolSchema {
+                ToolSchema {
+                    name: "probe".into(),
+                    description: "d".into(),
+                    parameters: serde_json::json!({"type":"object","properties":{}}),
+                }
+            }
+            fn read_only(&self) -> bool {
+                true
+            }
+            async fn execute(&self, ctx: &ToolContext, _args: &str) -> anyhow::Result<String> {
+                let m = ctx.extensions.get::<Marker>().map(|m| m.0).unwrap_or(0);
+                Ok(format!("marker={m}"))
+            }
+        }
+
+        let agent =
+            Agent::new(Arc::new(MockProvider::text("ok")), 3).with_extension(Marker(42));
+        let ctx = agent.make_tool_context("call-1", CancellationToken::new());
+        let out = ProbeTool.execute(&ctx, "{}").await.unwrap();
+        assert_eq!(out, "marker=42");
+    }
+
+    #[test]
+    fn tool_names_lists_registered() {
+        let mut agent = Agent::new(Arc::new(MockProvider::text("ok")), 3);
+        agent.register_tool(Arc::new(SpyTool {
+            name: "probe2",
+            result: "r".into(),
+        }));
+        assert!(agent.tool_names().iter().any(|n| n == "probe2"));
     }
 }
