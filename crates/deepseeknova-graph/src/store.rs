@@ -282,9 +282,7 @@ impl Store {
         }
         let raw_calls: Vec<(String, String, String)> = {
             let mut stmt = tx.prepare("SELECT path, caller, callee FROM raw_calls")?;
-            let rows = stmt.query_map([], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })?;
+            let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
             let mut out = Vec::new();
             for row in rows {
                 out.push(row?);
