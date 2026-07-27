@@ -3,13 +3,21 @@
 use crate::model::Node;
 
 /// 估算 token 数（沿用项目惯例 chars/4）。
-fn est_tokens(s: &str) -> usize { s.chars().count() / 4 }
+fn est_tokens(s: &str) -> usize {
+    s.chars().count() / 4
+}
 
 /// 在 token 预算内渲染骨架 repo map。入参 nodes 由 GraphIndex::repo_map 传入。
 pub fn render_repo_map(nodes: &[Node], token_budget: usize) -> String {
-    if nodes.is_empty() || token_budget == 0 { return String::new(); }
+    if nodes.is_empty() || token_budget == 0 {
+        return String::new();
+    }
     let mut ranked: Vec<&Node> = nodes.iter().collect();
-    ranked.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    ranked.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     use std::collections::BTreeMap;
     let mut per_file: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
@@ -17,11 +25,23 @@ pub fn render_repo_map(nodes: &[Node], token_budget: usize) -> String {
     let mut used = 0usize;
 
     for n in ranked {
-        let line_cost = est_tokens(&n.signature) + 1;
-        if used + line_cost > token_budget { continue; }
-        if !per_file.contains_key(n.path.as_str()) { order.push(n.path.as_str()); }
-        per_file.entry(n.path.as_str()).or_default().push(&n.signature);
-        used += line_cost;
+        let is_new_file = !per_file.contains_key(n.path.as_str());
+        // 符号行成本："│ " + signature + "\n"；新文件额外加 "path:\n" + "⋮\n" 开销
+        let mut cost = est_tokens(&n.signature) + 1;
+        if is_new_file {
+            cost += est_tokens(&n.path) + 2;
+        }
+        if used + cost > token_budget {
+            continue;
+        }
+        if is_new_file {
+            order.push(n.path.as_str());
+        }
+        per_file
+            .entry(n.path.as_str())
+            .or_default()
+            .push(&n.signature);
+        used += cost;
     }
 
     let mut out = String::new();
@@ -44,17 +64,25 @@ mod tests {
     use crate::model::{Node, NodeKind};
 
     fn node(name: &str, path: &str, sig: &str, score: f64) -> Node {
-        Node { id: format!("{path}#{name}#1"), kind: NodeKind::Function, name: name.into(),
-               path: path.into(), start_line: 1, end_line: 2, signature: sig.into(),
-               doc: String::new(), score }
+        Node {
+            id: format!("{path}#{name}#1"),
+            kind: NodeKind::Function,
+            name: name.into(),
+            path: path.into(),
+            start_line: 1,
+            end_line: 2,
+            signature: sig.into(),
+            doc: String::new(),
+            score,
+        }
     }
 
     #[test]
     fn respects_token_budget_and_orders_by_score() {
         let nodes = vec![
             node("high", "a.rs", "pub fn high()", 0.9),
-            node("mid",  "a.rs", "pub fn mid()",  0.5),
-            node("low",  "b.rs", "pub fn low()",  0.1),
+            node("mid", "a.rs", "pub fn mid()", 0.5),
+            node("low", "b.rs", "pub fn low()", 0.1),
         ];
         let map = render_repo_map(&nodes, 40);
         assert!(map.contains("a.rs:"));
@@ -66,5 +94,29 @@ mod tests {
     #[test]
     fn empty_nodes_yield_empty_map() {
         assert_eq!(render_repo_map(&[], 100), "");
+    }
+
+    #[test]
+    fn budget_covers_file_headers_across_many_files() {
+        // 20 个符号各在独立文件——path 头与 ⋮ 开销必须计入预算，否则超支
+        let nodes: Vec<Node> = (0..20)
+            .map(|i| {
+                node(
+                    &format!("func_{i}"),
+                    &format!("crates/deep/src/mod_{i}.rs"),
+                    &format!("pub fn func_{i}(arg: SomeType) -> Result<Widget, Error>"),
+                    1.0 - i as f64 * 0.01,
+                )
+            })
+            .collect();
+        let budget = 60usize;
+        let map = render_repo_map(&nodes, budget);
+        // 实际输出（含 path 头/│ 前缀/⋮）不得显著超预算：chars <= budget*4 + 小容差
+        let chars = map.chars().count();
+        assert!(
+            chars <= budget * 4 + 20,
+            "map chars {chars} exceeds budget {}*4",
+            budget
+        );
     }
 }
