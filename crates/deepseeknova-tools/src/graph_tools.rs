@@ -18,6 +18,24 @@ fn graph_handle(ctx: &ToolContext) -> Option<GraphHandle> {
     ctx.extensions.get::<GraphHandle>().cloned()
 }
 
+/// 把任意 `GraphError` 映射为对模型友好的文字提示（规格 §8：不打断 run）。
+fn graph_error_message(action: &str, err: &GraphError) -> String {
+    match err {
+        GraphError::EntityNotFound(name) => {
+            format!("entity '{name}' not found; try search_code first.")
+        }
+        GraphError::IndexBusy => {
+            format!("code graph is refreshing while {action}; retry shortly or use grep.")
+        }
+        GraphError::Parse { path, .. } => {
+            format!("code graph parse issue near {path} while {action}; result may be partial.")
+        }
+        GraphError::Storage(_) => {
+            format!("code graph storage error while {action}; try again or rebuild the index.")
+        }
+    }
+}
+
 fn lock_index(
     handle: &GraphHandle,
 ) -> anyhow::Result<std::sync::MutexGuard<'_, deepseeknova_graph::GraphIndex>> {
@@ -85,7 +103,10 @@ impl Tool for SearchCodeTool {
 
         let kind = parsed.kind.as_deref().and_then(NodeKind::parse);
         let limit = parsed.limit.unwrap_or(10).min(50);
-        let nodes = idx.search(&parsed.query, kind, limit)?;
+        let nodes = match idx.search(&parsed.query, kind, limit) {
+            Ok(n) => n,
+            Err(e) => return Ok(graph_error_message("searching code", &e)),
+        };
 
         if nodes.is_empty() {
             return Ok(format!("no matches for '{}'", parsed.query));
@@ -202,13 +223,7 @@ impl Tool for TraverseGraphTool {
 
         let neighbors = match idx.neighbors(&parsed.entity, &edge_kinds, dir, hops) {
             Ok(nodes) => nodes,
-            Err(GraphError::EntityNotFound(_)) => {
-                return Ok(format!(
-                    "entity '{}' not found; try search_code first",
-                    parsed.entity
-                ));
-            }
-            Err(e) => return Err(e.into()),
+            Err(e) => return Ok(graph_error_message("traversing the graph", &e)),
         };
 
         if neighbors.is_empty() {
@@ -297,13 +312,7 @@ impl Tool for RetrieveEntityTool {
         if parsed.view.as_deref() == Some("full") {
             let (rel_path, start, end) = match idx.location(&parsed.entity) {
                 Ok(loc) => loc,
-                Err(GraphError::EntityNotFound(_)) => {
-                    return Ok(format!(
-                        "entity '{}' not found; try search_code first",
-                        parsed.entity
-                    ));
-                }
-                Err(e) => return Err(e.into()),
+                Err(e) => return Ok(graph_error_message("locating the entity", &e)),
             };
             let abs = deepseeknova_security::path::sanitize_path(&ctx.workspace_root, &rel_path)?;
             let content = match std::fs::read_to_string(&abs) {
@@ -328,11 +337,7 @@ impl Tool for RetrieveEntityTool {
 
         match idx.skeleton(&parsed.entity) {
             Ok(sk) => Ok(sk),
-            Err(GraphError::EntityNotFound(_)) => Ok(format!(
-                "entity '{}' not found; try search_code first",
-                parsed.entity
-            )),
-            Err(e) => Err(e.into()),
+            Err(e) => Ok(graph_error_message("retrieving the skeleton", &e)),
         }
     }
 }
@@ -386,6 +391,32 @@ mod tests {
             .await
             .unwrap();
         assert!(r.contains("pub fn permission_gate_for"));
+    }
+
+    #[tokio::test]
+    async fn tools_never_bubble_graph_errors() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub fn only() {}\n").unwrap();
+        let ctx = ctx_with_index(root);
+
+        // 不存在实体：三工具都应返回 Ok(提示)，不 Err。
+        let t = TraverseGraphTool
+            .execute(&ctx, r#"{"entity":"no_such","direction":"callers"}"#)
+            .await;
+        assert!(t.is_ok(), "traverse must not bubble error");
+        assert!(t.unwrap().contains("not found"));
+        let r = RetrieveEntityTool
+            .execute(&ctx, r#"{"entity":"no_such","view":"full"}"#)
+            .await;
+        assert!(r.is_ok(), "retrieve must not bubble error");
+        assert!(r.unwrap().contains("not found"));
+        let sk = RetrieveEntityTool
+            .execute(&ctx, r#"{"entity":"no_such"}"#)
+            .await;
+        assert!(sk.is_ok(), "skeleton must not bubble error");
+        assert!(sk.unwrap().contains("not found"));
     }
 
     #[tokio::test]

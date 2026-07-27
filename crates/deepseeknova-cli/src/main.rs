@@ -67,8 +67,14 @@ async fn main() -> anyhow::Result<()> {
                     runner = runner.with_permission_gate(gate);
                 }
 
-                // Wire all built-in tools for the executor.
+                // Wire built-in tools for the executor. Graph tools require a GraphHandle
+                // injected via ToolContext (only wired in the single-agent build_agent path),
+                // so they are excluded here until coordinator graph wiring lands.
+                let graph_tools = ["search_code", "traverse_graph", "retrieve_entity"];
                 for tool in deepseeknova_tools::all_builtin_tools() {
+                    if graph_tools.contains(&tool.schema().name.as_str()) {
+                        continue;
+                    }
                     runner.register_tool(tool);
                 }
 
