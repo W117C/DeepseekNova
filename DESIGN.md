@@ -1,21 +1,44 @@
 # DeepseekNova — 架构设计文档
 
+> **文档性质**：本文件是**架构设计记录（Architecture Design Record）**，**非 Agent 操作指令**。Agent 在本项目中的工作指令以 [AGENTS.md](AGENTS.md) 为唯一准绳。文中标注 **[规划中/未实现]** 的能力尚不存在，不得以现行能力口吻引用或依赖。
+
 ## 一、项目概览
 
 DeepseekNova 是一个 Rust 编写的 AI Agent 框架，包含 21 个 crate。
 
-> **历史备注**：本项目从早期名称（DPronix）重命名为 DeepseekNova，重命名工作已全部完成。旧的 `.dpronix/` 目录已迁移至 `.deepseeknova/`，环境变量前缀从 `DPRONIX_` 统一为 `DEEPSEEKNOVA_`。
+### 命名现状（权威说明）
+
+> 本节是项目命名的**单一权威说明**，其他文档涉及命名时以本节为准。
+
+| 项 | 现状 | 说明 |
+|----|------|------|
+| **正式名** | `DeepseekNova` | 仓库名、crate 前缀（`deepseeknova-*`）、环境变量前缀（`DEEPSEEKNOVA_`）均使用此名 |
+| **工作区目录名** | `DPronix` | 本地检出目录沿用早期名称，仅为路径名，不代表项目名 |
+| **历史路径** | `crates/reasonix-*` → `crates/dpronix-*` → `crates/deepnova-*` → `crates/deepseeknova-*` | 完整重命名链：`reasonix` → `DPronix`（提交 `69509d5`）→ `DeepNova`（提交 `8a95226`）→ `DeepseekNova`（提交 `c5336db`）；另外 `.dpronix/` 已在提交 `7319692` 迁移至 `.deepseeknova/`，环境变量前缀从 `DPRONIX_` 统一为 `DEEPSEEKNOVA_` |
+
+重命名工作已全部完成，当前代码与配置中不再使用旧名称。
+
+**Git 历史分析注意**：由于上述重命名，依赖 `git log` 的历史统计（如热点分析）必须启用 rename 跟踪，否则同一文件会以新旧两个路径重复计入。本仓库通过以下本地配置合并更名前后的路径（clone 后需执行一次，详见 `BUILDING.md`）：
+
+```bash
+git config log.follow true    # git log -- <path> 自动跟随重命名
+git config diff.renames true  # diff/log 统计启用重命名检测
+```
 
 ### Crate 结构
 
-21 个 crate 分为四层：
+> **单一真相源**：21 个 crate 的权威清单以 [AGENTS.md §2「项目简介」](AGENTS.md) 为准，本文档不再重复维护 crate 列表，仅记录分层设计意图。
 
-| 层 | Crate | 职责 |
-|----|-------|------|
-| **核心层** | core, event, context, store | 类型定义、事件总线、工作区索引、持久化 |
-| **能力层** | provider, tools, mcp, sandbox, permission, security, checkpoint, skills | LLM 接入、工具实现、协议桥接、安全隔离 |
-| **编排层** | agent, orch, telemetry, runtime | Agent 主循环、多 Agent 协调、追踪、组合根 |
-| **前端层** | cli, tui, serve, desktop | CLI、TUI、HTTP API、桌面应用 |
+设计上，全部 crate 按职责分为四层：
+
+| 层 | 职责 |
+|----|------|
+| **核心层** | 类型定义、事件总线、工作区索引、持久化 |
+| **能力层** | LLM 接入、工具实现、协议桥接、安全隔离 |
+| **编排层** | Agent 主循环、多 Agent 协调、追踪、组合根 |
+| **前端层** | CLI、TUI、HTTP API、桌面应用 |
+
+各 crate 与层的具体对应关系见 AGENTS.md 权威清单中每个 crate 的职责注释。
 
 ---
 
@@ -38,7 +61,7 @@ GOAP（Goal-Oriented Action Planning）是 `deepseeknova-orch` crate 的核心�
           │
           ▼
 ┌─────────────────────┐
-│  2. Schedule        │  A* 搜索找到最优执行顺序
+│  2. Schedule        │  拓扑就绪调度（依赖满足即就绪，非 A*）
 │  (依赖图拓扑排序)      │  ready_actions() = 依赖已满足的动作
 └─────────┬───────────┘
           │
@@ -281,11 +304,13 @@ Swarm 成员通过 `SwarmMessage` 进行异步通信：
 
 ---
 
-## 五、Agent Federation — 跨实例联邦调度
+## 五、Agent Federation — 跨实例联邦调度 [规划中/未实现]
 
 ### 概述
 
-Agent Federation 允许多个 DeepseekNova 实例跨进程/跨机器协作。目前在 `deepseeknova-orch` 中作为类型定义和接口预留，具体协议实现仍在开发中。
+> **状态**：[规划中/未实现]（见 §十 P5）。目前仅在 `deepseeknova-orch` 中作为类型定义和接口预留，具体协议实现尚未开始，不可作为现行能力使用。
+
+Agent Federation 允许多个 DeepseekNova 实例跨进程/跨机器协作。
 
 ### 设计原则
 
@@ -333,19 +358,23 @@ tools_allowed:
 具体的工作流程和红旗清单...
 ```
 
-### 计划中的 Skill（DESIGN.md 记录）
+### 计划中的 Skill（DESIGN.md 记录）[规划中/未实现]
+
+以下 Skill 均为**规划中/未实现**，`.deepseeknova/skills/` 中不存在对应文件，不得在工作流程中引用：
 
 | Skill | 状态 | 能力 |
 |-------|------|------|
-| `frontend-developer` | 规划中 | UI/UX 设计和代码生成 |
-| `coding-copilot` | 规划中 | 多语言编码助手 |
-| `loop-engineering` | 规划中 | 生成→评估→改进循环 |
-| `first-principles` | 规划中 | 第一性原理推理 |
-| `adversarial-review` | 规划中 | 对抗式审查 |
+| `frontend-developer` | 规划中/未实现 | UI/UX 设计和代码生成 |
+| `coding-copilot` | 规划中/未实现 | 多语言编码助手 |
+| `loop-engineering` | 规划中/未实现 | 生成→评估→改进循环 |
+| `first-principles` | 规划中/未实现 | 第一性原理推理 |
+| `adversarial-review` | 规划中/未实现 | 对抗式审查 |
 
 ---
 
-## 七、项目后置产出 (Post-Project Artifacts)
+## 七、项目后置产出 (Post-Project Artifacts) [规划中/未实现]
+
+> **状态**：[规划中/未实现]（见 §十 P3）。本节为设计构想，Wiki/知识卡片/记忆沉淀的生成能力均尚未实现。
 
 ### 流程
 
@@ -382,7 +411,9 @@ tools_allowed:
 
 ---
 
-## 八、Agent 工作规范 (DNA Spec)
+## 八、Agent 工作规范 (DNA Spec) [规划中/未实现]
+
+> **状态**：[规划中/未实现]（见 §十 P4）。本规范尚未接入运行时 system prompt，属于设计目标而非现行工作指令；现行 Agent 指令见 [AGENTS.md](AGENTS.md)。
 
 ```
 Phase 1: 理解 (Understand)
@@ -402,13 +433,13 @@ Phase 3: 执行 (Execute)
 
 Phase 4: 验证 (Verify)
   ├── 自动运行测试
-  ├── 对抗式审查 (adversarial-review skill)
+  ├── 对抗式审查（依赖 adversarial-review skill，见 §六，规划中/未实现）
   └── 与成功标准对比
 
 Phase 5: 沉淀 (Distill) ← 这是大多数 Agent 缺失的
   ├── 提炼可复用的 Skill
   ├── 更新记忆
-  ├── 询问是否生成 Wiki/知识卡片
+  ├── 询问是否生成 Wiki/知识卡片（依赖 §七 后置产出，规划中/未实现）
   └── 记录项目经验
 ```
 
@@ -464,7 +495,7 @@ Phase 5: 沉淀 (Distill) ← 这是大多数 Agent 缺失的
 
 | 优先级 | 任务 | 预计工作量 |
 |--------|------|-----------|
-| P0 | ~~重命名 DeepseekNova → DeepseekNova~~ ✅ | ~~机械替换~~ 已完成 |
+| P0 | ~~重命名 DPronix → DeepseekNova~~ ✅ | ~~机械替换~~ 已完成 |
 | P1 | 实现自动记忆系统 | 新模块，2-3个文件 |
 | P2 | 内置 5 个 Skill | Skill 定义文件 |
 | P3 | 项目后置产出 | Wiki/卡片/记忆生成 |

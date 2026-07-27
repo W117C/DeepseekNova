@@ -14,8 +14,10 @@
 //!       Shared Memory & Results
 //! ```
 
+use crate::progress::ProgressTracker;
 use crate::types::*;
 use deepseeknova_core::runner::RunInput;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -132,6 +134,106 @@ mod tests {
             (true, "max")
         );
     }
+
+    // ── orchestrate: consensus surfacing + progress tracking ─────
+
+    use deepseeknova_core::runner::{RunEvent, RunEventStream, RunInput, RunOutput, Runner};
+
+    /// Minimal Runner that always completes with a fixed reply.
+    struct MockRunner {
+        reply: String,
+    }
+
+    #[async_trait::async_trait]
+    impl Runner for MockRunner {
+        async fn run_stream(&self, _input: RunInput) -> anyhow::Result<RunEventStream> {
+            let events: Vec<anyhow::Result<RunEvent>> = vec![Ok(RunEvent::Done(RunOutput {
+                text: self.reply.clone(),
+                tool_calls: vec![],
+                usage: None,
+            }))];
+            Ok(Box::pin(tokio_stream::iter(events)))
+        }
+    }
+
+    fn mock_agent(id: &str, role: AgentRole, reply: &str) -> SwarmAgent {
+        SwarmAgent {
+            id: id.to_string(),
+            name: id.to_string(),
+            role,
+            provider: Arc::new(MockRunner {
+                reply: reply.to_string(),
+            }),
+            system_prompt: "sys".to_string(),
+            max_steps: 3,
+        }
+    }
+
+    fn plan_with_one_action() -> Plan {
+        Plan {
+            id: "p1".into(),
+            goal: Goal {
+                description: "do it".into(),
+                constraints: vec![],
+                criteria: vec![],
+            },
+            actions: vec![Action {
+                id: "a1".into(),
+                name: "write_code".into(),
+                description: "write some code".into(),
+                preconditions: vec![],
+                effects: vec![],
+                cost: 1.0,
+                tool: None,
+                tool_args: None,
+                delegatable: true,
+                status: ActionStatus::Pending,
+            }],
+            dependencies: HashMap::new(),
+            status: PlanStatus::Draft,
+            reasoning: None,
+            usage: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn orchestrate_returns_consensus_and_tracks_progress() {
+        let queen = mock_agent("queen", AgentRole::Queen, "final synthesis");
+        let worker = mock_agent("worker", AgentRole::Worker, "worker output");
+        let config = SwarmConfig {
+            consensus_required: true,
+            ..SwarmConfig::default()
+        };
+        let mut swarm = SwarmCoordinator::new(queen, config);
+        swarm.register_agent(worker);
+
+        let tracker = ProgressTracker::new();
+        let plan = plan_with_one_action();
+        let outcome = swarm.orchestrate(&plan, Some(&tracker)).await.unwrap();
+
+        // Consensus synthesis is surfaced, not discarded.
+        assert_eq!(outcome.synthesis.as_deref(), Some("final synthesis"));
+        assert_eq!(outcome.tasks.len(), 1);
+        assert_eq!(outcome.tasks[0].status, SwarmTaskStatus::Completed);
+
+        // ProgressTracker reflects the completed action.
+        let report = tracker.report();
+        assert_eq!(report.total_actions, 1);
+        assert_eq!(report.completed_actions, 1);
+    }
+
+    #[tokio::test]
+    async fn orchestrate_without_consensus_has_no_synthesis() {
+        let queen = mock_agent("queen", AgentRole::Queen, "ignored");
+        let worker = mock_agent("worker", AgentRole::Worker, "worker output");
+        let mut swarm = SwarmCoordinator::new(queen, SwarmConfig::default());
+        swarm.register_agent(worker);
+
+        let plan = plan_with_one_action();
+        let outcome = swarm.orchestrate(&plan, None).await.unwrap();
+        assert!(outcome.synthesis.is_none());
+        assert_eq!(outcome.tasks[0].status, SwarmTaskStatus::Completed);
+    }
 }
 
 /// The Swarm Coordinator — manages a team of agents working on a shared goal.
@@ -164,11 +266,15 @@ impl SwarmCoordinator {
     }
 
     /// Decompose a plan into sub-tasks, assign to workers, and execute.
-    /// Returns the completed tasks with their outputs.
+    /// Returns the completed tasks and any queen consensus synthesis.
+    ///
+    /// When `progress` is provided, orchestration milestones are recorded into
+    /// the tracker so a frontend can poll real-time status.
     pub async fn orchestrate(
         &mut self,
         plan: &crate::types::Plan,
-    ) -> anyhow::Result<Vec<SwarmTask>> {
+        progress: Option<&ProgressTracker>,
+    ) -> anyhow::Result<SwarmOutcome> {
         // Find the queen agent
         let queen = self
             .agents
@@ -179,6 +285,12 @@ impl SwarmCoordinator {
         let queen_prompt = queen.system_prompt.clone();
 
         info!(plan_id = %plan.id, agents = self.agents.len(), "orchestrating swarm");
+
+        // Record planning + action registration into the progress tracker.
+        if let Some(p) = progress {
+            p.start(&plan.goal.description, &self.config);
+            p.register_plan(plan);
+        }
 
         // Phase 1: Decompose plan actions into tasks
         let mut tasks: Vec<SwarmTask> = Vec::new();
@@ -201,12 +313,21 @@ impl SwarmCoordinator {
 
         if tasks.is_empty() {
             info!("no delegatable actions in plan");
-            return Ok(tasks);
+            if let Some(p) = progress {
+                p.finish();
+            }
+            return Ok(SwarmOutcome {
+                tasks,
+                synthesis: None,
+            });
         }
 
         // Phase 2: Execute tasks concurrently (up to max_workers)
         let max_workers = self.config.max_workers;
         let agents = self.agents.clone();
+        // DeepSeek V4 model routing: workers run on the (cheaper) worker model.
+        // The signal is carried on RunInput; a routing-aware runner honors it.
+        let worker_model = self.config.model_routing.worker_model.clone();
         let semaphore = Arc::new(tokio::sync::Semaphore::new(max_workers));
         let mut handles = Vec::new();
 
@@ -215,20 +336,29 @@ impl SwarmCoordinator {
                 Some(w) => w,
                 None => {
                     task.status = SwarmTaskStatus::Failed("worker not found".into());
+                    if let Some(p) = progress {
+                        p.mark_failed(&task.action_id, "worker not found");
+                    }
                     continue;
                 }
             };
 
             let task_desc = task.description.clone();
             let permit = semaphore.clone();
+            let worker_model = worker_model.clone();
             task.status = SwarmTaskStatus::InProgress;
+            // Progress write happens here in the sequential setup loop (not in
+            // the spawned task) to avoid cross-task lock contention.
+            if let Some(p) = progress {
+                p.mark_started(&task.action_id, &worker.id);
+            }
 
             let handle = tokio::spawn(async move {
                 let _permit = permit.acquire().await;
                 let input = RunInput {
                     prompt: format!("{}\n\nTask: {}", worker.system_prompt, task_desc),
                     images: vec![],
-                    model_override: None,
+                    model_override: Some(worker_model),
                 };
 
                 match worker.provider.run_stream(input).await {
@@ -251,29 +381,40 @@ impl SwarmCoordinator {
             handles.push((task.id.clone(), handle));
         }
 
-        // Phase 3: Collect results
+        // Phase 3: Collect results (progress writes happen here, sequentially)
         for (task_id, handle) in handles {
             match handle.await {
                 Ok(Ok(output)) => {
                     if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
-                        task.output = Some(output);
+                        task.output = Some(output.clone());
                         task.status = SwarmTaskStatus::Completed;
+                        if let Some(p) = progress {
+                            p.mark_completed(&task.action_id, &output);
+                        }
                     }
                 }
                 Ok(Err(err)) => {
                     if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
-                        task.status = SwarmTaskStatus::Failed(err);
+                        task.status = SwarmTaskStatus::Failed(err.clone());
+                        if let Some(p) = progress {
+                            p.mark_failed(&task.action_id, &err);
+                        }
                     }
                 }
                 Err(e) => {
                     if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
-                        task.status = SwarmTaskStatus::Failed(format!("join error: {e}"));
+                        let reason = format!("join error: {e}");
+                        task.status = SwarmTaskStatus::Failed(reason.clone());
+                        if let Some(p) = progress {
+                            p.mark_failed(&task.action_id, &reason);
+                        }
                     }
                 }
             }
         }
 
-        // Phase 4: Optional — Queen synthesizes results
+        // Phase 4: Optional — Queen synthesizes results (runs on the planner model)
+        let mut synthesis: Option<String> = None;
         if self.config.consensus_required && !tasks.is_empty() {
             let results: Vec<String> = tasks.iter().filter_map(|t| t.output.clone()).collect();
             let synth_prompt = format!(
@@ -284,17 +425,22 @@ impl SwarmCoordinator {
             let input = RunInput {
                 prompt: synth_prompt,
                 images: vec![],
-                model_override: None,
+                model_override: Some(self.config.model_routing.planner_model.clone()),
             };
             if let Ok(mut stream) = queen_runner.run_stream(input).await {
-                let mut synthesis = String::new();
+                let mut synth = String::new();
                 while let Some(chunk) = stream.next().await {
                     if let Ok(deepseeknova_core::runner::RunEvent::Done(out)) = chunk {
-                        synthesis = out.text;
+                        synth = out.text;
                     }
                 }
-                info!(len = synthesis.len(), "queen synthesis complete");
+                info!(len = synth.len(), "queen synthesis complete");
+                synthesis = Some(synth);
             }
+        }
+
+        if let Some(p) = progress {
+            p.finish();
         }
 
         let completed = tasks
@@ -305,7 +451,7 @@ impl SwarmCoordinator {
             total = tasks.len(),
             completed, "swarm orchestration complete"
         );
-        Ok(tasks)
+        Ok(SwarmOutcome { tasks, synthesis })
     }
 
     /// Select the best worker for an action based on role.
@@ -325,6 +471,14 @@ impl SwarmCoordinator {
             .or_else(|| self.agents.values().find(|a| a.role == AgentRole::Worker))
             .ok_or_else(|| anyhow::anyhow!("no suitable worker found for action: {}", action.name))
     }
+}
+
+/// Result of a swarm orchestration run: the per-action tasks plus the queen's
+/// consensus synthesis (when `consensus_required` was set).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SwarmOutcome {
+    pub tasks: Vec<SwarmTask>,
+    pub synthesis: Option<String>,
 }
 
 #[derive(Debug, Clone)]

@@ -8,9 +8,10 @@
 //! ## How it works
 //!
 //! 1. **Decompose**: LLM breaks the goal into sub-actions with preconditions/effects
-//! 2. **Schedule**: A* search finds the optimal action sequence
+//! 2. **Schedule**: dependency-based topological readiness selects runnable actions
+//!    (`ready_actions`); note: `cost` is currently informational and not used for ordering
 //! 3. **Execute**: Actions run via the agent, with tool calls
-//! 4. **Replan**: On failure, the planner re-runs A* from current state
+//! 4. **Replan**: On failure, the planner re-evaluates readiness from current state
 //!
 //! ## DeepSeek-V4 optimizations
 //!

@@ -4,7 +4,7 @@
 
 ### A DeepSeek-Native AI Coding Agent Framework
 
-**21 Rust crates · 47 Tauri commands · 3 frontends (CLI / TUI / Desktop)**
+**21 Rust crates · 44 Tauri commands · 3 frontends (CLI / TUI / Desktop)**
 
 A Rust-from-scratch AI agent framework — not a wrapper. Built specifically for DeepSeek models.
 
@@ -43,7 +43,7 @@ A Rust-from-scratch AI agent framework — not a wrapper. Built specifically for
 ```
 Frontend    Tauri 2.0 + React 18 + TypeScript (Desktop)
             ratatui (TUI) · clap (CLI)
-               │ 47 Tauri Commands / IPC
+               │ 44 Tauri Commands / IPC
 Desktop RT  Tauri 2.0 · Channel<WireEvent>
                │
 Runtime     Agent Loop · Coordinator · Plan-Mode Runner

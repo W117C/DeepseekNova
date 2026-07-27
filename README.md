@@ -4,7 +4,7 @@
 
 ### DeepSeek 原生 AI 编程 Agent 框架
 
-**21 个 Rust crate · 47 个 Tauri 命令 · 三端覆盖（CLI / TUI / Desktop）**
+**21 个 Rust crate · 44 个 Tauri 命令 · 三端覆盖（CLI / TUI / Desktop）**
 
 Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型量身打造的原生编程助手。
 
@@ -88,10 +88,10 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 │  Desktop (Tauri 2.0 + React 18 + TypeScript + Vite)  │
 │  TUI (ratatui)  ·  CLI (clap)                        │
 └──────────────────────┬──────────────────────────────┘
-                       │ 47 Tauri Commands / IPC
+                       │ 44 Tauri Commands / IPC
 ┌──────────────────────┴──────────────────────────────┐
 │                  桌面运行时 (Desktop Runtime)          │
-│  Tauri 2.0 · 47 Commands · Channel<WireEvent>        │
+│  Tauri 2.0 · 44 Commands · Channel<WireEvent>        │
 └──────────────────────┬──────────────────────────────┘
                        │
 ┌──────────────────────┴──────────────────────────────┐
@@ -146,7 +146,7 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 |----|------|------|
 | **CLI** | clap | 轻量，单二进制，chat / plan / serve / setup |
 | **TUI** | ratatui | 全屏终端 UI，快捷键驱动 |
-| **Desktop** | Tauri 2.0 + React 18 | 原生桌面体验，47 个 IPC 命令 |
+| **Desktop** | Tauri 2.0 + React 18 | 原生桌面体验，44 个 IPC 命令 |
 
 ### 桌面前端亮点
 

@@ -9,13 +9,17 @@
 //! swarm coordination, and agent federation. Inspired by Ruflo's goal planner
 //! and swarm system, optimized for DeepSeek-V4's thinking mode and context caching.
 //!
+//! > **Status: experimental.** This crate is not yet wired into any frontend
+//! > (CLI/desktop/serve) — it has no external callers and is exercised only by
+//! > its own tests.
+//!
 //! ## Architecture
 //!
 //! ```text
 //! User Goal
 //!    │
 //!    ▼
-//! GoalPlanner (GOAP A* planner)
+//! GoalPlanner (GOAP: dependency/topological scheduling)
 //!    │  └─ decomposes goal → Action DAG
 //!    ▼
 //! SwarmCoordinator (Queen-led)
