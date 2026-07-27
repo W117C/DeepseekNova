@@ -42,6 +42,10 @@ export interface SubmitRequest {
   model?: string;
   reasoning_effort?: string;
   thinking_enabled?: boolean;
+  /** 四档模式（后端可选字段，缺省 agent） */
+  agent_mode?: string;
+  /** 附件绝对路径列表（后端可选字段） */
+  attachments?: string[];
 }
 
 export interface SkillSummary {
@@ -70,7 +74,7 @@ export interface Capabilities {
 }
 
 /** One message in the conversation transcript. */
-export type MessageRole = "user" | "assistant" | "reasoning" | "tool";
+export type MessageRole = "user" | "assistant" | "reasoning" | "tool" | "error";
 
 export interface Message {
   id: string;
@@ -81,6 +85,9 @@ export interface Message {
   toolArgs?: string;
   toolResult?: string;
   reasoningDone?: boolean;
+  /** 工具调用计时（前端事件时间戳派生） */
+  startTs?: number;
+  endTs?: number;
 }
 
 /** A pending tool approval request (Act mode). */
@@ -94,8 +101,8 @@ export interface ApprovalRequest {
 
 // ── Desktop-only types (UI state, not wire protocol) ──────────────────────
 
-/** Agent execution mode. */
-export type Mode = "plan" | "act" | "yolo";
+/** Agent execution mode（mockup 定稿四档：代理/对话/规划/审查） */
+export type Mode = "agent" | "chat" | "plan" | "review";
 
 /** Reasoning effort level. */
 export type Effort = "low" | "medium" | "high" | "max";
@@ -175,4 +182,43 @@ export interface ToolCallInfo {
   args: string;
   result?: string;
   status: "running" | "done" | "error";
+}
+
+// ── Mockup 移植新增类型（阶段 0）──────────────────────
+
+/** 代码改动文件（get_changed_files） */
+export interface ChangedFile {
+  path: string;
+  tag: "M" | "A" | "D";
+  additions: number;
+  deletions: number;
+}
+
+/** Git 工作树（list_worktrees） */
+export interface WorktreeInfo {
+  branch: string;
+  path: string;
+  is_current: boolean;
+  dirty?: boolean;
+}
+
+/** 附件 chip */
+export interface AttachmentInfo {
+  path: string;
+  name: string;
+  size?: number;
+}
+
+/** AI 工作阶段（思考中/推理中/回复中） */
+export type RunPhase = "idle" | "thinking" | "reasoning" | "replying" | "done" | "stopped";
+
+/** 对比面板的成对 diff 行：
+ * ctx 上下文 / del 仅删除 / add 仅新增 / mod 修改（左删右增配对）/ hunk 块分隔 */
+export type DiffRowType = "ctx" | "del" | "add" | "mod" | "hunk";
+export interface DiffRow {
+  type: DiffRowType;
+  oldNo: number | null;
+  oldText: string;
+  newNo: number | null;
+  newText: string;
 }

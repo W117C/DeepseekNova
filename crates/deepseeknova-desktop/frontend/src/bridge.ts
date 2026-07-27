@@ -69,6 +69,7 @@ export interface SessionInfo { id: string; title: string; message_count: number;
 export async function listSessions(): Promise<SessionInfo[]> { return await invoke("list_sessions"); }
 export async function createSession(title?: string): Promise<SessionInfo> { return await invoke("create_session", { title }); }
 export async function deleteSession(id: string): Promise<void> { return await invoke("delete_session", { id }); }
+export async function renameSession(id: string, title: string): Promise<void> { return await invoke("rename_session", { id, title }); }
 
 // ---------------------------------------------------------------------------
 // Skills & Providers
@@ -144,6 +145,7 @@ export async function toggleMcpServer(name: string, start: boolean): Promise<voi
 
 export interface SubAgent { name: string; description: string; model: string; status: string; tasks: number; }
 export async function listSubagents(): Promise<SubAgent[]> { return await invoke("list_subagents"); }
+export async function getOrchProgress(): Promise<any> { return await invoke("get_orch_progress"); }
 
 // ---------------------------------------------------------------------------
 // Diagnostics
@@ -179,6 +181,45 @@ export async function deleteMemory(id: string): Promise<void> { return await inv
 
 export async function saveSettings(settings: any): Promise<void> { return await invoke("save_settings", { settings }); }
 export async function loadSettings(): Promise<any> { return await invoke("load_settings"); }
+
+// 角色：系统提示词
+export async function getSystemPrompt(): Promise<string> { return await invoke("get_system_prompt"); }
+export async function setSystemPrompt(prompt: string): Promise<void> { return await invoke("set_system_prompt", { prompt }); }
+
+// 推理参数
+export interface ReasoningParams {
+  temperature: number; top_p: number; max_tokens: number;
+  stop_sequences: string[]; fallback_model: string | null;
+  timeout_secs: number; max_retries: number;
+}
+export async function getReasoningParams(): Promise<ReasoningParams> { return await invoke("get_reasoning_params"); }
+export async function setReasoningParams(params: ReasoningParams): Promise<void> { return await invoke("set_reasoning_params", { params }); }
+
+// 工具管理
+export interface ToolInfo { name: string; description: string; enabled: boolean; }
+export async function listTools(): Promise<ToolInfo[]> { return await invoke("list_tools"); }
+export async function setToolEnabled(name: string, enabled: boolean): Promise<void> { return await invoke("set_tool_enabled", { name, enabled }); }
+
+// 日志与可观测性
+export interface LogConfig { level: string; otel_enabled: boolean; audit_enabled: boolean; }
+export async function getLogConfig(): Promise<LogConfig> { return await invoke("get_log_config"); }
+export async function setLogConfig(config: LogConfig): Promise<void> { return await invoke("set_log_config", { config }); }
+export async function exportLogs(): Promise<string> { return await invoke("export_logs"); }
+
+// 代码改动审查
+export async function getChangedFiles(): Promise<import("./types").ChangedFile[]> { return await invoke("get_changed_files"); }
+export async function acceptFileChange(path: string): Promise<void> { return await invoke("accept_file_change", { path }); }
+export async function rejectFileChange(path: string): Promise<void> { return await invoke("reject_file_change", { path }); }
+
+// Git 工作树
+export async function listWorktrees(): Promise<import("./types").WorktreeInfo[]> { return await invoke("list_worktrees"); }
+export async function switchWorktree(branch: string): Promise<void> { return await invoke("switch_worktree", { branch }); }
+
+// 触发与调度（一期仅配置持久化）
+export interface ScheduleEntry { cron: string; prompt: string; enabled: boolean; }
+export interface TriggerConfig { http_api_enabled: boolean; schedules: ScheduleEntry[]; webhook_enabled: boolean; max_concurrent: number; }
+export async function getTriggers(): Promise<TriggerConfig> { return await invoke("get_triggers"); }
+export async function setTriggers(config: TriggerConfig): Promise<void> { return await invoke("set_triggers", { config }); }
 
 // ---------------------------------------------------------------------------
 // Shortcuts

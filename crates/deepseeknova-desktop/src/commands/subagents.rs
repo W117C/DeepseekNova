@@ -59,3 +59,15 @@ pub async fn list_subagents() -> Result<serde_json::Value, String> {
         "provider_count": config.providers.len(),
     }))
 }
+
+/// Return the current multi-agent orchestration progress report.
+///
+/// Backed by the shared `ProgressTracker` in `AppState`; the swarm coordinator
+/// records milestones into it. The UI polls this during an active run. When no
+/// orchestration has run this reports the idle snapshot.
+#[tauri::command]
+pub async fn get_orch_progress(
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<deepseeknova_orch::OrchProgressReport, String> {
+    Ok(state.progress.report())
+}

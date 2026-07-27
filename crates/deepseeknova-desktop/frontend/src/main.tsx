@@ -1,7 +1,11 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
+import { useStore } from "./store";
 import "./styles.css";
+
+// 开发/联调用：浏览器控制台与端到端脚本可直接驱动 store（生产构建同样无害）
+(window as unknown as { __store?: typeof useStore }).__store = useStore;
 
 // Error boundary — catches render errors without crashing the webview
 class ErrorBoundary extends React.Component<

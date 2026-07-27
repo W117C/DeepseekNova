@@ -26,9 +26,11 @@ tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
+async-trait = { workspace = true }
 deepseeknova-core = { workspace = true }
 deepseeknova-agent = { workspace = true }
 deepseeknova-config = { workspace = true }
+deepseeknova-permission = { workspace = true }
 deepseeknova-provider = { workspace = true }
 deepseeknova-tools = { workspace = true }
 deepseeknova-runtime = { workspace = true }

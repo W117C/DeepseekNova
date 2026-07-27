@@ -1,64 +1,53 @@
 /**
- * ToolCard.tsx — 工具调用卡片（展开/折叠）
+ * ToolCard.tsx — 工具调用（mockup 定稿：单行摘要折叠行 + 状态/耗时徽章）
  */
 
 import { useState } from "react";
 import type { Message } from "../types";
 
+function argsSummary(args?: string): string {
+  if (!args) return "";
+  const s = args.replace(/\s+/g, " ").trim();
+  return s.length > 60 ? s.slice(0, 60) + "…" : s;
+}
+
 export default function ToolCard({ message }: { message: Message }) {
   const [expanded, setExpanded] = useState(false);
 
   const hasResult = !!message.toolResult;
-  const status = hasResult ? "done" : "running";
+  const durSec =
+    message.startTs && message.endTs
+      ? ((message.endTs - message.startTs) / 1000).toFixed(1)
+      : null;
 
   return (
-    <div className="tool-card">
-      <div
-        className="tool-card-header"
-        onClick={() => setExpanded(!expanded)}
-      >
-        <svg
-          width="12"
-          height="12"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          style={{
-            transform: expanded ? "rotate(90deg)" : "none",
-            transition: "transform 0.15s",
-          }}
-        >
-          <polyline points="9 18 15 12 9 6"/>
-        </svg>
-        <span className="tool-card-name">{message.toolName || "tool"}</span>
-        <span className="tool-card-status">
-          {status === "running" ? (
-            <span style={{ color: "var(--amber)" }}>⏳ 执行中…</span>
+    <div className={`row-fold thread-inset ${expanded ? "open" : ""}`}>
+      <div className="row-fold-h" onClick={() => setExpanded(!expanded)}>
+        <span className="tri">▶</span>
+        <span className="lbl mono">{message.toolName || "tool"}</span>
+        <span className="meta mono">{argsSummary(message.toolArgs)}</span>
+        <span className="right">
+          {hasResult ? (
+            <span className="stx ok">完成{durSec ? ` ${durSec}s` : ""}</span>
           ) : (
-            <span style={{ color: "var(--green)" }}>✓ 完成</span>
+            <span className="ring act" />
           )}
         </span>
       </div>
-
-      {expanded && (
-        <div className="tool-card-body">
-          {message.toolArgs && (
-            <div className="tool-card-args">
-              <span style={{ color: "var(--text-3)" }}>参数: </span>
-              {message.toolArgs}
-            </div>
-          )}
-          {message.toolResult && (
-            <div className="tool-card-result">
-              <span style={{ color: "var(--text-3)" }}>结果: </span>
-              {message.toolResult.length > 2000
-                ? message.toolResult.slice(0, 2000) + "\n… (已截断)"
-                : message.toolResult}
-            </div>
-          )}
-        </div>
-      )}
+      <div className="row-fold-b">
+        {message.toolArgs && (
+          <pre className="code-block-content mono" style={{ borderRadius: "7px", maxHeight: 150, color: "var(--text-3)" }}>
+            {message.toolArgs}
+          </pre>
+        )}
+        {message.toolResult && (
+          <pre className="code-block-content mono" style={{ borderRadius: "7px", maxHeight: 150, marginTop: 8 }}>
+            {message.toolResult.length > 2000
+              ? message.toolResult.slice(0, 2000) + "\n… (已截断)"
+              : message.toolResult}
+          </pre>
+        )}
+      </div>
     </div>
   );
 }

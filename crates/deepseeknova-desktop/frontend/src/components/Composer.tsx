@@ -1,12 +1,16 @@
 /**
- * Composer.tsx — 输入区
- * 多行输入 + 文件附件 + 发送/停止 + 上下文指示器 + Slash 命令
+ * Composer.tsx — 输入区（mockup 定稿）
+ * 附件 chip + 多行输入 + 底部工具条（附件/模型/思考程度/模式/语音/发送停止）
  */
 
 import { useState, useRef, useEffect, useCallback } from "react";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useStore, slashCommands } from "../store";
 import { submitPrompt, cancelRun } from "../bridge";
 import { useI18n } from "../i18n";
+import ModelSelector from "./ModelSelector";
+import EffortSwitcher from "./EffortSwitcher";
+import ModeBar from "./ModeBar";
 
 export default function Composer() {
   const { t } = useI18n();
@@ -19,15 +23,46 @@ export default function Composer() {
   const model = useStore((s) => s.model);
   const addMessage = useStore((s) => s.addMessage);
   const updateMessage = useStore((s) => s.updateMessage);
-  const lastUsage = useStore((s) => s.lastUsage);
-  const sessionCache = useStore((s) => s.sessionCache);
+  const capabilities = useStore((s) => s.capabilities);
+  const attachments = useStore((s) => s.attachments);
+  const addAttachment = useStore((s) => s.addAttachment);
+  const removeAttachment = useStore((s) => s.removeAttachment);
+  const clearAttachments = useStore((s) => s.clearAttachments);
+  const [recording, setRecording] = useState(false);
 
   const [showSlash, setShowSlash] = useState(false);
   const [slashIndex, setSlashIndex] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const streamingText = useRef("");
+  const streamingReasoning = useRef("");
   const streamingMsgId = useRef("");
   const streamingReasoningId = useRef("");
+  const rafId = useRef<number | null>(null);
+
+  // rAF 合帧：流式 delta 先累积到 ref，每帧最多写一次 store，
+  // 配合 Transcript 的 React.memo，历史消息在流式期间零重渲染。
+  const flushStream = useCallback(() => {
+    rafId.current = null;
+    const st = useStore.getState();
+    if (streamingReasoningId.current) {
+      const text = streamingReasoning.current;
+      st.updateMessage(streamingReasoningId.current, (m) =>
+        m.content === text ? m : { ...m, content: text }
+      );
+    }
+    if (streamingMsgId.current) {
+      const text = streamingText.current;
+      st.updateMessage(streamingMsgId.current, (m) =>
+        m.content === text ? m : { ...m, content: text }
+      );
+    }
+  }, []);
+
+  const scheduleFlush = useCallback(() => {
+    if (rafId.current === null) {
+      rafId.current = requestAnimationFrame(flushStream);
+    }
+  }, [flushStream]);
 
   // 自动调整高度
   useEffect(() => {
@@ -42,14 +77,28 @@ export default function Composer() {
     ? slashCommands.filter((c) => c.name.startsWith(input.split(" ")[0]))
     : [];
 
-  // 上下文窗口使用率
-  const totalCache = sessionCache.hit + sessionCache.miss;
-  const cacheRate = totalCache > 0 ? Math.round((sessionCache.hit / totalCache) * 100) : 0;
-  const contextPct = lastUsage
-    ? Math.min(100, (lastUsage.total_tokens / 64000) * 100)
-    : 0;
-  const contextColor =
-    contextPct > 80 ? "var(--red)" : contextPct > 50 ? "var(--amber)" : "var(--green)";
+  // 附件选择（tauri dialog）
+  const pickFiles = useCallback(async () => {
+    try {
+      const picked = await openDialog({ multiple: true, title: "添加文件" });
+      const paths = Array.isArray(picked) ? picked : picked ? [picked] : [];
+      for (const p of paths) {
+        const path = String(p);
+        const name = path.split("/").pop() ?? path;
+        addAttachment({ path, name });
+      }
+    } catch (err) {
+      console.warn("attach_files dialog error:", err);
+    }
+  }, [addAttachment]);
+
+  // 语音输入：一期 UI stub
+  const toggleMic = useCallback(() => {
+    setRecording((r) => {
+      if (!r) setTimeout(() => setRecording(false), 3000);
+      return !r;
+    });
+  }, []);
 
   const handleSubmit = useCallback(async () => {
     const prompt = input.trim();
@@ -58,10 +107,14 @@ export default function Composer() {
     setRunning(true);
     setShowSlash(false);
     streamingText.current = "";
+    streamingReasoning.current = "";
     streamingMsgId.current = "";
+    streamingReasoningId.current = "";
 
     // Clear previous trace for this run
     useStore.getState().clearTrace();
+    // AI 计时：思考中 → 推理中 → 回复中
+    useStore.getState().markRunStart();
 
     addMessage({ id: crypto.randomUUID(), role: "user", content: prompt });
 
@@ -72,21 +125,24 @@ export default function Composer() {
         if (!streamingMsgId.current) {
           streamingMsgId.current = crypto.randomUUID();
           addMessage({ id: streamingMsgId.current, role: "assistant", content: "" });
+          useStore.getState().markTtft();
         }
-        updateMessage(streamingMsgId.current, (m) => ({ ...m, content: streamingText.current }));
+        scheduleFlush();
       },
       onReasoning(text: string) {
         useStore.getState().pushTraceEvent({ kind: "reasoning_delta", text, signature: null });
+        streamingReasoning.current += text;
         if (!streamingReasoningId.current) {
           streamingReasoningId.current = crypto.randomUUID();
           addMessage({ id: streamingReasoningId.current, role: "reasoning", content: text, reasoningDone: false });
-        } else {
-          updateMessage(streamingReasoningId.current, (m) => ({ ...m, content: m.content + text }));
+          useStore.getState().setPhase("reasoning");
         }
+        scheduleFlush();
       },
       onToolCallStart(id: string, name: string) {
         useStore.getState().pushTraceEvent({ kind: "tool_call_start", id, name });
-        addMessage({ id, role: "tool", content: "", toolName: name, toolId: id });
+        useStore.getState().incToolCalls();
+        addMessage({ id, role: "tool", content: "", toolName: name, toolId: id, startTs: Date.now() });
       },
       onToolCallDelta(id: string, argsDelta: string) {
         updateMessage(id, (m) => ({
@@ -101,12 +157,14 @@ export default function Composer() {
       },
       onToolResult(callId: string, result: string) {
         useStore.getState().pushTraceEvent({ kind: "tool_result", call_id: callId, result });
-        updateMessage(callId, (m) => ({ ...m, toolResult: result }));
+        updateMessage(callId, (m) => ({ ...m, toolResult: result, endTs: Date.now() }));
       },
       onTurnComplete() {
+        flushStream();
         if (streamingReasoningId.current) {
           updateMessage(streamingReasoningId.current, (m) => ({ ...m, reasoningDone: true }));
           streamingReasoningId.current = "";
+          streamingReasoning.current = "";
         }
       },
       onUsage(usage: any) {
@@ -115,19 +173,29 @@ export default function Composer() {
       },
       onDone(text: string) {
         useStore.getState().pushTraceEvent({ kind: "done", text, usage: useStore.getState().lastUsage });
+        flushStream();
         if (streamingReasoningId.current) {
           updateMessage(streamingReasoningId.current, (m) => ({ ...m, reasoningDone: true }));
           streamingReasoningId.current = "";
+          streamingReasoning.current = "";
         }
         if (text && streamingMsgId.current) {
           updateMessage(streamingMsgId.current, (m) => ({ ...m, content: text }));
         }
         streamingMsgId.current = "";
+        useStore.getState().markRunEnd(false);
         setRunning(false);
+      },
+      onApprovalRequest(req: { id: string; title: string; description: string | null }) {
+        // Surface the gate's Ask decision as an approval card; ApprovalCard
+        // sends the user's answer back via respond_approval.
+        useStore.getState().setPendingApproval(req);
       },
       onError(message: string) {
         useStore.getState().pushTraceEvent({ kind: "error", message });
-        addMessage({ id: crypto.randomUUID(), role: "assistant", content: `⚠️ Error: ${message}` });
+        flushStream();
+        addMessage({ id: crypto.randomUUID(), role: "error", content: message });
+        useStore.getState().markRunEnd(false);
         setRunning(false);
       },
     };
@@ -139,19 +207,25 @@ export default function Composer() {
           model,
           reasoning_effort: effort,
           thinking_enabled: effort !== "low",
+          agent_mode: mode,
+          attachments: attachments.length ? attachments.map((a) => a.path) : undefined,
         },
         handlers
       );
+      clearAttachments();
     } catch (err) {
-      addMessage({ id: crypto.randomUUID(), role: "assistant", content: `⚠️ Error: ${err}` });
+      addMessage({ id: crypto.randomUUID(), role: "error", content: String(err) });
+      useStore.getState().markRunEnd(false);
       setRunning(false);
     }
-  }, [input, running, mode, effort, model, addMessage, updateMessage, setInput, setRunning]);
+  }, [input, running, mode, effort, model, attachments, addMessage, updateMessage, setInput, setRunning, clearAttachments, flushStream, scheduleFlush]);
 
   const handleCancel = useCallback(async () => {
     await cancelRun();
+    flushStream();
+    useStore.getState().markRunEnd(true);
     setRunning(false);
-  }, [setRunning]);
+  }, [setRunning, flushStream]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     // Enter 发送，Shift+Enter 换行
@@ -224,59 +298,50 @@ export default function Composer() {
         rows={1}
       />
 
-      <div className="composer-footer">
-        {/* 上下文窗口指示器 */}
-        <div className="context-ring" title="上下文窗口使用率">
-          {lastUsage && (
-            <>
-              <span>{lastUsage.total_tokens.toLocaleString()} tokens</span>
-              <div className="context-ring-bar">
-                <div
-                  className="context-ring-fill"
-                  style={{ width: `${contextPct}%`, background: contextColor }}
-                />
-              </div>
-            </>
-          )}
-          {totalCache > 0 && (
-            <span title="缓存命中率">💡 {cacheRate}%</span>
-          )}
+      {/* 附件 chip 列表 */}
+      {attachments.length > 0 && (
+        <div className="atts">
+          {attachments.map((a) => (
+            <span key={a.path} className="att" title={a.path}>
+              <span>{a.name}</span>
+              <span className="x" onClick={() => removeAttachment(a.path)}>✕</span>
+            </span>
+          ))}
         </div>
+      )}
 
-        <div className="spacer" />
+      {/* 底部工具条（mockup cbar） */}
+      <div className="cbar">
+        {/* 添加文件 */}
+        <button className="cib" title={t("composer.attach")} onClick={pickFiles}>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+            <path d="M21.4 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
+          </svg>
+        </button>
 
-        {/* 模式提示 */}
-        <span className="tag" style={{ opacity: 0.7 }}>
-          <span className="icon-only">
-            {mode === "plan" && "🔒 Plan"}
-            {mode === "act" && "✋ Act"}
-            {mode === "yolo" && "🚀 YOLO"}
-          </span>
-          <span className="text-only">
-            模式: {mode.toUpperCase()}
-          </span>
-        </span>
+        <ModelSelector />
+        {capabilities?.supports_reasoning_effort !== false && <EffortSwitcher />}
+        <ModeBar />
 
-        {/* 发送/停止按钮 */}
+        <span className="spacer" />
+
+        {/* 语音输入（一期 stub） */}
+        <button
+          className={`cib ${recording ? "rec" : ""}`}
+          title={recording ? t("composer.voiceStop") : t("composer.voice")}
+          onClick={toggleMic}
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+            <rect x="9" y="2" width="6" height="12" rx="3"/>
+            <path d="M5 10v1a7 7 0 0014 0v-1M12 18v4"/>
+          </svg>
+        </button>
+
+        {/* 发送/停止合一 */}
         {running ? (
-          <button className="btn btn-danger" onClick={handleCancel}>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-              <rect x="6" y="6" width="12" height="12" rx="2"/>
-            </svg>
-            {t("app.stop")}
-          </button>
+          <button className="send-btn stop" onClick={handleCancel} title={t("app.stop")}>◼</button>
         ) : (
-          <button
-            className="btn btn-primary"
-            onClick={handleSubmit}
-            disabled={!input.trim()}
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <line x1="22" y1="2" x2="11" y2="13"/>
-              <polygon points="22 2 15 22 11 13 2 9 22 2"/>
-            </svg>
-            {t("app.send")}
-          </button>
+          <button className="send-btn" onClick={handleSubmit} disabled={!input.trim()} title={t("app.send")}>↑</button>
         )}
       </div>
     </div>

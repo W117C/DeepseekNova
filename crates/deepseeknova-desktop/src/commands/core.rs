@@ -1,5 +1,23 @@
 use super::*;
 
+/// Desktop approval responder: registers a oneshot per request id in the shared
+/// AppState map and awaits the user's answer (delivered by `respond_approval`).
+struct DesktopApprovalResponder {
+    approvals: crate::ApprovalChannel,
+}
+
+#[async_trait::async_trait]
+impl deepseeknova_agent::ApprovalResponder for DesktopApprovalResponder {
+    async fn request(&self, id: &str, _title: &str, _description: Option<&str>) -> bool {
+        let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
+        {
+            let mut map = self.approvals.lock().await;
+            map.insert(id.to_string(), tx);
+        }
+        rx.await.unwrap_or(false)
+    }
+}
+
 #[tauri::command]
 pub async fn submit_prompt(
     _app: tauri::AppHandle,
@@ -9,11 +27,28 @@ pub async fn submit_prompt(
 ) -> Result<(), String> {
     info!("submit_prompt: prompt={}", request.prompt);
 
-    let config = deepseeknova_config::Config::load().map_err(|e| format!("config error: {e}"))?;
+    // Session-cached config: load once per session so the permission gate's
+    // approval cache (below) survives across prompts (C7).
+    let config = {
+        let mut cached = state.session_config.lock().await;
+        if cached.is_none() {
+            *cached = Some(
+                deepseeknova_config::Config::load().map_err(|e| format!("config error: {e}"))?,
+            );
+        }
+        cached
+            .clone()
+            .ok_or_else(|| "config unavailable".to_string())?
+    };
+
+    // 桌面端设置接线：系统提示词 / 推理参数 / 工具开关叠加到本次运行的 Config。
+    let config = {
+        let mut config = config;
+        super::settings::apply_desktop_overrides(&mut config);
+        config
+    };
 
     let workspace_root = std::env::current_dir().unwrap_or_default();
-    let security = deepseeknova_runtime::build_security_context(&config, &workspace_root)
-        .map_err(|e| format!("security context error: {e}"))?;
 
     let provider_cfg = if let Some(ref model_name) = request.model {
         config
@@ -35,19 +70,57 @@ pub async fn submit_prompt(
         }
     };
 
-    let provider = deepseeknova_provider::factory::create_provider_for_task(provider_cfg, effort)
-        .map_err(|e| format!("provider error: {e}"))?;
+    let provider =
+        match deepseeknova_provider::factory::create_provider_for_task(provider_cfg, effort) {
+            Ok(p) => p,
+            Err(primary_err) => {
+                // 推理参数里配置了降级模型时，主 provider 创建失败自动切换
+                let fallback = super::settings::desktop_fallback_model()
+                    .and_then(|m| config.resolve_provider_for_model(&m).map(|c| (m, c)));
+                match fallback {
+                    Some((name, fb_cfg)) => {
+                        tracing::warn!(
+                            "primary provider failed ({primary_err}); falling back to {name}"
+                        );
+                        deepseeknova_provider::factory::create_provider_for_task(fb_cfg, effort)
+                            .map_err(|e| {
+                                format!("provider error: {primary_err}; fallback error: {e}")
+                            })?
+                    }
+                    None => return Err(format!("provider error: {primary_err}")),
+                }
+            }
+        };
 
-    let mut agent = deepseeknova_agent::Agent::new(provider.into(), config.agent.max_steps)
-        .with_workspace_root(workspace_root)
-        .with_security(security)
-        .with_conversation_history(state.history.clone());
-    if let Some(ref sp) = config.agent.system_prompt {
-        agent = agent.with_system_prompt(sp.clone());
-    }
-    for tool in deepseeknova_tools::all_builtin_tools() {
-        agent.register_tool(tool);
-    }
+    // Desktop can prompt the user, so attach an approval responder to resolve
+    // any permission-gate `Ask` decisions (the gate itself is only active when
+    // config.permissions.enabled). Shared security + sandbox + gate wiring is
+    // built once by the runtime composition helper.
+    let responder: Arc<dyn deepseeknova_agent::ApprovalResponder> =
+        Arc::new(DesktopApprovalResponder {
+            approvals: state.approval_tx.clone(),
+        });
+
+    // Session-cached permission gate so its approval decisions persist across
+    // prompts (the user isn't re-prompted for the same tool within a session).
+    let gate = {
+        let mut cached = state.session_gate.lock().await;
+        if cached.is_none() {
+            *cached = deepseeknova_runtime::permission_gate_for(&config, &workspace_root);
+        }
+        cached.clone()
+    };
+
+    let agent = deepseeknova_runtime::build_agent(
+        &config,
+        workspace_root,
+        provider.into(),
+        config.agent.max_steps,
+        gate,
+    )
+    .map_err(|e| format!("agent error: {e}"))?
+    .with_conversation_history(state.history.clone())
+    .with_approval_responder(responder);
 
     let cancel = tokio_util::sync::CancellationToken::new();
     {
@@ -57,8 +130,39 @@ pub async fn submit_prompt(
 
     let agent: Arc<dyn Runner> = Arc::new(agent);
 
+    // 附件：一期将文本内容拼入 prompt 前缀（单文件上限 64KB，超出截断）。
+    // 图片通道 RunInput.images 已预留，二期接入。
+    let mut prompt = request.prompt;
+    if let Some(paths) = request.attachments.as_ref().filter(|p| !p.is_empty()) {
+        const MAX_ATTACHMENT_BYTES: usize = 64 * 1024;
+        let mut prefix = String::new();
+        for path in paths {
+            match std::fs::read_to_string(path) {
+                Ok(mut content) => {
+                    if content.len() > MAX_ATTACHMENT_BYTES {
+                        // truncate 必须落在 UTF-8 字符边界，否则 panic
+                        let mut cut = MAX_ATTACHMENT_BYTES;
+                        while cut > 0 && !content.is_char_boundary(cut) {
+                            cut -= 1;
+                        }
+                        content.truncate(cut);
+                        content.push_str("\n…(已截断)");
+                    }
+                    prefix.push_str(&format!("【附件 {path}】\n```\n{content}\n```\n\n"));
+                }
+                Err(e) => {
+                    prefix.push_str(&format!("【附件 {path}】读取失败：{e}\n\n"));
+                }
+            }
+        }
+        prompt = format!("{prefix}{prompt}");
+    }
+    if let Some(mode) = request.agent_mode.as_deref() {
+        info!("agent_mode={mode}");
+    }
+
     let input = RunInput {
-        prompt: request.prompt,
+        prompt,
         images: vec![],
         model_override: request.model,
     };
@@ -148,9 +252,11 @@ pub async fn cancel_run(state: State<'_, AppState>) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn new_session(state: State<'_, AppState>) -> Result<(), String> {
-    let mut history = state.history.lock().await;
-    history.clear();
-    info!("new session started (conversation history cleared)");
+    state.history.lock().await.clear();
+    *state.session_config.lock().await = None;
+    *state.session_gate.lock().await = None;
+    state.progress.reset();
+    info!("new session started (history + session caches cleared)");
     Ok(())
 }
 
@@ -161,9 +267,9 @@ pub async fn respond_approval(
     approved: bool,
 ) -> Result<(), String> {
     info!("respond_approval: id={request_id} approved={approved}");
-    let mut approval_tx = state.approval_tx.lock().await;
-    if let Some(tx) = approval_tx.take() {
-        let _ = tx.send((request_id, approved));
+    let mut map = state.approval_tx.lock().await;
+    if let Some(tx) = map.remove(&request_id) {
+        let _ = tx.send(approved);
     }
     Ok(())
 }
