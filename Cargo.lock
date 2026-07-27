@@ -1339,11 +1339,13 @@ name = "deepseeknova-runtime"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "deepseeknova-agent",
  "deepseeknova-config",
  "deepseeknova-context",
  "deepseeknova-core",
  "deepseeknova-event",
+ "deepseeknova-graph",
  "deepseeknova-permission",
  "deepseeknova-provider",
  "deepseeknova-sandbox",
