@@ -35,7 +35,15 @@ CREATE INDEX IF NOT EXISTS idx_edges_src ON edges(src);
 CREATE INDEX IF NOT EXISTS idx_edges_dst ON edges(dst);
 CREATE VIRTUAL TABLE IF NOT EXISTS symbol_fts USING fts5(
   name, signature, doc, id UNINDEXED, path UNINDEXED, tokenize='porter unicode61');
+CREATE TABLE IF NOT EXISTS raw_calls(path TEXT, caller TEXT, callee TEXT);
+CREATE TABLE IF NOT EXISTS raw_imports(path TEXT, text TEXT);
+CREATE INDEX IF NOT EXISTS idx_raw_calls_path ON raw_calls(path);
+CREATE INDEX IF NOT EXISTS idx_raw_imports_path ON raw_imports(path);
+CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
 ";
+
+/// 当前 schema 版本：v2 引入 raw_calls/raw_imports 事实表与全局边重建。
+const SCHEMA_VERSION: &str = "2";
 
 /// 硬排除的目录名（任何路径段命中即跳过）。
 const HARD_EXCLUDES: [&str; 4] = ["target", "node_modules", ".git", "dist"];
@@ -43,14 +51,6 @@ const HARD_EXCLUDES: [&str; 4] = ["target", "node_modules", ".git", "dist"];
 /// SQLite 持久化的代码图存储（单线程串行；上层门面负责加锁）。
 pub struct Store {
     conn: Connection,
-}
-
-/// 单个重解析文件暂存的名称级边素材。
-struct PendingEdges {
-    rel_path: String,
-    file_node_id: String,
-    calls: Vec<(String, String)>,
-    imports: Vec<String>,
 }
 
 fn node_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Node> {
@@ -85,6 +85,25 @@ impl Store {
         }
         let conn = Connection::open(db_path)?;
         conn.execute_batch(SCHEMA)?;
+        // 迁移：旧版库缺 raw_calls/raw_imports 事实，清空 files 强制下次全量重解析
+        let version: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })?;
+        if version.as_deref() != Some(SCHEMA_VERSION) {
+            conn.execute("DELETE FROM files", [])?;
+            conn.execute(
+                "INSERT INTO meta(key, value) VALUES('schema_version', ?1)\n                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [SCHEMA_VERSION],
+            )?;
+        }
         Ok(Store { conn })
     }
 
@@ -99,8 +118,8 @@ impl Store {
         collect_files(root, root, &ignores, &mut files);
         files.sort_by(|a, b| a.1.cmp(&b.1));
 
+        let current: HashSet<&str> = files.iter().map(|(_, rel)| rel.as_str()).collect();
         let mut report = RefreshReport::default();
-        let mut pending: Vec<PendingEdges> = Vec::new();
         let tx = self.conn.transaction()?;
 
         for (abs_path, rel_path) in &files {
@@ -162,13 +181,15 @@ impl Store {
                 }
             };
 
-            // 清理该文件旧数据：出入边（id 前缀为 path#）、节点、FTS 行
+            // 清理该文件旧数据：出入边（id 前缀为 path#）、节点、FTS 行、原始调用/导入事实
             tx.execute(
                 "DELETE FROM edges WHERE src LIKE ?1 || '#%' OR dst LIKE ?1 || '#%'",
                 [rel_path],
             )?;
             tx.execute("DELETE FROM nodes WHERE path = ?1", [rel_path])?;
             tx.execute("DELETE FROM symbol_fts WHERE path = ?1", [rel_path])?;
+            tx.execute("DELETE FROM raw_calls WHERE path = ?1", [rel_path])?;
+            tx.execute("DELETE FROM raw_imports WHERE path = ?1", [rel_path])?;
 
             let file_name = rel_path.rsplit('/').next().unwrap_or(rel_path).to_string();
             let file_node = Node {
@@ -190,18 +211,56 @@ impl Store {
                     (&file_node.id, &def.id, EdgeKind::Contains.as_str()),
                 )?;
             }
-            pending.push(PendingEdges {
-                rel_path: rel_path.clone(),
-                file_node_id: file_node.id,
-                calls: parsed.calls,
-                imports: parsed.imports,
-            });
+            // 持久化原始 calls/imports 事实，供后续全局重建名称级边
+            for (caller, callee) in &parsed.calls {
+                tx.execute(
+                    "INSERT INTO raw_calls(path, caller, callee) VALUES(?1, ?2, ?3)",
+                    (rel_path, caller, callee),
+                )?;
+            }
+            for import in &parsed.imports {
+                tx.execute(
+                    "INSERT INTO raw_imports(path, text) VALUES(?1, ?2)",
+                    (rel_path, import),
+                )?;
+            }
             report.files_reparsed += 1;
             tx.execute(
                 "INSERT INTO files(path, mtime, hash) VALUES(?1, ?2, ?3)\n                 ON CONFLICT(path) DO UPDATE SET mtime = excluded.mtime, hash = excluded.hash",
                 (rel_path, mtime, &hash),
             )?;
         }
+
+        // 清理磁盘上已消失文件的全部索引数据，避免幽灵实体残留
+        let stale: Vec<String> = {
+            let mut stmt = tx.prepare("SELECT path FROM files")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            let mut out = Vec::new();
+            for row in rows {
+                let path = row?;
+                if !current.contains(path.as_str()) {
+                    out.push(path);
+                }
+            }
+            out
+        };
+        for path in &stale {
+            tx.execute(
+                "DELETE FROM edges WHERE src LIKE ?1 || '#%' OR dst LIKE ?1 || '#%'",
+                [path],
+            )?;
+            tx.execute("DELETE FROM nodes WHERE path = ?1", [path])?;
+            tx.execute("DELETE FROM symbol_fts WHERE path = ?1", [path])?;
+            tx.execute("DELETE FROM raw_calls WHERE path = ?1", [path])?;
+            tx.execute("DELETE FROM raw_imports WHERE path = ?1", [path])?;
+            tx.execute("DELETE FROM files WHERE path = ?1", [path])?;
+        }
+
+        // 全局重建 Calls/Imports 边（Contains 随节点按文件维护，不受影响）
+        tx.execute(
+            "DELETE FROM edges WHERE kind IN (?1, ?2)",
+            (EdgeKind::Calls.as_str(), EdgeKind::Imports.as_str()),
+        )?;
 
         // 名称级边解析：全库定义节点 name → [(id, path)]（排除 File/Directory 节点）
         let mut by_name: HashMap<String, Vec<(String, String)>> = HashMap::new();
@@ -221,32 +280,50 @@ impl Store {
                 by_name.entry(name).or_default().push((id, path));
             }
         }
-        for pend in &pending {
-            for (caller_name, callee_name) in &pend.calls {
-                let caller_id = by_name.get(caller_name).and_then(|ids| {
-                    ids.iter()
-                        .find(|(_, p)| *p == pend.rel_path)
-                        .map(|(id, _)| id)
-                });
-                let callee_id = by_name
-                    .get(callee_name)
-                    .and_then(|ids| ids.first().map(|(id, _)| id));
-                if let (Some(src), Some(dst)) = (caller_id, callee_id) {
-                    tx.execute(
-                        "INSERT INTO edges(src, dst, kind) VALUES(?1, ?2, ?3)",
-                        (src, dst, EdgeKind::Calls.as_str()),
-                    )?;
-                }
+        let raw_calls: Vec<(String, String, String)> = {
+            let mut stmt = tx.prepare("SELECT path, caller, callee FROM raw_calls")?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
             }
-            for import in &pend.imports {
-                for (name, ids) in &by_name {
-                    if import.contains(name.as_str()) {
-                        if let Some((dst, _)) = ids.first() {
-                            tx.execute(
-                                "INSERT INTO edges(src, dst, kind) VALUES(?1, ?2, ?3)",
-                                (&pend.file_node_id, dst, EdgeKind::Imports.as_str()),
-                            )?;
-                        }
+            out
+        };
+        for (path, caller_name, callee_name) in &raw_calls {
+            let caller_id = by_name
+                .get(caller_name)
+                .and_then(|ids| ids.iter().find(|(_, p)| p == path).map(|(id, _)| id));
+            let callee_id = by_name
+                .get(callee_name)
+                .and_then(|ids| ids.first().map(|(id, _)| id));
+            if let (Some(src), Some(dst)) = (caller_id, callee_id) {
+                tx.execute(
+                    "INSERT INTO edges(src, dst, kind) VALUES(?1, ?2, ?3)",
+                    (src, dst, EdgeKind::Calls.as_str()),
+                )?;
+            }
+        }
+        let raw_imports: Vec<(String, String)> = {
+            let mut stmt = tx.prepare("SELECT path, text FROM raw_imports")?;
+            let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            out
+        };
+        for (path, import) in &raw_imports {
+            let file_name = path.rsplit('/').next().unwrap_or(path);
+            let file_id = node_id(path, file_name, 0);
+            for (name, ids) in &by_name {
+                if import.contains(name.as_str()) {
+                    if let Some((dst, _)) = ids.first() {
+                        tx.execute(
+                            "INSERT INTO edges(src, dst, kind) VALUES(?1, ?2, ?3)",
+                            (&file_id, dst, EdgeKind::Imports.as_str()),
+                        )?;
                     }
                 }
             }
@@ -568,6 +645,71 @@ mod tests {
         assert_eq!(n2.files_reparsed, 1);
         assert_eq!(store.find_by_name("beta").unwrap()[0].id, beta_id);
         assert!(!store.find_by_name("delta").unwrap().is_empty());
+    }
+
+    #[test]
+    fn incremental_preserves_cross_file_caller_edges() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        // a.rs 调用 b.rs 的 beta；随后只改 b.rs（新增函数，beta 行号后移）
+        write(root, "src/a.rs", "pub fn alpha() { beta(); }\n");
+        write(root, "src/b.rs", "pub fn beta() {}\n");
+        let mut store = Store::open(&root.join(".deepseeknova/graph.db")).unwrap();
+        store.refresh(root, 1_048_576).unwrap();
+
+        // 首建：alpha 是 beta 的 caller
+        let beta_id = store.find_by_name("beta").unwrap()[0].id.clone();
+        let callers = store
+            .neighbors(&beta_id, &[EdgeKind::Calls], Direction::Callers, 1)
+            .unwrap();
+        assert!(
+            callers.iter().any(|n| n.name == "alpha"),
+            "alpha should call beta after full build"
+        );
+
+        // 只改 b.rs：在 beta 前插一个函数使 beta 行号后移（node id 变化）
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        write(root, "src/b.rs", "pub fn prelude() {}\npub fn beta() {}\n");
+        let r = store.refresh(root, 1_048_576).unwrap();
+        assert_eq!(r.files_reparsed, 1, "only b.rs reparsed");
+
+        // 增量后：alpha→beta 的跨文件 caller 边必须仍然存在（bug 会导致丢失）
+        let beta_id2 = store.find_by_name("beta").unwrap()[0].id.clone();
+        let callers2 = store
+            .neighbors(&beta_id2, &[EdgeKind::Calls], Direction::Callers, 1)
+            .unwrap();
+        assert!(
+            callers2.iter().any(|n| n.name == "alpha"),
+            "cross-file caller alpha->beta must survive incremental refresh of b.rs"
+        );
+    }
+
+    #[test]
+    fn deleted_file_is_purged_from_index() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write(root, "src/keep.rs", "pub fn keeper() {}\n");
+        write(root, "src/gone.rs", "pub fn ghost() {}\n");
+        let mut store = Store::open(&root.join(".deepseeknova/graph.db")).unwrap();
+        store.refresh(root, 1_048_576).unwrap();
+        assert!(
+            !store.find_by_name("ghost").unwrap().is_empty(),
+            "ghost indexed initially"
+        );
+
+        // 删除 gone.rs 后刷新
+        std::fs::remove_file(root.join("src/gone.rs")).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        store.refresh(root, 1_048_576).unwrap();
+
+        assert!(
+            store.find_by_name("ghost").unwrap().is_empty(),
+            "ghost must be purged after its file is deleted"
+        );
+        assert!(
+            !store.find_by_name("keeper").unwrap().is_empty(),
+            "keeper remains"
+        );
     }
 
     #[test]
