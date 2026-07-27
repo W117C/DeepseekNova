@@ -14,7 +14,7 @@ pub use store::Direction;
 
 use std::path::{Path, PathBuf};
 
-/// 代码图索引门面。内部 Store 连接串行；多处共享时外层包 Arc<Mutex<GraphIndex>>。
+/// 代码图索引门面。内部 Store 连接串行；多处共享时外层包 `Arc<Mutex<GraphIndex>>`。
 pub struct GraphIndex {
     store: store::Store,
     root: PathBuf,

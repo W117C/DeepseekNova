@@ -50,6 +50,9 @@ fn self_index_finds_known_symbols() {
 
     // repo_map 在 1024 token 预算内非空（成功标准 4 的下界验证）
     let map = idx.repo_map(1024, &[]).expect("repo map");
-    assert!(!map.is_empty(), "repo map should be non-empty for a real repo");
+    assert!(
+        !map.is_empty(),
+        "repo map should be non-empty for a real repo"
+    );
     eprintln!("repo_map chars={}", map.chars().count());
 }
