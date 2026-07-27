@@ -29,6 +29,23 @@ impl SeatbeltSandbox {
         }
     }
 
+    /// Build a sandbox whose profile extends the default with config-driven
+    /// allowances. Appended rules take precedence (SBPL evaluates last match
+    /// wins), so an empty policy is byte-identical to the default profile.
+    pub fn with_policy(writable_paths: &[String], allow_network: bool) -> Self {
+        let mut profile = default_profile();
+        if !writable_paths.is_empty() || allow_network {
+            profile.push_str("\n;; --- policy appended from config (last match wins) ---\n");
+            for p in writable_paths {
+                profile.push_str(&format!("(allow file-write* (subpath \"{p}\"))\n"));
+            }
+            if allow_network {
+                profile.push_str("(allow network*)\n");
+            }
+        }
+        Self { profile }
+    }
+
     /// Create a new `SeatbeltSandbox` from a profile file path.
     pub fn from_file(path: impl AsRef<std::path::Path>) -> std::io::Result<Self> {
         let content = std::fs::read_to_string(path)?;
@@ -129,16 +146,20 @@ impl Sandbox for SeatbeltSandbox {
     }
 }
 
-/// Check whether `sandbox-exec` is available on the system.
+/// Check whether `sandbox-exec` is available on the system (cached per process
+/// so the probe subprocess is spawned at most once).
 fn sandbox_exec_available() -> bool {
-    std::process::Command::new("sandbox-exec")
-        .arg("-n")
-        .arg("true")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        std::process::Command::new("sandbox-exec")
+            .arg("-n")
+            .arg("true")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    })
 }
 
 /// Returns the default profile string (same as `SeatbeltSandbox::default_profile()`).
@@ -174,5 +195,43 @@ mod tests {
         assert!(!profile.is_empty());
         assert!(profile.contains("(deny default)"));
         assert!(profile.contains("(allow file-read*)"));
+    }
+
+    // --- with_policy ---
+
+    #[test]
+    fn with_policy_appends_writable_subpath_rules() {
+        let sb = SeatbeltSandbox::with_policy(&["/tmp/work".into(), "/var/cache".into()], false);
+        assert!(sb
+            .profile
+            .contains("(allow file-write* (subpath \"/tmp/work\"))"));
+        assert!(sb
+            .profile
+            .contains("(allow file-write* (subpath \"/var/cache\"))"));
+        // 追加规则位于默认 profile 之后（SBPL last match wins）
+        assert!(sb.profile.starts_with(&default_profile()));
+    }
+
+    #[test]
+    fn with_policy_appends_network_allow() {
+        let sb = SeatbeltSandbox::with_policy(&[], true);
+        assert!(sb.profile.contains("(allow network*)"));
+        // 默认的 (deny default) 仍保留在前缀中
+        assert!(sb.profile.contains("(deny default)"));
+    }
+
+    #[test]
+    fn with_policy_network_disallowed_adds_no_network_rule() {
+        // 负例：未开网络时不得出现 (allow network*)
+        let sb = SeatbeltSandbox::with_policy(&["/tmp/work".into()], false);
+        assert!(!sb.profile.contains("(allow network*)"));
+    }
+
+    #[test]
+    fn with_policy_empty_is_byte_identical_to_default() {
+        // 负例：空策略不得改变默认 profile（也不带追加标记）
+        let sb = SeatbeltSandbox::with_policy(&[], false);
+        assert_eq!(sb.profile, default_profile());
+        assert!(!sb.profile.contains("policy appended from config"));
     }
 }

@@ -5,6 +5,7 @@ use deepseeknova_core::types::{FunctionCall, ToolCall};
 use deepseeknova_core::{
     Message, Role, RunEvent, RunEventStream, RunInput, RunOutput, Runner, Tool,
 };
+use deepseeknova_permission::{Decision, PermissionGate};
 use deepseeknova_provider::Provider;
 use deepseeknova_security::context::SecurityContext;
 use std::collections::HashMap;
@@ -17,6 +18,10 @@ use tracing::{info, warn};
 
 /// Approximate characters-per-token for rough heuristics.
 const CHARS_PER_TOKEN: f32 = 4.0;
+
+// Re-export the approval trait (defined in core, next to `RunEvent`) so
+// existing `deepseeknova_agent::ApprovalResponder` references keep resolving.
+pub use deepseeknova_core::runner::ApprovalResponder;
 
 // ---------------------------------------------------------------------------
 // Agent — the main agent runner
@@ -44,6 +49,14 @@ pub struct Agent {
     /// `reasoning_content` replay contract span user turns, not just the
     /// tool-loop within a single run.
     history: Option<Arc<tokio::sync::Mutex<Vec<Message>>>>,
+
+    /// Optional permission gate. When set, every tool call is checked before
+    /// execution: Allow → run, Deny → blocked, Ask → routed to the approval
+    /// responder. When `None` (the default), tools run unconditionally.
+    permission: Option<Arc<PermissionGate>>,
+
+    /// Optional approval responder used to resolve `Ask` decisions.
+    approval: Option<Arc<dyn ApprovalResponder>>,
 }
 
 impl Agent {
@@ -58,6 +71,8 @@ impl Agent {
 
             compaction_threshold_tokens: None,
             history: None,
+            permission: None,
+            approval: None,
         }
     }
 
@@ -96,6 +111,20 @@ impl Agent {
         self
     }
 
+    /// Attach a permission gate. When set, tool calls are gated (Allow/Ask/Deny)
+    /// before execution.
+    pub fn with_permission_gate(mut self, gate: Arc<PermissionGate>) -> Self {
+        self.permission = Some(gate);
+        self
+    }
+
+    /// Attach an approval responder used to resolve `Ask` decisions from the
+    /// permission gate.
+    pub fn with_approval_responder(mut self, responder: Arc<dyn ApprovalResponder>) -> Self {
+        self.approval = Some(responder);
+        self
+    }
+
     pub fn register_tool(&mut self, tool: Arc<dyn Tool>) {
         let name = tool.schema().name.clone();
         self.tools.insert(name, tool);
@@ -115,6 +144,8 @@ impl Runner for Agent {
         let workspace_root = self.workspace_root.clone();
         let security = self.security.clone();
         let history = self.history.clone();
+        let permission = self.permission.clone();
+        let approval = self.approval.clone();
 
         // Create a cancellation token and wire Ctrl-C (SIGINT) to cancel it.
         // This enables graceful interruption of the agent loop (e.g. Ctrl-C).
@@ -177,6 +208,8 @@ impl Runner for Agent {
                 &cancel,
                 workspace_root,
                 security,
+                permission,
+                approval,
             )
             .await;
 
@@ -222,6 +255,8 @@ async fn run_agent_loop(
     cancel: &CancellationToken,
     workspace_root: PathBuf,
     security: SecurityContext,
+    permission: Option<Arc<PermissionGate>>,
+    approval: Option<Arc<dyn ApprovalResponder>>,
 ) -> anyhow::Result<()> {
     // Add user prompt
     memory.add_message(Message {
@@ -232,6 +267,12 @@ async fn run_agent_loop(
         tool_call_id: None,
         reasoning_content: None,
     });
+
+    // Resource-limit accounting (from SecurityContext.limits). Enforced at
+    // step boundaries so each turn stays atomic — preserving the DeepSeek
+    // replay invariant (no dangling tool_calls without matching results).
+    let run_started = std::time::Instant::now();
+    let mut tool_calls_made: usize = 0;
 
     for step in 0..max_steps {
         // Check for cancellation between steps
@@ -244,6 +285,28 @@ async fn run_agent_loop(
             .await
             .ok();
             return Ok(());
+        }
+
+        // Resource limits: overall wall-clock deadline and tool-call budget.
+        if run_started.elapsed() > security.limits.max_execution_time {
+            warn!(
+                "agent exceeded max_execution_time ({:?})",
+                security.limits.max_execution_time
+            );
+            return Err(anyhow::anyhow!(
+                "exceeded max execution time ({:?})",
+                security.limits.max_execution_time
+            ));
+        }
+        if tool_calls_made >= security.limits.max_tool_calls {
+            warn!(
+                "agent exceeded max_tool_calls ({})",
+                security.limits.max_tool_calls
+            );
+            return Err(anyhow::anyhow!(
+                "exceeded max tool calls ({})",
+                security.limits.max_tool_calls
+            ));
         }
 
         info!("agent step {}/{}", step + 1, max_steps);
@@ -285,6 +348,9 @@ async fn run_agent_loop(
             cancel,
             &workspace_root,
             &security,
+            &mut tool_calls_made,
+            permission.as_ref(),
+            approval.as_ref(),
         )
         .await?;
 
@@ -334,6 +400,9 @@ async fn stream_and_process_turn(
     cancel: &CancellationToken,
     workspace_root: &std::path::Path,
     security: &SecurityContext,
+    tool_calls_made: &mut usize,
+    permission: Option<&Arc<PermissionGate>>,
+    approval: Option<&Arc<dyn ApprovalResponder>>,
 ) -> anyhow::Result<StepOutcome> {
     // Build tool refs for provider
     let tool_refs: Vec<&dyn Tool> = tools.iter().map(|t| t.as_ref()).collect();
@@ -509,32 +578,99 @@ async fn stream_and_process_turn(
                 break;
             }
 
-            let ctx = ToolContext::with_cancellation(&call.id, cancel.child_token())
-                .with_workspace(workspace_root.to_path_buf())
-                .with_extension(security.clone());
-            let result = if let Some(tool) = tool_map.get(&call.name) {
-                info!(tool = %call.name, id = %call.id, "executing tool");
-                match tool.execute(&ctx, &call.arguments).await {
-                    Ok(output) => output,
-                    Err(e) => {
-                        let err_str = format!("{e:#}");
-                        // Truncate tool errors to avoid leaking file paths or data into context
-                        let max_len = 500;
-                        let truncated = if err_str.len() > max_len {
-                            let end = err_str.floor_char_boundary(max_len);
-                            format!(
-                                "{}... [truncated {} bytes]",
-                                &err_str[..end],
-                                err_str.len() - end
-                            )
-                        } else {
-                            err_str
-                        };
-                        format!("Error: {truncated}")
+            // Permission gate (only when a gate is attached). Decide before
+            // executing: Allow → run, Deny → block, Ask → prompt via responder.
+            let gate_block: Option<String> = match permission {
+                Some(gate) => {
+                    let decision = match tool_map.get(&call.name) {
+                        Some(tool) => gate.check(tool.as_ref(), &call.arguments),
+                        None => Decision::Allow,
+                    };
+                    match decision {
+                        Decision::Allow => None,
+                        Decision::Deny => Some("blocked by permission policy".to_string()),
+                        Decision::Ask => {
+                            let approved = if let Some(responder) = approval {
+                                let approval_id = format!("approval_{}", uuid::Uuid::new_v4());
+                                tx.send(Ok(RunEvent::ApprovalRequest {
+                                    id: approval_id.clone(),
+                                    title: format!("Allow tool: {}", call.name),
+                                    description: Some(call.arguments.clone()),
+                                }))
+                                .await
+                                .ok();
+                                // Block until the user answers, but never
+                                // deadlock: cancellation resolves to a denial.
+                                tokio::select! {
+                                    ans = responder.request(
+                                        &approval_id,
+                                        &call.name,
+                                        Some(&call.arguments),
+                                    ) => ans,
+                                    _ = cancel.cancelled() => false,
+                                }
+                            } else {
+                                // No responder wired (CLI/tests) → allow, so
+                                // non-interactive callers keep working.
+                                true
+                            };
+                            if approved {
+                                gate.cache_decision(&call.name, &call.arguments, Decision::Allow);
+                                None
+                            } else {
+                                Some("denied by user".to_string())
+                            }
+                        }
                     }
                 }
+                None => None,
+            };
+
+            let result = if let Some(reason) = gate_block {
+                format!("Error: tool '{}' {}", call.name, reason)
             } else {
-                format!("Error: unknown tool '{}'", call.name)
+                let ctx = ToolContext::with_cancellation(&call.id, cancel.child_token())
+                    .with_workspace(workspace_root.to_path_buf())
+                    .with_extension(security.clone());
+                if let Some(tool) = tool_map.get(&call.name) {
+                    info!(tool = %call.name, id = %call.id, "executing tool");
+                    match tool.execute(&ctx, &call.arguments).await {
+                        Ok(output) => output,
+                        Err(e) => {
+                            let err_str = format!("{e:#}");
+                            // Truncate tool errors to avoid leaking file paths or data into context
+                            let max_len = 500;
+                            let truncated = if err_str.len() > max_len {
+                                let end = err_str.floor_char_boundary(max_len);
+                                format!(
+                                    "{}... [truncated {} bytes]",
+                                    &err_str[..end],
+                                    err_str.len() - end
+                                )
+                            } else {
+                                err_str
+                            };
+                            format!("Error: {truncated}")
+                        }
+                    }
+                } else {
+                    format!("Error: unknown tool '{}'", call.name)
+                }
+            };
+
+            // Count this executed tool call against the budget, and cap its
+            // output size to protect the context window (max_output_bytes).
+            *tool_calls_made += 1;
+            let max_out = security.limits.max_output_bytes as usize;
+            let result = if result.len() > max_out {
+                let end = result.floor_char_boundary(max_out);
+                format!(
+                    "{}... [truncated {} bytes]",
+                    &result[..end],
+                    result.len() - end
+                )
+            } else {
+                result
             };
 
             // Send ToolResult event
@@ -985,6 +1121,123 @@ mod tests {
                 && m.reasoning_content.as_deref() == Some("let me think about q1")),
             "assistant reasoning_content must persist into the shared history \
              so DeepSeek-V4 reasoning replay works across turns"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Permission gate (D3/D4): Deny blocks execution; no gate = unchanged.
+    // -----------------------------------------------------------------------
+
+    /// A writer tool that records whether it actually executed.
+    struct RecordingTool {
+        ran: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for RecordingTool {
+        fn schema(&self) -> ToolSchema {
+            ToolSchema {
+                name: "danger".to_string(),
+                description: "writer tool".to_string(),
+                parameters: serde_json::json!({"type":"object","properties":{}}),
+            }
+        }
+        fn read_only(&self) -> bool {
+            false
+        }
+        async fn execute(&self, _ctx: &ToolContext, _args: &str) -> anyhow::Result<String> {
+            self.ran.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok("danger executed".to_string())
+        }
+    }
+
+    /// Two-turn script: call `danger`, then finish with text.
+    fn call_danger_then_done() -> Vec<Vec<Chunk>> {
+        vec![
+            vec![
+                Chunk::ToolCallStart {
+                    id: "c1".into(),
+                    name: "danger".into(),
+                },
+                Chunk::ToolCallEnd {
+                    id: "c1".into(),
+                    name: "danger".into(),
+                    arguments: "{}".into(),
+                },
+                Chunk::Done,
+            ],
+            vec![
+                Chunk::TextDelta("finished".into()),
+                Chunk::Usage(Usage::default()),
+                Chunk::Done,
+            ],
+        ]
+    }
+
+    #[tokio::test]
+    async fn agent_permission_gate_denies_tool() {
+        use deepseeknova_permission::{Decision, PermissionGate, Policy, Rule};
+        use std::sync::atomic::Ordering;
+
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let provider = Arc::new(MockProvider::sequential(call_danger_then_done()));
+        let gate = Arc::new(PermissionGate::new(Policy {
+            mode: Decision::Ask,
+            allow: vec![],
+            ask: vec![],
+            deny: vec![Rule::new("danger")],
+        }));
+        let mut agent = Agent::new(provider, 5).with_permission_gate(gate);
+        agent.register_tool(Arc::new(RecordingTool { ran: ran.clone() }));
+
+        let mut stream = agent
+            .run_stream(RunInput {
+                prompt: "go".into(),
+                images: vec![],
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        let mut tool_result = String::new();
+        while let Some(ev) = stream.next().await {
+            if let Ok(RunEvent::ToolResult { result, .. }) = ev {
+                tool_result = result;
+            }
+        }
+
+        assert!(
+            !ran.load(Ordering::SeqCst),
+            "a Denied tool must NOT execute"
+        );
+        assert!(
+            tool_result.contains("blocked by permission policy"),
+            "denied tool result should explain the block, got: {tool_result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_without_gate_executes_tool() {
+        use std::sync::atomic::Ordering;
+
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let provider = Arc::new(MockProvider::sequential(call_danger_then_done()));
+        // No permission gate attached — behavior must be unchanged (tool runs).
+        let mut agent = Agent::new(provider, 5);
+        agent.register_tool(Arc::new(RecordingTool { ran: ran.clone() }));
+
+        let mut stream = agent
+            .run_stream(RunInput {
+                prompt: "go".into(),
+                images: vec![],
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+
+        assert!(
+            ran.load(Ordering::SeqCst),
+            "without a gate the tool must execute (behavior unchanged)"
         );
     }
 }

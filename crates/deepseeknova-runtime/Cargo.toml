@@ -18,6 +18,7 @@ deepseeknova-provider = { workspace = true }
 deepseeknova-agent = { workspace = true }
 deepseeknova-tools = { workspace = true }
 deepseeknova-permission = { workspace = true }
+deepseeknova-sandbox = { workspace = true }
 deepseeknova-context = { workspace = true }
 deepseeknova-event = { workspace = true }
 deepseeknova-security = { workspace = true }

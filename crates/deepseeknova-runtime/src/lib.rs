@@ -69,7 +69,7 @@ impl Runtime {
 }
 
 /// Build a PermissionGate from Config.
-fn build_permission_gate(config: &Config) -> PermissionGate {
+pub fn build_permission_gate(config: &Config) -> PermissionGate {
     let mut allow = Vec::new();
     let mut ask = Vec::new();
     let mut deny = Vec::new();
@@ -94,12 +94,33 @@ fn build_permission_gate(config: &Config) -> PermissionGate {
         deepseeknova_config::PermissionMode::Deny => Decision::Deny,
     };
 
-    PermissionGate::new(Policy {
+    let gate = PermissionGate::new(Policy {
         mode,
         allow,
         ask,
         deny,
-    })
+    });
+    // 可选速率限制：滚动一分钟内超出上限的工具调用直接 Deny。
+    match config.permissions.rate_limit_per_minute {
+        Some(limit) => gate.with_rate_limit(limit),
+        None => gate,
+    }
+}
+
+/// Return an `Arc<PermissionGate>` when permission enforcement is enabled in
+/// config (pinned to `workspace_root`), otherwise `None`. Shared by the agent
+/// builder and the CLI coordinator so gate activation stays consistent.
+pub fn permission_gate_for(
+    config: &Config,
+    workspace_root: &std::path::Path,
+) -> Option<Arc<PermissionGate>> {
+    if config.permissions.enabled {
+        Some(Arc::new(
+            build_permission_gate(config).with_workspace_root(workspace_root.to_path_buf()),
+        ))
+    } else {
+        None
+    }
 }
 
 /// Parse a capability name (case-insensitive) from config.
@@ -186,6 +207,86 @@ pub fn build_security_context(
         policy,
         audit: Arc::new(TracingAuditLogger),
     })
+}
+
+/// Build a fully-wired [`deepseeknova_agent::Agent`] from config.
+///
+/// Single composition point for the security dual-layer, shared by CLI and
+/// desktop so their wiring can't drift:
+/// - always injects the [`SecurityContext`] (capabilities, path confinement,
+///   resource limits);
+/// - attaches the [`PermissionGate`] only when `config.permissions.enabled`;
+/// - wires the shell tool to the OS sandbox only when `config.sandbox.enabled`
+///   (otherwise `NoOpSandbox`), so activation is opt-in and Windows/CI stay on
+///   the no-isolation path by default.
+///
+/// Callers add frontend-specific pieces (conversation history, approval
+/// responder) on the returned agent via its builder methods.
+pub fn build_agent(
+    config: &Config,
+    workspace_root: PathBuf,
+    provider: Arc<dyn deepseeknova_provider::Provider>,
+    max_steps: usize,
+    gate: Option<Arc<PermissionGate>>,
+) -> anyhow::Result<deepseeknova_agent::Agent> {
+    let security = build_security_context(config, &workspace_root)?;
+    let steps = if max_steps > 0 {
+        max_steps
+    } else {
+        config.agent.max_steps
+    };
+
+    let mut agent = deepseeknova_agent::Agent::new(provider, steps)
+        .with_workspace_root(workspace_root.clone())
+        .with_security(security);
+
+    if let Some(ref sp) = config.agent.system_prompt {
+        agent = agent.with_system_prompt(sp.clone());
+    }
+
+    // Permission gate — opt-in. Reuse the caller-supplied (session-cached) gate
+    // when given, otherwise build a fresh one per config. Caching the gate
+    // across a session preserves its per-tool approval decision cache so the
+    // user isn't re-prompted for the same operation every turn.
+    let gate = gate.or_else(|| permission_gate_for(config, &workspace_root));
+    if let Some(gate) = gate {
+        agent = agent.with_permission_gate(gate);
+    }
+
+    // Tools — sandboxed shell only when explicitly enabled. Tools disabled via
+    // `config.tools.overrides` (e.g. the desktop settings toggles) are skipped
+    // at registration so the model never sees their schemas.
+    let disabled: std::collections::HashSet<&str> = config
+        .tools
+        .overrides
+        .iter()
+        .filter(|o| o.disabled)
+        .map(|o| o.name.as_str())
+        .collect();
+    let register = |agent: &mut deepseeknova_agent::Agent,
+                    tools: Vec<Arc<dyn deepseeknova_core::Tool>>| {
+        for tool in tools {
+            if disabled.contains(tool.schema().name.as_str()) {
+                continue;
+            }
+            agent.register_tool(tool);
+        }
+    };
+    if config.sandbox.enabled {
+        let sandbox: Arc<dyn deepseeknova_sandbox::Sandbox> =
+            Arc::from(deepseeknova_sandbox::platform_sandbox_with(
+                &config.sandbox.writable_paths,
+                config.sandbox.allow_network,
+            ));
+        register(
+            &mut agent,
+            deepseeknova_tools::all_builtin_tools_with_sandbox(sandbox),
+        );
+    } else {
+        register(&mut agent, deepseeknova_tools::all_builtin_tools());
+    }
+
+    Ok(agent)
 }
 
 #[cfg(test)]

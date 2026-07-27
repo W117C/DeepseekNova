@@ -62,6 +62,17 @@ pub struct RunOutput {
 
 pub type RunEventStream = Pin<Box<dyn Stream<Item = anyhow::Result<RunEvent>> + Send>>;
 
+/// Resolves a permission-gate `Ask` decision by asking a frontend for a user
+/// decision. Returning `true` allows the pending tool call; `false` denies it.
+///
+/// Frontends that can prompt a user (desktop app, HTTP server) implement this.
+/// When no responder is attached, the agent falls back to allowing `Ask`
+/// decisions so non-interactive callers (CLI, tests) keep working.
+#[async_trait::async_trait]
+pub trait ApprovalResponder: Send + Sync {
+    async fn request(&self, id: &str, title: &str, description: Option<&str>) -> bool;
+}
+
 /// RunEvent has no Error variant — errors ride the Stream's Result.
 #[derive(Debug, Clone)]
 pub enum RunEvent {

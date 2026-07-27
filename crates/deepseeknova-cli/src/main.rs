@@ -59,8 +59,13 @@ async fn main() -> anyhow::Result<()> {
                     deepseeknova_runtime::build_security_context(&config, &workspace_root)?;
                 let mut runner = CoordinatorRunner::new(planner_provider, executor_provider)
                     .with_max_graph_nodes(max_nodes)
-                    .with_workspace_root(workspace_root)
+                    .with_workspace_root(workspace_root.clone())
                     .with_security(security);
+                if let Some(gate) =
+                    deepseeknova_runtime::permission_gate_for(&config, &workspace_root)
+                {
+                    runner = runner.with_permission_gate(gate);
+                }
 
                 // Wire all built-in tools for the executor.
                 for tool in deepseeknova_tools::all_builtin_tools() {
@@ -165,10 +170,18 @@ async fn main() -> anyhow::Result<()> {
             info!("serve command: addr={addr}");
 
             let provider = resolve_provider(&config, &None)?;
-            let agent = build_agent(Arc::clone(&provider), None, &config, 0)?;
+            // Share a pending-approvals map between the agent's approval
+            // responder and the server's POST /v1/approval route so the gate's
+            // `Ask` decisions can be answered over HTTP.
+            let pending = deepseeknova_serve::new_pending_approvals();
+            let responder: Arc<dyn deepseeknova_core::runner::ApprovalResponder> = Arc::new(
+                deepseeknova_serve::ServerApprovalResponder::new(pending.clone()),
+            );
+            let agent = build_agent(Arc::clone(&provider), None, &config, 0)?
+                .with_approval_responder(responder);
             let runner: Arc<dyn Runner> = Arc::new(agent);
 
-            let server = deepseeknova_serve::Server::new(runner);
+            let server = deepseeknova_serve::Server::with_pending(runner, pending);
             server.serve(addr).await?;
         }
 
@@ -283,29 +296,10 @@ fn build_agent(
     max_steps: usize,
 ) -> anyhow::Result<deepseeknova_agent::Agent> {
     let workspace_root = std::env::current_dir().unwrap_or_default();
-    let security = deepseeknova_runtime::build_security_context(config, &workspace_root)?;
-
-    let mut agent = deepseeknova_agent::Agent::new(
-        provider,
-        if max_steps > 0 {
-            max_steps
-        } else {
-            config.agent.max_steps
-        },
-    )
-    .with_workspace_root(workspace_root)
-    .with_security(security);
-
-    if let Some(ref sp) = config.agent.system_prompt {
-        agent = agent.with_system_prompt(sp.clone());
-    }
-
-    // Register all built-in tools
-    for tool in deepseeknova_tools::all_builtin_tools() {
-        agent.register_tool(tool);
-    }
-
-    Ok(agent)
+    // Delegate to the shared runtime builder (security + sandbox + permission
+    // gate wiring lives in one place). CLI is non-interactive, so no approval
+    // responder is attached — the gate falls back to Allow on `Ask`.
+    deepseeknova_runtime::build_agent(config, workspace_root, provider, max_steps, None)
 }
 
 /// Stream events from any [`Runner`] to stdout in a consistent format.

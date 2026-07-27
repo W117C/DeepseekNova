@@ -19,6 +19,7 @@ tracing = { workspace = true }
 async-trait = { workspace = true }
 uuid = { workspace = true }
 deepseeknova-core = { workspace = true }
+deepseeknova-permission = { workspace = true }
 deepseeknova-provider = { workspace = true }
 deepseeknova-security = { workspace = true }
 deepseeknova-context = { workspace = true }

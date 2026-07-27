@@ -249,9 +249,21 @@ impl Default for AgentConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PermissionsConfig {
+    /// Master switch. When false (the default), the permission gate is not
+    /// consulted during tool execution and tools run unconditionally (subject
+    /// only to the SecurityContext capability/path checks). Set true to enforce
+    /// allow/ask/deny gating.
+    #[serde(default)]
+    pub enabled: bool,
+
     /// Default mode for write tools when no rule matches.
     #[serde(default)]
     pub default_mode: PermissionMode,
+
+    /// Optional rate limit: max gated tool calls per rolling minute.
+    /// `None` disables rate limiting.
+    #[serde(default)]
+    pub rate_limit_per_minute: Option<u32>,
 
     /// Rules ordered by priority. First match wins.
     #[serde(default)]
@@ -261,7 +273,9 @@ pub struct PermissionsConfig {
 impl Default for PermissionsConfig {
     fn default() -> Self {
         Self {
+            enabled: false,
             default_mode: PermissionMode::Ask,
+            rate_limit_per_minute: None,
             rules: Vec::new(),
         }
     }
@@ -550,6 +564,7 @@ impl AgentConfig {
 
 impl PermissionsConfig {
     fn merge(&mut self, other: PermissionsConfig) {
+        self.enabled = other.enabled;
         self.default_mode = other.default_mode;
         if !other.rules.is_empty() {
             self.rules = other.rules;
