@@ -899,6 +899,7 @@ mod tests {
         assert!(c.memory.auto_learn);
         assert!(c.memory.redact_secrets);
         assert_eq!(c.memory.embedder, "none");
+        assert_eq!(c.memory.embed_model, "");
         assert_eq!(c.memory.recall_inject_tokens, 200);
         assert_eq!(c.memory.recall_top_k, 3);
         assert_eq!(c.memory.min_tool_calls, 5);
