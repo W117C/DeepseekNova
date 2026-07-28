@@ -110,7 +110,14 @@ impl MemoryEngine {
             warn!("distill skipped: daily cap reached");
             return Ok(false);
         }
-        if self.session_distills.load(Ordering::Relaxed) >= g.max_per_session {
+        // 会话硬上限：原子预留槽位，并发下也不会超额（check-then-act 竞态消除）。
+        if self
+            .session_distills
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+                (cur < g.max_per_session).then_some(cur + 1)
+            })
+            .is_err()
+        {
             warn!("distill skipped: session cap reached");
             return Ok(false);
         }
@@ -160,7 +167,6 @@ impl MemoryEngine {
         }
 
         self.store.bump_distill_count()?;
-        self.session_distills.fetch_add(1, Ordering::Relaxed);
         info!(outcome = ?obs.outcome, "task experience captured");
         Ok(true)
     }
@@ -278,6 +284,19 @@ mod tests {
         // 相同摘要内容 → 同 id → upsert，不重复
         let count = eng.list(MemoryCategory::Task).unwrap().len();
         assert_eq!(count, 1, "identical summary must not duplicate");
+    }
+
+    #[test]
+    fn record_task_respects_session_cap() {
+        let eng = MemoryEngine::open_in_memory(true).unwrap();
+        let mut g = guards();
+        g.max_per_session = 1;
+        let mut o1 = obs(6, 4, TaskOutcome::Success, None);
+        o1.task_description = "first task".into();
+        let mut o2 = obs(6, 4, TaskOutcome::Success, None);
+        o2.task_description = "second task".into();
+        assert!(eng.record_task(&o1, &g).unwrap());
+        assert!(!eng.record_task(&o2, &g).unwrap(), "session cap must block");
     }
 
     #[test]
