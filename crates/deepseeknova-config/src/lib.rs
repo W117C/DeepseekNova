@@ -43,6 +43,10 @@ pub struct Config {
     #[serde(default)]
     pub graph: GraphConfig,
 
+    /// 记忆引擎配置（闭环学习）。
+    #[serde(default)]
+    pub memory: MemoryConfig,
+
     /// Agent behaviour tuning.
     #[serde(default)]
     pub agent: AgentConfig,
@@ -234,6 +238,94 @@ impl Default for GraphConfig {
             enabled: true,
             repo_map_tokens: 1024,
             max_file_size: 524_288,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Memory (closed-loop learning)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryConfig {
+    /// 主开关。false = 零开销，行为等同现状。
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// SQLite 记忆库路径（相对工作区根）。
+    #[serde(default = "default_memory_db_path")]
+    pub db_path: String,
+    /// 全自动沉淀开关（依赖 redact_secrets + CLI 审查入口作为前置条件）。
+    #[serde(default = "default_true")]
+    pub auto_learn: bool,
+    /// 写入前脱敏（auto_learn 的硬前提）。
+    #[serde(default = "default_true")]
+    pub redact_secrets: bool,
+    /// 嵌入后端：none | local | remote（P1 恒为 none）。
+    #[serde(default = "default_embedder")]
+    pub embedder: String,
+    /// 嵌入模型名（P2 起用）。
+    #[serde(default)]
+    pub embed_model: String,
+    /// 起点召回注入块的 token 上限。0 = 不注入，仅保留按需工具。
+    #[serde(default = "default_recall_inject_tokens")]
+    pub recall_inject_tokens: usize,
+    /// 起点召回条数。
+    #[serde(default = "default_recall_top_k")]
+    pub recall_top_k: usize,
+    /// 触发沉淀的最小工具调用数。
+    #[serde(default = "default_min_tool_calls")]
+    pub min_tool_calls: usize,
+    /// 触发沉淀的最小步数。
+    #[serde(default = "default_min_steps")]
+    pub min_steps: usize,
+    /// 每日沉淀硬上限。
+    #[serde(default = "default_max_distill_day")]
+    pub max_distillations_per_day: u32,
+    /// 每会话沉淀硬上限。
+    #[serde(default = "default_max_distill_session")]
+    pub max_distillations_per_session: u32,
+}
+
+fn default_memory_db_path() -> String {
+    ".deepseeknova/memory.db".to_string()
+}
+fn default_embedder() -> String {
+    "none".to_string()
+}
+fn default_recall_inject_tokens() -> usize {
+    200
+}
+fn default_recall_top_k() -> usize {
+    3
+}
+fn default_min_tool_calls() -> usize {
+    5
+}
+fn default_min_steps() -> usize {
+    3
+}
+fn default_max_distill_day() -> u32 {
+    50
+}
+fn default_max_distill_session() -> u32 {
+    10
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            db_path: default_memory_db_path(),
+            auto_learn: true,
+            redact_secrets: true,
+            embedder: default_embedder(),
+            embed_model: String::new(),
+            recall_inject_tokens: 200,
+            recall_top_k: 3,
+            min_tool_calls: 5,
+            min_steps: 3,
+            max_distillations_per_day: 50,
+            max_distillations_per_session: 10,
         }
     }
 }
@@ -798,5 +890,33 @@ mod tests {
         assert!(!c.graph.enabled);
         assert_eq!(c.graph.repo_map_tokens, 0);
         assert_eq!(c.graph.max_file_size, 524_288);
+    }
+
+    #[test]
+    fn memory_config_defaults() {
+        let c = Config::default();
+        assert!(c.memory.enabled);
+        assert!(c.memory.auto_learn);
+        assert!(c.memory.redact_secrets);
+        assert_eq!(c.memory.embedder, "none");
+        assert_eq!(c.memory.recall_inject_tokens, 200);
+        assert_eq!(c.memory.recall_top_k, 3);
+        assert_eq!(c.memory.min_tool_calls, 5);
+        assert_eq!(c.memory.min_steps, 3);
+        assert_eq!(c.memory.max_distillations_per_day, 50);
+        assert_eq!(c.memory.max_distillations_per_session, 10);
+        assert_eq!(c.memory.db_path, ".deepseeknova/memory.db");
+    }
+
+    #[test]
+    fn memory_config_parses_from_toml() {
+        let toml = "[memory]\nenabled = false\nauto_learn = false\nrecall_top_k = 7\n";
+        let c: Config = toml::from_str(toml).unwrap();
+        assert!(!c.memory.enabled);
+        assert!(!c.memory.auto_learn);
+        assert_eq!(c.memory.recall_top_k, 7);
+        // 未覆盖字段仍取默认
+        assert!(c.memory.redact_secrets);
+        assert_eq!(c.memory.recall_inject_tokens, 200);
     }
 }
