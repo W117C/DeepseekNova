@@ -23,9 +23,9 @@ fn patterns() -> &'static Patterns {
     static P: OnceLock<Patterns> = OnceLock::new();
     P.get_or_init(|| Patterns {
         // key/secret/token/password = <值> 或 : <值>；允许 GITHUB_TOKEN/MY_API_KEY 等前缀名，
-        // 值取任意非空白串（宁可误伤，不可泄露）。
+        // 捕获完整键名（含前缀）以保留上下文；值取任意非空白串（宁可误伤，不可泄露）。
         kv: Regex::new(
-            r#"(?i)\b[a-z0-9_-]*(api[_-]?key|secret|token|password|passwd|access[_-]?key)\b\s*[:=]\s*\S{8,}"#,
+            r#"(?i)\b([a-z0-9_-]*(?:api[_-]?key|secret|token|password|passwd|access[_-]?key))\b\s*[:=]\s*\S{8,}"#,
         )
         .expect("kv regex"),
         // AWS Access Key ID
@@ -78,6 +78,13 @@ mod tests {
             let out = redact(s);
             assert!(out.contains("[REDACTED]"), "must redact: {s} -> {out}");
         }
+    }
+
+    #[test]
+    fn preserves_prefix_in_redacted_key_name() {
+        // 脱敏后保留完整键名（含前缀），不丢上下文。
+        let out = redact("MY_API_KEY=sk-abcdef12345678");
+        assert!(out.contains("MY_API_KEY=[REDACTED]"), "got: {out}");
     }
 
     #[test]
