@@ -1,5 +1,6 @@
 use crate::memory::Memory;
 use deepseeknova_core::chunk::{Chunk, Usage};
+use deepseeknova_core::memory::skill::{TaskObservation, TaskOutcome};
 use deepseeknova_core::tool::ToolContext;
 use deepseeknova_core::types::{FunctionCall, ToolCall};
 use deepseeknova_core::{
@@ -68,10 +69,19 @@ pub struct Agent {
     /// when no map is available (e.g. empty budget or index unavailable). This
     /// is wired by the runtime from a shared `GraphHandle` + token budget.
     repo_map_provider: Option<RepoMapProvider>,
+
+    recall_provider: Option<RecallProvider>,
+    distill_hook: Option<DistillHook>,
 }
 
 /// Type-erased provider that yields the current repo-map text (or `None`).
 pub type RepoMapProvider = Arc<dyn Fn() -> Option<String> + Send + Sync>;
+
+/// Run-start 召回提供器：给定首条用户 prompt，返回可选的"召回上下文"块。
+pub type RecallProvider = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
+/// Run-end 沉淀钩子：接收本轮组装的 TaskObservation（非阻塞捕获）。
+pub type DistillHook = Arc<dyn Fn(TaskObservation) + Send + Sync>;
 
 /// Type-erased closure that inserts a build-time extension value into a
 /// ToolContext's `ExtensionRegistry`.
@@ -93,6 +103,8 @@ impl Agent {
             approval: None,
             extensions: Vec::new(),
             repo_map_provider: None,
+            recall_provider: None,
+            distill_hook: None,
         }
     }
 
@@ -172,6 +184,19 @@ impl Agent {
         self
     }
 
+    /// 附加起点召回提供器。新会话时以首条 prompt 调用，返回块作为 volatile
+    /// User 消息注入（不改动被缓存的 system 前缀）。
+    pub fn with_recall_provider(mut self, provider: RecallProvider) -> Self {
+        self.recall_provider = Some(provider);
+        self
+    }
+
+    /// 附加结束沉淀钩子。循环结束后组装 TaskObservation 并调用（非阻塞捕获）。
+    pub fn with_distill_hook(mut self, hook: DistillHook) -> Self {
+        self.distill_hook = Some(hook);
+        self
+    }
+
     pub fn register_tool(&mut self, tool: Arc<dyn Tool>) {
         let name = tool.schema().name.clone();
         self.tools.insert(name, tool);
@@ -236,6 +261,8 @@ impl Runner for Agent {
         let approval = self.approval.clone();
         let extensions = self.extensions.clone();
         let repo_map_provider = self.repo_map_provider.clone();
+        let recall_provider = self.recall_provider.clone();
+        let distill_hook = self.distill_hook.clone();
 
         // Create a cancellation token and wire Ctrl-C (SIGINT) to cancel it.
         // This enables graceful interruption of the agent loop (e.g. Ctrl-C).
@@ -303,6 +330,29 @@ impl Runner for Agent {
                 }
             }
 
+            // Run-start 召回注入（仅新会话）：作为稳定 system 前缀之后的 volatile
+            // User 消息插入 —— 保住 DeepSeek-V4 前缀缓存；无 tool_calls/tool_call_id/
+            // reasoning，故通过 replay 不变量校验。
+            if !seeded {
+                if let Some(ref rp) = recall_provider {
+                    if let Some(block) = rp(&input.prompt) {
+                        if !block.is_empty() {
+                            memory.add_message(Message {
+                                role: Role::User,
+                                content: format!("<recalled-memory>\n{block}\n</recalled-memory>"),
+                                name: None,
+                                tool_calls: None,
+                                tool_call_id: None,
+                                reasoning_content: None,
+                            });
+                        }
+                    }
+                }
+            }
+
+            // 结束沉淀需要的任务文本（input 随后被移入 run_agent_loop）。
+            let task_text = input.prompt.clone();
+
             let result = run_agent_loop(
                 provider,
                 tools,
@@ -327,6 +377,35 @@ impl Runner for Agent {
             if let Some(ref hist) = history {
                 let mut store = hist.lock().await;
                 *store = memory.get_all();
+            }
+
+            // Run-end 沉淀（非阻塞捕获）：取消时跳过。借用 &result，不影响后续错误日志。
+            if let Some(ref hook) = distill_hook {
+                if !cancel.is_cancelled() {
+                    let msgs = memory.get_all();
+                    let tool_calls: Vec<String> = msgs
+                        .iter()
+                        .filter(|m| m.role == Role::Tool)
+                        .filter_map(|m| m.name.clone().or_else(|| m.tool_call_id.clone()))
+                        .collect();
+                    let steps_taken: Vec<String> = msgs
+                        .iter()
+                        .filter(|m| m.role == Role::Assistant)
+                        .map(|_| "step".to_string())
+                        .collect();
+                    let (outcome, user_feedback) = match &result {
+                        Ok(()) => (TaskOutcome::Success, None),
+                        Err(e) => (TaskOutcome::Failure, Some(e.to_string())),
+                    };
+                    hook(TaskObservation {
+                        task_description: task_text.clone(),
+                        tool_calls,
+                        steps_taken,
+                        outcome,
+                        user_feedback,
+                        session_id: "agent".to_string(),
+                    });
+                }
             }
 
             if let Err(e) = result {
@@ -1429,5 +1508,107 @@ mod tests {
             result: "r".into(),
         }));
         assert!(agent.tool_names().iter().any(|n| n == "probe2"));
+    }
+
+    #[tokio::test]
+    async fn recall_injects_volatile_and_keeps_system_prefix() {
+        use std::sync::Mutex as StdMutex;
+        struct CapturingProvider {
+            seen: Arc<StdMutex<Vec<Message>>>,
+        }
+        #[async_trait::async_trait]
+        impl deepseeknova_provider::Provider for CapturingProvider {
+            async fn generate(
+                &self,
+                _v: deepseeknova_provider::ValidatedRequest<'_>,
+            ) -> anyhow::Result<Message> {
+                Ok(Message {
+                    role: Role::Assistant,
+                    content: "done".into(),
+                    name: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                })
+            }
+            async fn stream(
+                &self,
+                v: deepseeknova_provider::ValidatedRequest<'_>,
+            ) -> anyhow::Result<deepseeknova_core::chunk::ChunkStream> {
+                *self.seen.lock().unwrap_or_else(|e| e.into_inner()) = v.messages.to_vec();
+                let chunks: Vec<anyhow::Result<deepseeknova_core::chunk::Chunk>> = vec![
+                    Ok(deepseeknova_core::chunk::Chunk::TextDelta("done".into())),
+                    Ok(deepseeknova_core::chunk::Chunk::Usage(
+                        deepseeknova_core::chunk::Usage::default(),
+                    )),
+                    Ok(deepseeknova_core::chunk::Chunk::Done),
+                ];
+                Ok(Box::pin(tokio_stream::iter(chunks)))
+            }
+        }
+
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let provider = Arc::new(CapturingProvider { seen: seen.clone() });
+        let recall: RecallProvider = Arc::new(|_q: &str| Some("REMEMBERED_FACT_XYZ".to_string()));
+        let agent = Agent::new(provider, 3)
+            .with_system_prompt("SYSTEM_PROMPT_BASE")
+            .with_recall_provider(recall);
+
+        let mut stream = agent
+            .run_stream(RunInput {
+                prompt: "hi".into(),
+                images: vec![],
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+
+        let msgs = seen.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert_eq!(msgs[0].role, Role::System);
+        assert!(msgs[0].content.contains("SYSTEM_PROMPT_BASE"));
+        assert!(
+            !msgs[0].content.contains("REMEMBERED_FACT_XYZ"),
+            "recall must NOT be in the cached system prefix"
+        );
+        assert!(
+            msgs.iter()
+                .any(|m| m.content.contains("REMEMBERED_FACT_XYZ")),
+            "recall must be injected as a volatile message"
+        );
+    }
+
+    #[tokio::test]
+    async fn distill_hook_fires_after_run() {
+        use std::sync::Mutex as StdMutex;
+        let fired = Arc::new(StdMutex::new(false));
+        let f2 = fired.clone();
+        let hook: DistillHook = Arc::new(move |_obs| {
+            *f2.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        });
+        let agent = Agent::new(Arc::new(MockProvider::text("ok")), 3)
+            .with_system_prompt("sp")
+            .with_distill_hook(hook);
+        let mut stream = agent
+            .run_stream(RunInput {
+                prompt: "do it".into(),
+                images: vec![],
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        // The distill hook fires at the very tail of the spawned task, which may
+        // race the stream draining to None. Bounded wait avoids flakiness.
+        for _ in 0..50 {
+            if *fired.lock().unwrap_or_else(|e| e.into_inner()) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            *fired.lock().unwrap_or_else(|e| e.into_inner()),
+            "distill hook should fire"
+        );
     }
 }
