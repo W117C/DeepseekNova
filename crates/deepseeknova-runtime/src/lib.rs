@@ -279,6 +279,12 @@ pub fn build_agent(
         disabled.insert("traverse_graph");
         disabled.insert("retrieve_entity");
     }
+    // 记忆关闭时排除记忆工具（模型看不到其 schema），与 graph 同款处理。
+    if !config.memory.enabled {
+        disabled.insert("remember");
+        disabled.insert("recall");
+        disabled.insert("forget");
+    }
     let register = |agent: &mut deepseeknova_agent::Agent,
                     tools: Vec<Arc<dyn deepseeknova_core::Tool>>| {
         for tool in tools {
@@ -345,6 +351,64 @@ pub fn build_agent(
         }
     }
 
+    // ── 记忆引擎：持久化、注入工具句柄、装配起点召回 + 结束沉淀 ──
+    if config.memory.enabled {
+        let db = workspace_root.join(&config.memory.db_path);
+        match deepseeknova_core::memory::engine::MemoryEngine::open(
+            &db,
+            config.memory.redact_secrets,
+        ) {
+            Ok(engine) => {
+                let handle: deepseeknova_tools::MemoryHandle = Arc::new(engine);
+                agent = agent.with_extension(handle.clone());
+
+                // 起点召回注入（token 预算内的极简块）。
+                let rp = handle.clone();
+                let top_k = config.memory.recall_top_k;
+                let cap_chars = config.memory.recall_inject_tokens.saturating_mul(4);
+                if cap_chars > 0 {
+                    let recall: deepseeknova_agent::RecallProvider =
+                        Arc::new(move |query: &str| {
+                            let hits = rp.recall(query, top_k).ok()?;
+                            if hits.is_empty() {
+                                return None;
+                            }
+                            let mut block = String::from("## Recalled Context\n");
+                            let mut budget = cap_chars;
+                            for h in &hits {
+                                let snippet: String = h.entry.content.chars().take(160).collect();
+                                let line = format!("- [{}] {}\n", h.entry.id, snippet);
+                                if line.len() > budget {
+                                    break;
+                                }
+                                budget -= line.len();
+                                block.push_str(&line);
+                            }
+                            Some(block)
+                        });
+                    agent = agent.with_recall_provider(recall);
+                }
+
+                // 结束沉淀钩子（启发式，无 LLM）。
+                let dh = handle.clone();
+                let guards = deepseeknova_core::memory::engine::DistillGuards {
+                    auto_learn: config.memory.auto_learn,
+                    min_tool_calls: config.memory.min_tool_calls,
+                    min_steps: config.memory.min_steps,
+                    max_per_day: config.memory.max_distillations_per_day,
+                    max_per_session: config.memory.max_distillations_per_session,
+                };
+                let distill: deepseeknova_agent::DistillHook = Arc::new(move |obs| {
+                    if let Err(e) = dh.record_task(&obs, &guards) {
+                        tracing::warn!("memory distill failed: {e}");
+                    }
+                });
+                agent = agent.with_distill_hook(distill);
+            }
+            Err(e) => tracing::warn!("memory engine unavailable, tools will degrade: {e}"),
+        }
+    }
+
     Ok(agent)
 }
 
@@ -407,6 +471,31 @@ mod tests {
         assert!(!agent.tool_names().iter().any(|n| n == "search_code"));
         assert!(!agent.tool_names().iter().any(|n| n == "traverse_graph"));
         assert!(!agent.tool_names().iter().any(|n| n == "retrieve_entity"));
+    }
+
+    #[tokio::test]
+    async fn build_agent_registers_memory_tools_when_enabled() {
+        let mut config = Config::default();
+        config.memory.enabled = true;
+        config.graph.enabled = false;
+        let root = std::env::temp_dir().join(format!("dnv-mem-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let provider = std::sync::Arc::new(stub_provider());
+        let agent = build_agent(&config, root.clone(), provider, 5, None).unwrap();
+        let names = agent.tool_names();
+        assert!(names.iter().any(|n| n == "recall"));
+        assert!(names.iter().any(|n| n == "remember"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn build_agent_skips_memory_tools_when_disabled() {
+        let mut config = Config::default();
+        config.memory.enabled = false;
+        config.graph.enabled = false;
+        let provider = std::sync::Arc::new(stub_provider());
+        let agent = build_agent(&config, std::env::temp_dir(), provider, 5, None).unwrap();
+        assert!(!agent.tool_names().iter().any(|n| n == "recall"));
     }
 
     #[test]
