@@ -1180,6 +1180,7 @@ dependencies = [
  "hex",
  "indexmap 2.14.0",
  "rand 0.8.6",
+ "regex",
  "rusqlite",
  "serde",
  "serde_jcs",
