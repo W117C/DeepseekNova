@@ -330,6 +330,11 @@ impl MemoryStore {
             "DELETE FROM memory_fts WHERE id = ?1",
             rusqlite::params![id],
         )?;
+        // 同步清理 lifecycle 伴行，避免孤儿 meta 积累与状态不一致。
+        db.execute(
+            "DELETE FROM memory_meta WHERE id = ?1",
+            rusqlite::params![id],
+        )?;
         Ok(rows > 0)
     }
 
@@ -417,7 +422,8 @@ impl MemoryStore {
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         ) {
             Ok(v) => v,
-            Err(_) => return Ok(()), // 无 meta 行则跳过
+            Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(()), // 无 meta 行则跳过
+            Err(e) => return Err(e.into()), // 其它 DB 错误向上传播，不静默吞掉
         };
         let mut meta = LifecycleMeta {
             stage: MemoryLifecycleStage::parse(&stage_s),
@@ -618,6 +624,17 @@ mod tests {
 
         let results = store.search("updated", 10).unwrap();
         assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn delete_removes_meta_row_too() {
+        // 回归：删除记忆时同步清理 lifecycle 伴行，不留孤儿。
+        let store = MemoryStore::open_in_memory().unwrap();
+        let e = make_entry("ephemeral", MemoryCategory::Task, vec![], "t", 0.5);
+        store.store(&e).unwrap();
+        assert!(store.meta(&e.id).unwrap().is_some());
+        assert!(store.delete(&e.id).unwrap());
+        assert!(store.meta(&e.id).unwrap().is_none(), "meta must be cleaned");
     }
 
     #[test]
