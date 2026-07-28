@@ -8,7 +8,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "lint": "tsc --noEmit",
-    "test": "node --test"
+    "test": "node --test test/"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
