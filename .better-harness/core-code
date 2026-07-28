@@ -1,0 +1,29 @@
+# DeepseekNova 核心代码边界（仅供变更影响分析使用，不影响构建/运行时）
+# 格式：每行一个路径前缀；以 "/" 结尾表示目录前缀匹配；"!" 前缀表示排除；"#" 为注释。
+#
+# 安全关键 crate（显式核心边界下限）
+crates/deepseeknova-security/src/
+crates/deepseeknova-sandbox/src/
+crates/deepseeknova-permission/src/
+crates/deepseeknova-tools/src/
+crates/deepseeknova-agent/src/
+#
+# 其余 Rust 后端 crate 源码（整个 Rust 信任边界均视为核心；
+# 前端 TS/TSX、tests/、benches/、文档与锁文件不在边界内）
+crates/deepseeknova-cli/src/
+crates/deepseeknova-config/src/
+crates/deepseeknova-core/src/
+crates/deepseeknova-context/src/
+crates/deepseeknova-checkpoint/src/
+crates/deepseeknova-desktop/src/
+crates/deepseeknova-event/src/
+crates/deepseeknova-graph/src/
+crates/deepseeknova-mcp/src/
+crates/deepseeknova-orch/src/
+crates/deepseeknova-provider/src/
+crates/deepseeknova-runtime/src/
+crates/deepseeknova-serve/src/
+crates/deepseeknova-skills/src/
+crates/deepseeknova-store/src/
+crates/deepseeknova-telemetry/src/
+crates/deepseeknova-tui/src/
