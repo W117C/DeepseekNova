@@ -22,9 +22,10 @@ struct Patterns {
 fn patterns() -> &'static Patterns {
     static P: OnceLock<Patterns> = OnceLock::new();
     P.get_or_init(|| Patterns {
-        // key/secret/token/password = <值> 或 : <值>
+        // key/secret/token/password = <值> 或 : <值>；允许 GITHUB_TOKEN/MY_API_KEY 等前缀名，
+        // 值取任意非空白串（宁可误伤，不可泄露）。
         kv: Regex::new(
-            r#"(?i)\b(api[_-]?key|secret|token|password|passwd|access[_-]?key)\b\s*[:=]\s*['"]?[A-Za-z0-9._\-/+]{8,}['"]?"#,
+            r#"(?i)\b[a-z0-9_-]*(api[_-]?key|secret|token|password|passwd|access[_-]?key)\b\s*[:=]\s*\S{8,}"#,
         )
         .expect("kv regex"),
         // AWS Access Key ID
@@ -63,6 +64,20 @@ mod tests {
         assert!(redact("id AKIAIOSFODNN7EXAMPLE here").contains("[REDACTED]"));
         assert!(redact("-----BEGIN RSA PRIVATE KEY-----").contains("[REDACTED]"));
         assert!(redact("Authorization: Bearer abcdefghijklmnop").contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn masks_prefixed_env_style_names() {
+        // 回归：带前缀的 .env 风格名必须命中（审查发现的假阴性）。
+        for s in [
+            "GITHUB_TOKEN=ghp_abcdefghij123456",
+            "MY_API_KEY=sk-abcdef12345678",
+            "access_token=abcdefgh12345678",
+            "password: \"p@ssw0rd123!\"",
+        ] {
+            let out = redact(s);
+            assert!(out.contains("[REDACTED]"), "must redact: {s} -> {out}");
+        }
     }
 
     #[test]
