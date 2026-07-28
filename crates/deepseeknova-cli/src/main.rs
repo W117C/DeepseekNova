@@ -200,6 +200,55 @@ async fn main() -> anyhow::Result<()> {
             println!("{:#?}", config);
         }
 
+        // ── Memory (审查/检索/删除/统计) ─────────────────────────────────
+        Some(Commands::Memory { action }) => {
+            use deepseeknova_core::memory::store::MemoryCategory;
+            let db = std::env::current_dir()
+                .unwrap_or_default()
+                .join(&config.memory.db_path);
+            let engine = deepseeknova_core::memory::engine::MemoryEngine::open(
+                &db,
+                config.memory.redact_secrets,
+            )?;
+            match action {
+                cli::MemoryAction::List { category, limit } => {
+                    let cat = match category.as_str() {
+                        "skill" => MemoryCategory::Skill,
+                        "user_profile" => MemoryCategory::UserProfile,
+                        _ => MemoryCategory::Task,
+                    };
+                    for e in engine.list(cat)?.into_iter().take(*limit) {
+                        let preview: String = e.content.chars().take(100).collect();
+                        println!("[{}] ({}) {}", e.id, e.source, preview);
+                    }
+                }
+                cli::MemoryAction::Search { query } => {
+                    let q = query.join(" ");
+                    for (i, r) in engine.recall(&q, 10)?.iter().enumerate() {
+                        let preview: String = r.entry.content.chars().take(120).collect();
+                        println!("{}. [{}] {}", i + 1, r.entry.id, preview);
+                    }
+                }
+                cli::MemoryAction::Forget { id } => {
+                    println!(
+                        "{}",
+                        if engine.forget(id)? {
+                            "removed"
+                        } else {
+                            "not found"
+                        }
+                    );
+                }
+                cli::MemoryAction::Stats => {
+                    let s = engine.stats()?;
+                    println!(
+                        "total={} recall_hit_rate={:.2} reinforce_ratio={:.2}",
+                        s.total, s.recall_hit_rate, s.reinforce_ratio
+                    );
+                }
+            }
+        }
+
         Some(Commands::Init) => {
             info!("init command");
             init::run_init().await?;

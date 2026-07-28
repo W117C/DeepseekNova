@@ -78,6 +78,28 @@ pub enum Commands {
     },
     /// Print configuration details
     Config,
+    /// 记忆库管理（查看/检索/删除/统计）。
+    Memory {
+        #[command(subcommand)]
+        action: MemoryAction,
+    },
     /// Init a new DeepseekNova project
     Init,
+}
+
+#[derive(Subcommand)]
+pub enum MemoryAction {
+    /// 列出某类记忆（task/skill/user_profile）。
+    List {
+        #[arg(long, default_value = "task")]
+        category: String,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// 按相关度检索记忆。
+    Search { query: Vec<String> },
+    /// 按 id/key 删除一条记忆。
+    Forget { id: String },
+    /// 打印统计（召回命中率、reinforce 比例）——P2 决策依据。
+    Stats,
 }
