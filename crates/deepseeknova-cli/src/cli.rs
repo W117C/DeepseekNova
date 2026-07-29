@@ -65,6 +65,12 @@ pub enum Commands {
     Chat {
         #[arg(long)]
         model: Option<String>,
+        /// Resume the most recent saved session's history.
+        #[arg(long)]
+        resume: bool,
+        /// Launch the full-screen terminal UI instead of the line REPL.
+        #[arg(long, conflicts_with = "resume")]
+        tui: bool,
     },
     /// Start the HTTP/SSE server
     Serve {
@@ -102,4 +108,31 @@ pub enum MemoryAction {
     Forget { id: String },
     /// 打印统计（召回命中率、reinforce 比例）——P2 决策依据。
     Stats,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn cli_definition_is_valid() {
+        // Catches structural errors (e.g. bad conflicts_with references).
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn chat_tui_conflicts_with_resume() {
+        let err = Cli::try_parse_from(["deepseeknova", "chat", "--tui", "--resume"]);
+        assert!(
+            err.is_err(),
+            "--tui and --resume must be mutually exclusive"
+        );
+    }
+
+    #[test]
+    fn chat_tui_alone_parses() {
+        let parsed = Cli::try_parse_from(["deepseeknova", "chat", "--tui"]);
+        assert!(parsed.is_ok(), "--tui alone should parse");
+    }
 }

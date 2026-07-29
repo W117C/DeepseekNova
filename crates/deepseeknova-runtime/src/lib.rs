@@ -230,12 +230,18 @@ pub fn build_security_context(
 ///
 /// Callers add frontend-specific pieces (conversation history, approval
 /// responder) on the returned agent via its builder methods.
+///
+/// `extra_tools` are registered after the built-in tools and pass through the
+/// same `config.tools.overrides` disable filter. Callers use it to inject
+/// dynamically-discovered tools (e.g. MCP tools from [`discover_mcp_tools`]);
+/// pass an empty vec when there are none.
 pub fn build_agent(
     config: &Config,
     workspace_root: PathBuf,
     provider: Arc<dyn deepseeknova_provider::Provider>,
     max_steps: usize,
     gate: Option<Arc<PermissionGate>>,
+    extra_tools: Vec<Arc<dyn deepseeknova_core::Tool>>,
 ) -> anyhow::Result<deepseeknova_agent::Agent> {
     let security = build_security_context(config, &workspace_root)?;
     let steps = if max_steps > 0 {
@@ -311,6 +317,10 @@ pub fn build_agent(
     } else {
         register(&mut agent, deepseeknova_tools::all_builtin_tools());
     }
+
+    // Dynamically-discovered tools (MCP, etc). Same disable-filter as built-ins;
+    // their namespaced names (`mcp__server__tool`) can be toggled via overrides.
+    register(&mut agent, extra_tools);
 
     // 句柄提升到外层，供主 agent 与子代理共享（delegate 需要）。
     let mut graph_ext: Option<deepseeknova_tools::GraphHandle> = None;
@@ -437,6 +447,48 @@ pub fn build_agent(
     Ok(agent)
 }
 
+/// Connect to every enabled MCP server in `config` and return their tools,
+/// ready to hand to [`build_agent`] as `extra_tools`.
+///
+/// This is the config-level entry point (contrast with
+/// [`deepseeknova_mcp::adapter::discover_mcp_tools`], which lists tools for a
+/// single already-connected server). It never fails: connection or listing
+/// errors are logged and that server is skipped. An empty `mcp_servers` list
+/// returns an empty vec without any I/O.
+///
+/// The returned tools own their transport connections (via `Arc`), so the
+/// connections — and, for stdio servers, the child processes (`kill_on_drop`)
+/// — live exactly as long as the tools are held by the agent.
+pub async fn discover_mcp_tools(config: &Config) -> Vec<Arc<dyn deepseeknova_core::Tool>> {
+    if config.mcp_servers.is_empty() {
+        return Vec::new();
+    }
+
+    let discovered =
+        deepseeknova_mcp::discover_and_connect(config, std::time::Duration::from_secs(30)).await;
+
+    // List tools per server concurrently; a slow or broken `tools/list` on one
+    // server must not stall the others.
+    let listings = discovered.into_iter().map(|server| async move {
+        let client = Arc::new(deepseeknova_mcp::McpClient::from_connection(
+            server.connection,
+        ));
+        match deepseeknova_mcp::adapter::discover_mcp_tools(&server.name, client).await {
+            Ok(tools) => tools,
+            Err(e) => {
+                tracing::warn!("MCP server '{}' tools/list failed: {e}", server.name);
+                Vec::new()
+            }
+        }
+    });
+
+    futures::future::join_all(listings)
+        .await
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
 /// 构建委派引擎：合并内置预设与配置覆盖，为每个预设造一个受限工具集的子 Agent
 /// （共享主 agent 的 graph/memory 句柄与安全策略）。禁递归：剔除任何 "delegate" 工具。
 #[allow(clippy::too_many_arguments)]
@@ -452,6 +504,8 @@ fn build_delegate_engine(
     use deepseeknova_core::Tool;
 
     // 子代理工具源（沿用主 agent 的沙箱选择）。
+    // 注：子代理刻意不接收 MCP/extra_tools——它们只从内置工具集派生受限子集，
+    // 因此 MCP 工具天然只暴露给主 agent（等价于向 build_agent 传 vec![]）。
     let base: Vec<Arc<dyn Tool>> = if config.sandbox.enabled {
         let sandbox: Arc<dyn deepseeknova_sandbox::Sandbox> =
             Arc::from(deepseeknova_sandbox::platform_sandbox_with(
@@ -566,7 +620,7 @@ mod tests {
         std::fs::write(root.join("src/x.rs"), "pub fn foo() {}\n").unwrap();
 
         let provider = std::sync::Arc::new(stub_provider());
-        let agent = build_agent(&config, root.clone(), provider, 5, None).unwrap();
+        let agent = build_agent(&config, root.clone(), provider, 5, None, vec![]).unwrap();
         let names = agent.tool_names();
         assert!(names.iter().any(|n| n == "search_code"));
         assert!(names.iter().any(|n| n == "traverse_graph"));
@@ -579,7 +633,7 @@ mod tests {
         let mut config = Config::default();
         config.graph.enabled = false;
         let provider = std::sync::Arc::new(stub_provider());
-        let agent = build_agent(&config, std::env::temp_dir(), provider, 5, None).unwrap();
+        let agent = build_agent(&config, std::env::temp_dir(), provider, 5, None, vec![]).unwrap();
         assert!(!agent.tool_names().iter().any(|n| n == "search_code"));
         assert!(!agent.tool_names().iter().any(|n| n == "traverse_graph"));
         assert!(!agent.tool_names().iter().any(|n| n == "retrieve_entity"));
@@ -593,7 +647,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("dnv-mem-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let provider = std::sync::Arc::new(stub_provider());
-        let agent = build_agent(&config, root.clone(), provider, 5, None).unwrap();
+        let agent = build_agent(&config, root.clone(), provider, 5, None, vec![]).unwrap();
         let names = agent.tool_names();
         assert!(names.iter().any(|n| n == "recall"));
         assert!(names.iter().any(|n| n == "remember"));
@@ -606,7 +660,7 @@ mod tests {
         config.memory.enabled = false;
         config.graph.enabled = false;
         let provider = std::sync::Arc::new(stub_provider());
-        let agent = build_agent(&config, std::env::temp_dir(), provider, 5, None).unwrap();
+        let agent = build_agent(&config, std::env::temp_dir(), provider, 5, None, vec![]).unwrap();
         assert!(!agent.tool_names().iter().any(|n| n == "recall"));
     }
 
@@ -617,7 +671,7 @@ mod tests {
         config.graph.enabled = false;
         config.memory.enabled = false;
         let provider = std::sync::Arc::new(stub_provider());
-        let agent = build_agent(&config, std::env::temp_dir(), provider, 5, None).unwrap();
+        let agent = build_agent(&config, std::env::temp_dir(), provider, 5, None, vec![]).unwrap();
         assert!(agent.tool_names().iter().any(|n| n == "delegate"));
     }
 
@@ -628,8 +682,65 @@ mod tests {
         config.graph.enabled = false;
         config.memory.enabled = false;
         let provider = std::sync::Arc::new(stub_provider());
-        let agent = build_agent(&config, std::env::temp_dir(), provider, 5, None).unwrap();
+        let agent = build_agent(&config, std::env::temp_dir(), provider, 5, None, vec![]).unwrap();
         assert!(!agent.tool_names().iter().any(|n| n == "delegate"));
+    }
+
+    // A no-op tool with a caller-chosen name, used to exercise extra_tools.
+    struct NamedStubTool(&'static str);
+
+    #[async_trait::async_trait]
+    impl deepseeknova_core::Tool for NamedStubTool {
+        fn schema(&self) -> deepseeknova_core::types::ToolSchema {
+            deepseeknova_core::types::ToolSchema {
+                name: self.0.to_string(),
+                description: "stub".into(),
+                parameters: serde_json::json!({"type": "object"}),
+            }
+        }
+        async fn execute(
+            &self,
+            _ctx: &deepseeknova_core::tool::ToolContext,
+            _args: &str,
+        ) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+    }
+
+    #[test]
+    fn build_agent_registers_extra_tools() {
+        let mut config = Config::default();
+        config.graph.enabled = false;
+        config.memory.enabled = false;
+        let provider = std::sync::Arc::new(stub_provider());
+        let extra: Vec<Arc<dyn deepseeknova_core::Tool>> =
+            vec![Arc::new(NamedStubTool("mcp__srv__do_thing"))];
+        let agent = build_agent(&config, std::env::temp_dir(), provider, 5, None, extra).unwrap();
+        assert!(agent.tool_names().iter().any(|n| n == "mcp__srv__do_thing"));
+    }
+
+    #[test]
+    fn build_agent_skips_extra_tool_disabled_via_overrides() {
+        let mut config = Config::default();
+        config.graph.enabled = false;
+        config.memory.enabled = false;
+        config.tools.overrides = vec![deepseeknova_config::ToolOverride {
+            name: "mcp__srv__do_thing".into(),
+            disabled: true,
+            timeout_secs: None,
+            max_file_size: None,
+        }];
+        let provider = std::sync::Arc::new(stub_provider());
+        let extra: Vec<Arc<dyn deepseeknova_core::Tool>> =
+            vec![Arc::new(NamedStubTool("mcp__srv__do_thing"))];
+        let agent = build_agent(&config, std::env::temp_dir(), provider, 5, None, extra).unwrap();
+        assert!(!agent.tool_names().iter().any(|n| n == "mcp__srv__do_thing"));
+    }
+
+    #[tokio::test]
+    async fn discover_mcp_tools_empty_config_returns_empty() {
+        let config = Config::default();
+        assert!(discover_mcp_tools(&config).await.is_empty());
     }
 
     #[test]

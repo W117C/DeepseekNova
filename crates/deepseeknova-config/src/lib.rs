@@ -71,6 +71,10 @@ pub struct Config {
     /// MCP server definitions.
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
+
+    /// OpenTelemetry export settings (disabled by default).
+    #[serde(default)]
+    pub telemetry: TelemetryConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -619,6 +623,28 @@ pub struct EnvEntry {
 }
 
 // ---------------------------------------------------------------------------
+// Telemetry
+// ---------------------------------------------------------------------------
+
+/// OpenTelemetry (OTLP) export configuration.
+///
+/// Disabled by default. When enabled, the CLI installs the
+/// `deepseeknova-telemetry` subscriber instead of the plain fmt subscriber;
+/// terminal log output is suppressed in that mode (the OTel registry carries
+/// no fmt layer) — a known trade-off.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TelemetryConfig {
+    /// Whether OTLP telemetry export is enabled (default: false).
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// OTLP collector endpoint (e.g. "http://localhost:4317").
+    /// When unset, the exporter falls back to `http://localhost:4317`.
+    #[serde(default)]
+    pub otlp_endpoint: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Loading & merging
 // ---------------------------------------------------------------------------
 
@@ -683,6 +709,7 @@ impl Config {
         self.permissions.merge(other.permissions);
         self.sandbox.merge(other.sandbox);
         self.security.merge(other.security);
+        self.telemetry.merge(other.telemetry);
     }
 
     /// Apply DEEPSEEKNOVA_* environment variable overrides.
@@ -751,6 +778,15 @@ impl PermissionsConfig {
         self.default_mode = other.default_mode;
         if !other.rules.is_empty() {
             self.rules = other.rules;
+        }
+    }
+}
+
+impl TelemetryConfig {
+    fn merge(&mut self, other: TelemetryConfig) {
+        self.enabled = other.enabled;
+        if other.otlp_endpoint.is_some() {
+            self.otlp_endpoint = other.otlp_endpoint;
         }
     }
 }

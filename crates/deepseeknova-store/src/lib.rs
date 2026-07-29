@@ -196,6 +196,15 @@ impl SessionStore {
     }
 }
 
+/// Generate a fresh chat session id of the form `chat-YYYYMMDD-HHMMSS` (UTC).
+///
+/// The timestamp layout is lexicographically ordered, so sorting session ids
+/// as strings yields chronological order — callers pick the newest session
+/// with a plain `max()` without touching the filesystem.
+pub fn new_session_id() -> String {
+    format!("chat-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S"))
+}
+
 // ---------------------------------------------------------------------------
 // Converters
 // ---------------------------------------------------------------------------
@@ -438,5 +447,50 @@ mod tests {
         assert_eq!(ri.prompt, "test");
         assert_eq!(ri.images.len(), 1);
         assert_eq!(ri.model_override, Some("gpt-4".into()));
+    }
+
+    #[test]
+    fn new_session_id_has_expected_shape() {
+        let id = new_session_id();
+        assert!(id.starts_with("chat-"), "unexpected prefix: {id}");
+        // chat- (5) + YYYYMMDD (8) + - (1) + HHMMSS (6) = 20 chars.
+        assert_eq!(id.len(), 20, "unexpected length: {id}");
+        assert!(id[5..].chars().all(|c| c.is_ascii_digit() || c == '-'));
+    }
+
+    #[test]
+    fn append_then_load_round_trips() {
+        let root = test_root().join("roundtrip");
+        let _ = std::fs::remove_dir_all(&root);
+        let store = SessionStore::new(root.clone()).unwrap();
+        let sid = "chat-roundtrip";
+        let turn = SessionStore::build_turn(&sample_input(), 1, sample_messages(), None);
+        store.append(sid, &turn).unwrap();
+
+        let loaded = store.load(sid).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].turn, 1);
+        assert_eq!(loaded[0].input.prompt, "hello world");
+        assert_eq!(loaded[0].messages.len(), 2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resume_primitives_degrade_gracefully_when_empty() {
+        // The `--resume` path relies on these two behaviours to fall back to a
+        // fresh session instead of erroring when nothing is saved yet.
+        let root = test_root().join("empty-resume");
+        let _ = std::fs::remove_dir_all(&root);
+        let store = SessionStore::new(root.clone()).unwrap();
+
+        // No sessions yet: listing is empty and max() yields no candidate.
+        let ids = store.list_sessions().unwrap();
+        assert!(ids.is_empty());
+        assert!(ids.into_iter().max().is_none());
+
+        // Loading a non-existent session is Ok(empty), not an error.
+        let loaded = store.load("chat-does-not-exist").unwrap();
+        assert!(loaded.is_empty());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

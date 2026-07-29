@@ -232,3 +232,51 @@ fn mcp_server_config_serde() {
     assert_eq!(srv.args[0], "-y");
     assert!(srv.enabled);
 }
+
+#[test]
+fn telemetry_disabled_by_default() {
+    let cfg = Config::default();
+    assert!(!cfg.telemetry.enabled);
+    assert!(cfg.telemetry.otlp_endpoint.is_none());
+}
+
+#[test]
+fn telemetry_toml_parse() {
+    let toml = r#"
+[telemetry]
+enabled = true
+otlp_endpoint = "http://localhost:4317"
+"#;
+    let cfg: Config = toml::from_str(toml).unwrap();
+    assert!(cfg.telemetry.enabled);
+    assert_eq!(
+        cfg.telemetry.otlp_endpoint.as_deref(),
+        Some("http://localhost:4317")
+    );
+}
+
+#[test]
+fn telemetry_merge_overrides_endpoint() {
+    let mut base = Config::default();
+    base.telemetry.enabled = true;
+    base.telemetry.otlp_endpoint = Some("http://base:4317".into());
+
+    // Overlay with an endpoint: both fields overwrite.
+    let mut overlay = Config::default();
+    overlay.telemetry.enabled = true;
+    overlay.telemetry.otlp_endpoint = Some("http://overlay:4317".into());
+    base.merge(overlay);
+    assert!(base.telemetry.enabled);
+    assert_eq!(
+        base.telemetry.otlp_endpoint.as_deref(),
+        Some("http://overlay:4317")
+    );
+
+    // Overlay without endpoint: enabled overwrites, endpoint preserved.
+    base.merge(Config::default());
+    assert!(!base.telemetry.enabled);
+    assert_eq!(
+        base.telemetry.otlp_endpoint.as_deref(),
+        Some("http://overlay:4317")
+    );
+}

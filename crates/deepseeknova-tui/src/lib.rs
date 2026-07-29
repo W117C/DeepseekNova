@@ -36,11 +36,17 @@ use tokio_stream::StreamExt;
 
 // ── TuiRunner ──────────────────────────────────────────────────
 
+/// A [`Runner`] wrapper that drives an interactive split-pane terminal UI.
+///
+/// Wrap any `Arc<dyn Runner>` (e.g. an `Agent`) and call [`TuiRunner::run`] to
+/// take over the terminal, stream the runner's events into a scrolling
+/// conversation pane, and read user prompts from an input pane.
 pub struct TuiRunner {
     runner: Arc<dyn Runner>,
 }
 
 impl TuiRunner {
+    /// Wrap `runner` for display in the TUI.
     pub fn new(runner: Arc<dyn Runner>) -> Self {
         Self { runner }
     }
@@ -73,6 +79,15 @@ impl TuiRunner {
 
             tokio::select! {
                 Some(event) = rx.recv() => {
+                    // Drain events already queued so a burst of streaming deltas
+                    // collapses into a single redraw instead of one full repaint
+                    // per token (this also relieves channel(64) backpressure on
+                    // the runner task under fast output).
+                    let mut batch = vec![event];
+                    while let Ok(next) = rx.try_recv() {
+                        batch.push(next);
+                    }
+                    for event in batch {
                     match event {
                         AppEvent::Input(CEvent::Key(key)) if key.kind == KeyEventKind::Press => {
                             match key.code {
@@ -165,6 +180,7 @@ impl TuiRunner {
                         }
                         _ => {}
                     }
+                    }
                 }
             }
         }
@@ -175,6 +191,8 @@ impl TuiRunner {
 
 #[derive(Default)]
 struct AppState {
+    // TODO(tui): cap `lines` with a scrollback limit (e.g. 2000) so very long
+    // sessions don't grow unbounded or make each `draw` O(total lines).
     lines: Vec<UiLine>,
     input: String,
     running: bool,

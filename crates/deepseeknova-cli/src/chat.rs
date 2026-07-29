@@ -1,7 +1,28 @@
 use deepseeknova_core::runner::{RunEvent, RunInput, Runner};
+use deepseeknova_core::{Message, Role};
 use deepseeknova_provider::factory::ReasoningEffort;
+use deepseeknova_store::{SessionStore, StoredOutput};
 use std::io::{BufRead, Write};
+use std::sync::Arc;
 use tokio_stream::StreamExt;
+
+/// Session-persistence context for the chat REPL.
+///
+/// When present, every completed turn is appended to `store` under
+/// `session_id`, and the `/sessions` / `/resume` commands operate on the same
+/// store. `history` is the shared conversation buffer the agent reads from;
+/// `/resume` replaces its contents in place so the next turn sees the restored
+/// messages without rebuilding the agent.
+pub struct ChatPersistence {
+    /// Backing JSONL store.
+    pub store: SessionStore,
+    /// Id of the session currently being written.
+    pub session_id: String,
+    /// Number of turns already recorded in this session (monotonic counter).
+    pub turn: u64,
+    /// Shared conversation history the agent appends to and `/resume` rewrites.
+    pub history: Arc<tokio::sync::Mutex<Vec<Message>>>,
+}
 
 /// Display mode for agent output.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -32,10 +53,14 @@ enum SlashAction {
 /// starts or when the user changes model/reasoning-effort via `/model`
 /// commands.  The factory receives the resolved effort level and an optional
 /// model override and must return a boxed [`Runner`] + [`Send`].
+///
+/// When `persist` is `Some`, every completed turn is appended to the session
+/// store and the `/sessions` / `/resume` commands become available.
 pub async fn run_chat_repl<F>(
     agent_factory: F,
     baseline_effort: ReasoningEffort,
     initial_model: Option<String>,
+    mut persist: Option<ChatPersistence>,
 ) -> anyhow::Result<bool>
 where
     F: Fn(Option<ReasoningEffort>, Option<String>) -> anyhow::Result<Box<dyn Runner + Send>>,
@@ -98,6 +123,7 @@ where
                 &mut current_effort,
                 baseline_effort,
                 &mut current_model,
+                persist.as_mut(),
             )
             .await?;
             match action {
@@ -130,8 +156,9 @@ where
         }
 
         // Send to agent
+        let prompt_text = trimmed.to_string();
         let input = RunInput {
-            prompt: trimmed.to_string(),
+            prompt: prompt_text.clone(),
             images: Vec::new(),
             model_override: current_model.clone(),
         };
@@ -140,6 +167,7 @@ where
             Ok(mut stream) => {
                 println!();
                 let mut started_output = false;
+                let mut final_output: Option<StoredOutput> = None;
 
                 while let Some(event) = stream.next().await {
                     match event {
@@ -222,6 +250,13 @@ where
                             if !output.text.is_empty() {
                                 println!("{}", output.text);
                             }
+                            // Capture the final text for session persistence
+                            // (tool calls are already streamed above; the
+                            // stored turn keeps just the assistant text).
+                            final_output = Some(StoredOutput {
+                                text: output.text.clone(),
+                                tool_calls: Vec::new(),
+                            });
                         }
                         Ok(RunEvent::TurnComplete) if started_output => {
                             println!();
@@ -235,6 +270,44 @@ where
                     }
                 }
                 println!();
+
+                // Persist the completed turn. The stored messages carry both
+                // the user prompt and the assistant reply so `/resume` can
+                // rebuild the conversation. A write failure only warns — it
+                // never interrupts the session.
+                if let Some(p) = persist.as_mut() {
+                    if let Some(out) = final_output {
+                        p.turn += 1;
+                        let messages = vec![
+                            Message {
+                                role: Role::User,
+                                content: prompt_text.clone(),
+                                name: None,
+                                tool_calls: None,
+                                tool_call_id: None,
+                                reasoning_content: None,
+                            },
+                            Message {
+                                role: Role::Assistant,
+                                content: out.text.clone(),
+                                name: None,
+                                tool_calls: None,
+                                tool_call_id: None,
+                                reasoning_content: None,
+                            },
+                        ];
+                        let stored_input = RunInput {
+                            prompt: prompt_text.clone(),
+                            images: Vec::new(),
+                            model_override: current_model.clone(),
+                        };
+                        let stored_turn =
+                            SessionStore::build_turn(&stored_input, p.turn, messages, Some(out));
+                        if let Err(e) = p.store.append(&p.session_id, &stored_turn) {
+                            tracing::warn!("failed to persist chat turn: {e}");
+                        }
+                    }
+                }
             }
             Err(e) => {
                 eprintln!("error: {e}");
@@ -253,6 +326,7 @@ async fn handle_slash_command(
     current_effort: &mut ReasoningEffort,
     baseline_effort: ReasoningEffort,
     current_model: &mut Option<String>,
+    persist: Option<&mut ChatPersistence>,
 ) -> anyhow::Result<SlashAction> {
     // Split command and optional arguments
     let (name, args) = cmd.split_once(' ').unwrap_or((cmd, ""));
@@ -411,6 +485,61 @@ async fn handle_slash_command(
             println!("Use /mcp status to check connected servers (coming soon).");
         }
 
+        // ── Sessions (list / resume) ──────────────────────────
+        "sessions" => match persist.as_ref() {
+            Some(p) => match p.store.list_sessions() {
+                Ok(ids) if !ids.is_empty() => {
+                    let mut ids = ids;
+                    ids.sort();
+                    ids.reverse(); // newest first (ids are lexicographically timed)
+                    println!("Saved sessions (newest first):");
+                    for id in &ids {
+                        let marker = if *id == p.session_id {
+                            "  (current)"
+                        } else {
+                            ""
+                        };
+                        println!("  {id}{marker}");
+                    }
+                }
+                Ok(_) => println!("(no saved sessions yet)"),
+                Err(e) => eprintln!("failed to list sessions: {e}"),
+            },
+            None => println!("session persistence is disabled"),
+        },
+
+        "resume" => match persist {
+            Some(p) => {
+                let target = args.trim();
+                if target.is_empty() {
+                    eprintln!("Usage: /resume <session-id>  (see /sessions)");
+                } else {
+                    match p.store.load(target) {
+                        Ok(turns) if !turns.is_empty() => {
+                            let mut hist = p.history.lock().await;
+                            hist.clear();
+                            for t in &turns {
+                                for m in &t.messages {
+                                    hist.push(m.into());
+                                }
+                            }
+                            let restored = hist.len();
+                            drop(hist);
+                            p.session_id = target.to_string();
+                            p.turn = turns.len() as u64;
+                            println!(
+                                "resumed '{target}' — {restored} messages across {} turns",
+                                turns.len()
+                            );
+                        }
+                        Ok(_) => eprintln!("session '{target}' is empty or does not exist"),
+                        Err(e) => eprintln!("failed to load session '{target}': {e}"),
+                    }
+                }
+            }
+            None => println!("session persistence is disabled"),
+        },
+
         // ── Undo ──────────────────────────────────────────────
         "undo" => {
             println!("Undo is not yet implemented in the CLI.");
@@ -427,6 +556,8 @@ async fn handle_slash_command(
             println!("  /model            — show / change model & reasoning settings");
             println!("  /skills           — list available agent skills");
             println!("  /mcp              — MCP server status");
+            println!("  /sessions         — list saved sessions");
+            println!("  /resume <id>      — restore a saved session's history");
             println!("  /undo             — revert changes (coming soon)");
             println!("  /help             — show this help");
             println!();
