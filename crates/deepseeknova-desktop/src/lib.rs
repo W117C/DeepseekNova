@@ -42,8 +42,8 @@ pub struct AppState {
     /// per-tool approval decision cache (so the user isn't re-prompted).
     pub session_gate:
         tokio::sync::Mutex<Option<std::sync::Arc<deepseeknova_permission::PermissionGate>>>,
-    /// Shared multi-agent orchestration progress tracker, polled by the UI.
-    pub progress: std::sync::Arc<deepseeknova_orch::ProgressTracker>,
+    /// Shared multi-agent progress tracker, polled by the UI (fed by delegate engine).
+    pub progress: std::sync::Arc<deepseeknova_core::progress::ProgressTracker>,
 }
 
 pub fn run() {
@@ -64,7 +64,7 @@ pub fn run() {
             usage: std::sync::Arc::new(tokio::sync::Mutex::new(CumulativeUsage::default())),
             session_config: tokio::sync::Mutex::new(None),
             session_gate: tokio::sync::Mutex::new(None),
-            progress: std::sync::Arc::new(deepseeknova_orch::ProgressTracker::new()),
+            progress: std::sync::Arc::new(deepseeknova_core::progress::ProgressTracker::new()),
         })
         .invoke_handler(tauri::generate_handler![
             // Core
