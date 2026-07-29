@@ -127,12 +127,21 @@ pub async fn submit_prompt(
 
     // Session-cached MCP tools. Discovered once (spawning stdio server
     // processes), then reused so we don't spawn/kill servers per prompt.
+    // Discovery runs outside the lock so a slow MCP handshake never blocks
+    // other session commands (e.g. new_session) that touch this cache.
     let mcp_tools = {
-        let mut cached = state.session_mcp_tools.lock().await;
-        if cached.is_none() {
-            *cached = Some(deepseeknova_runtime::discover_mcp_tools(&config).await);
+        let cached = state.session_mcp_tools.lock().await.clone();
+        match cached {
+            Some(tools) => tools,
+            None => {
+                let discovered = deepseeknova_runtime::discover_mcp_tools(&config).await;
+                let mut slot = state.session_mcp_tools.lock().await;
+                // If another prompt populated the cache while we were
+                // discovering, keep that set and drop ours; the surplus
+                // connections (and their child processes) are released on drop.
+                slot.get_or_insert(discovered).clone()
+            }
         }
-        cached.clone().unwrap_or_default()
     };
 
     let agent = deepseeknova_runtime::build_agent(
