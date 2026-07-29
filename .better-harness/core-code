@@ -1,4 +1,12 @@
 # DeepseekNova 核心代码边界（仅供变更影响分析使用，不影响构建/运行时）
+#
+# ⚠️ 调用要求：本边界仅在 core-change-watch 以 `--languages auto` 运行时生效。
+#    工具默认语言集不含 Rust，缺省调用会在边界匹配前过滤掉 .rs 文件，
+#    导致核心命中与 reviewRecommended 判定失真。任何以本文件为依据的
+#    核心变更审查都必须使用：
+#      core-change-watch evidence-pack --languages auto
+#    默认（无 --languages 参数）运行的结果不得作为核心审查依据。
+#
 # 格式：每行一个路径前缀；以 "/" 结尾表示目录前缀匹配；"!" 前缀表示排除；"#" 为注释。
 #
 # 安全关键 crate（显式核心边界下限）

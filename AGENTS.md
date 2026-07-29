@@ -77,25 +77,36 @@ crates/
 ## 3. 常用命令
 
 ```bash
-make build       # 编译全部
-make check       # CI 等价检查（fmt + clippy + test + doc），不含 deepseeknova-desktop
-make test        # cargo test --all
-make fmt         # 格式化代码
-make clippy-fix  # clippy 自动修复
+make build          # 编译全部
+make check          # CI 等价检查（fmt + clippy + test + doc），不含 deepseeknova-desktop
+make check-desktop  # 桌面端本地验证（前端 lint/test + 桌面端 Rust check/clippy/test）
+make test           # cargo test --all
+make fmt            # 格式化代码
+make clippy-fix     # clippy 自动修复
 ```
 
-> **注意**：`make check` 与 CI 的主要 Rust 检查任务（check / clippy / test / coverage / bench / docs）均通过 `--exclude deepseeknova-desktop` 排除桌面端 crate（CI 由独立的 `check-desktop` 与 `frontend` 任务单独覆盖）。改动 desktop 相关代码后，请在本地额外运行以下替代验证命令：
->
-> ```bash
-> # 前端类型检查 + 测试（在 crates/deepseeknova-desktop/frontend 目录下，与 CI 对齐）
-> npm run lint    # tsc --noEmit
-> npm test        # node --test test/
->
-> # 桌面端 Rust 编译 + Clippy + 测试（需先构建前端产物 dist/，可用 make frontend）
-> cargo check -p deepseeknova-desktop
-> cargo clippy -p deepseeknova-desktop --all-targets -- -D warnings
-> cargo test -p deepseeknova-desktop
-> ```
+> **注意**：`make check` 与 CI 的主要 Rust 检查任务（check / clippy / test / coverage / bench / docs）均通过 `--exclude deepseeknova-desktop` 排除桌面端 crate（CI 由独立的 `check-desktop` 与 `frontend` 任务单独覆盖）。改动 desktop 相关代码后，请在本地额外运行 `make check-desktop` 作为替代验证；该目标会按序执行前端 `npm run lint`（tsc --noEmit）、`npm test`（node --test test/），以及 `cargo check` / `cargo clippy --all-targets -- -D warnings` / `cargo test`（均 `-p deepseeknova-desktop`），与 CI 对齐。其中 Rust 侧编译需要前端产物 dist/，缺失时请先运行 `make frontend`。
+
+> **核心变更影响分析（core-change-watch）**：本项目的核心代码边界定义在 `.better-harness/core-code`，该边界**仅在 `--languages auto` 下生效**。工具默认语言集不含 Rust，缺省运行会在边界匹配前过滤掉 `.rs` 文件，导致核心命中与 `reviewRecommended` 判定失真。因此任何核心变更审查必须使用 `core-change-watch evidence-pack --languages auto`；默认（无 `--languages` 参数）运行的结果不得作为核心审查依据。
+
+> **core-change-watch 历史路径映射（rename 不跟随）**：该工具的历史扫描底层是 `git log -N --numstat`，**不跟随重命名**（CLI 无 `--follow` / rename 类选项，已核实 `evidence-pack` 全部参数：`--cwd` / `--languages` / `--base-ref` / `--max-commits` / `--history-windows` / `--ignore` / `--no-history` / `--core-code` / `--measure-source-lines` 等，均无此能力）。本仓库经历过三次全量重命名：`crates/reasonix-*` → `crates/dpronix-*`（69509d5）→ `crates/deepnova-*`（8a95226）→ `crates/deepseeknova-*`（c5336db），因此历史输出（`historyProfile.hotFiles`、`followUpActions` 等）中会出现旧前缀路径。消费这些输出前必须执行以下映射与校验：
+> 1. **前缀映射**：将路径前缀 `crates/reasonix-`、`crates/dpronix-`、`crates/deepnova-` 统一替换为 `crates/deepseeknova-`；同一文件在新旧路径下的提交计数应按映射后路径**合并**统计。注意 `hotFiles` 是 top-N 截断列表，新前缀段的提交可能因未达入榜门槛而不在列表中，仅基于 `hotFiles` 合并会低估；需要精确计数时直接用 `git log --follow -- <当前路径>` 核对。
+> 2. **存在性校验**：映射后仍需确认文件在当前工作树中真实存在；映射后依然缺失的条目属于历史输出相对当前结构的正常滞后（例如 `deepseeknova-desktop/src/commands.rs` 已在 60a579e 被拆分为 `commands/` 子模块目录），应改指其后继文件或丢弃，不得据此创建文件。
+
+> **changeDrift 文档同步口径**：本项目中 `Makefile` / `Cargo.toml` 等构建配置的**文档伴随文件是 `AGENTS.md` 与 `BUILDING.md`**（`BUILDING.md` 的本地验证说明指回 `AGENTS.md`），而非各 crate 的 README。消费 `core-change-watch` 的 changeDrift 输出时，若 advisory 提示构建配置变更缺少文档同步，应核对 `AGENTS.md`（§3 常用命令）与 `BUILDING.md` 是否已与 Makefile 目标一致；一致即判定为**已同步**，不得据此去补写无关 README。构建配置变更时也应同步更新这两个文件。
+
+### 3.1 深入文档与调试路由
+
+需要更深背景或定位问题时，按用途路由到以下文档（本节仅作索引，不改变 §1 分档协议与上述命令面）：
+
+- [DESIGN.md](DESIGN.md) — **架构设计记录（架构史）**，含命名现状权威说明与四层分层设计意图；**非 Agent 操作指令**，文中标注 [规划中/未实现] 的能力不得当作现行能力引用
+- [BUILDING.md](BUILDING.md) — 编译环境与系统依赖（Linux/macOS 原生库安装），及 clone 后的 Git rename 跟踪配置
+- [GUIDE.md](GUIDE.md) — 用户指南：核心概念（Runner/Tool）、配置、工具参考、HTTP API、TUI、MCP、沙箱等
+
+最小调试入口：
+
+- **CLI**：日志经 `tracing` 输出到终端（固定 INFO 级，见 `crates/deepseeknova-cli/src/main.rs`，不读 `RUST_LOG`）；运行时派生数据在工作区 `.deepseeknova/`（`graph.db` 代码图索引、`memory.db` 记忆库）；配置层级为 `~/.deepseeknova/config.toml`（用户）+ `./deepseeknova.toml`（项目）；release 产物在 `target/release/deepseeknova-cli`。聚焦测试：`cargo test -p <crate> <测试名过滤词>`
+- **桌面端**：前端产物在 `crates/deepseeknova-desktop/frontend/dist/`（Rust 侧编译依赖它，缺失先 `make frontend`）；前端类型检查/测试在 frontend 目录运行 `npm run lint` / `npm test`（node --test test/）；Rust 侧聚焦测试 `cargo test -p deepseeknova-desktop <测试名过滤词>`；一键验证 `make check-desktop`
 
 ---
 
