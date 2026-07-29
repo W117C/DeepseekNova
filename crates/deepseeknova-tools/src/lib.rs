@@ -4,6 +4,7 @@
 //! web fetching, task management, memory operations, and MCP bridging.
 //! Each tool implements the `Tool` trait with security-aware execution.
 
+pub mod delegate;
 pub mod fs;
 pub mod glob;
 pub mod graph_tools;
@@ -15,6 +16,7 @@ pub mod snippet;
 pub mod todo;
 pub mod web_fetch;
 
+pub use delegate::*;
 pub use fs::*;
 pub use glob::*;
 pub use graph_tools::*;
@@ -54,5 +56,6 @@ pub fn all_builtin_tools_with_sandbox(sandbox: Arc<dyn Sandbox>) -> Vec<Arc<dyn 
         Arc::new(SearchCodeTool),
         Arc::new(TraverseGraphTool),
         Arc::new(RetrieveEntityTool),
+        Arc::new(DelegateTool),
     ]
 }

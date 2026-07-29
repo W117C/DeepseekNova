@@ -20,6 +20,7 @@ chrono = { workspace = true }
 glob = { workspace = true }
 regex = { workspace = true }
 url = { workspace = true }
+deepseeknova-agent = { workspace = true }
 deepseeknova-core = { workspace = true }
 deepseeknova-sandbox = { workspace = true }
 deepseeknova-checkpoint = { workspace = true }
