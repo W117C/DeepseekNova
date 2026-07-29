@@ -1123,7 +1123,6 @@ dependencies = [
  "deepseeknova-config",
  "deepseeknova-core",
  "deepseeknova-mcp",
- "deepseeknova-orch",
  "deepseeknova-provider",
  "deepseeknova-runtime",
  "deepseeknova-security",
@@ -1206,7 +1205,6 @@ dependencies = [
  "deepseeknova-config",
  "deepseeknova-core",
  "deepseeknova-event",
- "deepseeknova-orch",
  "deepseeknova-permission",
  "deepseeknova-provider",
  "deepseeknova-runtime",
@@ -1274,30 +1272,6 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
-]
-
-[[package]]
-name = "deepseeknova-orch"
-version = "0.4.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "deepseeknova-agent",
- "deepseeknova-config",
- "deepseeknova-core",
- "deepseeknova-event",
- "deepseeknova-provider",
- "deepseeknova-tools",
- "rand 0.8.6",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tracing",
- "uuid",
 ]
 
 [[package]]

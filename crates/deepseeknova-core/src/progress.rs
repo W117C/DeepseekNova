@@ -1,7 +1,7 @@
 //! # Progress Tracker — 多智能体执行的实时状态
 //!
 //! 线程安全的共享进度跟踪器，desktop 前端经 Tauri 命令轮询显示委派/子代理状态。
-//! 自 `deepseeknova-orch` 收编而来，已解耦 SwarmConfig/Plan——仅依赖标准库 + serde。
+//! 自已删除的 orch crate（见 git 历史）收编而来，已解耦 SwarmConfig/Plan——仅依赖标准库 + serde。
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

@@ -37,7 +37,6 @@ deepseeknova-runtime = { workspace = true }
 deepseeknova-store = { workspace = true }
 deepseeknova-skills = { workspace = true }
 deepseeknova-event = { workspace = true }
-deepseeknova-orch = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

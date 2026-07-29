@@ -2,6 +2,12 @@
 
 All notable changes to DeepseekNova will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+
+- 删除实验性 `deepseeknova-orch` crate（GOAP + Swarm，零业务调用）；其唯一有消费者的组件 `ProgressTracker` 已解耦收编至 `deepseeknova-core::progress`。多智能体能力改由 `deepseeknova-agent` 的 delegate/子代理路径提供。CLI dev-dependency、quickstart 示例的 GOAP 段、release 脚本与 README crate 表中的 orch 引用一并清除。
+
 ## [0.4.0] — 2026-07-19
 
 ### 桌面前端完善

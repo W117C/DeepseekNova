@@ -6,8 +6,7 @@
 //!   1. 安全路径解析（secure_resolve / sanitize_path）
 //!   2. 安全策略检查（路径/命令/域名权限）
 //!   3. 资源限额配置
-//!   4. GOAP 计划类型（Goal / Action / Plan 序列化）
-//!   5. MCP 工具适配器命名约定
+//!   4. MCP 工具适配器命名约定
 
 use std::path::Path;
 
@@ -55,72 +54,8 @@ fn main() -> anyhow::Result<()> {
         limits.max_files, limits.max_tool_calls
     );
 
-    // ── 4. GOAP 计划 ────────────────────────────────────────────
-    println!("\n▸ 4. Orchestration — Goal / Action / Plan");
-    use deepseeknova_orch::types::*;
-
-    let goal = Goal {
-        description: "构建一个 Rust CLI 工具".into(),
-        constraints: vec!["使用 clap".into()],
-        criteria: vec!["编译通过".into(), "测试通过".into()],
-    };
-
-    let actions = vec![
-        Action {
-            id: "act-1".into(),
-            name: "create_cargo_project".into(),
-            description: "初始化 Cargo 项目".into(),
-            preconditions: vec![],
-            effects: vec!["项目已创建".into()],
-            cost: 10.0,
-            tool: Some("bash".into()),
-            tool_args: None,
-            delegatable: false,
-            status: ActionStatus::Completed,
-        },
-        Action {
-            id: "act-2".into(),
-            name: "implement_cli".into(),
-            description: "编写 CLI 入口".into(),
-            preconditions: vec!["项目已创建".into()],
-            effects: vec!["CLI 已实现".into()],
-            cost: 50.0,
-            tool: Some("edit_file".into()),
-            tool_args: None,
-            delegatable: true,
-            status: ActionStatus::Pending,
-        },
-    ];
-
-    let mut deps = std::collections::HashMap::new();
-    deps.insert("act-2".into(), vec!["act-1".into()]);
-
-    let plan = Plan {
-        id: "plan-001".into(),
-        goal,
-        actions,
-        dependencies: deps,
-        status: PlanStatus::Draft,
-        reasoning: Some("分两步：先创建项目再实现 CLI".into()),
-        usage: Some(PlanUsage {
-            prompt_tokens: 150,
-            completion_tokens: 80,
-            cache_hit_tokens: 0,
-            cache_miss_tokens: 150,
-        }),
-    };
-
-    println!(
-        "   计划: {} | 动作: {} | 依赖: act-2→act-1",
-        plan.id,
-        plan.actions.len()
-    );
-    let json = serde_json::to_string_pretty(&plan)?;
-    let _restored: Plan = serde_json::from_str(&json)?;
-    println!("   📋 JSON 序列化 ✅");
-
-    // ── 5. MCP 命名 ─────────────────────────────────────────────
-    println!("\n▸ 5. MCP — tool adapter naming convention");
+    // ── 4. MCP 命名 ─────────────────────────────────────────────
+    println!("\n▸ 4. MCP — tool adapter naming convention");
     println!("   mcp__<server>__<tool>  (e.g. mcp__my-server__read_file)");
 
     println!("\n═══ quickstart 完成 ✅ ═══");

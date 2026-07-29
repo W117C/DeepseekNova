@@ -28,5 +28,4 @@ dirs = { workspace = true }
 [dev-dependencies]
 deepseeknova-security = { workspace = true }
 deepseeknova-mcp = { workspace = true }
-deepseeknova-orch = { workspace = true }
 serde_json = { workspace = true }

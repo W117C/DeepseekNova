@@ -71,7 +71,6 @@ Provider    DeepSeek V4 Pro/Flash   Tools: File · Glob · Grep · Shell
 | `deepseeknova-context` | Workspace indexing, project memory, session state |
 | `deepseeknova-skills` | Markdown skill system (.claude/skills compatible) |
 | `deepseeknova-store` | JSONL session persistence + rotation + compression |
-| `deepseeknova-orch` | GOAP planning, Swarm coordination, Agent Federation *(experimental)* |
 | `deepseeknova-telemetry` | OpenTelemetry distributed tracing (OTLP) |
 | `deepseeknova-event` | Agent lifecycle event bus |
 | `deepseeknova-runtime` | Composition root: registry + context + events + permission + security |

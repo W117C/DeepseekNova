@@ -20,7 +20,6 @@ members = [
     "crates/deepseeknova-skills",
     "crates/deepseeknova-telemetry",
     "crates/deepseeknova-desktop",
-    "crates/deepseeknova-orch",
     "crates/deepseeknova-security",
 ]
 resolver = "2"
@@ -44,7 +43,6 @@ default-members = [
     "crates/deepseeknova-serve",
     "crates/deepseeknova-skills",
     "crates/deepseeknova-telemetry",
-    "crates/deepseeknova-orch",
     "crates/deepseeknova-security",
 ]
 
@@ -112,7 +110,6 @@ deepseeknova-desktop = { path = "crates/deepseeknova-desktop" }
 deepseeknova-event = { version = "0.4.0", path = "crates/deepseeknova-event" }
 deepseeknova-graph = { version = "0.4.0", path = "crates/deepseeknova-graph" }
 deepseeknova-mcp = { version = "0.4.0", path = "crates/deepseeknova-mcp" }
-deepseeknova-orch = { version = "0.4.0", path = "crates/deepseeknova-orch" }
 deepseeknova-permission = { version = "0.4.0", path = "crates/deepseeknova-permission" }
 deepseeknova-provider = { version = "0.4.0", path = "crates/deepseeknova-provider" }
 deepseeknova-runtime = { version = "0.4.0", path = "crates/deepseeknova-runtime" }

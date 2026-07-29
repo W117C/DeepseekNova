@@ -130,7 +130,6 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 | `deepseeknova-context` | 工作区索引、项目记忆、会话状态 |
 | `deepseeknova-skills` | Markdown 技能系统，兼容 .claude/skills 格式 |
 | `deepseeknova-store` | JSONL 会话持久化 + 轮转 + 压缩 |
-| `deepseeknova-orch` | GOAP 规划、Swarm 协调、Agent 联邦 *(实验性)* |
 | `deepseeknova-telemetry` | OpenTelemetry 分布式追踪 (OTLP) |
 | `deepseeknova-event` | Agent 生命周期事件总线 |
 | `deepseeknova-runtime` | 组合根：注册表 + 上下文 + 事件 + 权限 + 安全 |

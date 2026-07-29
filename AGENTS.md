@@ -67,7 +67,6 @@ crates/
 ├── deepseeknova-sandbox/      # 沙箱（bubblewrap、seatbelt）
 ├── deepseeknova-skills/       # 技能加载
 ├── deepseeknova-telemetry/    # 遥测
-├── deepseeknova-orch/         # 编排层（规划器、swarm、记忆）
 ├── deepseeknova-serve/        # HTTP 服务
 ├── deepseeknova-tui/          # TUI
 ├── deepseeknova-desktop/      # Tauri 桌面端

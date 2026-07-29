@@ -44,6 +44,8 @@ git config diff.renames true  # diff/log 统计启用重命名检测
 
 ## 二、GOAP 规划器 — 决策机制
 
+> **状态**：**已裁撤（B0）**。GOAP/Swarm 实验实现随 `deepseeknova-orch` crate 删除；本节仅作历史设计记录保留，历史实现见删除提交之前的 git 历史。多智能体能力由 `deepseeknova-agent` 的 delegate/子代理路径提供（见长任务与多智能体引擎 spec）。
+
 ### 概述
 
 GOAP（Goal-Oriented Action Planning）是 `deepseeknova-orch` crate 的核心组件。它将用户自然语言目标分解为可执行的动作 DAG（有向无环图），然后按依赖顺序执行。
@@ -241,6 +243,8 @@ Candidate ──(recall ≥1)──▶ Verified ──(recall ≥3 AND age >7d A
 
 ## 四、Swarm 协调 — 多 Agent 集群
 
+> **状态**：**已裁撤（B0）**。GOAP/Swarm 实验实现随 `deepseeknova-orch` crate 删除；本节仅作历史设计记录保留，历史实现见删除提交之前的 git 历史。多智能体能力由 `deepseeknova-agent` 的 delegate/子代理路径提供（见长任务与多智能体引擎 spec）。
+
 ### Queen-Led 层级架构
 
 ```
@@ -308,7 +312,7 @@ Swarm 成员通过 `SwarmMessage` 进行异步通信：
 
 ### 概述
 
-> **状态**：[规划中/未实现]（见 §十 P5）。目前仅在 `deepseeknova-orch` 中作为类型定义和接口预留，具体协议实现尚未开始，不可作为现行能力使用。
+> **状态**：[规划中/未实现]（见 §十 P5）。原先位于 `deepseeknova-orch` 的类型定义与接口预留已随该 crate 删除（B0），本节仅为规划性记录，不可作为现行能力使用。
 
 Agent Federation 允许多个 DeepseekNova 实例跨进程/跨机器协作。
 
