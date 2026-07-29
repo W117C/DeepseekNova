@@ -47,6 +47,10 @@ pub struct Config {
     #[serde(default)]
     pub memory: MemoryConfig,
 
+    /// 委派子代理配置（多智能体）。
+    #[serde(default)]
+    pub delegate: DelegateConfig,
+
     /// Agent behaviour tuning.
     #[serde(default)]
     pub agent: AgentConfig,
@@ -326,6 +330,55 @@ impl Default for MemoryConfig {
             min_steps: 3,
             max_distillations_per_day: 50,
             max_distillations_per_session: 10,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Delegate (multi-agent sub-agents)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DelegateConfig {
+    /// 主开关。false = 不注册 delegate 工具，行为等同现状。
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// 并发子代理上限（满员时新委派排队等待）。
+    #[serde(default = "default_delegate_concurrency")]
+    pub max_concurrent: usize,
+    /// 子代理回传摘要的 token 上限。
+    #[serde(default = "default_delegate_output_cap")]
+    pub output_cap_tokens: usize,
+    /// 预设覆盖/新增（按 name 匹配内置预设覆盖其字段；未匹配则新增）。
+    #[serde(default)]
+    pub agents: Vec<DelegateAgentOverride>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DelegateAgentOverride {
+    pub name: String,
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+    #[serde(default)]
+    pub tools: Option<Vec<String>>,
+    #[serde(default)]
+    pub max_steps: Option<usize>,
+}
+
+fn default_delegate_concurrency() -> usize {
+    2
+}
+fn default_delegate_output_cap() -> usize {
+    2000
+}
+
+impl Default for DelegateConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_concurrent: 2,
+            output_cap_tokens: 2000,
+            agents: Vec::new(),
         }
     }
 }
@@ -919,5 +972,26 @@ mod tests {
         // 未覆盖字段仍取默认
         assert!(c.memory.redact_secrets);
         assert_eq!(c.memory.recall_inject_tokens, 200);
+    }
+
+    #[test]
+    fn delegate_config_defaults() {
+        let c = Config::default();
+        assert!(c.delegate.enabled);
+        assert_eq!(c.delegate.max_concurrent, 2);
+        assert_eq!(c.delegate.output_cap_tokens, 2000);
+        assert!(c.delegate.agents.is_empty());
+    }
+
+    #[test]
+    fn delegate_config_parses_overrides() {
+        let toml = "[delegate]\nenabled = false\nmax_concurrent = 3\n\n[[delegate.agents]]\nname = \"coder\"\nmax_steps = 25\n";
+        let c: Config = toml::from_str(toml).unwrap();
+        assert!(!c.delegate.enabled);
+        assert_eq!(c.delegate.max_concurrent, 3);
+        assert_eq!(c.delegate.output_cap_tokens, 2000); // 未覆盖取默认
+        assert_eq!(c.delegate.agents.len(), 1);
+        assert_eq!(c.delegate.agents[0].name, "coder");
+        assert_eq!(c.delegate.agents[0].max_steps, Some(25));
     }
 }
