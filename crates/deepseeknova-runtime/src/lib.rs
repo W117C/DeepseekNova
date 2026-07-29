@@ -244,9 +244,9 @@ pub fn build_agent(
         config.agent.max_steps
     };
 
-    let mut agent = deepseeknova_agent::Agent::new(provider, steps)
+    let mut agent = deepseeknova_agent::Agent::new(Arc::clone(&provider), steps)
         .with_workspace_root(workspace_root.clone())
-        .with_security(security);
+        .with_security(security.clone());
 
     if let Some(ref sp) = config.agent.system_prompt {
         agent = agent.with_system_prompt(sp.clone());
@@ -257,8 +257,8 @@ pub fn build_agent(
     // across a session preserves its per-tool approval decision cache so the
     // user isn't re-prompted for the same operation every turn.
     let gate = gate.or_else(|| permission_gate_for(config, &workspace_root));
-    if let Some(gate) = gate {
-        agent = agent.with_permission_gate(gate);
+    if let Some(ref g) = gate {
+        agent = agent.with_permission_gate(g.clone());
     }
 
     // Tools — sandboxed shell only when explicitly enabled. Tools disabled via
@@ -285,6 +285,10 @@ pub fn build_agent(
         disabled.insert("recall");
         disabled.insert("forget");
     }
+    // 委派关闭时排除 delegate 工具。
+    if !config.delegate.enabled {
+        disabled.insert("delegate");
+    }
     let register = |agent: &mut deepseeknova_agent::Agent,
                     tools: Vec<Arc<dyn deepseeknova_core::Tool>>| {
         for tool in tools {
@@ -308,6 +312,10 @@ pub fn build_agent(
         register(&mut agent, deepseeknova_tools::all_builtin_tools());
     }
 
+    // 句柄提升到外层，供主 agent 与子代理共享（delegate 需要）。
+    let mut graph_ext: Option<deepseeknova_tools::GraphHandle> = None;
+    let mut memory_ext: Option<deepseeknova_tools::MemoryHandle> = None;
+
     // ── 代码图：可选、后台构建、注入检索工具句柄与检索策略提示 ──
     // Open the on-disk index synchronously (cheap: just opens SQLite), then
     // refresh it on a blocking thread so the expensive tree-sitter parse never
@@ -328,6 +336,7 @@ pub fn build_agent(
                     Err(_) => tracing::warn!("graph index lock poisoned during refresh"),
                 });
                 agent = agent.with_extension(handle.clone());
+                graph_ext = Some(handle.clone());
                 agent = agent.with_appended_system_prompt(GRAPH_RETRIEVAL_HINT);
 
                 // Feed a global repo map into the agent's system prompt at run
@@ -361,6 +370,7 @@ pub fn build_agent(
             Ok(engine) => {
                 let handle: deepseeknova_tools::MemoryHandle = Arc::new(engine);
                 agent = agent.with_extension(handle.clone());
+                memory_ext = Some(handle.clone());
 
                 // 起点召回注入（token 预算内的极简块）。
                 let rp = handle.clone();
@@ -409,7 +419,109 @@ pub fn build_agent(
         }
     }
 
+    // ── 委派引擎：为每个预设构建受限工具集的子 Agent（共享 graph/memory 句柄）──
+    if config.delegate.enabled {
+        let engine = build_delegate_engine(
+            config,
+            Arc::clone(&provider),
+            &workspace_root,
+            &security,
+            gate.clone(),
+            graph_ext.clone(),
+            memory_ext.clone(),
+        );
+        let handle: deepseeknova_tools::DelegateHandle = engine;
+        agent = agent.with_extension(handle);
+    }
+
     Ok(agent)
+}
+
+/// 构建委派引擎：合并内置预设与配置覆盖，为每个预设造一个受限工具集的子 Agent
+/// （共享主 agent 的 graph/memory 句柄与安全策略）。禁递归：剔除任何 "delegate" 工具。
+#[allow(clippy::too_many_arguments)]
+fn build_delegate_engine(
+    config: &Config,
+    provider: Arc<dyn deepseeknova_provider::Provider>,
+    workspace_root: &std::path::Path,
+    security: &SecurityContext,
+    gate: Option<Arc<PermissionGate>>,
+    graph_ext: Option<deepseeknova_tools::GraphHandle>,
+    memory_ext: Option<deepseeknova_tools::MemoryHandle>,
+) -> Arc<deepseeknova_agent::DelegateEngine> {
+    use deepseeknova_core::Tool;
+
+    // 子代理工具源（沿用主 agent 的沙箱选择）。
+    let base: Vec<Arc<dyn Tool>> = if config.sandbox.enabled {
+        let sandbox: Arc<dyn deepseeknova_sandbox::Sandbox> =
+            Arc::from(deepseeknova_sandbox::platform_sandbox_with(
+                &config.sandbox.writable_paths,
+                config.sandbox.allow_network,
+            ));
+        deepseeknova_tools::all_builtin_tools_with_sandbox(sandbox)
+    } else {
+        deepseeknova_tools::all_builtin_tools()
+    };
+
+    // 合并内置预设 + 配置覆盖（按 name 匹配覆盖字段，未匹配则新增）。
+    let mut presets = deepseeknova_agent::builtin_presets();
+    for ov in &config.delegate.agents {
+        if let Some(p) = presets.iter_mut().find(|p| p.name == ov.name) {
+            if let Some(sp) = &ov.system_prompt {
+                p.system_prompt = sp.clone();
+            }
+            if let Some(tools) = &ov.tools {
+                p.tools = tools.clone();
+            }
+            if let Some(ms) = ov.max_steps {
+                p.max_steps = ms;
+            }
+        } else {
+            presets.push(deepseeknova_agent::DelegatePreset {
+                name: ov.name.clone(),
+                system_prompt: ov.system_prompt.clone().unwrap_or_default(),
+                tools: ov.tools.clone().unwrap_or_default(),
+                max_steps: ov.max_steps.unwrap_or(10),
+            });
+        }
+    }
+
+    let mut agents: std::collections::HashMap<String, Arc<deepseeknova_agent::Agent>> =
+        std::collections::HashMap::new();
+    for p in &presets {
+        // 禁递归：即便配置误加 "delegate" 也剔除。
+        let sub_tools: Vec<Arc<dyn Tool>> = base
+            .iter()
+            .filter(|t| {
+                let n = t.schema().name;
+                n != "delegate" && p.tools.iter().any(|allow| allow == &n)
+            })
+            .cloned()
+            .collect();
+        let mut sub = deepseeknova_agent::Agent::new(Arc::clone(&provider), p.max_steps)
+            .with_workspace_root(workspace_root.to_path_buf())
+            .with_security(security.clone())
+            .with_system_prompt(p.system_prompt.clone());
+        for t in sub_tools {
+            sub.register_tool(t);
+        }
+        if let Some(g) = &graph_ext {
+            sub = sub.with_extension(g.clone());
+        }
+        if let Some(m) = &memory_ext {
+            sub = sub.with_extension(m.clone());
+        }
+        if let Some(gate) = &gate {
+            sub = sub.with_permission_gate(gate.clone());
+        }
+        agents.insert(p.name.clone(), Arc::new(sub));
+    }
+
+    Arc::new(deepseeknova_agent::DelegateEngine::new(
+        agents,
+        config.delegate.max_concurrent,
+        config.delegate.output_cap_tokens,
+    ))
 }
 
 #[cfg(test)]
@@ -496,6 +608,28 @@ mod tests {
         let provider = std::sync::Arc::new(stub_provider());
         let agent = build_agent(&config, std::env::temp_dir(), provider, 5, None).unwrap();
         assert!(!agent.tool_names().iter().any(|n| n == "recall"));
+    }
+
+    #[tokio::test]
+    async fn build_agent_registers_delegate_tool_when_enabled() {
+        let mut config = Config::default();
+        config.delegate.enabled = true;
+        config.graph.enabled = false;
+        config.memory.enabled = false;
+        let provider = std::sync::Arc::new(stub_provider());
+        let agent = build_agent(&config, std::env::temp_dir(), provider, 5, None).unwrap();
+        assert!(agent.tool_names().iter().any(|n| n == "delegate"));
+    }
+
+    #[test]
+    fn build_agent_skips_delegate_when_disabled() {
+        let mut config = Config::default();
+        config.delegate.enabled = false;
+        config.graph.enabled = false;
+        config.memory.enabled = false;
+        let provider = std::sync::Arc::new(stub_provider());
+        let agent = build_agent(&config, std::env::temp_dir(), provider, 5, None).unwrap();
+        assert!(!agent.tool_names().iter().any(|n| n == "delegate"));
     }
 
     #[test]
