@@ -93,6 +93,13 @@ async fn main() -> anyhow::Result<()> {
                     runner.register_tool(tool);
                 }
 
+                // MCP 工具：与单 Agent 路径一致，从 config.mcp_servers 发现并注册到
+                // 执行器 Runner（子代理按设计不接 MCP）。graph 工具仍受上面的排除
+                // 限制，待 coordinator graph wiring 落地后再补。
+                for tool in deepseeknova_runtime::discover_mcp_tools(&config).await {
+                    runner.register_tool(tool);
+                }
+
                 let input = RunInput {
                     prompt: prompt_str,
                     images: Vec::new(),
