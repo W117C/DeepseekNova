@@ -125,7 +125,12 @@ fn read_settings_sync() -> serde_json::Value {
 
 /// 推理参数降级模型（主 provider 创建失败时由 submit_prompt 使用）
 pub fn desktop_fallback_model() -> Option<String> {
-    read_settings_sync()
+    fallback_model_from(&read_settings_sync())
+}
+
+/// 纯函数核心：从 settings JSON 中取降级模型（空白视为未配置）。
+fn fallback_model_from(settings: &serde_json::Value) -> Option<String> {
+    settings
         .get("reasoning_params")?
         .get("fallback_model")?
         .as_str()
@@ -139,8 +144,19 @@ pub fn desktop_fallback_model() -> Option<String> {
 ///   （OpenAI 兼容端点将 temperature/top_p/max_tokens/stop 合并到请求顶层）
 /// - tools.json 开关 → config.tools.overrides（build_agent 跳过禁用工具）
 pub fn apply_desktop_overrides(config: &mut deepseeknova_config::Config) {
-    let settings = read_settings_sync();
+    apply_settings_overrides(
+        &read_settings_sync(),
+        &super::tools::load_tool_overrides(),
+        config,
+    );
+}
 
+/// 纯函数核心：将给定 settings JSON 与工具开关叠加到 Config（不触盘，可单测）。
+fn apply_settings_overrides(
+    settings: &serde_json::Value,
+    tool_overrides: &std::collections::HashMap<String, bool>,
+    config: &mut deepseeknova_config::Config,
+) {
     if let Some(sp) = settings.get("system_prompt").and_then(|v| v.as_str()) {
         if !sp.trim().is_empty() {
             config.agent.system_prompt = Some(sp.to_string());
@@ -177,17 +193,127 @@ pub fn apply_desktop_overrides(config: &mut deepseeknova_config::Config) {
         }
     }
 
-    for (name, enabled) in super::tools::load_tool_overrides() {
+    for (name, enabled) in tool_overrides {
         if !enabled {
             config
                 .tools
                 .overrides
                 .push(deepseeknova_config::ToolOverride {
-                    name,
+                    name: name.clone(),
                     disabled: true,
                     timeout_secs: None,
                     max_file_size: None,
                 });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn config_with_provider() -> deepseeknova_config::Config {
+        serde_json::from_value(serde_json::json!({
+            "providers": [{ "name": "p1", "kind": "openai", "extra_body": { "seed": 7 } }]
+        }))
+        .expect("minimal config")
+    }
+
+    #[test]
+    fn fallback_model_from_filters_missing_and_blank() {
+        assert_eq!(fallback_model_from(&serde_json::json!({})), None);
+        assert_eq!(
+            fallback_model_from(
+                &serde_json::json!({ "reasoning_params": { "fallback_model": "   " } })
+            ),
+            None
+        );
+        assert_eq!(
+            fallback_model_from(
+                &serde_json::json!({ "reasoning_params": { "fallback_model": "deepseek-chat" } })
+            ),
+            Some("deepseek-chat".to_string())
+        );
+    }
+
+    #[test]
+    fn apply_overrides_sets_prompt_and_rate_limit_ignoring_blank_prompt() {
+        let mut config = config_with_provider();
+        apply_settings_overrides(
+            &serde_json::json!({ "system_prompt": "  " }),
+            &HashMap::new(),
+            &mut config,
+        );
+        assert_eq!(config.agent.system_prompt, None);
+
+        apply_settings_overrides(
+            &serde_json::json!({ "system_prompt": "be terse", "rate_limit_per_minute": 30 }),
+            &HashMap::new(),
+            &mut config,
+        );
+        assert_eq!(config.agent.system_prompt.as_deref(), Some("be terse"));
+        assert_eq!(config.permissions.rate_limit_per_minute, Some(30));
+    }
+
+    #[test]
+    fn apply_overrides_merges_reasoning_params_preserving_extra_body() {
+        let mut config = config_with_provider();
+        let params = serde_json::to_value(ReasoningParams {
+            temperature: 0.2,
+            timeout_secs: 120,
+            max_retries: 5,
+            stop_sequences: vec!["END".into()],
+            ..ReasoningParams::default()
+        })
+        .unwrap();
+        apply_settings_overrides(
+            &serde_json::json!({ "reasoning_params": params }),
+            &HashMap::new(),
+            &mut config,
+        );
+
+        let provider = &config.providers[0];
+        assert_eq!(provider.timeout_secs, 120);
+        assert_eq!(provider.max_retries, 5);
+        let extra = provider.extra_body.as_ref().unwrap();
+        // 既有 extra_body 键保留，推理参数叠加到顶层
+        assert_eq!(extra["seed"], serde_json::json!(7));
+        assert_eq!(extra["temperature"], serde_json::json!(0.2));
+        assert_eq!(extra["stop"], serde_json::json!(["END"]));
+    }
+
+    #[test]
+    fn apply_overrides_omits_stop_when_empty_and_pushes_only_disabled_tools() {
+        let mut config = config_with_provider();
+        let params = serde_json::to_value(ReasoningParams::default()).unwrap();
+        let tools = HashMap::from([("grep".to_string(), false), ("shell".to_string(), true)]);
+        apply_settings_overrides(
+            &serde_json::json!({ "reasoning_params": params }),
+            &tools,
+            &mut config,
+        );
+
+        let extra = config.providers[0].extra_body.as_ref().unwrap();
+        assert!(extra.get("stop").is_none());
+        assert_eq!(config.tools.overrides.len(), 1);
+        assert_eq!(config.tools.overrides[0].name, "grep");
+        assert!(config.tools.overrides[0].disabled);
+    }
+
+    #[tokio::test]
+    async fn set_reasoning_params_rejects_out_of_range_sampling() {
+        // 校验发生在落盘之前，非法输入不会触碰文件系统
+        let bad_temp = ReasoningParams {
+            temperature: 3.0,
+            ..ReasoningParams::default()
+        };
+        assert!(set_reasoning_params(bad_temp).await.is_err());
+
+        let bad_top_p = ReasoningParams {
+            top_p: 1.5,
+            ..ReasoningParams::default()
+        };
+        assert!(set_reasoning_params(bad_top_p).await.is_err());
     }
 }

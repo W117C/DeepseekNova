@@ -18,6 +18,20 @@ impl deepseeknova_agent::ApprovalResponder for DesktopApprovalResponder {
     }
 }
 
+/// 纯函数核心：将字符串截断到不超过 `max_bytes` 字节，且落在 UTF-8 字符边界上
+/// （否则 `String::truncate` 会 panic）。超长时追加截断标记。
+fn truncate_attachment(content: &mut String, max_bytes: usize) {
+    if content.len() <= max_bytes {
+        return;
+    }
+    let mut cut = max_bytes;
+    while cut > 0 && !content.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    content.truncate(cut);
+    content.push_str("\n…(已截断)");
+}
+
 #[tauri::command]
 pub async fn submit_prompt(
     _app: tauri::AppHandle,
@@ -111,12 +125,23 @@ pub async fn submit_prompt(
         cached.clone()
     };
 
+    // Session-cached MCP tools. Discovered once (spawning stdio server
+    // processes), then reused so we don't spawn/kill servers per prompt.
+    let mcp_tools = {
+        let mut cached = state.session_mcp_tools.lock().await;
+        if cached.is_none() {
+            *cached = Some(deepseeknova_runtime::discover_mcp_tools(&config).await);
+        }
+        cached.clone().unwrap_or_default()
+    };
+
     let agent = deepseeknova_runtime::build_agent(
         &config,
         workspace_root,
         provider.into(),
         config.agent.max_steps,
         gate,
+        mcp_tools,
     )
     .map_err(|e| format!("agent error: {e}"))?
     .with_conversation_history(state.history.clone())
@@ -139,15 +164,7 @@ pub async fn submit_prompt(
         for path in paths {
             match std::fs::read_to_string(path) {
                 Ok(mut content) => {
-                    if content.len() > MAX_ATTACHMENT_BYTES {
-                        // truncate 必须落在 UTF-8 字符边界，否则 panic
-                        let mut cut = MAX_ATTACHMENT_BYTES;
-                        while cut > 0 && !content.is_char_boundary(cut) {
-                            cut -= 1;
-                        }
-                        content.truncate(cut);
-                        content.push_str("\n…(已截断)");
-                    }
+                    truncate_attachment(&mut content, MAX_ATTACHMENT_BYTES);
                     prefix.push_str(&format!("【附件 {path}】\n```\n{content}\n```\n\n"));
                 }
                 Err(e) => {
@@ -255,6 +272,7 @@ pub async fn new_session(state: State<'_, AppState>) -> Result<(), String> {
     state.history.lock().await.clear();
     *state.session_config.lock().await = None;
     *state.session_gate.lock().await = None;
+    *state.session_mcp_tools.lock().await = None;
     state.progress.reset();
     info!("new session started (history + session caches cleared)");
     Ok(())
@@ -297,4 +315,31 @@ pub async fn get_capabilities() -> Result<serde_json::Value, String> {
         "max_steps_default": 25,
         "reasoning_effort_levels": ["low", "medium", "high", "max"],
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_attachment_keeps_short_content_untouched() {
+        let mut s = "hello".to_string();
+        truncate_attachment(&mut s, 64);
+        assert_eq!(s, "hello");
+    }
+
+    #[test]
+    fn truncate_attachment_cuts_ascii_at_exact_limit() {
+        let mut s = "abcdef".to_string();
+        truncate_attachment(&mut s, 4);
+        assert_eq!(s, "abcd\n…(已截断)");
+    }
+
+    #[test]
+    fn truncate_attachment_respects_utf8_char_boundary() {
+        // 每个汉字 3 字节；限制 4 字节落在第二字中间，应回退到 3 字节而非 panic
+        let mut s = "你好世界".to_string();
+        truncate_attachment(&mut s, 4);
+        assert_eq!(s, "你\n…(已截断)");
+    }
 }
