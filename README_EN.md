@@ -34,7 +34,7 @@ A Rust-from-scratch AI agent framework — not a wrapper. Built specifically for
 - **Deep reasoning + tool calling** — streaming reasoning output, 4-level reasoning effort, 13+ built-in tools
 - **Prefix-cache architecture** — cross-turn prompt prefix hits, real-time token tracking, budget control
 - **Sandboxed execution** — macOS Seatbelt / Linux bubblewrap isolation, 12 permission rules
-- **Multi-agent orchestration** *(experimental)* — GOAP planner, Swarm coordination, Agent Federation
+- **Multi-agent delegation** — delegate-based sub-agents (explorer / coder / tester / reviewer) with constrained tool sets, semaphore concurrency, and capped result summaries; isolated context, no recursion. Historical GOAP/Swarm/Federation experiments were removed in B0 (see DESIGN.md).
 - **MCP protocol** — stdio + HTTP dual transport, auto-discovery
 - **Project knowledge** — Wiki generation, knowledge cards, 4-layer memory distillation, file checkpoints
 
@@ -64,6 +64,7 @@ Provider    DeepSeek V4 Pro/Flash   Tools: File · Glob · Grep · Shell
 | `deepseeknova-provider` | DeepSeek / OpenAI-compatible / Anthropic streaming |
 | `deepseeknova-tools` | 13+ built-in tools |
 | `deepseeknova-mcp` | MCP protocol client (stdio / HTTP) |
+| `deepseeknova-graph` | Code graph engine (tree-sitter + SQLite FTS5 + PageRank + repo map) |
 | `deepseeknova-sandbox` | Sandbox trait + macOS Seatbelt / Linux bubblewrap |
 | `deepseeknova-permission` | Allow / Ask / Deny permission gate |
 | `deepseeknova-security` | Path restrictions, resource limits, audit logging |

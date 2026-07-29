@@ -62,12 +62,11 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 
 > ⚠️ **Windows 安全边界**：当前沙箱隔离仅支持 macOS (Seatbelt) 和 Linux (bubblewrap)。Windows 平台执行 Shell 工具时使用 `NoOpSandbox`（无隔离），后续计划通过 Job Object / AppContainer 补齐。在 Windows 平台上，请谨慎配置 `allowed_commands` 和路径策略。
 
-### 🎪 多 Agent 编排 *(实验性)*
-- GOAP 规划器 — 目标导向行动规划
-- Swarm 协调 — 多 Agent 集群协作
-- Agent Federation — 跨实例联邦调度
+### 🎪 多 Agent 委派
+- **delegate 子代理** — explorer / coder / tester / reviewer 四类预设，受限工具集 + 信号量并发控制 + 结果封顶回传
+- 独立上下文隔离，禁递归（子代理不能再委派）
 
-> 🔬 这三个子系统目前处于实验阶段，API 和行为可能随版本变更。
+> 🔬 历史 GOAP / Swarm / Federation 实验已于 B0 裁撤（见 DESIGN.md）；多智能体能力现由 delegate 路径提供。
 
 ### 🧩 MCP 协议原生支持
 - stdio + HTTP 双传输
@@ -123,6 +122,7 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 | `deepseeknova-provider` | DeepSeek / OpenAI 兼容 / Anthropic 流式 Provider |
 | `deepseeknova-tools` | 13+ 内置工具实现 |
 | `deepseeknova-mcp` | MCP 协议客户端（stdio / HTTP） |
+| `deepseeknova-graph` | 代码图检索引擎（tree-sitter + SQLite FTS5 + PageRank + repo map） |
 | `deepseeknova-sandbox` | 沙箱 trait + macOS Seatbelt / Linux bubblewrap |
 | `deepseeknova-permission` | Allow / Ask / Deny 权限门控 |
 | `deepseeknova-security` | 路径限制、资源限额、审计日志 |
