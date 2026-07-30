@@ -72,6 +72,21 @@ pub struct Agent {
 
     recall_provider: Option<RecallProvider>,
     distill_hook: Option<DistillHook>,
+
+    /// max_steps 到顶行为：true = 优雅暂停（默认），false = 旧版报错。
+    pause_on_max_steps: bool,
+
+    /// L3 结构化压缩开关（config.agent.l3_compaction）。
+    l3_enabled: bool,
+
+    /// L3 摘要用 provider；None = 复用主 provider。
+    compact_provider: Option<Arc<dyn Provider>>,
+
+    /// step 边界预算守门；None = 关闭。
+    budget: Option<crate::budget::controller::PromptBudgetController>,
+
+    /// 暂停事件附带的会话标注（CLI/desktop 持久化开启时注入）。
+    session_label: Option<String>,
 }
 
 /// Type-erased provider that yields the current repo-map text (or `None`).
@@ -105,6 +120,11 @@ impl Agent {
             repo_map_provider: None,
             recall_provider: None,
             distill_hook: None,
+            pause_on_max_steps: true,
+            l3_enabled: true,
+            compact_provider: None,
+            budget: None,
+            session_label: None,
         }
     }
 
@@ -197,6 +217,36 @@ impl Agent {
         self
     }
 
+    /// 配置 max_steps 到顶行为："pause"（默认）或 "error"（旧行为逃生舱）。
+    pub fn with_on_max_steps(mut self, mode: &str) -> Self {
+        self.pause_on_max_steps = mode != "error";
+        self
+    }
+
+    /// 开关 L3 结构化压缩（false = 仅 L1/L2 现状）。
+    pub fn with_l3_compaction(mut self, enabled: bool) -> Self {
+        self.l3_enabled = enabled;
+        self
+    }
+
+    /// 指定 L3 摘要用的（廉价）provider；不设则复用主 provider。
+    pub fn with_compact_provider(mut self, p: Arc<dyn Provider>) -> Self {
+        self.compact_provider = Some(p);
+        self
+    }
+
+    /// 启用 step 边界预算守门。
+    pub fn with_budget(mut self, b: crate::budget::controller::PromptBudgetController) -> Self {
+        self.budget = Some(b);
+        self
+    }
+
+    /// 标注当前持久化会话 id（Paused 事件透出给前端）。
+    pub fn with_session_label(mut self, id: impl Into<String>) -> Self {
+        self.session_label = Some(id.into());
+        self
+    }
+
     pub fn register_tool(&mut self, tool: Arc<dyn Tool>) {
         let name = tool.schema().name.clone();
         self.tools.insert(name, tool);
@@ -263,6 +313,18 @@ impl Runner for Agent {
         let repo_map_provider = self.repo_map_provider.clone();
         let recall_provider = self.recall_provider.clone();
         let distill_hook = self.distill_hook.clone();
+        let pause_on_max_steps = self.pause_on_max_steps;
+        let l3_enabled = self.l3_enabled;
+        let compact_provider = self.compact_provider.clone();
+        // PromptBudgetController 不实现 Clone：从 pub 字段重建一份带进 spawn。
+        let budget =
+            self.budget
+                .as_ref()
+                .map(|b| crate::budget::controller::PromptBudgetController {
+                    max_total_tokens: b.max_total_tokens,
+                    max_memory_tokens: b.max_memory_tokens,
+                });
+        let session_label = self.session_label.clone();
 
         // Create a cancellation token and wire Ctrl-C (SIGINT) to cancel it.
         // This enables graceful interruption of the agent loop (e.g. Ctrl-C).
@@ -367,6 +429,11 @@ impl Runner for Agent {
                 permission,
                 approval,
                 extensions,
+                pause_on_max_steps,
+                l3_enabled,
+                compact_provider,
+                budget,
+                session_label,
             )
             .await;
 
@@ -444,6 +511,11 @@ async fn run_agent_loop(
     permission: Option<Arc<PermissionGate>>,
     approval: Option<Arc<dyn ApprovalResponder>>,
     extensions: Vec<Arc<ExtensionApplier>>,
+    pause_on_max_steps: bool,
+    l3_enabled: bool,
+    compact_provider: Option<Arc<dyn Provider>>,
+    budget: Option<crate::budget::controller::PromptBudgetController>,
+    session_label: Option<String>,
 ) -> anyhow::Result<()> {
     // Add user prompt
     memory.add_message(Message {
@@ -460,6 +532,9 @@ async fn run_agent_loop(
     // replay invariant (no dangling tool_calls without matching results).
     let run_started = std::time::Instant::now();
     let mut tool_calls_made: usize = 0;
+
+    // 会话级 L3 压缩器（持有熔断状态，跨 step 复用）。
+    let mut l3 = crate::compaction::L3Compactor::new();
 
     for step in 0..max_steps {
         // Check for cancellation between steps
@@ -498,14 +573,38 @@ async fn run_agent_loop(
 
         info!("agent step {}/{}", step + 1, max_steps);
 
+        // B2 预算守门：step 边界评估。CompressHistory 由下方压缩链处理；
+        // Reject 时优雅暂停（保留历史写回路径），不再盲目上摊上下文。
+        let mut budget_wants_compress = false;
+        if let Some(ref b) = budget {
+            const EXPECTED_TURN_TOKENS: usize = 2048; // 一轮回复的保守预估
+            let current = estimate_tokens(&memory.get_all()) as usize;
+            use crate::budget::controller::BudgetDecision;
+            match b.evaluate_budget(current, EXPECTED_TURN_TOKENS) {
+                BudgetDecision::Allow => {}
+                BudgetDecision::CompressHistory => budget_wants_compress = true,
+                BudgetDecision::Reject(why) => {
+                    warn!("budget rejected further work: {why}");
+                    tx.send(Ok(RunEvent::Paused {
+                        reason: format!("budget: {why}"),
+                        session_id: session_label.clone(),
+                    }))
+                    .await
+                    .ok();
+                    return Ok(());
+                }
+            }
+        }
+
         // Atomic Turn-end compaction
-        if let Some(threshold) = compaction_threshold {
+        if compaction_threshold.is_some() || budget_wants_compress {
+            let threshold = compaction_threshold.unwrap_or(0);
             let all_msgs = memory.get_all();
             let tokens = estimate_tokens(&all_msgs);
 
-            if tokens > threshold {
+            if tokens > threshold || budget_wants_compress {
                 let before = tokens;
-                memory.shrink_large_results(threshold as usize * 4);
+                memory.shrink_large_results(threshold.max(1) as usize * 4);
                 let after_shrink = estimate_tokens(&memory.get_all());
 
                 info!("shrunk tool results: {} -> {} tokens", before, after_shrink);
@@ -515,6 +614,21 @@ async fn run_agent_loop(
                     memory.slide_window();
                     let after_slide = estimate_tokens(&memory.get_all());
                     info!("slid window: {} -> {} tokens", after_shrink, after_slide);
+
+                    // B2 L3：L1+L2 仍不够（或 budget 要求压缩）时，结构化摘要。
+                    // 已熔断（连败 3 次）则直接跳过，省去渲染开销。
+                    if l3_enabled
+                        && !l3.is_disabled()
+                        && (after_slide > threshold || budget_wants_compress)
+                    {
+                        let p: &dyn Provider = compact_provider
+                            .as_deref()
+                            .unwrap_or_else(|| provider.as_ref());
+                        if l3.try_compact(p, memory).await {
+                            let after_l3 = estimate_tokens(&memory.get_all());
+                            info!("L3 compacted: {} -> {} tokens", after_slide, after_l3);
+                        }
+                    }
                 }
             }
         }
@@ -553,6 +667,15 @@ async fn run_agent_loop(
             }
             StepOutcome::MaxSteps => {
                 warn!("agent reached max steps ({max_steps})");
+                if pause_on_max_steps {
+                    tx.send(Ok(RunEvent::Paused {
+                        reason: format!("reached max steps ({max_steps})"),
+                        session_id: session_label.clone(),
+                    }))
+                    .await
+                    .ok();
+                    return Ok(());
+                }
                 return Err(anyhow::anyhow!(
                     "reached max steps ({max_steps}) without completing the task"
                 ));
@@ -561,6 +684,15 @@ async fn run_agent_loop(
     }
 
     warn!("agent reached max steps ({max_steps})");
+    if pause_on_max_steps {
+        tx.send(Ok(RunEvent::Paused {
+            reason: format!("reached max steps ({max_steps})"),
+            session_id: session_label.clone(),
+        }))
+        .await
+        .ok();
+        return Ok(());
+    }
     Err(anyhow::anyhow!(
         "reached max steps ({max_steps}) without completing the task"
     ))
@@ -1029,6 +1161,80 @@ mod tests {
         }
 
         assert!(events.iter().any(|e| matches!(e, RunEvent::Done(_))));
+    }
+
+    /// 永远只回同一个工具调用的 Agent：每个 step 都 Continue，必然耗尽
+    /// max_steps。沿用本模块既有的 MockProvider 单响应（重放）模式。
+    fn looping_agent(max_steps: usize) -> Agent {
+        let provider = Arc::new(MockProvider::new(vec![
+            Chunk::ToolCallStart {
+                id: "loop_1".into(),
+                name: "spy".into(),
+            },
+            Chunk::ToolCallEnd {
+                id: "loop_1".into(),
+                name: "spy".into(),
+                arguments: "{}".into(),
+            },
+            Chunk::Done,
+        ]));
+        let mut agent = Agent::new(provider, max_steps);
+        agent.register_tool(Arc::new(SpyTool {
+            name: "spy",
+            result: "still going".into(),
+        }));
+        agent
+    }
+
+    #[tokio::test]
+    async fn max_steps_pause_emits_paused_not_error() {
+        let agent = looping_agent(2)
+            .with_on_max_steps("pause")
+            .with_session_label("sess-test-1");
+        let mut stream = agent
+            .run_stream(RunInput {
+                prompt: "loop forever".into(),
+                images: vec![],
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        let mut saw_paused = false;
+        while let Some(ev) = stream.next().await {
+            match ev {
+                Ok(RunEvent::Paused { reason, session_id }) => {
+                    assert!(reason.contains("max steps"));
+                    assert_eq!(session_id.as_deref(), Some("sess-test-1"));
+                    saw_paused = true;
+                }
+                Ok(_) => {}
+                Err(e) => panic!("pause mode must not surface a stream error: {e}"),
+            }
+        }
+        assert!(saw_paused, "must emit Paused instead of stream error");
+    }
+
+    #[tokio::test]
+    async fn max_steps_error_mode_keeps_old_behavior() {
+        let agent = looping_agent(2).with_on_max_steps("error");
+        let mut stream = agent
+            .run_stream(RunInput {
+                prompt: "loop forever".into(),
+                images: vec![],
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        let mut saw_err = false;
+        while let Some(ev) = stream.next().await {
+            if ev.is_err() {
+                saw_err = true;
+            }
+        }
+        assert!(
+            saw_err,
+            "error mode must surface a stream error (pre-B2 contract)"
+        );
     }
 
     #[tokio::test]
