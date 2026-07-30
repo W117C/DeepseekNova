@@ -81,6 +81,8 @@ impl SubAgentConfig {
 /// default sub-agent named `"default"` if one is registered.
 pub struct SubAgentRunner {
     provider: Arc<dyn Provider>,
+    /// Provider used for history compaction; falls back to `provider`.
+    compact_provider: Option<Arc<dyn Provider>>,
     sub_agents: HashMap<String, SubAgentConfig>,
     default_sub_agent: Option<String>,
     compaction_threshold_tokens: Option<u32>,
@@ -90,6 +92,7 @@ impl SubAgentRunner {
     pub fn new(provider: Arc<dyn Provider>) -> Self {
         Self {
             provider,
+            compact_provider: None,
             sub_agents: HashMap::new(),
             default_sub_agent: None,
             compaction_threshold_tokens: None,
@@ -111,6 +114,13 @@ impl SubAgentRunner {
     /// Set the compaction token threshold for all sub-agent contexts.
     pub fn with_compaction_threshold(mut self, tokens: u32) -> Self {
         self.compaction_threshold_tokens = Some(tokens);
+        self
+    }
+
+    /// Use a dedicated provider (e.g. the `compact` model pointer) for
+    /// history compaction instead of the main provider.
+    pub fn with_compact_provider(mut self, provider: Arc<dyn Provider>) -> Self {
+        self.compact_provider = Some(provider);
         self
     }
 
@@ -172,6 +182,11 @@ impl Runner for SubAgentRunner {
 
         // Clone what the spawned task needs
         let provider = Arc::clone(&self.provider);
+        let compact_provider = self
+            .compact_provider
+            .as_ref()
+            .map(Arc::clone)
+            .unwrap_or_else(|| Arc::clone(&self.provider));
         let tools = config.tools.clone();
         let max_steps = config.max_steps;
         let system_prompt = config.system_prompt.clone();
@@ -200,6 +215,7 @@ impl Runner for SubAgentRunner {
         tokio::spawn(async move {
             if let Err(e) = run_sub_agent_loop(
                 provider,
+                compact_provider,
                 tools,
                 max_steps,
                 compaction_threshold,
@@ -224,6 +240,7 @@ impl Runner for SubAgentRunner {
 
 async fn run_sub_agent_loop(
     provider: Arc<dyn Provider>,
+    compact_provider: Arc<dyn Provider>,
     tools: Vec<Arc<dyn Tool>>,
     max_steps: usize,
     compaction_threshold: Option<u32>,
@@ -264,7 +281,7 @@ async fn run_sub_agent_loop(
             let tokens = estimate_tokens(&all_msgs);
             if tokens > threshold {
                 let before = tokens;
-                match compact_with_provider(provider.as_ref(), &all_msgs).await {
+                match compact_with_provider(compact_provider.as_ref(), &all_msgs).await {
                     Ok(digest) => {
                         memory.compact(digest, None);
                         let after = estimate_tokens(&memory.get_all());
@@ -446,8 +463,14 @@ async fn compact_with_provider(
 
     let validated = deepseeknova_provider::ValidatedRequest::new(&summary_msgs, &[])
         .map_err(|v| anyhow::anyhow!("invariant violation in sub-agent summarize: {:?}", v))?;
-    let result = provider.generate(validated).await?;
-    Ok(result.content)
+    let mut stream = provider.stream(validated).await?;
+    let mut out = String::new();
+    while let Some(chunk) = stream.next().await {
+        if let Chunk::TextDelta(t) = chunk? {
+            out.push_str(&t);
+        }
+    }
+    Ok(out)
 }
 
 fn format_role(role: Role) -> &'static str {
@@ -642,5 +665,34 @@ mod tests {
         let tokens = estimate_tokens(&msgs);
         assert!(tokens > 0);
         assert!(tokens < 100);
+    }
+
+    // --- Compaction provider routing tests ---
+
+    #[tokio::test]
+    async fn compaction_uses_compact_provider() {
+        use crate::test_utils::MockProvider;
+
+        // 主 provider 回复正常文本；compact provider 回复特征摘要文本
+        let main = Arc::new(MockProvider::text("main-answer"));
+        let compact = Arc::new(MockProvider::text("COMPACT-DIGEST"));
+
+        let mut runner = SubAgentRunner::new(main)
+            .with_compact_provider(compact.clone() as Arc<dyn Provider>)
+            .with_compaction_threshold(1); // 阈值 1 token → 必触发压缩
+        runner.register(SubAgentConfig::new("t", "you are t"));
+        let runner = runner.with_default("t");
+
+        let mut stream = runner
+            .run_stream(RunInput {
+                prompt: "goal: do something with enough words to exceed one token".into(),
+                images: Vec::new(),
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+
+        assert!(compact.call_count() >= 1, "compact provider should be used");
     }
 }
