@@ -105,6 +105,13 @@ pub enum RunEvent {
         title: String,
         description: Option<String>,
     },
+    /// The run stopped gracefully before completion (max-steps pause or
+    /// budget rejection). The task is resumable: frontends should surface
+    /// `reason` and, when present, which saved session to resume.
+    Paused {
+        reason: String,
+        session_id: Option<String>,
+    },
     Done(RunOutput),
 }
 
@@ -163,6 +170,10 @@ pub enum WireEvent {
     Done {
         text: String,
         usage: Option<WireUsageInfo>,
+    },
+    Paused {
+        reason: String,
+        session_id: Option<String>,
     },
     Error {
         message: String,
@@ -241,10 +252,42 @@ impl From<RunEvent> for WireEvent {
                 title,
                 description,
             },
+            RunEvent::Paused { reason, session_id } => WireEvent::Paused { reason, session_id },
             RunEvent::Done(output) => WireEvent::Done {
                 text: output.text,
                 usage: output.usage.map(|u| u.into()),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paused_event_maps_to_wire() {
+        let ev = RunEvent::Paused {
+            reason: "reached max steps (10)".into(),
+            session_id: Some("chat-20260729-120000".into()),
+        };
+        let wire: WireEvent = ev.into();
+        match wire {
+            WireEvent::Paused { reason, session_id } => {
+                assert_eq!(reason, "reached max steps (10)");
+                assert_eq!(session_id.as_deref(), Some("chat-20260729-120000"));
+            }
+            other => panic!("expected Paused, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn paused_wire_event_serializes_with_kind_tag() {
+        let wire = WireEvent::Paused {
+            reason: "budget: over limit".into(),
+            session_id: None,
+        };
+        let json = serde_json::to_string(&wire).unwrap();
+        assert!(json.contains("\"kind\":\"paused\""), "json = {json}");
     }
 }
