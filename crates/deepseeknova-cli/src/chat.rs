@@ -56,11 +56,15 @@ enum SlashAction {
 ///
 /// When `persist` is `Some`, every completed turn is appended to the session
 /// store and the `/sessions` / `/resume` commands become available.
+///
+/// When `router` is `Some`, the `/model use` (role-pointer hot switch) and
+/// `/cost` (token/price report) commands become available.
 pub async fn run_chat_repl<F>(
     agent_factory: F,
     baseline_effort: ReasoningEffort,
     initial_model: Option<String>,
     mut persist: Option<ChatPersistence>,
+    router: Option<std::sync::Arc<deepseeknova_provider::router::ModelRouter>>,
 ) -> anyhow::Result<bool>
 where
     F: Fn(Option<ReasoningEffort>, Option<String>) -> anyhow::Result<Box<dyn Runner + Send>>,
@@ -70,7 +74,7 @@ where
     println!();
     println!("╭──────────────────────────────────────────────────╮");
     println!("│     deepseeknova — interactive chat                  │");
-    println!("│     /exit  /new  /model  /skills  /help          │");
+    println!("│     /exit  /new  /model  /cost  /skills  /help   │");
     println!("╰──────────────────────────────────────────────────╯");
     println!();
 
@@ -124,6 +128,7 @@ where
                 baseline_effort,
                 &mut current_model,
                 persist.as_mut(),
+                router.as_ref(),
             )
             .await?;
             match action {
@@ -319,6 +324,8 @@ where
 }
 
 /// Handle a slash command. Returns a [`SlashAction`] telling the main loop what to do.
+// 私有 REPL 分发器：参数即命令所需的全部会话状态，拆结构体反而降低可读性。
+#[allow(clippy::too_many_arguments)]
 async fn handle_slash_command(
     cmd: &str,
     mode: &mut DisplayMode,
@@ -327,6 +334,7 @@ async fn handle_slash_command(
     baseline_effort: ReasoningEffort,
     current_model: &mut Option<String>,
     persist: Option<&mut ChatPersistence>,
+    router: Option<&std::sync::Arc<deepseeknova_provider::router::ModelRouter>>,
 ) -> anyhow::Result<SlashAction> {
     // Split command and optional arguments
     let (name, args) = cmd.split_once(' ').unwrap_or((cmd, ""));
@@ -379,12 +387,32 @@ async fn handle_slash_command(
                     );
                     println!("  /model thinking        — toggle thinking on/off");
                     println!("  /model switch <name>   — switch to a named provider model");
+                    println!(
+                        "  /model use <role> <name>  — set a role pointer: main|task|compact|quick"
+                    );
                     println!();
                     println!(
                         "Current: effort={}, model={}",
                         effort_label(*current_effort),
                         current_model.as_deref().unwrap_or("(default)")
                     );
+                    if let Some(r) = router {
+                        use deepseeknova_provider::cost::ModelRole;
+                        println!();
+                        println!("Model pointers:");
+                        for role in [
+                            ModelRole::Main,
+                            ModelRole::Task,
+                            ModelRole::Compact,
+                            ModelRole::Quick,
+                        ] {
+                            println!(
+                                "  {:<8} → {}",
+                                role.label(),
+                                r.pointer(role).unwrap_or_else(|| "(default)".to_string())
+                            );
+                        }
+                    }
                 }
                 "effort" => {
                     if sub_args.is_empty() {
@@ -436,12 +464,75 @@ async fn handle_slash_command(
                         });
                     }
                 }
+                "use" => {
+                    let mut parts = sub_args.split_whitespace();
+                    match (parts.next(), parts.next(), router) {
+                        (Some(role_s), Some(model), Some(r)) => {
+                            match deepseeknova_provider::cost::ModelRole::parse(role_s) {
+                                Some(role) => match r.set_pointer(role, model) {
+                                    Ok(()) => {
+                                        println!("pointer {} → {model}", role.label());
+                                        // 重建 agent 使新指针生效（含委派引擎）
+                                        return Ok(SlashAction::Rebuild {
+                                            effort: None,
+                                            model: None,
+                                        });
+                                    }
+                                    Err(e) => eprintln!("{e}"),
+                                },
+                                None => {
+                                    eprintln!("unknown role '{role_s}': main|task|compact|quick")
+                                }
+                            }
+                        }
+                        (_, _, None) => eprintln!("model pointers unavailable (no router)"),
+                        _ => eprintln!("Usage: /model use <main|task|compact|quick> <model-name>"),
+                    }
+                }
                 other => {
                     eprintln!("unknown /model sub-command: {other}");
                     eprintln!("try /model help");
                 }
             }
         }
+
+        // ── Cost accounting ─────────────────────────────────
+        "cost" => match router {
+            Some(r) => {
+                let report = r.ledger().report(&r.price_table());
+                if report.rows.is_empty() {
+                    println!("no usage recorded yet");
+                } else {
+                    println!(
+                        "{:<24} {:<8} {:>10} {:>12} {:>10} {:>10}",
+                        "model", "role", "prompt", "completion", "cache-hit", "cost($)"
+                    );
+                    for row in &report.rows {
+                        println!(
+                            "{:<24} {:<8} {:>10} {:>12} {:>10} {:>10}",
+                            row.model,
+                            row.role.label(),
+                            row.bucket.prompt_tokens,
+                            row.bucket.completion_tokens,
+                            row.bucket.cache_hit_tokens,
+                            row.cost_usd
+                                .map(|c| format!("{c:.4}"))
+                                .unwrap_or_else(|| "-".to_string()),
+                        );
+                    }
+                    if let Some(total) = report.total_usd {
+                        println!("total estimated: ${total:.4}");
+                    }
+                    if report.unmetered_calls > 0 {
+                        println!(
+                            "note: {} call(s) had no usage info (not estimated)",
+                            report.unmetered_calls
+                        );
+                    }
+                }
+            }
+            None => println!("cost accounting unavailable (no router)"),
+        },
 
         // ── Skills ────────────────────────────────────────────
         "skills" => {
@@ -554,6 +645,7 @@ async fn handle_slash_command(
             println!("  /clear            — clear the screen");
             println!("  /raw              — cycle display mode (normal/lite/raw)");
             println!("  /model            — show / change model & reasoning settings");
+            println!("  /cost             — show per-model token usage & estimated cost");
             println!("  /skills           — list available agent skills");
             println!("  /mcp              — MCP server status");
             println!("  /sessions         — list saved sessions");

@@ -24,6 +24,19 @@ async fn main() -> anyhow::Result<()> {
         deepseeknova_config::Config::default()
     });
 
+    // Role-pointer routing + cost accounting. The router owns its ledger
+    // (retrievable via `router.ledger()`), so no separate binding is needed.
+    let model_router = Arc::new(
+        deepseeknova_provider::router::ModelRouter::from_config(
+            &config,
+            Arc::new(deepseeknova_provider::cost::CostLedger::new()),
+        )
+        .unwrap_or_else(|e| {
+            eprintln!("config error: {e}");
+            std::process::exit(2);
+        }),
+    );
+
     // Tracing backend — exactly one of the two is installed. The telemetry
     // guard's registry carries no fmt layer, so terminal log output is
     // suppressed while OTLP export is active (known trade-off); it must be
@@ -112,6 +125,7 @@ async fn main() -> anyhow::Result<()> {
                 let mcp_tools = deepseeknova_runtime::discover_mcp_tools(&config).await;
                 let agent = build_agent(
                     Arc::clone(&provider),
+                    None,
                     model_args.model.as_deref(),
                     &config,
                     model_args.max_steps,
@@ -172,7 +186,7 @@ async fn main() -> anyhow::Result<()> {
                 let history: Arc<tokio::sync::Mutex<Vec<deepseeknova_core::Message>>> =
                     Arc::new(tokio::sync::Mutex::new(Vec::new()));
                 let provider = resolve_provider_for_task(&config, model, Some(baseline_effort))?;
-                let agent = build_agent(provider, model.as_deref(), &config, 0, mcp_tools)?
+                let agent = build_agent(provider, None, model.as_deref(), &config, 0, mcp_tools)?
                     .with_conversation_history(history);
                 deepseeknova_tui::TuiRunner::new(Arc::new(agent))
                     .run()
@@ -201,13 +215,21 @@ async fn main() -> anyhow::Result<()> {
                 let history_clone = Arc::clone(&history);
                 let cfg = &config;
                 let mcp_tools = mcp_tools.clone();
+                let router = Arc::clone(&model_router);
                 let agent_factory =
                     move |effort: Option<deepseeknova_provider::factory::ReasoningEffort>,
                           model_name: Option<String>|
                           -> anyhow::Result<Box<dyn Runner + Send>> {
-                        let provider = resolve_provider_for_task(cfg, &model_name, effort)?;
+                        use deepseeknova_provider::cost::ModelRole;
+                        let provider = match &model_name {
+                            // `/model switch <name>` 显式覆盖，仍按 Main 角色计量
+                            Some(m) => router.provider_for_model(m, ModelRole::Main, effort)?,
+                            None => router.provider_for(ModelRole::Main, effort)?,
+                        };
+                        let task_provider = router.provider_for(ModelRole::Task, effort)?;
                         let agent = build_agent(
-                            Arc::clone(&provider),
+                            provider,
+                            Some(task_provider),
                             model_name.as_deref(),
                             cfg,
                             0, // no max_steps limit in chat mode
@@ -217,9 +239,14 @@ async fn main() -> anyhow::Result<()> {
                         Ok(Box::new(agent))
                     };
 
-                let restart =
-                    chat::run_chat_repl(agent_factory, baseline_effort, model.clone(), persist)
-                        .await?;
+                let restart = chat::run_chat_repl(
+                    agent_factory,
+                    baseline_effort,
+                    model.clone(),
+                    persist,
+                    Some(Arc::clone(&model_router)),
+                )
+                .await?;
                 if !restart {
                     break;
                 }
@@ -241,7 +268,7 @@ async fn main() -> anyhow::Result<()> {
             let responder: Arc<dyn deepseeknova_core::runner::ApprovalResponder> = Arc::new(
                 deepseeknova_serve::ServerApprovalResponder::new(pending.clone()),
             );
-            let agent = build_agent(Arc::clone(&provider), None, &config, 0, mcp_tools)?
+            let agent = build_agent(Arc::clone(&provider), None, None, &config, 0, mcp_tools)?
                 .with_approval_responder(responder);
             let runner: Arc<dyn Runner> = Arc::new(agent);
 
@@ -334,13 +361,21 @@ async fn main() -> anyhow::Result<()> {
                 let history_clone = Arc::clone(&history);
                 let cfg = &config;
                 let mcp_tools = mcp_tools.clone();
+                let router = Arc::clone(&model_router);
                 let agent_factory =
                     move |effort: Option<deepseeknova_provider::factory::ReasoningEffort>,
                           model_name: Option<String>|
                           -> anyhow::Result<Box<dyn Runner + Send>> {
-                        let provider = resolve_provider_for_task(cfg, &model_name, effort)?;
+                        use deepseeknova_provider::cost::ModelRole;
+                        let provider = match &model_name {
+                            // `/model switch <name>` 显式覆盖，仍按 Main 角色计量
+                            Some(m) => router.provider_for_model(m, ModelRole::Main, effort)?,
+                            None => router.provider_for(ModelRole::Main, effort)?,
+                        };
+                        let task_provider = router.provider_for(ModelRole::Task, effort)?;
                         let agent = build_agent(
-                            Arc::clone(&provider),
+                            provider,
+                            Some(task_provider),
                             model_name.as_deref(),
                             cfg,
                             0,
@@ -350,8 +385,14 @@ async fn main() -> anyhow::Result<()> {
                         Ok(Box::new(agent))
                     };
 
-                let restart =
-                    chat::run_chat_repl(agent_factory, baseline_effort, None, persist).await?;
+                let restart = chat::run_chat_repl(
+                    agent_factory,
+                    baseline_effort,
+                    None,
+                    persist,
+                    Some(Arc::clone(&model_router)),
+                )
+                .await?;
                 if !restart {
                     break;
                 }
@@ -418,8 +459,11 @@ fn resolve_provider_for_task(
 
 /// Build an agent with built-in tools registered, plus any `extra_tools`
 /// (e.g. MCP tools discovered via [`deepseeknova_runtime::discover_mcp_tools`]).
+/// `task_provider` routes the delegation engine (sub-agents) to the Task-role
+/// model when supplied; `None` falls back to the main provider.
 fn build_agent(
     provider: Arc<dyn deepseeknova_provider::Provider>,
+    task_provider: Option<Arc<dyn deepseeknova_provider::Provider>>,
     _model: Option<&str>,
     config: &deepseeknova_config::Config,
     max_steps: usize,
@@ -429,10 +473,11 @@ fn build_agent(
     // Delegate to the shared runtime builder (security + sandbox + permission
     // gate wiring lives in one place). CLI is non-interactive, so no approval
     // responder is attached — the gate falls back to Allow on `Ask`.
-    deepseeknova_runtime::build_agent(
+    deepseeknova_runtime::build_agent_with_task_provider(
         config,
         workspace_root,
         provider,
+        task_provider,
         max_steps,
         None,
         extra_tools,
