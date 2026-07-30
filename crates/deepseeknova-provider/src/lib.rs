@@ -11,6 +11,7 @@ use deepseeknova_core::chunk::ChunkStream;
 use deepseeknova_core::Message;
 
 pub mod anthropic;
+pub mod cost;
 pub mod openai;
 pub mod scavenge;
 pub mod telemetry;
