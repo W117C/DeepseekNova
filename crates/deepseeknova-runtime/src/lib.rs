@@ -217,28 +217,15 @@ pub fn build_security_context(
     })
 }
 
-/// Build a fully-wired [`deepseeknova_agent::Agent`] from config.
-///
-/// Single composition point for the security dual-layer, shared by CLI and
-/// desktop so their wiring can't drift:
-/// - always injects the [`SecurityContext`] (capabilities, path confinement,
-///   resource limits);
-/// - attaches the [`PermissionGate`] only when `config.permissions.enabled`;
-/// - wires the shell tool to the OS sandbox only when `config.sandbox.enabled`
-///   (otherwise `NoOpSandbox`), so activation is opt-in and Windows/CI stay on
-///   the no-isolation path by default.
-///
-/// Callers add frontend-specific pieces (conversation history, approval
-/// responder) on the returned agent via its builder methods.
-///
-/// `extra_tools` are registered after the built-in tools and pass through the
-/// same `config.tools.overrides` disable filter. Callers use it to inject
-/// dynamically-discovered tools (e.g. MCP tools from [`discover_mcp_tools`]);
-/// pass an empty vec when there are none.
-pub fn build_agent(
+/// Like [`build_agent`], but routes the delegate engine's sub-agents to a
+/// dedicated `task` provider (the `task` model pointer). `None` falls back
+/// to the main provider — identical to [`build_agent`].
+#[allow(clippy::too_many_arguments)]
+pub fn build_agent_with_task_provider(
     config: &Config,
     workspace_root: PathBuf,
     provider: Arc<dyn deepseeknova_provider::Provider>,
+    task_provider: Option<Arc<dyn deepseeknova_provider::Provider>>,
     max_steps: usize,
     gate: Option<Arc<PermissionGate>>,
     extra_tools: Vec<Arc<dyn deepseeknova_core::Tool>>,
@@ -430,10 +417,15 @@ pub fn build_agent(
     }
 
     // ── 委派引擎：为每个预设构建受限工具集的子 Agent（共享 graph/memory 句柄）──
+    // 子代理路由到独立 task provider（若提供），否则回退主 provider。
     if config.delegate.enabled {
+        let delegate_provider = task_provider
+            .as_ref()
+            .map(Arc::clone)
+            .unwrap_or_else(|| Arc::clone(&provider));
         let engine = build_delegate_engine(
             config,
-            Arc::clone(&provider),
+            delegate_provider,
             &workspace_root,
             &security,
             gate.clone(),
@@ -445,6 +437,43 @@ pub fn build_agent(
     }
 
     Ok(agent)
+}
+
+/// Build a fully-wired [`deepseeknova_agent::Agent`] from config.
+///
+/// Single composition point for the security dual-layer, shared by CLI and
+/// desktop so their wiring can't drift:
+/// - always injects the [`SecurityContext`] (capabilities, path confinement,
+///   resource limits);
+/// - attaches the [`PermissionGate`] only when `config.permissions.enabled`;
+/// - wires the shell tool to the OS sandbox only when `config.sandbox.enabled`
+///   (otherwise `NoOpSandbox`), so activation is opt-in and Windows/CI stay on
+///   the no-isolation path by default.
+///
+/// Callers add frontend-specific pieces (conversation history, approval
+/// responder) on the returned agent via its builder methods.
+///
+/// `extra_tools` are registered after the built-in tools and pass through the
+/// same `config.tools.overrides` disable filter. Callers use it to inject
+/// dynamically-discovered tools (e.g. MCP tools from [`discover_mcp_tools`]);
+/// pass an empty vec when there are none.
+pub fn build_agent(
+    config: &Config,
+    workspace_root: PathBuf,
+    provider: Arc<dyn deepseeknova_provider::Provider>,
+    max_steps: usize,
+    gate: Option<Arc<PermissionGate>>,
+    extra_tools: Vec<Arc<dyn deepseeknova_core::Tool>>,
+) -> anyhow::Result<deepseeknova_agent::Agent> {
+    build_agent_with_task_provider(
+        config,
+        workspace_root,
+        provider,
+        None,
+        max_steps,
+        gate,
+        extra_tools,
+    )
 }
 
 /// Connect to every enabled MCP server in `config` and return their tools,
@@ -672,6 +701,27 @@ mod tests {
         config.memory.enabled = false;
         let provider = std::sync::Arc::new(stub_provider());
         let agent = build_agent(&config, std::env::temp_dir(), provider, 5, None, vec![]).unwrap();
+        assert!(agent.tool_names().iter().any(|n| n == "delegate"));
+    }
+
+    #[tokio::test]
+    async fn build_agent_with_task_provider_compiles_and_registers_delegate() {
+        let mut config = Config::default();
+        config.delegate.enabled = true;
+        config.graph.enabled = false;
+        config.memory.enabled = false;
+        let main: Arc<dyn deepseeknova_provider::Provider> = Arc::new(stub_provider());
+        let task: Arc<dyn deepseeknova_provider::Provider> = Arc::new(stub_provider());
+        let agent = build_agent_with_task_provider(
+            &config,
+            std::env::temp_dir(),
+            main,
+            Some(task),
+            0,
+            None,
+            vec![],
+        )
+        .unwrap();
         assert!(agent.tool_names().iter().any(|n| n == "delegate"));
     }
 
