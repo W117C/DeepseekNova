@@ -75,6 +75,10 @@ pub struct Config {
     /// OpenTelemetry export settings (disabled by default).
     #[serde(default)]
     pub telemetry: TelemetryConfig,
+
+    /// Role-based model pointers (main/task/compact/quick).
+    #[serde(default)]
+    pub model_pointers: ModelPointersConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -188,10 +192,74 @@ pub struct ModelConfig {
     /// Model is only used for planning (read-only, no tool execution).
     #[serde(default)]
     pub planner_only: bool,
+
+    /// Input (prompt) price in USD per 1M tokens. Unset = cost not estimated.
+    #[serde(default)]
+    pub input_price_per_mtok: Option<f64>,
+
+    /// Output (completion, incl. reasoning) price in USD per 1M tokens.
+    #[serde(default)]
+    pub output_price_per_mtok: Option<f64>,
+
+    /// Prompt-cache-hit price in USD per 1M tokens. Unset = falls back to
+    /// `input_price_per_mtok` when estimating.
+    #[serde(default)]
+    pub cache_hit_price_per_mtok: Option<f64>,
 }
 
 fn default_true() -> bool {
     true
+}
+
+// ---------------------------------------------------------------------------
+// Model pointers — role-based model routing (Kode-style main/task/compact/quick)
+// ---------------------------------------------------------------------------
+
+/// Role-based model pointers. Each role optionally names an entry in
+/// `[[models]]`. Unset roles fall back to `main`; an unset `main` falls back
+/// to the legacy default-provider resolution, so zero-config behaviour is
+/// unchanged.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ModelPointersConfig {
+    /// Primary conversation model.
+    #[serde(default)]
+    pub main: Option<String>,
+    /// Sub-agent / delegation model.
+    #[serde(default)]
+    pub task: Option<String>,
+    /// History-compaction (summarize) model.
+    #[serde(default)]
+    pub compact: Option<String>,
+    /// Fast utility model (titles, classification).
+    #[serde(default)]
+    pub quick: Option<String>,
+}
+
+impl ModelPointersConfig {
+    fn merge(&mut self, other: ModelPointersConfig) {
+        if other.main.is_some() {
+            self.main = other.main;
+        }
+        if other.task.is_some() {
+            self.task = other.task;
+        }
+        if other.compact.is_some() {
+            self.compact = other.compact;
+        }
+        if other.quick.is_some() {
+            self.quick = other.quick;
+        }
+    }
+
+    /// Iterate (role-name, pointer) pairs for validation and routing.
+    pub fn entries(&self) -> [(&'static str, &Option<String>); 4] {
+        [
+            ("main", &self.main),
+            ("task", &self.task),
+            ("compact", &self.compact),
+            ("quick", &self.quick),
+        ]
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -681,6 +749,8 @@ impl Config {
         // Layer 3: environment variables
         config.apply_env_overrides();
 
+        config.validate()?;
+
         Ok(config)
     }
 
@@ -710,6 +780,7 @@ impl Config {
         self.sandbox.merge(other.sandbox);
         self.security.merge(other.security);
         self.telemetry.merge(other.telemetry);
+        self.model_pointers.merge(other.model_pointers);
     }
 
     /// Apply DEEPSEEKNOVA_* environment variable overrides.
@@ -742,6 +813,38 @@ impl Config {
         }
         // Fall back to first provider
         self.providers.first()
+    }
+
+    /// Validate cross-references: model pointers must name a defined model,
+    /// and prices must be non-negative. Called by [`Config::load`]; callers
+    /// constructing configs programmatically may call it directly.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let names: Vec<&str> = self.models.iter().map(|m| m.name.as_str()).collect();
+        for (role, ptr) in self.model_pointers.entries() {
+            if let Some(model) = ptr {
+                if !names.contains(&model.as_str()) {
+                    anyhow::bail!(
+                        "model_pointers.{role} points to unknown model '{model}' \
+                         (known models: {})",
+                        names.join(", ")
+                    );
+                }
+            }
+        }
+        for m in &self.models {
+            for (field, price) in [
+                ("input_price_per_mtok", m.input_price_per_mtok),
+                ("output_price_per_mtok", m.output_price_per_mtok),
+                ("cache_hit_price_per_mtok", m.cache_hit_price_per_mtok),
+            ] {
+                if let Some(p) = price {
+                    if p < 0.0 {
+                        anyhow::bail!("models.{}.{field} must be >= 0, got {p}", m.name);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
 
