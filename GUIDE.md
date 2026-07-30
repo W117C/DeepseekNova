@@ -137,6 +137,28 @@ servers = [
 ]
 ```
 
+### 模型指针与成本分账
+
+按角色路由模型（均可选；未配置的角色回落 `main`，`main` 未配置则用默认 provider）：
+
+```toml
+[model_pointers]
+main = "deepseek-v4"          # 主对话
+task = "deepseek-v4-flash"    # 子代理/委派
+compact = "deepseek-v4-flash" # 历史压缩
+quick = "deepseek-v4-flash"   # 快速操作
+
+[[models]]
+name = "deepseek-v4"
+provider = "deepseek"
+input_price_per_mtok = 0.28    # $/1M tokens，可选；配齐 input+output 才输出美元估算
+output_price_per_mtok = 0.42
+cache_hit_price_per_mtok = 0.028
+```
+
+会话内：`/model` 查看指针，`/model use <role> <model>` 热切换（不写盘），`/cost` 查看
+按 模型×角色 的 token 用量与成本估算。
+
 ### Environment Variables
 
 | Variable | Description |
