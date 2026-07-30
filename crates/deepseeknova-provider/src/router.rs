@@ -2,7 +2,7 @@
 //!
 //! [`ModelRouter`] resolves the `[model_pointers]` config section into
 //! lazily-built, cached provider instances. Every returned provider is
-//! wrapped in a [`MeteredProvider`](crate::cost::MeteredProvider) so token
+//! wrapped in a [`MeteredProvider`] so token
 //! accounting happens transparently.
 
 use crate::cost::{CostLedger, MeteredProvider, ModelPrices, ModelRole, PriceTable};
@@ -33,9 +33,9 @@ pub struct ModelRouter {
 }
 
 impl ModelRouter {
-    /// Build from config. Re-runs [`Config::validate`] so programmatically
-    /// constructed configs get the same dangling-pointer guarantees as
-    /// `Config::load`.
+    /// Build from config. Re-runs [`Config::validate`](deepseeknova_config::Config::validate)
+    /// so programmatically constructed configs get the same dangling-pointer
+    /// guarantees as `Config::load`.
     pub fn from_config(
         config: &deepseeknova_config::Config,
         ledger: Arc<CostLedger>,
