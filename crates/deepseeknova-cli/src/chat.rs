@@ -412,6 +412,10 @@ async fn handle_slash_command(
                                 r.pointer(role).unwrap_or_else(|| "(default)".to_string())
                             );
                         }
+                        println!(
+                            "  (note: an explicit /model switch overrides the main pointer \
+                             for this session)"
+                        );
                     }
                 }
                 "effort" => {
