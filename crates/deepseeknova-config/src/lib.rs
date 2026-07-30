@@ -838,8 +838,11 @@ impl Config {
                 ("cache_hit_price_per_mtok", m.cache_hit_price_per_mtok),
             ] {
                 if let Some(p) = price {
-                    if p < 0.0 {
-                        anyhow::bail!("models.{}.{field} must be >= 0, got {p}", m.name);
+                    if !p.is_finite() || p < 0.0 {
+                        anyhow::bail!(
+                            "models.{}.{field} must be a finite value >= 0, got {p}",
+                            m.name
+                        );
                     }
                 }
             }

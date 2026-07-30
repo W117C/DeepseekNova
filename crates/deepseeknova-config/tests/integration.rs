@@ -351,6 +351,15 @@ fn negative_price_rejected() {
 }
 
 #[test]
+fn non_finite_price_rejected() {
+    let mut cfg: deepseeknova_config::Config = toml::from_str(pointer_config_toml()).unwrap();
+    cfg.models[0].input_price_per_mtok = Some(f64::NAN);
+    assert!(cfg.validate().is_err());
+    cfg.models[0].input_price_per_mtok = Some(f64::INFINITY);
+    assert!(cfg.validate().is_err());
+}
+
+#[test]
 fn model_pointers_merge_project_over_user() {
     let mut user: deepseeknova_config::Config = toml::from_str(pointer_config_toml()).unwrap();
     let mut project = deepseeknova_config::Config::default();
