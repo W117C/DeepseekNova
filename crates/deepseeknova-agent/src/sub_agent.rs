@@ -677,7 +677,7 @@ mod tests {
         let main = Arc::new(MockProvider::text("main-answer"));
         let compact = Arc::new(MockProvider::text("COMPACT-DIGEST"));
 
-        let mut runner = SubAgentRunner::new(main)
+        let mut runner = SubAgentRunner::new(main.clone())
             .with_compact_provider(compact.clone() as Arc<dyn Provider>)
             .with_compaction_threshold(1); // 阈值 1 token → 必触发压缩
         runner.register(SubAgentConfig::new("t", "you are t"));
@@ -694,5 +694,10 @@ mod tests {
         while stream.next().await.is_some() {}
 
         assert!(compact.call_count() >= 1, "compact provider should be used");
+        // 主 provider 仍应参与对话生成，防止整个 runner 误路由到 compact provider
+        assert!(
+            main.call_count() >= 1,
+            "main provider should still be used for sub-agent turns"
+        );
     }
 }
