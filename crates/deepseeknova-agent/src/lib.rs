@@ -25,6 +25,8 @@
 
 pub mod agent;
 pub mod budget;
+#[allow(dead_code)] // wired in Task 5
+mod compaction;
 pub mod coordinator;
 pub mod delegate;
 pub mod memory;
