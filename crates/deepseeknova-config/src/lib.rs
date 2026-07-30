@@ -75,6 +75,14 @@ pub struct Config {
     /// OpenTelemetry export settings (disabled by default).
     #[serde(default)]
     pub telemetry: TelemetryConfig,
+
+    /// Session persistence for long-task resume (B2).
+    #[serde(default)]
+    pub session: SessionConfig,
+
+    /// Prompt budget guard evaluated at agent step boundaries (B2).
+    #[serde(default)]
+    pub budget: BudgetConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -412,10 +420,26 @@ pub struct AgentConfig {
     /// Whether plan mode is enabled by default.
     #[serde(default)]
     pub plan_mode_default: bool,
+
+    /// What to do when max_steps is exhausted: "pause" (default, saves the
+    /// session and emits RunEvent::Paused) or "error" (pre-B2 behavior).
+    #[serde(default = "default_on_max_steps")]
+    pub on_max_steps: String,
+
+    /// Enable L3 structured LLM compaction. false = L1/L2 only (pre-B2).
+    #[serde(default = "default_true")]
+    pub l3_compaction: bool,
+
+    /// Model used for L3 compaction digests. Empty = main model.
+    #[serde(default)]
+    pub compact_model: String,
 }
 
 fn default_max_steps() -> usize {
     10
+}
+fn default_on_max_steps() -> String {
+    "pause".to_string()
 }
 
 impl Default for AgentConfig {
@@ -426,6 +450,9 @@ impl Default for AgentConfig {
             compaction_threshold_tokens: None,
             concurrent_tools: true,
             plan_mode_default: false,
+            on_max_steps: default_on_max_steps(),
+            l3_compaction: true,
+            compact_model: String::new(),
         }
     }
 }
@@ -645,6 +672,69 @@ pub struct TelemetryConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Session（长任务会话持久化）
+// ---------------------------------------------------------------------------
+
+/// Session persistence configuration (long-task resume).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionConfig {
+    /// Whether chat/run sessions are persisted (default: true).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Session store root. Empty (default) = `~/.deepseeknova/sessions`
+    /// (the pre-B2 behavior); non-empty = explicit directory path.
+    #[serde(default)]
+    pub root: String,
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            root: String::new(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Budget（step 边界上下文预算守门）
+// ---------------------------------------------------------------------------
+
+/// Prompt budget configuration, feeding `PromptBudgetController`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BudgetConfig {
+    /// Whether the budget guard runs at step boundaries (default: true).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Hard context ceiling in estimated tokens (default: 128000).
+    #[serde(default = "default_budget_total")]
+    pub max_total_tokens: usize,
+
+    /// Memory sub-budget in estimated tokens (default: 32000).
+    #[serde(default = "default_budget_memory")]
+    pub max_memory_tokens: usize,
+}
+
+fn default_budget_total() -> usize {
+    128_000
+}
+fn default_budget_memory() -> usize {
+    32_000
+}
+
+impl Default for BudgetConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_total_tokens: default_budget_total(),
+            max_memory_tokens: default_budget_memory(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Loading & merging
 // ---------------------------------------------------------------------------
 
@@ -710,6 +800,8 @@ impl Config {
         self.sandbox.merge(other.sandbox);
         self.security.merge(other.security);
         self.telemetry.merge(other.telemetry);
+        self.session = other.session;
+        self.budget = other.budget;
     }
 
     /// Apply DEEPSEEKNOVA_* environment variable overrides.
@@ -769,6 +861,11 @@ impl AgentConfig {
         self.max_steps = other.max_steps;
         self.concurrent_tools = other.concurrent_tools;
         self.plan_mode_default = other.plan_mode_default;
+        self.on_max_steps = other.on_max_steps;
+        self.l3_compaction = other.l3_compaction;
+        if !other.compact_model.is_empty() {
+            self.compact_model = other.compact_model;
+        }
     }
 }
 
@@ -1029,5 +1126,31 @@ mod tests {
         assert_eq!(c.delegate.agents.len(), 1);
         assert_eq!(c.delegate.agents[0].name, "coder");
         assert_eq!(c.delegate.agents[0].max_steps, Some(25));
+    }
+
+    #[test]
+    fn session_budget_config_defaults() {
+        let c = Config::default();
+        assert!(c.session.enabled);
+        assert_eq!(c.session.root, "");
+        assert!(c.budget.enabled);
+        assert_eq!(c.budget.max_total_tokens, 128_000);
+        assert_eq!(c.budget.max_memory_tokens, 32_000);
+        assert_eq!(c.agent.on_max_steps, "pause");
+        assert!(c.agent.l3_compaction);
+        assert_eq!(c.agent.compact_model, "");
+    }
+
+    #[test]
+    fn agent_b2_fields_parse_overrides() {
+        let toml = "[agent]\non_max_steps = \"error\"\nl3_compaction = false\ncompact_model = \"deepseek-chat\"\n\n[budget]\nenabled = false\nmax_total_tokens = 64000\n";
+        let c: Config = toml::from_str(toml).unwrap();
+        assert_eq!(c.agent.on_max_steps, "error");
+        assert!(!c.agent.l3_compaction);
+        assert_eq!(c.agent.compact_model, "deepseek-chat");
+        assert!(!c.budget.enabled);
+        assert_eq!(c.budget.max_total_tokens, 64_000);
+        assert_eq!(c.budget.max_memory_tokens, 32_000);
+        assert!(c.session.enabled);
     }
 }
