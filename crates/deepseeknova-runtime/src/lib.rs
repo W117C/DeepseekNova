@@ -614,6 +614,59 @@ fn build_delegate_engine(
     ))
 }
 
+/// Build a [`SubAgentRunner`](deepseeknova_agent::SubAgentRunner) for
+/// coordinator `Delegate` actions: sub-agent turns use `task_provider` (the
+/// `task` model pointer), history compaction uses `compact_provider` (the
+/// `compact` pointer), falling back to the task provider when `None`.
+///
+/// Presets and tool restrictions mirror the delegate engine: merged builtin
+/// presets + `config.delegate.agents` overrides, sandbox-aware builtin
+/// tools, `"delegate"` always excluded (no recursion), no MCP tools.
+pub fn build_sub_agent_runner(
+    config: &Config,
+    task_provider: Arc<dyn deepseeknova_provider::Provider>,
+    compact_provider: Option<Arc<dyn deepseeknova_provider::Provider>>,
+) -> deepseeknova_agent::SubAgentRunner {
+    use deepseeknova_core::Tool;
+
+    // 子代理工具源（与委派引擎同款：沿用沙箱选择，不接 MCP 工具）。
+    let base: Vec<Arc<dyn Tool>> = if config.sandbox.enabled {
+        let sandbox: Arc<dyn deepseeknova_sandbox::Sandbox> =
+            Arc::from(deepseeknova_sandbox::platform_sandbox_with(
+                &config.sandbox.writable_paths,
+                config.sandbox.allow_network,
+            ));
+        deepseeknova_tools::all_builtin_tools_with_sandbox(sandbox)
+    } else {
+        deepseeknova_tools::all_builtin_tools()
+    };
+
+    let mut runner = deepseeknova_agent::SubAgentRunner::new(task_provider);
+    for p in merged_delegate_presets(config) {
+        // 禁递归：即便配置误加 "delegate" 也剔除。
+        let sub_tools: Vec<Arc<dyn Tool>> = base
+            .iter()
+            .filter(|t| {
+                let n = t.schema().name;
+                n != "delegate" && p.tools.iter().any(|allow| allow == &n)
+            })
+            .cloned()
+            .collect();
+        runner.register(
+            deepseeknova_agent::SubAgentConfig::new(p.name.clone(), p.system_prompt.clone())
+                .with_tools(sub_tools)
+                .with_max_steps(p.max_steps),
+        );
+    }
+    if let Some(threshold) = config.agent.compaction_threshold_tokens {
+        runner = runner.with_compaction_threshold(threshold);
+    }
+    if let Some(compact) = compact_provider {
+        runner = runner.with_compact_provider(compact);
+    }
+    runner
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -645,6 +698,82 @@ mod tests {
 
     fn stub_provider() -> StubProvider {
         StubProvider
+    }
+
+    // --- build_sub_agent_runner (coordinator Delegate wiring) ---
+
+    /// Counting stub: proves the compact provider (not the task provider)
+    /// served the compaction request.
+    struct CountingProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl deepseeknova_provider::Provider for CountingProvider {
+        async fn generate(
+            &self,
+            _validated: deepseeknova_provider::ValidatedRequest<'_>,
+        ) -> anyhow::Result<deepseeknova_core::Message> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(deepseeknova_core::Message {
+                role: deepseeknova_core::Role::Assistant,
+                content: "digest".into(),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn sub_agent_runner_registers_presets_and_uses_compact_provider() {
+        use deepseeknova_core::Runner;
+        use futures::StreamExt;
+
+        let mut config = Config::default();
+        // 阈值 1 token → 首步必触发压缩。
+        config.agent.compaction_threshold_tokens = Some(1);
+
+        let task = std::sync::Arc::new(stub_provider());
+        let compact = std::sync::Arc::new(CountingProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let runner = build_sub_agent_runner(&config, task, Some(compact.clone()));
+
+        let mut stream = runner
+            .run_stream(deepseeknova_core::RunInput {
+                prompt: "sub_agent:explorer\ngoal: investigate something long enough".into(),
+                images: Vec::new(),
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+
+        assert!(
+            compact.calls.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            "compaction should go through the compact provider"
+        );
+    }
+
+    #[test]
+    fn sub_agent_runner_builds_with_delegate_tool_override() {
+        // "delegate" 恒被过滤（与 build_delegate_engine 同款谓词）；此处验证
+        // 含 delegate 覆盖的配置能安全构造。SubAgentRunner 无公开工具观测
+        // 接口，过滤逻辑由 build_delegate_engine 的既有测试共同守护。
+        let mut config = Config::default();
+        config
+            .delegate
+            .agents
+            .push(deepseeknova_config::DelegateAgentOverride {
+                name: "explorer".into(),
+                system_prompt: None,
+                tools: Some(vec!["delegate".into(), "read_file".into()]),
+                max_steps: None,
+            });
+        let task = std::sync::Arc::new(stub_provider());
+        let _runner = build_sub_agent_runner(&config, task, None);
     }
 
     #[tokio::test]
