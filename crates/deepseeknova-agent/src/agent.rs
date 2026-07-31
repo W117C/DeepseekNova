@@ -87,6 +87,13 @@ pub struct Agent {
 
     /// 暂停事件附带的会话标注（CLI/desktop 持久化开启时注入）。
     session_label: Option<String>,
+
+    /// B3 审查：provider + 设置；None = 关闭（默认）。
+    review_provider: Option<Arc<dyn Provider>>,
+    review_settings: Option<crate::review::ReviewSettings>,
+
+    /// 审查计数钩子（runtime 注入，落 memory counters；None = 仅 tracing）。
+    review_counter: Option<ReviewCounterHook>,
 }
 
 /// Type-erased provider that yields the current repo-map text (or `None`).
@@ -97,6 +104,9 @@ pub type RecallProvider = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
 /// Run-end 沉淀钩子：接收本轮组装的 TaskObservation（非阻塞捕获）。
 pub type DistillHook = Arc<dyn Fn(TaskObservation) + Send + Sync>;
+
+/// 审查指标计数钩子：name ∈ review_triggered/issues_found/fix_succeeded。
+pub type ReviewCounterHook = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// Type-erased closure that inserts a build-time extension value into a
 /// ToolContext's `ExtensionRegistry`.
@@ -125,6 +135,9 @@ impl Agent {
             compact_provider: None,
             budget: None,
             session_label: None,
+            review_provider: None,
+            review_settings: None,
+            review_counter: None,
         }
     }
 
@@ -247,6 +260,27 @@ impl Agent {
         self
     }
 
+    /// 启用完成前自审（B3）。provider 为审查模型，settings 含 diff 上限与轮次。
+    pub fn with_review(
+        mut self,
+        provider: Arc<dyn Provider>,
+        diff_cap_tokens: usize,
+        max_cycles: usize,
+    ) -> Self {
+        self.review_provider = Some(provider);
+        self.review_settings = Some(crate::review::ReviewSettings {
+            diff_cap_tokens,
+            max_cycles,
+        });
+        self
+    }
+
+    /// 注入审查指标计数钩子。
+    pub fn with_review_counter(mut self, hook: ReviewCounterHook) -> Self {
+        self.review_counter = Some(hook);
+        self
+    }
+
     pub fn register_tool(&mut self, tool: Arc<dyn Tool>) {
         let name = tool.schema().name.clone();
         self.tools.insert(name, tool);
@@ -325,6 +359,16 @@ impl Runner for Agent {
                     max_memory_tokens: b.max_memory_tokens,
                 });
         let session_label = self.session_label.clone();
+        let review_provider = self.review_provider.clone();
+        // ReviewSettings 不实现 Clone：与 budget 同法，从 pub 字段重建带进 spawn。
+        let review_settings =
+            self.review_settings
+                .as_ref()
+                .map(|s| crate::review::ReviewSettings {
+                    diff_cap_tokens: s.diff_cap_tokens,
+                    max_cycles: s.max_cycles,
+                });
+        let review_counter = self.review_counter.clone();
 
         // Create a cancellation token and wire Ctrl-C (SIGINT) to cancel it.
         // This enables graceful interruption of the agent loop (e.g. Ctrl-C).
@@ -434,6 +478,9 @@ impl Runner for Agent {
                 compact_provider,
                 budget,
                 session_label,
+                review_provider,
+                review_settings,
+                review_counter,
             )
             .await;
 
@@ -516,6 +563,9 @@ async fn run_agent_loop(
     compact_provider: Option<Arc<dyn Provider>>,
     budget: Option<crate::budget::controller::PromptBudgetController>,
     session_label: Option<String>,
+    review_provider: Option<Arc<dyn Provider>>,
+    review_settings: Option<crate::review::ReviewSettings>,
+    review_counter: Option<ReviewCounterHook>,
 ) -> anyhow::Result<()> {
     // Add user prompt
     memory.add_message(Message {
@@ -532,6 +582,10 @@ async fn run_agent_loop(
     // replay invariant (no dangling tool_calls without matching results).
     let run_started = std::time::Instant::now();
     let mut tool_calls_made: usize = 0;
+
+    // B3 审查状态：本轮是否有写类工具执行过 + 已回炉修复的轮次。
+    let mut wrote_files = false;
+    let mut review_cycles = 0usize;
 
     // 会话级 L3 压缩器（持有熔断状态，跨 step 复用）。
     let mut l3 = crate::compaction::L3Compactor::new();
@@ -650,6 +704,7 @@ async fn run_agent_loop(
             &workspace_root,
             &security,
             &mut tool_calls_made,
+            &mut wrote_files,
             permission.as_ref(),
             approval.as_ref(),
             &extensions,
@@ -658,6 +713,62 @@ async fn run_agent_loop(
 
         match step_result {
             StepOutcome::Complete(output) => {
+                // ── B3 完成前自审：有文件写入才触发；降级路径一律放行 Done ──
+                if let (Some(rp), Some(rs)) = (&review_provider, &review_settings) {
+                    if wrote_files {
+                        let bump = |name: &str| {
+                            if let Some(ref h) = review_counter {
+                                h(name);
+                            }
+                            info!("review counter: {name}");
+                        };
+                        match run_review_pass(
+                            rp.as_ref(),
+                            rs,
+                            &workspace_root,
+                            &input.prompt,
+                            &output.text,
+                            &bump,
+                            review_cycles == 0,
+                        )
+                        .await
+                        {
+                            ReviewOutcome::Approve => {
+                                if review_cycles > 0 {
+                                    bump("fix_succeeded");
+                                }
+                            }
+                            ReviewOutcome::Issues(issues) if review_cycles < rs.max_cycles => {
+                                review_cycles += 1;
+                                memory.add_message(Message {
+                                    role: Role::User,
+                                    content: crate::review::render_feedback(&issues),
+                                    name: None,
+                                    tool_calls: None,
+                                    tool_call_id: None,
+                                    reasoning_content: None,
+                                });
+                                continue; // 回炉修复，下一次 Complete 再审
+                            }
+                            ReviewOutcome::Issues(issues) => {
+                                let head = issues
+                                    .iter()
+                                    .take(3)
+                                    .cloned()
+                                    .collect::<Vec<_>>()
+                                    .join("; ");
+                                tx.send(Ok(RunEvent::Paused {
+                                    reason: format!("review_issues: {head}"),
+                                    session_id: session_label.clone(),
+                                }))
+                                .await
+                                .ok();
+                                return Ok(());
+                            }
+                            ReviewOutcome::Skipped => {}
+                        }
+                    }
+                }
                 tx.send(Ok(RunEvent::Done(output))).await.ok();
                 return Ok(());
             }
@@ -699,6 +810,50 @@ async fn run_agent_loop(
 }
 
 // ---------------------------------------------------------------------------
+// B3 pre-completion review
+// ---------------------------------------------------------------------------
+
+/// 审查一轮的三态结果。
+enum ReviewOutcome {
+    Approve,
+    Issues(Vec<String>),
+    Skipped,
+}
+
+/// 执行一次审查：采集 diff → 问审查模型 → 判定。任何失败 → Skipped。
+/// `first_pass` 仅用于 review_triggered 只计首轮。
+async fn run_review_pass(
+    provider: &dyn Provider,
+    settings: &crate::review::ReviewSettings,
+    workspace_root: &std::path::Path,
+    task: &str,
+    completion: &str,
+    bump: &(dyn Fn(&str) + Send + Sync),
+    first_pass: bool,
+) -> ReviewOutcome {
+    let cap_chars = settings.diff_cap_tokens.saturating_mul(4);
+    let Some(diff) = crate::review::collect_diff(workspace_root, cap_chars).await else {
+        warn!("review skipped: no git diff available");
+        return ReviewOutcome::Skipped;
+    };
+    if first_pass {
+        bump("review_triggered");
+    }
+    let prompt = crate::review::render_review_prompt(task, completion, &diff);
+    match crate::review::ask_reviewer(provider, &prompt).await {
+        Some(crate::review::Verdict::Approve) => ReviewOutcome::Approve,
+        Some(crate::review::Verdict::Issues(list)) => {
+            bump("issues_found");
+            ReviewOutcome::Issues(list)
+        }
+        None => {
+            warn!("review skipped: reviewer verdict unavailable/unparseable");
+            ReviewOutcome::Skipped
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Turn processing — one provider call + optional tool execution
 // ---------------------------------------------------------------------------
 
@@ -721,6 +876,7 @@ async fn stream_and_process_turn(
     workspace_root: &std::path::Path,
     security: &SecurityContext,
     tool_calls_made: &mut usize,
+    wrote_files: &mut bool,
     permission: Option<&Arc<PermissionGate>>,
     approval: Option<&Arc<dyn ApprovalResponder>>,
     extensions: &[Arc<ExtensionApplier>],
@@ -986,6 +1142,14 @@ async fn stream_and_process_turn(
             // Count this executed tool call against the budget, and cap its
             // output size to protect the context window (max_output_bytes).
             *tool_calls_made += 1;
+            // B3：写类工具或 shell 执行过 → 本轮需审查（名字以注册 schema 为准；
+            // shell 工具实际注册名为 "bash"）。
+            if matches!(
+                call.name.as_str(),
+                "write_file" | "edit_file" | "move_file" | "bash"
+            ) {
+                *wrote_files = true;
+            }
             let max_out = security.limits.max_output_bytes as usize;
             let result = if result.len() > max_out {
                 let end = result.floor_char_boundary(max_out);
@@ -1798,5 +1962,270 @@ mod tests {
             *fired.lock().unwrap_or_else(|e| e.into_inner()),
             "distill hook should fire"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // B3 pre-completion review gate
+    // -----------------------------------------------------------------------
+
+    /// 审查模型专用 mock：`generate` 依次弹出队列文本；只剩一个时重复返回
+    /// （与 MockProvider 的 stream 语义一致）。主循环不走 stream。
+    struct SeqProvider {
+        responses: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl SeqProvider {
+        fn new(responses: Vec<&str>) -> Self {
+            Self {
+                responses: std::sync::Mutex::new(
+                    responses.into_iter().map(str::to_string).collect(),
+                ),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl deepseeknova_provider::Provider for SeqProvider {
+        async fn generate(
+            &self,
+            _v: deepseeknova_provider::ValidatedRequest<'_>,
+        ) -> anyhow::Result<Message> {
+            let mut lock = self.responses.lock().unwrap_or_else(|e| e.into_inner());
+            let content = if lock.len() > 1 {
+                lock.remove(0)
+            } else {
+                lock.first().cloned().unwrap_or_default()
+            };
+            Ok(Message {
+                role: Role::Assistant,
+                content,
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            })
+        }
+        async fn stream(
+            &self,
+            _v: deepseeknova_provider::ValidatedRequest<'_>,
+        ) -> anyhow::Result<deepseeknova_core::chunk::ChunkStream> {
+            anyhow::bail!("SeqProvider is generate-only (review path)")
+        }
+    }
+
+    /// 建一个带未暂存改动的临时 git 仓库（`git diff HEAD` 非空），供审查触发。
+    fn temp_git_repo_with_diff(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "dnv-b3-review-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        std::fs::write(dir.join("f.txt"), "v1\n").unwrap();
+        git(&["add", "f.txt"]);
+        git(&[
+            "-c",
+            "user.email=t@test",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qm",
+            "init",
+        ]);
+        std::fs::write(dir.join("f.txt"), "v2\n").unwrap(); // 未暂存改动
+        dir
+    }
+
+    /// 主 provider 脚本：先一次写类工具调用，再依次回若干段完成文本。
+    fn write_then_texts(texts: &[&str]) -> Vec<Vec<Chunk>> {
+        let mut turns = vec![vec![
+            Chunk::ToolCallStart {
+                id: "w1".into(),
+                name: "write_file".into(),
+            },
+            Chunk::ToolCallEnd {
+                id: "w1".into(),
+                name: "write_file".into(),
+                arguments: "{}".into(),
+            },
+            Chunk::Done,
+        ]];
+        for t in texts {
+            turns.push(vec![
+                Chunk::TextDelta((*t).into()),
+                Chunk::Usage(Usage::default()),
+                Chunk::Done,
+            ]);
+        }
+        turns
+    }
+
+    /// 计数钩子：把每次 bump 的名字收集进共享 Vec。
+    fn counting_hook() -> (ReviewCounterHook, Arc<std::sync::Mutex<Vec<String>>>) {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let s2 = seen.clone();
+        let hook: ReviewCounterHook = Arc::new(move |name: &str| {
+            s2.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(name.to_string());
+        });
+        (hook, seen)
+    }
+
+    async fn drain(agent: Agent, prompt: &str) -> Vec<RunEvent> {
+        let mut stream = agent
+            .run_stream(RunInput {
+                prompt: prompt.into(),
+                images: vec![],
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        let mut events = Vec::new();
+        while let Some(ev) = stream.next().await {
+            events.push(ev.unwrap());
+        }
+        events
+    }
+
+    #[tokio::test]
+    async fn review_disabled_behavior_unchanged() {
+        // 不设 with_review：写文件工具跑完后照常 Done，不走审查门。
+        let provider = Arc::new(MockProvider::sequential(write_then_texts(&["all done"])));
+        let mut agent = Agent::new(provider, 5);
+        agent.register_tool(Arc::new(SpyTool {
+            name: "write_file",
+            result: "written".into(),
+        }));
+
+        let events = drain(agent, "write something").await;
+        assert!(events.iter().any(|e| matches!(e, RunEvent::Done(_))));
+        assert!(!events.iter().any(|e| matches!(e, RunEvent::Paused { .. })));
+    }
+
+    #[tokio::test]
+    async fn review_issues_then_fix_leads_to_done() {
+        let repo = temp_git_repo_with_diff("fix");
+        let reviewer = Arc::new(SeqProvider::new(vec![
+            r#"{"verdict":"issues","issues":["missing test"]}"#,
+            r#"{"verdict":"approve"}"#,
+        ]));
+        let (hook, seen) = counting_hook();
+        // 主 provider：写工具 → 完成声明 v1（被驳回）→ 完成声明 v2（放行）。
+        let provider = Arc::new(MockProvider::sequential(write_then_texts(&[
+            "done v1", "done v2",
+        ])));
+        let mut agent = Agent::new(provider, 6)
+            .with_workspace_root(repo.clone())
+            .with_review(reviewer, 4000, 2)
+            .with_review_counter(hook);
+        agent.register_tool(Arc::new(SpyTool {
+            name: "write_file",
+            result: "written".into(),
+        }));
+
+        let events = drain(agent, "write something").await;
+        assert!(
+            events.iter().any(|e| matches!(e, RunEvent::Done(_))),
+            "fix cycle must end in Done"
+        );
+        assert!(!events.iter().any(|e| matches!(e, RunEvent::Paused { .. })));
+        let seen = seen.lock().unwrap_or_else(|e| e.into_inner());
+        for name in ["review_triggered", "issues_found", "fix_succeeded"] {
+            assert_eq!(
+                seen.iter().filter(|s| s.as_str() == name).count(),
+                1,
+                "counter {name} must fire exactly once, got {seen:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[tokio::test]
+    async fn review_persistent_issues_pauses() {
+        let repo = temp_git_repo_with_diff("pause");
+        // 审查 provider 永远回 issues（单响应重复模式）。
+        let reviewer = Arc::new(SeqProvider::new(vec![
+            r#"{"verdict":"issues","issues":["still broken"]}"#,
+        ]));
+        let provider = Arc::new(MockProvider::sequential(write_then_texts(&[
+            "done v1", "done v2",
+        ])));
+        let mut agent = Agent::new(provider, 6)
+            .with_workspace_root(repo.clone())
+            .with_review(reviewer, 4000, 1);
+        agent.register_tool(Arc::new(SpyTool {
+            name: "write_file",
+            result: "written".into(),
+        }));
+
+        let events = drain(agent, "write something").await;
+        assert!(
+            !events.iter().any(|e| matches!(e, RunEvent::Done(_))),
+            "persistent issues must NOT reach Done"
+        );
+        let paused = events.iter().find_map(|e| match e {
+            RunEvent::Paused { reason, .. } => Some(reason.clone()),
+            _ => None,
+        });
+        let reason = paused.expect("must emit Paused on persistent review issues");
+        assert!(
+            reason.starts_with("review_issues"),
+            "pause reason must start with review_issues, got: {reason}"
+        );
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[tokio::test]
+    async fn review_skips_outside_git_repo() {
+        // 非 git 目录：collect_diff → None → 降级放行 Done，review_triggered 不计。
+        let dir = std::env::temp_dir().join(format!(
+            "dnv-b3-nogit-agent-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let reviewer = Arc::new(SeqProvider::new(vec![r#"{"verdict":"approve"}"#]));
+        let (hook, seen) = counting_hook();
+        let provider = Arc::new(MockProvider::sequential(write_then_texts(&["all done"])));
+        let mut agent = Agent::new(provider, 5)
+            .with_workspace_root(dir.clone())
+            .with_review(reviewer, 4000, 2)
+            .with_review_counter(hook);
+        agent.register_tool(Arc::new(SpyTool {
+            name: "write_file",
+            result: "written".into(),
+        }));
+
+        let events = drain(agent, "write something").await;
+        assert!(
+            events.iter().any(|e| matches!(e, RunEvent::Done(_))),
+            "outside a git repo the review must degrade to Done"
+        );
+        let seen = seen.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            !seen.iter().any(|s| s == "review_triggered"),
+            "skipped review must not count review_triggered, got {seen:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

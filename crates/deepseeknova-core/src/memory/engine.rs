@@ -185,6 +185,16 @@ impl MemoryEngine {
         })
     }
 
+    /// 泛化计数器 +1（审查指标 review_triggered/issues_found/fix_succeeded 等）。
+    pub fn bump_counter(&self, name: &str) -> Result<()> {
+        self.store.bump_counter(name)
+    }
+
+    /// 读取泛化计数器（缺失 = 0）。
+    pub fn read_counter(&self, name: &str) -> Result<u64> {
+        self.store.read_counter(name)
+    }
+
     /// 列出某类记忆（CLI）。
     pub fn list(&self, category: MemoryCategory) -> Result<Vec<MemoryEntry>> {
         self.store.list_category(category)
