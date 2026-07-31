@@ -1395,6 +1395,7 @@ version = "0.4.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "deepseeknova-context",
  "deepseeknova-core",
  "serde",
  "serde_json",
