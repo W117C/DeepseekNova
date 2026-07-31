@@ -4,7 +4,7 @@
 
 ### DeepSeek 原生 AI 编程 Agent 框架
 
-**21 个 Rust crate · 44 个 Tauri 命令 · 三端覆盖（CLI / TUI / Desktop）**
+**22 个 Rust crate · 44 个 Tauri 命令 · 三端覆盖（CLI / TUI / Desktop）**
 
 Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型量身打造的原生编程助手。
 
@@ -24,8 +24,8 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 [![Release](https://github.com/W117C/DeepseekNova/actions/workflows/release.yml/badge.svg)](https://github.com/W117C/DeepseekNova/actions/workflows/release.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 [![Rust](https://img.shields.io/badge/rust-stable%201.97-orange.svg)](https://www.rust-lang.org)
-[![Crates](https://img.shields.io/badge/crates-21-green.svg)](#-21-个-crate)
-[![Tests](https://img.shields.io/badge/tests-511-brightgreen.svg)](#-技术栈)
+[![Crates](https://img.shields.io/badge/crates-22-green.svg)](#-22-个-crate)
+[![Tests](https://img.shields.io/badge/tests-536-brightgreen.svg)](#-技术栈)
 
 </div>
 
@@ -113,7 +113,7 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 └─────────────────────┘ └──────────────────────────────┘
 ```
 
-## 📦 21 个 Crate
+## 📦 22 个 Crate
 
 | Crate | 职责 |
 |-------|------|
@@ -126,6 +126,7 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 | `deepseeknova-sandbox` | 沙箱 trait + macOS Seatbelt / Linux bubblewrap |
 | `deepseeknova-permission` | Allow / Ask / Deny 权限门控 |
 | `deepseeknova-security` | 路径限制、资源限额、审计日志 |
+| `deepseeknova-scanner` | deepsec 式安全扫描：规则匹配 + 可选 AI 调查（`scan` 子命令） |
 | `deepseeknova-checkpoint` | 文件系统快照 + 事务性回滚 |
 | `deepseeknova-context` | 工作区索引、项目记忆、会话状态 |
 | `deepseeknova-skills` | Markdown 技能系统，兼容 .claude/skills 格式 |
@@ -143,7 +144,7 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 
 | 端 | 技术 | 特点 |
 |----|------|------|
-| **CLI** | clap | 轻量，单二进制，chat / plan / serve / setup |
+| **CLI** | clap | 轻量，单二进制，chat / plan / scan / serve / setup |
 | **TUI** | ratatui | 全屏终端 UI，快捷键驱动 |
 | **Desktop** | Tauri 2.0 + React 18 | 原生桌面体验，44 个 IPC 命令 |
 

@@ -4,7 +4,7 @@
 
 ### A DeepSeek-Native AI Coding Agent Framework
 
-**21 Rust crates · 44 Tauri commands · 3 frontends (CLI / TUI / Desktop)**
+**22 Rust crates · 44 Tauri commands · 3 frontends (CLI / TUI / Desktop)**
 
 A Rust-from-scratch AI agent framework — not a wrapper. Built specifically for DeepSeek models.
 
@@ -68,6 +68,7 @@ Provider    DeepSeek V4 Pro/Flash   Tools: File · Glob · Grep · Shell
 | `deepseeknova-sandbox` | Sandbox trait + macOS Seatbelt / Linux bubblewrap |
 | `deepseeknova-permission` | Allow / Ask / Deny permission gate |
 | `deepseeknova-security` | Path restrictions, resource limits, audit logging |
+| `deepseeknova-scanner` | deepsec-style security scanning: rule matching + optional AI investigation (`scan` subcommand) |
 | `deepseeknova-checkpoint` | Filesystem snapshots + transactional rollback |
 | `deepseeknova-context` | Workspace indexing, project memory, session state |
 | `deepseeknova-skills` | Markdown skill system (.claude/skills compatible) |
@@ -76,7 +77,7 @@ Provider    DeepSeek V4 Pro/Flash   Tools: File · Glob · Grep · Shell
 | `deepseeknova-event` | Agent lifecycle event bus |
 | `deepseeknova-runtime` | Composition root: registry + context + events + permission + security |
 | `deepseeknova-config` | Layered TOML config (default → user → project → env → CLI) |
-| `deepseeknova-cli` | CLI frontend: chat / plan / serve / setup |
+| `deepseeknova-cli` | CLI frontend: chat / plan / scan / serve / setup |
 | `deepseeknova-tui` | ratatui terminal UI |
 | `deepseeknova-serve` | axum HTTP server + SSE streaming |
 | `deepseeknova-desktop` | Tauri 2.0 desktop app + React frontend |

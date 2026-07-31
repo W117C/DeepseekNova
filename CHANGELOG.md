@@ -14,6 +14,10 @@ All notable changes to DeepseekNova will be documented in this file.
 
 - `[review]` 完成前自审（默认关）：文件写入后由廉价模型审查 diff，issues 回炉一轮修复，
   仍有问题以 `Paused(review_issues)` 交人工；非 git/解析失败一律降级放行。
+- 新增 `deepseeknova-scanner` crate 与 `deepseeknova scan` 子命令：内置正则规则
+  （硬编码密钥、SQL 拼接、命令注入、rust-unwrap 等）扫描工作区，可选一次性 agent
+  AI 调查并输出 md/json 报表；支持 `--path`、`--format md|json`、`--no-ai`、
+  `--severity-min high|medium|low`。
 
 ### Changed
 
