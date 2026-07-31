@@ -4,6 +4,12 @@ All notable changes to DeepseekNova will be documented in this file.
 
 ## [Unreleased]
 
+### ⚠ Breaking
+
+- `agent.on_max_steps` 默认值为 `"pause"`：max_steps 耗尽不再返回错误，而是发出
+  `Paused` 事件并优雅结束（CLI 非交互以退出码 3 结束并打印 resume 提示）。
+  依赖旧行为的自动化请显式配置 `[agent] on_max_steps = "error"`。
+
 ### Changed
 
 - 删除实验性 `deepseeknova-orch` crate（GOAP + Swarm，零业务调用）；其唯一有消费者的组件 `ProgressTracker` 已解耦收编至 `deepseeknova-core::progress`。多智能体能力改由 `deepseeknova-agent` 的 delegate/子代理路径提供。CLI dev-dependency、quickstart 示例的 GOAP 段、release 脚本与 README crate 表中的 orch 引用一并清除。

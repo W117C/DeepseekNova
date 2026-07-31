@@ -230,6 +230,13 @@ async fn chat(
                                 .event("approval_request")
                                 .data(json.to_string()))
                         }
+                        Ok(RunEvent::Paused { reason, session_id }) => {
+                            let json = serde_json::json!({
+                                "reason": reason,
+                                "session_id": session_id,
+                            });
+                            Ok(Event::default().event("paused").data(json.to_string()))
+                        }
                         Err(e) => Ok(Event::default().event("error").data(e.to_string())),
                     };
                     if tx.unbounded_send(sse_event).is_err() {

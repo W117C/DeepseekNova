@@ -25,6 +25,7 @@
 
 pub mod agent;
 pub mod budget;
+mod compaction;
 pub mod coordinator;
 pub mod delegate;
 pub mod memory;

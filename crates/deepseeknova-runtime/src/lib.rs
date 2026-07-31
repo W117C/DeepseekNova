@@ -436,6 +436,44 @@ pub fn build_agent_with_task_provider(
         agent = agent.with_extension(handle);
     }
 
+    // ── B2 续航：max_steps 行为 / L3 压缩 / 预算守门 ──
+    agent = agent
+        .with_on_max_steps(&config.agent.on_max_steps)
+        .with_l3_compaction(config.agent.l3_compaction);
+    if config.budget.enabled {
+        agent = agent.with_budget(
+            deepseeknova_agent::budget::controller::PromptBudgetController {
+                max_total_tokens: config.budget.max_total_tokens,
+                max_memory_tokens: config.budget.max_memory_tokens,
+            },
+        );
+    }
+    // compact_model 非空时为 L3 构造专用（廉价）provider。工厂没有按模型名
+    // 构造的入口，故复用 CLI 同款路径：按模型名解析 ProviderConfig，覆盖
+    // model 字段后走同一 create_provider。构造失败仅告警，L3 回退复用主
+    // provider——压缩通路永不阻断 agent 构建。
+    if !config.agent.compact_model.is_empty() {
+        match config
+            .resolve_provider_for_model(&config.agent.compact_model)
+            .cloned()
+        {
+            Some(mut cfg) => {
+                cfg.model = Some(config.agent.compact_model.clone());
+                match deepseeknova_provider::factory::create_provider(&cfg) {
+                    Ok(p) => agent = agent.with_compact_provider(p.into()),
+                    Err(e) => tracing::warn!(
+                        "compact_model '{}' unavailable ({e}); L3 will use the main provider",
+                        config.agent.compact_model
+                    ),
+                }
+            }
+            None => tracing::warn!(
+                "compact_model '{}' has no matching provider; L3 will use the main provider",
+                config.agent.compact_model
+            ),
+        }
+    }
+
     Ok(agent)
 }
 
@@ -1014,6 +1052,20 @@ mod tests {
         assert_eq!(ctx.limits.max_tool_calls, 100);
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn build_agent_applies_b2_config() {
+        let mut config = Config::default();
+        config.graph.enabled = false;
+        config.memory.enabled = false;
+        config.agent.on_max_steps = "error".into();
+        config.agent.l3_compaction = false;
+        config.budget.enabled = false;
+        let provider = std::sync::Arc::new(stub_provider());
+        // 只验证可构建不 panic（字段私有，行为断言在 agent 侧已覆盖）。
+        let agent = build_agent(&config, std::env::temp_dir(), provider, 5, None, vec![]).unwrap();
+        let _ = agent;
     }
 
     #[test]

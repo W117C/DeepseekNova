@@ -59,6 +59,12 @@ pub struct StoredMessage {
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Assistant tool calls (schema v2). `serde(default)` keeps old files readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<deepseeknova_core::types::ToolCall>>,
+    /// DeepSeek-V4 reasoning content (schema v2), required for replay fidelity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -190,6 +196,8 @@ impl SessionStore {
                     content: m.content,
                     name: m.name,
                     tool_call_id: m.tool_call_id,
+                    tool_calls: m.tool_calls,
+                    reasoning_content: m.reasoning_content,
                 })
                 .collect(),
         }
@@ -239,9 +247,9 @@ impl From<&StoredMessage> for Message {
             },
             content: sm.content.clone(),
             name: sm.name.clone(),
-            tool_calls: None,
+            tool_calls: sm.tool_calls.clone(),
             tool_call_id: sm.tool_call_id.clone(),
-            reasoning_content: None,
+            reasoning_content: sm.reasoning_content.clone(),
         }
     }
 }
@@ -421,6 +429,8 @@ mod tests {
             content: "hello".to_string(),
             name: None,
             tool_call_id: None,
+            tool_calls: None,
+            reasoning_content: None,
         };
         let msg: Message = (&sm).into();
         assert_eq!(msg.role, Role::User);
@@ -431,6 +441,8 @@ mod tests {
             content: "you are helpful".to_string(),
             name: None,
             tool_call_id: None,
+            tool_calls: None,
+            reasoning_content: None,
         };
         let msg: Message = (&sm).into();
         assert_eq!(msg.role, Role::System);
@@ -473,6 +485,48 @@ mod tests {
         assert_eq!(loaded[0].input.prompt, "hello world");
         assert_eq!(loaded[0].messages.len(), 2);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stored_message_roundtrips_tool_calls_and_reasoning() {
+        use deepseeknova_core::types::{FunctionCall, ToolCall};
+        let msg = Message {
+            role: Role::Assistant,
+            content: String::new(),
+            name: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "call_1".into(),
+                ty: "function".into(),
+                function: FunctionCall {
+                    name: "read_file".into(),
+                    arguments: "{\"path\":\"src/lib.rs\"}".into(),
+                },
+            }]),
+            tool_call_id: None,
+            reasoning_content: Some("I should read the file first.".into()),
+        };
+        let turn = SessionStore::build_turn(&sample_input(), 1, vec![msg], None);
+        let json = serde_json::to_string(&turn).unwrap();
+        let parsed: StoredTurn = serde_json::from_str(&json).unwrap();
+        let restored: Message = (&parsed.messages[0]).into();
+        let tcs = restored.tool_calls.expect("tool_calls must survive");
+        assert_eq!(tcs.len(), 1);
+        assert_eq!(tcs[0].id, "call_1");
+        assert_eq!(tcs[0].function.name, "read_file");
+        assert_eq!(
+            restored.reasoning_content.as_deref(),
+            Some("I should read the file first.")
+        );
+    }
+
+    #[test]
+    fn legacy_stored_message_without_new_fields_still_parses() {
+        let legacy = "{\"role\":\"user\",\"content\":\"hi\"}";
+        let sm: StoredMessage = serde_json::from_str(legacy).unwrap();
+        assert!(sm.tool_calls.is_none());
+        assert!(sm.reasoning_content.is_none());
+        let m: Message = (&sm).into();
+        assert!(m.tool_calls.is_none());
     }
 
     #[test]
