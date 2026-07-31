@@ -1349,9 +1349,11 @@ name = "deepseeknova-scanner"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "deepseeknova-core",
  "deepseeknova-graph",
  "deepseeknova-security",
+ "futures",
  "regex",
  "serde",
  "serde_json",
