@@ -518,6 +518,33 @@ pub async fn discover_mcp_tools(config: &Config) -> Vec<Arc<dyn deepseeknova_cor
         .collect()
 }
 
+/// 合并内置委派预设与 `config.delegate.agents` 覆盖（按 name 匹配覆盖字段，
+/// 未匹配则新增）。供委派引擎与 coordinator 的 SubAgentRunner 共用。
+fn merged_delegate_presets(config: &Config) -> Vec<deepseeknova_agent::DelegatePreset> {
+    let mut presets = deepseeknova_agent::builtin_presets();
+    for ov in &config.delegate.agents {
+        if let Some(p) = presets.iter_mut().find(|p| p.name == ov.name) {
+            if let Some(sp) = &ov.system_prompt {
+                p.system_prompt = sp.clone();
+            }
+            if let Some(tools) = &ov.tools {
+                p.tools = tools.clone();
+            }
+            if let Some(ms) = ov.max_steps {
+                p.max_steps = ms;
+            }
+        } else {
+            presets.push(deepseeknova_agent::DelegatePreset {
+                name: ov.name.clone(),
+                system_prompt: ov.system_prompt.clone().unwrap_or_default(),
+                tools: ov.tools.clone().unwrap_or_default(),
+                max_steps: ov.max_steps.unwrap_or(10),
+            });
+        }
+    }
+    presets
+}
+
 /// 构建委派引擎：合并内置预设与配置覆盖，为每个预设造一个受限工具集的子 Agent
 /// （共享主 agent 的 graph/memory 句柄与安全策略）。禁递归：剔除任何 "delegate" 工具。
 #[allow(clippy::too_many_arguments)]
@@ -546,28 +573,8 @@ fn build_delegate_engine(
         deepseeknova_tools::all_builtin_tools()
     };
 
-    // 合并内置预设 + 配置覆盖（按 name 匹配覆盖字段，未匹配则新增）。
-    let mut presets = deepseeknova_agent::builtin_presets();
-    for ov in &config.delegate.agents {
-        if let Some(p) = presets.iter_mut().find(|p| p.name == ov.name) {
-            if let Some(sp) = &ov.system_prompt {
-                p.system_prompt = sp.clone();
-            }
-            if let Some(tools) = &ov.tools {
-                p.tools = tools.clone();
-            }
-            if let Some(ms) = ov.max_steps {
-                p.max_steps = ms;
-            }
-        } else {
-            presets.push(deepseeknova_agent::DelegatePreset {
-                name: ov.name.clone(),
-                system_prompt: ov.system_prompt.clone().unwrap_or_default(),
-                tools: ov.tools.clone().unwrap_or_default(),
-                max_steps: ov.max_steps.unwrap_or(10),
-            });
-        }
-    }
+    // 合并内置预设 + 配置覆盖。
+    let presets = merged_delegate_presets(config);
 
     let mut agents: std::collections::HashMap<String, Arc<deepseeknova_agent::Agent>> =
         std::collections::HashMap::new();
