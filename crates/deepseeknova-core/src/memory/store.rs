@@ -498,6 +498,30 @@ impl MemoryStore {
         Ok((get("recall_calls") as u64, get("recall_nonempty") as u64))
     }
 
+    /// 泛化计数器：任意名字 +1（B3 审查指标等）。
+    pub fn bump_counter(&self, name: &str) -> Result<()> {
+        let db = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        db.execute(
+            "INSERT INTO counters(name, value) VALUES (?1, 1)
+             ON CONFLICT(name) DO UPDATE SET value = value + 1",
+            rusqlite::params![name],
+        )?;
+        Ok(())
+    }
+
+    /// 读取泛化计数器（缺失 = 0）。
+    pub fn read_counter(&self, name: &str) -> Result<u64> {
+        let db = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        let v: i64 = db
+            .query_row(
+                "SELECT value FROM counters WHERE name = ?1",
+                rusqlite::params![name],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        Ok(v as u64)
+    }
+
     /// 统计 auto-distill 来源条目中已达 verified/permanent 的比例（reinforce 比例）。
     pub fn reinforce_ratio(&self) -> Result<f64> {
         let db = self.db.lock().unwrap_or_else(|e| e.into_inner());
@@ -676,5 +700,14 @@ mod tests {
         let (calls, nonempty) = store.recall_counters().unwrap();
         assert_eq!(calls, 3);
         assert_eq!(nonempty, 2);
+    }
+
+    #[test]
+    fn generic_counters_bump_and_read() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        assert_eq!(store.read_counter("review_triggered").unwrap(), 0);
+        store.bump_counter("review_triggered").unwrap();
+        store.bump_counter("review_triggered").unwrap();
+        assert_eq!(store.read_counter("review_triggered").unwrap(), 2);
     }
 }
