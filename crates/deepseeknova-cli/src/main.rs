@@ -147,12 +147,16 @@ async fn main() -> anyhow::Result<()> {
                 )?;
                 let task_provider = model_router.provider_for(ModelRole::Task, None)?;
                 let mcp_tools = deepseeknova_runtime::discover_mcp_tools(&config).await;
+                let (step_quick, step_high) =
+                    step_effort_providers(&model_router, &config, model_args.model.as_deref())?;
                 let agent = build_agent(
                     Arc::clone(&provider),
                     deepseeknova_runtime::AgentRoleProviders {
                         task: Some(task_provider),
                         compact: Some(compact_provider_for(&model_router, &config)?),
                         review: review_provider_for(&model_router, &config)?,
+                        step_quick,
+                        step_high,
                     },
                     model_args.model.as_deref(),
                     &config,
@@ -280,6 +284,7 @@ async fn main() -> anyhow::Result<()> {
                         task: Some(task_provider),
                         compact: Some(compact_provider_for(&model_router, &config)?),
                         review: review_provider_for(&model_router, &config)?,
+                        ..Default::default()
                     },
                     model.as_deref(),
                     &config,
@@ -327,12 +332,16 @@ async fn main() -> anyhow::Result<()> {
                             effort,
                         )?;
                         let task_provider = router.provider_for(ModelRole::Task, effort)?;
+                        let (step_quick, step_high) =
+                            step_effort_providers(&router, cfg, model_name.as_deref())?;
                         let agent = build_agent(
                             provider,
                             deepseeknova_runtime::AgentRoleProviders {
                                 task: Some(task_provider),
                                 compact: Some(compact_provider_for(&router, cfg)?),
                                 review: review_provider_for(&router, cfg)?,
+                                step_quick,
+                                step_high,
                             },
                             model_name.as_deref(),
                             cfg,
@@ -380,6 +389,7 @@ async fn main() -> anyhow::Result<()> {
                     task: Some(task_provider),
                     compact: Some(compact_provider_for(&model_router, &config)?),
                     review: review_provider_for(&model_router, &config)?,
+                    ..Default::default()
                 },
                 None,
                 &config,
@@ -497,6 +507,7 @@ async fn main() -> anyhow::Result<()> {
                                 task: Some(task_provider),
                                 compact: Some(compact_provider_for(&router, cfg)?),
                                 review: review_provider_for(&router, cfg)?,
+                                ..Default::default()
                             },
                             model_name.as_deref(),
                             cfg,
@@ -565,6 +576,27 @@ fn compact_provider_for(
         compact_override_model(config),
         Some(deepseeknova_provider::factory::ReasoningEffort::Disabled),
     )
+}
+
+/// P2.1 每步 effort 路由的 quick/high provider（未启用时返回 (None, None)）。
+fn step_effort_providers(
+    router: &deepseeknova_provider::router::ModelRouter,
+    config: &deepseeknova_config::Config,
+    model: Option<&str>,
+) -> anyhow::Result<(
+    Option<Arc<dyn deepseeknova_provider::Provider>>,
+    Option<Arc<dyn deepseeknova_provider::Provider>>,
+)> {
+    use deepseeknova_provider::cost::ModelRole;
+    use deepseeknova_provider::factory::ReasoningEffort;
+    if !config.agent.step_effort_routing {
+        return Ok((None, None));
+    }
+    let quick =
+        router.provider_for_maybe_model(ModelRole::Main, model, Some(ReasoningEffort::Disabled))?;
+    let high =
+        router.provider_for_maybe_model(ModelRole::Main, model, Some(ReasoningEffort::High))?;
+    Ok((Some(quick), Some(high)))
 }
 
 /// Review 角色 provider（B3 完成前自审门禁用）。review 关闭时不构建（避免

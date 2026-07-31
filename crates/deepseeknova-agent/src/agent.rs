@@ -101,6 +101,15 @@ pub struct Agent {
 
     /// P1 确定性验证设置；None = 关闭（默认）。
     verify_settings: Option<crate::verify::VerifySettings>,
+
+    /// P2 每步 effort 路由（quick=thinking off / high=高推理）；None = 固定主 provider。
+    effort_routing: Option<EffortRouting>,
+
+    /// P2 观察压缩设置；None = 关闭（默认）。
+    observe: Option<ObserveSettings>,
+
+    /// P2 会话内只读工具结果缓存（写执行后失效）。
+    tool_cache: bool,
 }
 
 /// Type-erased provider that yields the current repo-map text (or `None`).
@@ -119,6 +128,23 @@ pub type ReviewCounterHook = Arc<dyn Fn(&str) + Send + Sync>;
 /// ToolContext's `ExtensionRegistry`.
 pub(crate) type ExtensionApplier =
     dyn Fn(&mut deepseeknova_core::tool::ExtensionRegistry) + Send + Sync;
+
+/// P2.1 每步 effort 路由所需的双 provider。
+#[derive(Clone)]
+pub(crate) struct EffortRouting {
+    /// 机械续步用：thinking off（省 reasoning token）。
+    pub quick: Arc<dyn Provider>,
+    /// 首步 / 出错 / 回炉反馈用：高推理。
+    pub high: Arc<dyn Provider>,
+}
+
+/// P2.2 观察压缩设置。
+#[derive(Clone)]
+pub(crate) struct ObserveSettings {
+    pub provider: Arc<dyn Provider>,
+    pub threshold_chars: usize,
+    pub max_chars: usize,
+}
 
 impl Agent {
     pub fn new(provider: Arc<dyn Provider>, max_steps: usize) -> Self {
@@ -148,6 +174,9 @@ impl Agent {
             review_counter: None,
             concurrent_tools: true,
             verify_settings: None,
+            effort_routing: None,
+            observe: None,
+            tool_cache: false,
         }
     }
 
@@ -308,6 +337,39 @@ impl Agent {
         self
     }
 
+    /// P2.1：启用每步 effort 路由。`quick` 用于机械续步（thinking off），
+    /// `high` 用于首步 / 出错 / 回炉反馈。
+    pub fn with_effort_routing(
+        mut self,
+        quick: Arc<dyn Provider>,
+        high: Arc<dyn Provider>,
+    ) -> Self {
+        self.effort_routing = Some(EffortRouting { quick, high });
+        self
+    }
+
+    /// P2.2：启用观察压缩。超 `threshold_chars` 的工具结果由廉价模型摘要为
+    /// 至多 `max_chars` 字符后入历史；事件流仍透出原始结果。
+    pub fn with_observe_compression(
+        mut self,
+        provider: Arc<dyn Provider>,
+        threshold_chars: usize,
+        max_chars: usize,
+    ) -> Self {
+        self.observe = Some(ObserveSettings {
+            provider,
+            threshold_chars,
+            max_chars,
+        });
+        self
+    }
+
+    /// P2.3：启用会话内只读工具结果缓存（同参读调用直接复用，写执行后失效）。
+    pub fn with_tool_cache(mut self, enabled: bool) -> Self {
+        self.tool_cache = enabled;
+        self
+    }
+
     pub fn register_tool(&mut self, tool: Arc<dyn Tool>) {
         let name = tool.schema().name.clone();
         self.tools.insert(name, tool);
@@ -398,6 +460,9 @@ impl Runner for Agent {
         let review_counter = self.review_counter.clone();
         let concurrent_tools = self.concurrent_tools;
         let verify_settings = self.verify_settings.clone();
+        let effort_routing = self.effort_routing.clone();
+        let observe = self.observe.clone();
+        let tool_cache = self.tool_cache;
 
         // Create a cancellation token and wire Ctrl-C (SIGINT) to cancel it.
         // This enables graceful interruption of the agent loop (e.g. Ctrl-C).
@@ -512,6 +577,9 @@ impl Runner for Agent {
                 review_counter,
                 concurrent_tools,
                 verify_settings,
+                effort_routing,
+                observe,
+                tool_cache,
             )
             .await;
 
@@ -599,6 +667,9 @@ async fn run_agent_loop(
     review_counter: Option<ReviewCounterHook>,
     concurrent_tools: bool,
     verify_settings: Option<crate::verify::VerifySettings>,
+    effort_routing: Option<EffortRouting>,
+    observe: Option<ObserveSettings>,
+    tool_cache: bool,
 ) -> anyhow::Result<()> {
     // Add user prompt
     memory.add_message(Message {
@@ -624,6 +695,8 @@ async fn run_agent_loop(
 
     // 会话级 L3 压缩器（持有熔断状态，跨 step 复用）。
     let mut l3 = crate::compaction::L3Compactor::new();
+    // P2.3 会话内只读工具结果缓存（写执行后整体失效）。
+    let mut tool_cache_map: HashMap<u64, String> = HashMap::new();
 
     for step in 0..max_steps {
         // Check for cancellation between steps
@@ -728,9 +801,21 @@ async fn run_agent_loop(
             .map(|t| (t.schema().name.clone(), Arc::clone(t)))
             .collect();
 
+        // P2.1 每步 provider 选择：机械续步（上一步是正常工具结果）走 quick，
+        // 首步 / 出错 / 回炉反馈走 high。
+        let step_provider: &Arc<dyn Provider> = if let Some(r) = effort_routing.as_ref() {
+            if classify_quick_step(&memory) {
+                &r.quick
+            } else {
+                &r.high
+            }
+        } else {
+            &provider
+        };
+
         // Stream from provider
         let step_result = stream_and_process_turn(
-            &provider,
+            step_provider,
             &tools,
             &tool_map,
             memory,
@@ -744,6 +829,9 @@ async fn run_agent_loop(
             approval.as_ref(),
             &extensions,
             concurrent_tools,
+            tool_cache,
+            &mut tool_cache_map,
+            observe.as_ref(),
         )
         .await?;
 
@@ -962,6 +1050,9 @@ async fn stream_and_process_turn(
     approval: Option<&Arc<dyn ApprovalResponder>>,
     extensions: &[Arc<ExtensionApplier>],
     concurrent_tools: bool,
+    tool_cache_enabled: bool,
+    tool_cache: &mut HashMap<u64, String>,
+    observe: Option<&ObserveSettings>,
 ) -> anyhow::Result<StepOutcome> {
     // Build tool refs for provider
     let tool_refs: Vec<&dyn Tool> = tools.iter().map(|t| t.as_ref()).collect();
@@ -1204,50 +1295,94 @@ async fn stream_and_process_turn(
             if cancel.is_cancelled() {
                 break;
             }
-            if !concurrent_tools || segment.len() <= 1 {
-                for &i in &segment {
-                    let (idx, result) = execute_tool_call(
-                        i,
-                        pending_calls[i].clone(),
-                        tool_map.clone(),
-                        workspace_root.to_path_buf(),
-                        security.clone(),
-                        extensions.to_vec(),
-                        cancel.clone(),
-                        max_out,
-                    )
-                    .await;
-                    results[idx] = Some(result);
-                    executed[idx] = true;
+
+            // P2.3 缓存：段内只读调用先查缓存（命中直接落结果，不执行）；
+            // 未命中的收集 key，执行后回填；写段执行后整体失效。
+            let mut cache_keys: Vec<(usize, u64)> = Vec::new();
+            let mut to_execute: Vec<usize> = Vec::new();
+            let is_read = |i: usize| {
+                tool_map
+                    .get(&pending_calls[i].name)
+                    .map(|t| t.read_only())
+                    .unwrap_or(false)
+            };
+            for &i in &segment {
+                if tool_cache_enabled && is_read(i) {
+                    let key = tool_cache_key(&pending_calls[i].name, &pending_calls[i].arguments);
+                    if let Some(cached) = tool_cache.get(&key) {
+                        results[i] = Some(format!("[cached]\n{cached}"));
+                        continue;
+                    }
+                    cache_keys.push((i, key));
                 }
-            } else {
-                let mut set = JoinSet::new();
-                for &i in &segment {
-                    let call = pending_calls[i].clone();
-                    let tool_map = tool_map.clone();
-                    let workspace_root = workspace_root.to_path_buf();
-                    let security = security.clone();
-                    let extensions = extensions.to_vec();
-                    let cancel = cancel.clone();
-                    set.spawn(async move {
-                        execute_tool_call(
+                to_execute.push(i);
+            }
+
+            if !to_execute.is_empty() {
+                if !concurrent_tools || to_execute.len() <= 1 {
+                    for &i in &to_execute {
+                        let (idx, result) = execute_tool_call(
                             i,
-                            call,
-                            tool_map,
-                            workspace_root,
-                            security,
-                            extensions,
-                            cancel,
+                            pending_calls[i].clone(),
+                            tool_map.clone(),
+                            workspace_root.to_path_buf(),
+                            security.clone(),
+                            extensions.to_vec(),
+                            cancel.clone(),
                             max_out,
                         )
-                        .await
-                    });
-                }
-                while let Some(joined) = set.join_next().await {
-                    if let Ok((idx, result)) = joined {
+                        .await;
                         results[idx] = Some(result);
                         executed[idx] = true;
                     }
+                } else {
+                    let mut set = JoinSet::new();
+                    for &i in &to_execute {
+                        let call = pending_calls[i].clone();
+                        let tool_map = tool_map.clone();
+                        let workspace_root = workspace_root.to_path_buf();
+                        let security = security.clone();
+                        let extensions = extensions.to_vec();
+                        let cancel = cancel.clone();
+                        set.spawn(async move {
+                            execute_tool_call(
+                                i,
+                                call,
+                                tool_map,
+                                workspace_root,
+                                security,
+                                extensions,
+                                cancel,
+                                max_out,
+                            )
+                            .await
+                        });
+                    }
+                    while let Some(joined) = set.join_next().await {
+                        if let Ok((idx, result)) = joined {
+                            results[idx] = Some(result);
+                            executed[idx] = true;
+                        }
+                    }
+                }
+            }
+
+            if tool_cache_enabled {
+                let mut wrote = false;
+                for &i in &to_execute {
+                    if !is_read(i) {
+                        wrote = true;
+                    }
+                    if let Some((_, key)) = cache_keys.iter().find(|(idx, _)| *idx == i) {
+                        if let Some(r) = &results[i] {
+                            if !r.starts_with("Error:") && !r.starts_with("[cached]") {
+                                tool_cache.insert(*key, r.clone());
+                            }
+                        }
+                    }
+                }
+                if wrote {
+                    tool_cache.clear();
                 }
             }
         }
@@ -1272,6 +1407,24 @@ async fn stream_and_process_turn(
                     *wrote_files = true;
                 }
             }
+            // P2.2 观察压缩：事件透出原始结果；历史存压缩摘要（压缩失败回退原始截断）。
+            let stored = if let Some(obs) = observe {
+                if result.len() > obs.threshold_chars
+                    && !result.starts_with("Error:")
+                    && !result.starts_with("[cached]")
+                {
+                    match compress_observation(obs, &call.name, &result).await {
+                        Some(summary) => {
+                            format!("[compressed observation for {}]\n{summary}", call.name)
+                        }
+                        None => result.clone(),
+                    }
+                } else {
+                    result.clone()
+                }
+            } else {
+                result.clone()
+            };
             tx.send(Ok(RunEvent::ToolResult {
                 call_id: call.id.clone(),
                 result: result.clone(),
@@ -1280,7 +1433,7 @@ async fn stream_and_process_turn(
             .ok();
             memory.add_message(Message {
                 role: Role::Tool,
-                content: result,
+                content: stored,
                 name: None,
                 tool_calls: None,
                 tool_call_id: Some(call.id.clone()),
@@ -1391,6 +1544,51 @@ async fn execute_tool_call(
         result
     };
     (idx, result)
+}
+
+/// P2.1 每步分类：上一条消息是工具结果且不含 `Error:` → 机械续步（quick）；
+/// 其余（首步、出错、回炉反馈）→ high。
+fn classify_quick_step(memory: &Memory) -> bool {
+    match memory.get_all().last() {
+        Some(m) if m.role == Role::Tool => !m.content.contains("Error:"),
+        _ => false,
+    }
+}
+
+/// P2.3 工具缓存 key：(工具名, 参数) 的 SHA-256 前缀 64 位。
+fn tool_cache_key(name: &str, args: &str) -> u64 {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(name.as_bytes());
+    h.update([0u8]);
+    h.update(args.as_bytes());
+    let d = h.finalize();
+    u64::from_le_bytes([d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]])
+}
+
+/// P2.2 观察压缩：用廉价模型把大输出压成结构化摘要；任何失败返回 None（回退截断）。
+async fn compress_observation(obs: &ObserveSettings, tool: &str, raw: &str) -> Option<String> {
+    let prompt = format!(
+        "Compress the following tool output (`{tool}`) into a concise structured \
+         summary. Preserve every fact, file path, exit code and number. \
+         Output only the summary.\n\n{raw}"
+    );
+    let msgs = vec![Message {
+        role: Role::User,
+        content: prompt,
+        name: None,
+        tool_calls: None,
+        tool_call_id: None,
+        reasoning_content: None,
+    }];
+    let validated = deepseeknova_provider::ValidatedRequest::new(&msgs, &[]).ok()?;
+    let msg = obs.provider.generate(validated).await.ok()?;
+    let capped: String = msg.content.chars().take(obs.max_chars).collect();
+    if capped.trim().is_empty() {
+        None
+    } else {
+        Some(capped)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2634,5 +2832,253 @@ mod tests {
             "passing verify must reach Done, got {events:?}"
         );
         assert!(!events.iter().any(|e| matches!(e, RunEvent::Paused { .. })));
+    }
+
+    /// 只读工具桩：统计执行次数。
+    struct CountingSpy {
+        name: &'static str,
+        result: String,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for CountingSpy {
+        fn schema(&self) -> ToolSchema {
+            ToolSchema {
+                name: self.name.to_string(),
+                description: "counting spy".to_string(),
+                parameters: serde_json::json!({"type":"object","properties":{}}),
+            }
+        }
+        fn read_only(&self) -> bool {
+            true
+        }
+        async fn execute(&self, _ctx: &ToolContext, _args: &str) -> anyhow::Result<String> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(self.result.clone())
+        }
+    }
+
+    /// 失败工具桩：执行必错。
+    struct FailSpy {
+        name: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for FailSpy {
+        fn schema(&self) -> ToolSchema {
+            ToolSchema {
+                name: self.name.to_string(),
+                description: "fail spy".to_string(),
+                parameters: serde_json::json!({"type":"object","properties":{}}),
+            }
+        }
+        fn read_only(&self) -> bool {
+            true
+        }
+        async fn execute(&self, _ctx: &ToolContext, _args: &str) -> anyhow::Result<String> {
+            anyhow::bail!("boom")
+        }
+    }
+
+    fn single_read_call(name: &str, id: &str, args: &str) -> Vec<Chunk> {
+        vec![
+            Chunk::ToolCallStart {
+                id: id.into(),
+                name: name.into(),
+            },
+            Chunk::ToolCallEnd {
+                id: id.into(),
+                name: name.into(),
+                arguments: args.into(),
+            },
+            Chunk::Done,
+        ]
+    }
+
+    #[tokio::test]
+    async fn effort_routing_uses_quick_after_ok_tool_result() {
+        let high = Arc::new(MockProvider::sequential(vec![
+            single_read_call("read_file", "h1", "{}"),
+            vec![
+                Chunk::TextDelta("done".into()),
+                Chunk::Usage(Usage::default()),
+                Chunk::Done,
+            ],
+        ]));
+        let quick = Arc::new(MockProvider::text("quick answer"));
+        let mut agent =
+            Agent::new(high.clone(), 5).with_effort_routing(quick.clone(), high.clone());
+        agent.register_tool(Arc::new(SpyTool {
+            name: "read_file",
+            result: "ok".into(),
+        }));
+
+        let events = drain(agent, "read the file").await;
+        assert!(events.iter().any(|e| matches!(e, RunEvent::Done(_))));
+        // 首步走 high（1 次），工具结果正常后的续步走 quick（1 次）。
+        assert_eq!(high.call_count(), 1, "first step must use high");
+        assert_eq!(
+            quick.call_count(),
+            1,
+            "continuation after ok result must use quick"
+        );
+    }
+
+    #[tokio::test]
+    async fn effort_routing_uses_high_after_error_result() {
+        let high = Arc::new(MockProvider::sequential(vec![
+            single_read_call("read_file", "e1", "{}"),
+            vec![
+                Chunk::TextDelta("done".into()),
+                Chunk::Usage(Usage::default()),
+                Chunk::Done,
+            ],
+        ]));
+        let quick = Arc::new(MockProvider::text("quick answer"));
+        let mut agent =
+            Agent::new(high.clone(), 5).with_effort_routing(quick.clone(), high.clone());
+        agent.register_tool(Arc::new(FailSpy { name: "read_file" }));
+
+        let events = drain(agent, "read the file").await;
+        assert!(events.iter().any(|e| matches!(e, RunEvent::Done(_))));
+        assert_eq!(high.call_count(), 2, "error result must keep using high");
+        assert_eq!(
+            quick.call_count(),
+            0,
+            "quick must not be used after an error"
+        );
+    }
+
+    #[tokio::test]
+    async fn observe_compression_stores_summary_keeps_raw_event() {
+        let history = Arc::new(tokio::sync::Mutex::new(Vec::<Message>::new()));
+        let raw = "x".repeat(20_000);
+        let provider = Arc::new(MockProvider::sequential(vec![
+            single_read_call("read_file", "o1", "{}"),
+            vec![
+                Chunk::TextDelta("done".into()),
+                Chunk::Usage(Usage::default()),
+                Chunk::Done,
+            ],
+        ]));
+        // MockProvider::generate 固定返回 "mock response"，作为压缩摘要。
+        let compressor = Arc::new(MockProvider::text("ignored"));
+        let mut agent = Agent::new(provider, 5)
+            .with_observe_compression(compressor, 1_000, 500)
+            .with_conversation_history(history.clone());
+        agent.register_tool(Arc::new(SpyTool {
+            name: "read_file",
+            result: raw.clone(),
+        }));
+
+        let events = drain(agent, "read big output").await;
+        let raw_event = events
+            .iter()
+            .find_map(|e| match e {
+                RunEvent::ToolResult { result, .. } if result.len() == 20_000 => Some(result),
+                _ => None,
+            })
+            .expect("raw result must be emitted to the event stream");
+        assert_eq!(raw_event, &raw);
+
+        let store = history.lock().await;
+        let tool_msg = store
+            .iter()
+            .find(|m| m.role == Role::Tool)
+            .expect("tool result must be stored");
+        assert!(
+            tool_msg
+                .content
+                .starts_with("[compressed observation for read_file]"),
+            "memory must hold the compressed summary, got: {}",
+            &tool_msg.content[..60.min(tool_msg.content.len())]
+        );
+        assert!(tool_msg.content.contains("mock response"));
+        assert!(!tool_msg.content.contains(&raw[..1000]));
+    }
+
+    #[tokio::test]
+    async fn tool_cache_reuses_read_results_across_steps() {
+        let history = Arc::new(tokio::sync::Mutex::new(Vec::<Message>::new()));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = Arc::new(MockProvider::sequential(vec![
+            single_read_call("read_file", "c1", r#"{"q":"x"}"#),
+            single_read_call("read_file", "c2", r#"{"q":"x"}"#),
+            vec![
+                Chunk::TextDelta("done".into()),
+                Chunk::Usage(Usage::default()),
+                Chunk::Done,
+            ],
+        ]));
+        let mut agent = Agent::new(provider, 5)
+            .with_tool_cache(true)
+            .with_conversation_history(history.clone());
+        agent.register_tool(Arc::new(CountingSpy {
+            name: "read_file",
+            result: "cached payload".into(),
+            calls: calls.clone(),
+        }));
+
+        let events = drain(agent, "read twice").await;
+        assert!(events.iter().any(|e| matches!(e, RunEvent::Done(_))));
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "identical read must hit the session cache"
+        );
+        let store = history.lock().await;
+        let tool_msgs: Vec<&str> = store
+            .iter()
+            .filter(|m| m.role == Role::Tool)
+            .map(|m| m.content.as_str())
+            .collect();
+        assert_eq!(tool_msgs.len(), 2);
+        assert!(tool_msgs[1].starts_with("[cached]"));
+    }
+
+    #[tokio::test]
+    async fn tool_cache_cleared_after_write() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = Arc::new(MockProvider::sequential(vec![
+            single_read_call("read_file", "d0", r#"{"q":"x"}"#),
+            vec![
+                Chunk::ToolCallStart {
+                    id: "d1".into(),
+                    name: "write_file".into(),
+                },
+                Chunk::ToolCallEnd {
+                    id: "d1".into(),
+                    name: "write_file".into(),
+                    arguments: "{}".into(),
+                },
+                Chunk::Done,
+            ],
+            single_read_call("read_file", "d2", r#"{"q":"x"}"#),
+            single_read_call("read_file", "d3", r#"{"q":"x"}"#),
+            vec![
+                Chunk::TextDelta("done".into()),
+                Chunk::Usage(Usage::default()),
+                Chunk::Done,
+            ],
+        ]));
+        let mut agent = Agent::new(provider, 8).with_tool_cache(true);
+        agent.register_tool(Arc::new(CountingSpy {
+            name: "read_file",
+            result: "r".into(),
+            calls: calls.clone(),
+        }));
+        agent.register_tool(Arc::new(WritableSpy {
+            name: "write_file",
+            result: "w".into(),
+        }));
+
+        let events = drain(agent, "read, write, read again").await;
+        assert!(events.iter().any(|e| matches!(e, RunEvent::Done(_))));
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "write must invalidate the cache: read(1) exec, write, read(2) exec, read(3) cached"
+        );
     }
 }
