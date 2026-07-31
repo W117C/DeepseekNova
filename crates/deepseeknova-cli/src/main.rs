@@ -205,12 +205,10 @@ async fn main() -> anyhow::Result<()> {
             severity_min,
         }) => {
             use deepseeknova_provider::cost::ModelRole;
-            let root = std::path::PathBuf::from(path.as_deref().unwrap_or("."));
-            let root = deepseeknova_security::path::secure_resolve(
-                &std::env::current_dir().unwrap_or_default(),
-                &root,
-            )
-            .unwrap_or(root);
+            let workspace_root = std::env::current_dir().unwrap_or_default();
+            let raw_root = std::path::PathBuf::from(path.as_deref().unwrap_or("."));
+            // 逃逸企图直接中止（fail-closed，与工具侧惯例一致）；其余解析失败回落 raw。
+            let root = resolve_scan_root(&workspace_root, &raw_root)?;
             let min = deepseeknova_scanner::rule::Severity::parse(severity_min)
                 .unwrap_or(deepseeknova_scanner::rule::Severity::Low);
 
@@ -226,15 +224,16 @@ async fn main() -> anyhow::Result<()> {
             if !*no_ai && !findings.is_empty() {
                 let mcp_tools = deepseeknova_runtime::discover_mcp_tools(&config).await;
                 let provider = model_router.provider_for(ModelRole::Task, None)?;
+                // agent 一次性构建，跨 findings 复用（Agent::run_stream 每次调用克隆状态）。
+                let agent = build_agent(
+                    Arc::clone(&provider),
+                    deepseeknova_runtime::AgentRoleProviders::default(),
+                    None,
+                    &config,
+                    5,
+                    mcp_tools,
+                )?;
                 for f in &mut findings {
-                    let agent = build_agent(
-                        Arc::clone(&provider),
-                        deepseeknova_runtime::AgentRoleProviders::default(),
-                        None,
-                        &config,
-                        5,
-                        mcp_tools.clone(),
-                    )?;
                     f.verdict = deepseeknova_scanner::investigate::investigate(f, &agent).await;
                 }
             }
@@ -786,6 +785,29 @@ async fn stream_coordinator(runner: &dyn Runner, input: RunInput) -> anyhow::Res
     Ok(())
 }
 
+/// 解析 scan 根目录：逃逸企图（`..` 遍历 / 符号链接逃逸）fail-closed 直接中止；
+/// 仅非安全类解析失败（如 canonicalize 失败）回落 raw 路径。
+fn resolve_scan_root(
+    workspace_root: &std::path::Path,
+    raw: &std::path::Path,
+) -> anyhow::Result<std::path::PathBuf> {
+    let abs = if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        workspace_root.join(raw)
+    };
+    // Path::starts_with 是词法前缀匹配，不折叠 `..`——先规范化再做包含性检查，
+    // 与 secure_resolve 的第一道防线保持一致。
+    let normalized = deepseeknova_security::path::normalize_path(&abs);
+    if !normalized.starts_with(workspace_root) {
+        anyhow::bail!("scan path escapes the workspace root: {}", raw.display());
+    }
+    Ok(
+        deepseeknova_security::path::secure_resolve(workspace_root, raw)
+            .unwrap_or_else(|_| raw.to_path_buf()),
+    )
+}
+
 fn truncate_str(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
@@ -843,6 +865,44 @@ mod tests {
         c.model_pointers.compact = None;
         c.agent.compact_model.clear();
         assert_eq!(compact_override_model(&c), None);
+    }
+
+    // ── resolve_scan_root（fail-closed 逃逸检查） ───────────────────────
+
+    fn temp_scan_root(tag: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!("dpr-cli-scan-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn scan_root_aborts_on_parent_traversal() {
+        let root = temp_scan_root("traversal");
+        for bad in ["..", "../..", "../../etc/passwd"] {
+            let err = resolve_scan_root(&root, std::path::Path::new(bad)).unwrap_err();
+            assert!(
+                err.to_string().contains("escapes the workspace root"),
+                "`{bad}` must fail-closed, got: {err}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn scan_root_aborts_on_absolute_escape() {
+        let root = temp_scan_root("abs-escape");
+        let err = resolve_scan_root(&root, std::path::Path::new("/etc")).unwrap_err();
+        assert!(err.to_string().contains("escapes the workspace root"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn scan_root_allows_inner_path() {
+        let root = temp_scan_root("inner");
+        std::fs::create_dir_all(root.join("a/b/c")).unwrap();
+        let res = resolve_scan_root(&root, std::path::Path::new("a/b/c")).unwrap();
+        assert_eq!(res, root.join("a/b/c"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
