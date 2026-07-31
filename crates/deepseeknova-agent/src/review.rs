@@ -32,8 +32,10 @@ pub(crate) async fn collect_diff(workspace_root: &Path, cap_chars: usize) -> Opt
     if !in_repo.status.success() {
         return None;
     }
-    let stat = git_capture(workspace_root, &["diff", "--stat"]).await?;
-    let body = git_capture(workspace_root, &["diff"]).await?;
+    // 对 HEAD 做 diff：覆盖未暂存 + 已暂存改动（agent 经 shell 执行过 git add 时裸
+    // `git diff` 会漏审）。
+    let stat = git_capture(workspace_root, &["diff", "--stat", "HEAD"]).await?;
+    let body = git_capture(workspace_root, &["diff", "HEAD"]).await?;
     if stat.trim().is_empty() && body.trim().is_empty() {
         return None; // 无改动可审
     }
@@ -104,14 +106,22 @@ fn extract_json(raw: &str) -> Option<String> {
             return Some(rest[..end].trim().to_string());
         }
     }
-    // 首个平衡的 {...}
+    // 首个平衡的 {...}；跟踪字符串与转义，避免 issue 文本里的字面花括号误截。
     let bytes = raw.as_bytes();
     let start = raw.find('{')?;
     let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escape = false;
     for (i, &b) in bytes.iter().enumerate().skip(start) {
+        if escape {
+            escape = false;
+            continue;
+        }
         match b {
-            b'{' => depth += 1,
-            b'}' => {
+            b'\\' if in_string => escape = true,
+            b'"' => in_string = !in_string,
+            b'{' if !in_string => depth += 1,
+            b'}' if !in_string => {
                 depth = depth.saturating_sub(1);
                 if depth == 0 {
                     return Some(raw[start..=i].to_string());
@@ -200,6 +210,16 @@ mod tests {
         assert_eq!(parse_verdict("not json at all"), None);
         assert_eq!(parse_verdict(r#"{"verdict":"maybe"}"#), None);
         assert_eq!(parse_verdict(r#"{"foo":1}"#), None);
+    }
+
+    #[test]
+    fn extracts_json_despite_braces_inside_strings() {
+        // 回归：issue 文本含字面 { } 不得误截 JSON。
+        let raw = r#"note {"verdict":"issues","issues":["fix `impl Foo { bar }` block"]} end"#;
+        match parse_verdict(raw) {
+            Some(Verdict::Issues(v)) => assert_eq!(v, vec!["fix `impl Foo { bar }` block"]),
+            other => panic!("expected issues, got {other:?}"),
+        }
     }
 
     #[test]
