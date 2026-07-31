@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -94,6 +95,12 @@ pub struct Agent {
 
     /// 审查计数钩子（runtime 注入，落 memory counters；None = 仅 tracing）。
     review_counter: Option<ReviewCounterHook>,
+
+    /// 同批工具调用是否允许并发执行（读类并发、写类保序串行）。
+    concurrent_tools: bool,
+
+    /// P1 确定性验证设置；None = 关闭（默认）。
+    verify_settings: Option<crate::verify::VerifySettings>,
 }
 
 /// Type-erased provider that yields the current repo-map text (or `None`).
@@ -110,7 +117,8 @@ pub type ReviewCounterHook = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// Type-erased closure that inserts a build-time extension value into a
 /// ToolContext's `ExtensionRegistry`.
-type ExtensionApplier = dyn Fn(&mut deepseeknova_core::tool::ExtensionRegistry) + Send + Sync;
+pub(crate) type ExtensionApplier =
+    dyn Fn(&mut deepseeknova_core::tool::ExtensionRegistry) + Send + Sync;
 
 impl Agent {
     pub fn new(provider: Arc<dyn Provider>, max_steps: usize) -> Self {
@@ -138,6 +146,8 @@ impl Agent {
             review_provider: None,
             review_settings: None,
             review_counter: None,
+            concurrent_tools: true,
+            verify_settings: None,
         }
     }
 
@@ -281,6 +291,23 @@ impl Agent {
         self
     }
 
+    /// 控制同批工具调用的执行方式：`true` 时读类工具并发、写类工具保序串行；
+    /// `false` 时保持旧的严格串行行为。
+    pub fn with_concurrent_tools(mut self, enabled: bool) -> Self {
+        self.concurrent_tools = enabled;
+        self
+    }
+
+    /// 启用完成前确定性验证（P1）：写入轮完成后按 `commands` 经 bash 工具验证，
+    /// 失败回炉修复，超过 `max_cycles` 时 Paused(verify_failed)。
+    pub fn with_verify(mut self, commands: Vec<String>, max_cycles: usize) -> Self {
+        self.verify_settings = Some(crate::verify::VerifySettings {
+            commands,
+            max_cycles,
+        });
+        self
+    }
+
     pub fn register_tool(&mut self, tool: Arc<dyn Tool>) {
         let name = tool.schema().name.clone();
         self.tools.insert(name, tool);
@@ -312,7 +339,7 @@ impl Agent {
 /// Shared ToolContext construction used by both `Agent::make_tool_context`
 /// and the spawned agent loop (which cannot borrow `self`). Keeps the
 /// injection set (workspace + security + registered extensions) in one place.
-fn build_tool_context(
+pub(crate) fn build_tool_context(
     call_id: &str,
     cancel: CancellationToken,
     workspace_root: &std::path::Path,
@@ -369,6 +396,8 @@ impl Runner for Agent {
                     max_cycles: s.max_cycles,
                 });
         let review_counter = self.review_counter.clone();
+        let concurrent_tools = self.concurrent_tools;
+        let verify_settings = self.verify_settings.clone();
 
         // Create a cancellation token and wire Ctrl-C (SIGINT) to cancel it.
         // This enables graceful interruption of the agent loop (e.g. Ctrl-C).
@@ -481,6 +510,8 @@ impl Runner for Agent {
                 review_provider,
                 review_settings,
                 review_counter,
+                concurrent_tools,
+                verify_settings,
             )
             .await;
 
@@ -566,6 +597,8 @@ async fn run_agent_loop(
     review_provider: Option<Arc<dyn Provider>>,
     review_settings: Option<crate::review::ReviewSettings>,
     review_counter: Option<ReviewCounterHook>,
+    concurrent_tools: bool,
+    verify_settings: Option<crate::verify::VerifySettings>,
 ) -> anyhow::Result<()> {
     // Add user prompt
     memory.add_message(Message {
@@ -586,6 +619,8 @@ async fn run_agent_loop(
     // B3 审查状态：本轮是否有写类工具执行过 + 已回炉修复的轮次。
     let mut wrote_files = false;
     let mut review_cycles = 0usize;
+    // P1 验证状态：写入后确定性验证的失败回炉轮次。
+    let mut verify_cycles = 0usize;
 
     // 会话级 L3 压缩器（持有熔断状态，跨 step 复用）。
     let mut l3 = crate::compaction::L3Compactor::new();
@@ -708,11 +743,57 @@ async fn run_agent_loop(
             permission.as_ref(),
             approval.as_ref(),
             &extensions,
+            concurrent_tools,
         )
         .await?;
 
         match step_result {
             StepOutcome::Complete(output) => {
+                // ── P1 完成前确定性验证：有文件写入才触发；bash 缺失或未配置降级放行 ──
+                if let Some(vs) = verify_settings.as_ref() {
+                    if wrote_files && !vs.commands.is_empty() {
+                        match crate::verify::run_verify_pass(
+                            &tool_map,
+                            vs,
+                            &workspace_root,
+                            &security,
+                            &extensions,
+                            cancel,
+                        )
+                        .await
+                        {
+                            crate::verify::VerifyOutcome::Pass => {}
+                            crate::verify::VerifyOutcome::Fail(reason)
+                                if verify_cycles < vs.max_cycles =>
+                            {
+                                verify_cycles += 1;
+                                memory.add_message(Message {
+                                    role: Role::User,
+                                    content: format!(
+                                        "[verification failed]\n{reason}\n\nFix the issues, \
+                                         then finish the task. The verification commands will \
+                                         run again before completion."
+                                    ),
+                                    name: None,
+                                    tool_calls: None,
+                                    tool_call_id: None,
+                                    reasoning_content: None,
+                                });
+                                continue; // 回炉修复，下一次 Complete 再验证
+                            }
+                            crate::verify::VerifyOutcome::Fail(reason) => {
+                                tx.send(Ok(RunEvent::Paused {
+                                    reason: format!("verify_failed: {reason}"),
+                                    session_id: session_label.clone(),
+                                }))
+                                .await
+                                .ok();
+                                return Ok(());
+                            }
+                            crate::verify::VerifyOutcome::Skipped => {}
+                        }
+                    }
+                }
                 // ── B3 完成前自审：有文件写入才触发；降级路径一律放行 Done ──
                 if let (Some(rp), Some(rs)) = (&review_provider, &review_settings) {
                     if wrote_files {
@@ -880,6 +961,7 @@ async fn stream_and_process_turn(
     permission: Option<&Arc<PermissionGate>>,
     approval: Option<&Arc<dyn ApprovalResponder>>,
     extensions: &[Arc<ExtensionApplier>],
+    concurrent_tools: bool,
 ) -> anyhow::Result<StepOutcome> {
     // Build tool refs for provider
     let tool_refs: Vec<&dyn Tool> = tools.iter().map(|t| t.as_ref()).collect();
@@ -1049,14 +1131,11 @@ async fn stream_and_process_turn(
             },
         });
 
-        // Execute each tool call
+        // ── P1 执行调度：权限预检先行，读类并发、写类保序串行 ──
+        // 预检按原始顺序串行执行（Ask 等待用户，避免并发弹窗），随后按
+        // `read_only` 分段：段内只读工具并发（JoinSet），写工具独占段串行。
+        let mut decisions: Vec<Option<String>> = Vec::with_capacity(pending_calls.len());
         for call in &pending_calls {
-            if cancel.is_cancelled() {
-                break;
-            }
-
-            // Permission gate (only when a gate is attached). Decide before
-            // executing: Allow → run, Deny → block, Ask → prompt via responder.
             let gate_block: Option<String> = match permission {
                 Some(gate) => {
                     let decision = match tool_map.get(&call.name) {
@@ -1102,75 +1181,103 @@ async fn stream_and_process_turn(
                 }
                 None => None,
             };
+            decisions.push(gate_block);
+        }
 
-            let result = if let Some(reason) = gate_block {
-                format!("Error: tool '{}' {}", call.name, reason)
-            } else {
-                let ctx = build_tool_context(
-                    &call.id,
-                    cancel.child_token(),
-                    workspace_root,
-                    security,
-                    extensions,
-                );
-                if let Some(tool) = tool_map.get(&call.name) {
-                    info!(tool = %call.name, id = %call.id, "executing tool");
-                    match tool.execute(&ctx, &call.arguments).await {
-                        Ok(output) => output,
-                        Err(e) => {
-                            let err_str = format!("{e:#}");
-                            // Truncate tool errors to avoid leaking file paths or data into context
-                            let max_len = 500;
-                            let truncated = if err_str.len() > max_len {
-                                let end = err_str.floor_char_boundary(max_len);
-                                format!(
-                                    "{}... [truncated {} bytes]",
-                                    &err_str[..end],
-                                    err_str.len() - end
-                                )
-                            } else {
-                                err_str
-                            };
-                            format!("Error: {truncated}")
-                        }
-                    }
-                } else {
-                    format!("Error: unknown tool '{}'", call.name)
-                }
-            };
-
-            // Count this executed tool call against the budget, and cap its
-            // output size to protect the context window (max_output_bytes).
-            *tool_calls_made += 1;
-            // B3：写类工具或 shell 执行过 → 本轮需审查（名字以注册 schema 为准；
-            // shell 工具实际注册名为 "bash"）。
-            if matches!(
-                call.name.as_str(),
-                "write_file" | "edit_file" | "move_file" | "bash"
-            ) {
-                *wrote_files = true;
+        let max_out = security.limits.max_output_bytes as usize;
+        let mut results: Vec<Option<String>> = vec![None; pending_calls.len()];
+        let mut executed: Vec<bool> = vec![false; pending_calls.len()];
+        for (i, call) in pending_calls.iter().enumerate() {
+            if let Some(reason) = &decisions[i] {
+                results[i] = Some(format!("Error: tool '{}' {reason}", call.name));
             }
-            let max_out = security.limits.max_output_bytes as usize;
-            let result = if result.len() > max_out {
-                let end = result.floor_char_boundary(max_out);
-                format!(
-                    "{}... [truncated {} bytes]",
-                    &result[..end],
-                    result.len() - end
-                )
-            } else {
-                result
-            };
+        }
 
-            // Send ToolResult event
+        let allowed: Vec<usize> = (0..pending_calls.len())
+            .filter(|&i| decisions[i].is_none())
+            .collect();
+        let segments = group_call_indices(&pending_calls, &allowed, |name| {
+            tool_map.get(name).map(|t| t.read_only()).unwrap_or(false)
+        });
+
+        for segment in segments {
+            if cancel.is_cancelled() {
+                break;
+            }
+            if !concurrent_tools || segment.len() <= 1 {
+                for &i in &segment {
+                    let (idx, result) = execute_tool_call(
+                        i,
+                        pending_calls[i].clone(),
+                        tool_map.clone(),
+                        workspace_root.to_path_buf(),
+                        security.clone(),
+                        extensions.to_vec(),
+                        cancel.clone(),
+                        max_out,
+                    )
+                    .await;
+                    results[idx] = Some(result);
+                    executed[idx] = true;
+                }
+            } else {
+                let mut set = JoinSet::new();
+                for &i in &segment {
+                    let call = pending_calls[i].clone();
+                    let tool_map = tool_map.clone();
+                    let workspace_root = workspace_root.to_path_buf();
+                    let security = security.clone();
+                    let extensions = extensions.to_vec();
+                    let cancel = cancel.clone();
+                    set.spawn(async move {
+                        execute_tool_call(
+                            i,
+                            call,
+                            tool_map,
+                            workspace_root,
+                            security,
+                            extensions,
+                            cancel,
+                            max_out,
+                        )
+                        .await
+                    });
+                }
+                while let Some(joined) = set.join_next().await {
+                    if let Ok((idx, result)) = joined {
+                        results[idx] = Some(result);
+                        executed[idx] = true;
+                    }
+                }
+            }
+        }
+
+        // 按原始顺序回写事件与历史（顺序确定，replay 友好）。
+        for (i, call) in pending_calls.iter().enumerate() {
+            let result = results[i].clone().unwrap_or_else(|| {
+                if cancel.is_cancelled() {
+                    format!("Error: tool '{}' cancelled before execution", call.name)
+                } else {
+                    format!("Error: tool '{}' panicked during execution", call.name)
+                }
+            });
+            if executed[i] {
+                *tool_calls_made += 1;
+                // B3/verify：写类工具或 shell 执行过 → 本轮需验证/审查
+                // （名字以注册 schema 为准；shell 工具实际注册名为 "bash"）。
+                if matches!(
+                    call.name.as_str(),
+                    "write_file" | "edit_file" | "move_file" | "bash"
+                ) {
+                    *wrote_files = true;
+                }
+            }
             tx.send(Ok(RunEvent::ToolResult {
                 call_id: call.id.clone(),
                 result: result.clone(),
             }))
             .await
             .ok();
-
-            // Add tool result to memory
             memory.add_message(Message {
                 role: Role::Tool,
                 content: result,
@@ -1198,6 +1305,92 @@ async fn stream_and_process_turn(
     // Nothing produced at all
     warn!("step produced no output");
     Ok(StepOutcome::MaxSteps)
+}
+
+// ---------------------------------------------------------------------------
+// P1 tool-call scheduling helpers
+// ---------------------------------------------------------------------------
+
+/// 将允许执行的下标分组：连续只读调用并入并发段；写类调用独占一段，保序。
+/// 未知工具按写（保守）处理，避免并发读写竞争。
+fn group_call_indices(
+    calls: &[PendingToolCall],
+    allowed: &[usize],
+    is_read: impl Fn(&str) -> bool,
+) -> Vec<Vec<usize>> {
+    let mut segments: Vec<Vec<usize>> = Vec::new();
+    let mut reads: Vec<usize> = Vec::new();
+    for &i in allowed {
+        if is_read(&calls[i].name) {
+            reads.push(i);
+        } else {
+            if !reads.is_empty() {
+                segments.push(std::mem::take(&mut reads));
+            }
+            segments.push(vec![i]);
+        }
+    }
+    if !reads.is_empty() {
+        segments.push(reads);
+    }
+    segments
+}
+
+/// 执行单个工具调用（并发段内每个任务调用一次），返回 (原始下标, 结果字符串)。
+/// 错误与超长输出沿用既有截断策略；本函数不抛错，保证 JoinSet 任务不 panic。
+async fn execute_tool_call(
+    idx: usize,
+    call: PendingToolCall,
+    tool_map: HashMap<String, Arc<dyn Tool>>,
+    workspace_root: PathBuf,
+    security: SecurityContext,
+    extensions: Vec<Arc<ExtensionApplier>>,
+    cancel: CancellationToken,
+    max_out: usize,
+) -> (usize, String) {
+    let result = if let Some(tool) = tool_map.get(&call.name) {
+        info!(tool = %call.name, id = %call.id, "executing tool");
+        let ctx = build_tool_context(
+            &call.id,
+            cancel.child_token(),
+            &workspace_root,
+            &security,
+            &extensions,
+        );
+        match tool.execute(&ctx, &call.arguments).await {
+            Ok(output) => output,
+            Err(e) => {
+                let err_str = format!("{e:#}");
+                // Truncate tool errors to avoid leaking file paths or data into context
+                let max_len = 500;
+                let truncated = if err_str.len() > max_len {
+                    let end = err_str.floor_char_boundary(max_len);
+                    format!(
+                        "{}... [truncated {} bytes]",
+                        &err_str[..end],
+                        err_str.len() - end
+                    )
+                } else {
+                    err_str
+                };
+                format!("Error: {truncated}")
+            }
+        }
+    } else {
+        format!("Error: unknown tool '{}'", call.name)
+    };
+
+    let result = if result.len() > max_out {
+        let end = result.floor_char_boundary(max_out);
+        format!(
+            "{}... [truncated {} bytes]",
+            &result[..end],
+            result.len() - end
+        )
+    } else {
+        result
+    };
+    (idx, result)
 }
 
 // ---------------------------------------------------------------------------
@@ -2227,5 +2420,219 @@ mod tests {
             "skipped review must not count review_triggered, got {seen:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // P1：并行工具执行 + 确定性 Verify
+    // -----------------------------------------------------------------------
+
+    /// 写类工具桩（read_only=false → 触发写段串行）。
+    struct WritableSpy {
+        name: &'static str,
+        result: String,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for WritableSpy {
+        fn schema(&self) -> ToolSchema {
+            ToolSchema {
+                name: self.name.to_string(),
+                description: "writable spy tool".to_string(),
+                parameters: serde_json::json!({"type":"object","properties":{}}),
+            }
+        }
+        fn read_only(&self) -> bool {
+            false
+        }
+        async fn execute(&self, _ctx: &ToolContext, _args: &str) -> anyhow::Result<String> {
+            Ok(self.result.clone())
+        }
+    }
+
+    /// bash 工具桩：按 fail 决定验证命令成败。
+    struct BashSpy {
+        fail: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for BashSpy {
+        fn schema(&self) -> ToolSchema {
+            ToolSchema {
+                name: "bash".to_string(),
+                description: "bash spy".to_string(),
+                parameters: serde_json::json!({"type":"object","properties":{}}),
+            }
+        }
+        fn read_only(&self) -> bool {
+            false
+        }
+        async fn execute(&self, _ctx: &ToolContext, _args: &str) -> anyhow::Result<String> {
+            if self.fail {
+                anyhow::bail!("command exited with code 1");
+            }
+            Ok("ok".to_string())
+        }
+    }
+
+    #[test]
+    fn group_call_indices_segments_reads_and_writes_in_order() {
+        let calls = vec![
+            PendingToolCall {
+                id: "a".into(),
+                name: "read_file".into(),
+                arguments: String::new(),
+            },
+            PendingToolCall {
+                id: "b".into(),
+                name: "grep".into(),
+                arguments: String::new(),
+            },
+            PendingToolCall {
+                id: "c".into(),
+                name: "write_file".into(),
+                arguments: String::new(),
+            },
+            PendingToolCall {
+                id: "d".into(),
+                name: "read_file".into(),
+                arguments: String::new(),
+            },
+        ];
+        let allowed: Vec<usize> = (0..calls.len()).collect();
+        let segs = group_call_indices(&calls, &allowed, |n| n != "write_file");
+        assert_eq!(segs, vec![vec![0, 1], vec![2], vec![3]]);
+
+        // 全读（或并发关闭）→ 单段，保持原始顺序。
+        let segs = group_call_indices(&calls, &allowed, |_| true);
+        assert_eq!(segs, vec![vec![0, 1, 2, 3]]);
+
+        // 被权限拦截的下标不参与分段。
+        let segs = group_call_indices(&calls, &[1, 3], |n| n != "write_file");
+        assert_eq!(segs, vec![vec![1, 3]]);
+    }
+
+    #[tokio::test]
+    async fn agent_parallel_tool_batch_preserves_result_order() {
+        let history = Arc::new(tokio::sync::Mutex::new(Vec::<Message>::new()));
+        let provider = Arc::new(MockProvider::sequential(vec![
+            vec![
+                Chunk::ToolCallStart {
+                    id: "call_a".into(),
+                    name: "read_file".into(),
+                },
+                Chunk::ToolCallEnd {
+                    id: "call_a".into(),
+                    name: "read_file".into(),
+                    arguments: "{}".into(),
+                },
+                Chunk::ToolCallStart {
+                    id: "call_b".into(),
+                    name: "grep".into(),
+                },
+                Chunk::ToolCallEnd {
+                    id: "call_b".into(),
+                    name: "grep".into(),
+                    arguments: "{}".into(),
+                },
+                Chunk::ToolCallStart {
+                    id: "call_c".into(),
+                    name: "write_file".into(),
+                },
+                Chunk::ToolCallEnd {
+                    id: "call_c".into(),
+                    name: "write_file".into(),
+                    arguments: "{}".into(),
+                },
+                Chunk::Done,
+            ],
+            vec![
+                Chunk::TextDelta("done".into()),
+                Chunk::Usage(Usage::default()),
+                Chunk::Done,
+            ],
+        ]));
+        let mut agent = Agent::new(provider, 5).with_conversation_history(history.clone());
+        agent.register_tool(Arc::new(SpyTool {
+            name: "read_file",
+            result: "R1".into(),
+        }));
+        agent.register_tool(Arc::new(SpyTool {
+            name: "grep",
+            result: "R2".into(),
+        }));
+        agent.register_tool(Arc::new(WritableSpy {
+            name: "write_file",
+            result: "W3".into(),
+        }));
+
+        let events = drain(agent, "use tools").await;
+        assert!(
+            events.iter().any(|e| matches!(e, RunEvent::Done(_))),
+            "batch must finish with Done"
+        );
+        let results: Vec<String> = events
+            .iter()
+            .filter_map(|e| match e {
+                RunEvent::ToolResult { result, .. } => Some(result.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            results,
+            vec!["R1", "R2", "W3"],
+            "results must keep call order"
+        );
+
+        let store = history.lock().await;
+        let tool_msgs: Vec<&str> = store
+            .iter()
+            .filter(|m| m.role == Role::Tool)
+            .map(|m| m.content.as_str())
+            .collect();
+        assert_eq!(tool_msgs, vec!["R1", "R2", "W3"]);
+    }
+
+    #[tokio::test]
+    async fn verify_gate_retries_then_pauses_on_persistent_failure() {
+        let provider = Arc::new(MockProvider::sequential(write_then_texts(&[
+            "done v1", "done v2",
+        ])));
+        let mut agent = Agent::new(provider, 6).with_verify(vec!["cargo check --quiet".into()], 1);
+        agent.register_tool(Arc::new(WritableSpy {
+            name: "write_file",
+            result: "written".into(),
+        }));
+        agent.register_tool(Arc::new(BashSpy { fail: true }));
+
+        let events = drain(agent, "write something").await;
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                RunEvent::Paused { reason, .. } if reason.starts_with("verify_failed:")
+            )),
+            "persistent verify failure must pause, got {events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, RunEvent::Done(_))),
+            "persistent verify failure must NOT reach Done"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_gate_passes_and_reaches_done() {
+        let provider = Arc::new(MockProvider::sequential(write_then_texts(&["all done"])));
+        let mut agent = Agent::new(provider, 5).with_verify(vec!["cargo check --quiet".into()], 1);
+        agent.register_tool(Arc::new(WritableSpy {
+            name: "write_file",
+            result: "written".into(),
+        }));
+        agent.register_tool(Arc::new(BashSpy { fail: false }));
+
+        let events = drain(agent, "write something").await;
+        assert!(
+            events.iter().any(|e| matches!(e, RunEvent::Done(_))),
+            "passing verify must reach Done, got {events:?}"
+        );
+        assert!(!events.iter().any(|e| matches!(e, RunEvent::Paused { .. })));
     }
 }

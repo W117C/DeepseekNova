@@ -165,6 +165,22 @@ coordinator 模式（`run --planner-model ...`）的 Delegate 子代理使用 `t
 `compact` 指针（`agent.compact_model` 仅在指针未设时作为覆盖，照样计量）；
 完成前自审门禁（`[review]`）走 `quick` 指针（`review.review_model` 同理作为覆盖）。
 
+### 完成前确定性验证（`[verify]`）
+
+写入类工具执行过后、模型宣布完成之前，按配置命令自动验证（默认关闭）。命令经
+`bash` 工具运行，沙箱、命令白名单与资源限制全部生效；失败结果回喂循环让模型修复，
+超过 `max_cycles` 后以 `Paused(verify_failed)` 交人工：
+
+```toml
+[verify]
+enabled = true                        # 默认 false
+commands = ["cargo check --quiet"]    # 按序执行，任一失败即回炉
+max_cycles = 1                        # 失败回炉上限
+```
+
+验证通过后继续原有流程（B3 自审 / Done）。命令需同时满足 `[security]` 的
+`allowed_commands`（启用时），未命中白名单会作为验证失败处理。
+
 ### Environment Variables
 
 | Variable | Description |

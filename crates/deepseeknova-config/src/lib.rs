@@ -91,6 +91,10 @@ pub struct Config {
     /// Pre-completion self-review gate (B3, default off).
     #[serde(default)]
     pub review: ReviewConfig,
+
+    /// Deterministic post-write verification (default off).
+    #[serde(default)]
+    pub verify: VerifyConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -853,6 +857,44 @@ impl Default for ReviewConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Verify（完成前确定性验证，P1）
+// ---------------------------------------------------------------------------
+
+/// Deterministic verification run after file-writing turns (default OFF).
+///
+/// Commands run through the registered `bash` tool so sandbox, command
+/// allow-lists and resource limits all apply. Failures feed back into the
+/// agent loop as User messages; exceeding `max_cycles` pauses the run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerifyConfig {
+    /// Whether the post-write verification gate runs (default: false).
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Shell commands executed in order after a writing turn completes.
+    #[serde(default)]
+    pub commands: Vec<String>,
+
+    /// Fix cycles allowed before pausing for human review (default: 1).
+    #[serde(default = "default_verify_cycles")]
+    pub max_cycles: usize,
+}
+
+fn default_verify_cycles() -> usize {
+    1
+}
+
+impl Default for VerifyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            commands: Vec::new(),
+            max_cycles: default_verify_cycles(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Loading & merging
 // ---------------------------------------------------------------------------
 
@@ -924,6 +966,7 @@ impl Config {
         self.session = other.session;
         self.budget = other.budget;
         self.review = other.review;
+        self.verify = other.verify;
     }
 
     /// Apply DEEPSEEKNOVA_* environment variable overrides.
@@ -1329,5 +1372,23 @@ mod tests {
         assert_eq!(c.review.review_model, "deepseek-chat");
         assert_eq!(c.review.diff_cap_tokens, 1500);
         assert_eq!(c.review.max_cycles, 1); // 未覆盖取默认
+    }
+
+    #[test]
+    fn verify_config_defaults_off() {
+        let c = Config::default();
+        assert!(!c.verify.enabled, "verify must default OFF per spec");
+        assert!(c.verify.commands.is_empty());
+        assert_eq!(c.verify.max_cycles, 1);
+    }
+
+    #[test]
+    fn verify_config_parses_overrides() {
+        let toml = "[verify]\nenabled = true\ncommands = [\"cargo check --quiet\", \"cargo test --quiet\"]\nmax_cycles = 2\n";
+        let c: Config = toml::from_str(toml).unwrap();
+        assert!(c.verify.enabled);
+        assert_eq!(c.verify.commands.len(), 2);
+        assert_eq!(c.verify.commands[0], "cargo check --quiet");
+        assert_eq!(c.verify.max_cycles, 2);
     }
 }
