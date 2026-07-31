@@ -10,6 +10,7 @@ export type WireEvent =
   | { kind: "tool_call_delta"; id: string; args_delta: string }
   | { kind: "tool_call_end"; id: string; name: string; arguments: string }
   | { kind: "tool_result"; call_id: string; result: string }
+  | { kind: "verification"; command: string; passed: boolean; summary: string }
   | {
       kind: "usage";
       prompt_tokens: number;

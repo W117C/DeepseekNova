@@ -167,11 +167,12 @@ fn extract_touched_files(messages: &[Message]) -> Vec<String> {
     seen.into_iter().collect()
 }
 
-fn last_user_message(messages: &[Message]) -> Option<Message> {
+pub(crate) fn last_user_message(messages: &[Message]) -> Option<Message> {
     messages
         .iter()
         .rev()
-        .find(|m| m.role == Role::User)
+        // 跳过合成召回消息（<recalled-memory>），避免把检索块当用户意图。
+        .find(|m| m.role == Role::User && !m.content.starts_with("<recalled-memory>"))
         .cloned()
 }
 

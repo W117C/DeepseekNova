@@ -237,6 +237,20 @@ async fn chat(
                             });
                             Ok(Event::default().event("paused").data(json.to_string()))
                         }
+                        Ok(RunEvent::Verification {
+                            command,
+                            passed,
+                            summary,
+                        }) => {
+                            let json = serde_json::json!({
+                                "command": command,
+                                "passed": passed,
+                                "summary": summary,
+                            });
+                            Ok(Event::default()
+                                .event("verification")
+                                .data(json.to_string()))
+                        }
                         Err(e) => Ok(Event::default().event("error").data(e.to_string())),
                     };
                     if tx.unbounded_send(sse_event).is_err() {

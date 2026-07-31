@@ -159,6 +159,9 @@ export default function Composer() {
         useStore.getState().pushTraceEvent({ kind: "tool_result", call_id: callId, result });
         updateMessage(callId, (m) => ({ ...m, toolResult: result, endTs: Date.now() }));
       },
+      onVerification(ev: { command: string; passed: boolean; summary: string }) {
+        useStore.getState().pushTraceEvent({ kind: "verification", ...ev });
+      },
       onTurnComplete() {
         flushStream();
         if (streamingReasoningId.current) {

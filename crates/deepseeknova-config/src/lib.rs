@@ -364,6 +364,21 @@ pub struct MemoryConfig {
     /// 起点召回条数。
     #[serde(default = "default_recall_top_k")]
     pub recall_top_k: usize,
+    /// 中途检索开关：新一轮开头或压缩后自动注入记忆 + 代码图命中。
+    #[serde(default = "default_true")]
+    pub mid_run_recall: bool,
+    /// 中途检索的记忆条数上限。
+    #[serde(default = "default_mid_run_recall_top_k")]
+    pub mid_run_recall_top_k: usize,
+    /// 中途检索的代码图实体条数上限（图索引启用时）。
+    #[serde(default = "default_mid_run_graph_top_k")]
+    pub mid_run_graph_top_k: usize,
+    /// 中途检索注入块的 token 上限。0 = 不注入。
+    #[serde(default = "default_mid_run_inject_tokens")]
+    pub mid_run_inject_tokens: usize,
+    /// 仅当上一轮执行过工具或本轮发生过压缩时才注入（默认 true）。
+    #[serde(default = "default_true")]
+    pub mid_run_require_tool_turn: bool,
     /// 触发沉淀的最小工具调用数。
     #[serde(default = "default_min_tool_calls")]
     pub min_tool_calls: usize,
@@ -390,6 +405,15 @@ fn default_recall_inject_tokens() -> usize {
 fn default_recall_top_k() -> usize {
     3
 }
+fn default_mid_run_recall_top_k() -> usize {
+    3
+}
+fn default_mid_run_graph_top_k() -> usize {
+    4
+}
+fn default_mid_run_inject_tokens() -> usize {
+    200
+}
 fn default_min_tool_calls() -> usize {
     5
 }
@@ -414,6 +438,11 @@ impl Default for MemoryConfig {
             embed_model: String::new(),
             recall_inject_tokens: 200,
             recall_top_k: 3,
+            mid_run_recall: true,
+            mid_run_recall_top_k: 3,
+            mid_run_graph_top_k: 4,
+            mid_run_inject_tokens: 200,
+            mid_run_require_tool_turn: true,
             min_tool_calls: 5,
             min_steps: 3,
             max_distillations_per_day: 50,
@@ -511,6 +540,27 @@ pub struct AgentConfig {
     /// Model used for L3 compaction digests. Empty = main model.
     #[serde(default)]
     pub compact_model: String,
+
+    /// 每步按规则切换 reasoning effort（P2）：工具结果正常 → quick（thinking off），
+    /// 首步/出错/回炉反馈 → high。默认关；开启需 runtime 注入 quick/high 两个 provider。
+    #[serde(default)]
+    pub step_effort_routing: bool,
+
+    /// 工具结果观察压缩（P2）：超阈值的大输出由廉价模型摘要后入历史。默认关。
+    #[serde(default)]
+    pub observe_compress: bool,
+
+    /// 触发观察压缩的输出大小阈值（字符）。
+    #[serde(default = "default_observe_threshold")]
+    pub observe_compress_threshold_chars: usize,
+
+    /// 压缩后摘要的最大字符数。
+    #[serde(default = "default_observe_max_chars")]
+    pub observe_compress_max_chars: usize,
+
+    /// 会话内只读工具结果缓存（P2）：同参读调用直接复用，写执行后失效。默认关。
+    #[serde(default)]
+    pub tool_cache: bool,
 }
 
 fn default_max_steps() -> usize {
@@ -518,6 +568,12 @@ fn default_max_steps() -> usize {
 }
 fn default_on_max_steps() -> String {
     "pause".to_string()
+}
+fn default_observe_threshold() -> usize {
+    12_000
+}
+fn default_observe_max_chars() -> usize {
+    4_000
 }
 
 impl Default for AgentConfig {
@@ -531,6 +587,11 @@ impl Default for AgentConfig {
             on_max_steps: default_on_max_steps(),
             l3_compaction: true,
             compact_model: String::new(),
+            step_effort_routing: false,
+            observe_compress: false,
+            observe_compress_threshold_chars: default_observe_threshold(),
+            observe_compress_max_chars: default_observe_max_chars(),
+            tool_cache: false,
         }
     }
 }
@@ -1066,6 +1127,11 @@ impl AgentConfig {
         if !other.compact_model.is_empty() {
             self.compact_model = other.compact_model;
         }
+        self.step_effort_routing = other.step_effort_routing;
+        self.observe_compress = other.observe_compress;
+        self.observe_compress_threshold_chars = other.observe_compress_threshold_chars;
+        self.observe_compress_max_chars = other.observe_compress_max_chars;
+        self.tool_cache = other.tool_cache;
     }
 }
 
@@ -1352,6 +1418,42 @@ mod tests {
         assert_eq!(c.budget.max_total_tokens, 64_000);
         assert_eq!(c.budget.max_memory_tokens, 32_000);
         assert!(c.session.enabled);
+    }
+
+    #[test]
+    fn agent_p2_fields_defaults_and_overrides() {
+        let d = Config::default();
+        assert!(!d.agent.step_effort_routing);
+        assert!(!d.agent.observe_compress);
+        assert_eq!(d.agent.observe_compress_threshold_chars, 12_000);
+        assert_eq!(d.agent.observe_compress_max_chars, 4_000);
+        assert!(!d.agent.tool_cache);
+
+        let toml = "[agent]\nstep_effort_routing = true\nobserve_compress = true\nobserve_compress_threshold_chars = 5000\nobserve_compress_max_chars = 1000\ntool_cache = true\n";
+        let c: Config = toml::from_str(toml).unwrap();
+        assert!(c.agent.step_effort_routing);
+        assert!(c.agent.observe_compress);
+        assert_eq!(c.agent.observe_compress_threshold_chars, 5_000);
+        assert_eq!(c.agent.observe_compress_max_chars, 1_000);
+        assert!(c.agent.tool_cache);
+    }
+
+    #[test]
+    fn memory_mid_run_fields_defaults_and_overrides() {
+        let d = Config::default();
+        assert!(d.memory.mid_run_recall);
+        assert_eq!(d.memory.mid_run_recall_top_k, 3);
+        assert_eq!(d.memory.mid_run_graph_top_k, 4);
+        assert_eq!(d.memory.mid_run_inject_tokens, 200);
+        assert!(d.memory.mid_run_require_tool_turn);
+
+        let toml = "[memory]\nmid_run_recall = false\nmid_run_recall_top_k = 5\nmid_run_graph_top_k = 6\nmid_run_inject_tokens = 300\nmid_run_require_tool_turn = false\n";
+        let c: Config = toml::from_str(toml).unwrap();
+        assert!(!c.memory.mid_run_recall);
+        assert_eq!(c.memory.mid_run_recall_top_k, 5);
+        assert_eq!(c.memory.mid_run_graph_top_k, 6);
+        assert_eq!(c.memory.mid_run_inject_tokens, 300);
+        assert!(!c.memory.mid_run_require_tool_turn);
     }
 
     #[test]

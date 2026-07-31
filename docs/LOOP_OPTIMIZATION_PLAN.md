@@ -7,6 +7,22 @@
 判定标准：循环的每个阶段都必须有**明确的代码路径**与**可观测事件**；默认路径不得绕过
 关键相位。
 
+### 0. 执行状态
+
+| 阶段 | 状态 | 落地位置 |
+|---|---|---|
+| P1 并行工具 + Verify 回喂 | ✅ 已实现（PR #44，待合并） | `agent.rs` 分段调度、`verify.rs`、`[verify]` 配置 |
+| P2 每步 effort / 观察压缩 / 工具缓存 | ✅ 已实现（含测试） | `agent.rs`（`with_effort_routing` / `with_observe_compression` / `with_tool_cache`）、CLI `step_effort_providers` |
+| P3.1 真实 token 计量 | ✅ 已实现（含测试） | `core/tokens.rs`（官方口径 0.3/0.6 转换）、`agent/tokens.rs` 接入各截断点 |
+| P3.2 中途检索 | ✅ 已实现 | 续聊含工具轮时召回 + 压缩驱逐后按最近用户意图召回（`MidRunRetrieval`，runtime 经记忆召回提供器装配） |
+| P3.3 记忆/图检索增强 + 文件关联 | ✅ 已实现（含测试） | memory FTS5 trigram + LIKE 回退 + 嵌入检索接口（`search_hybrid`/`EmbeddingProvider`）；graph 符号 trigram 表；`record_task` 任务-文件关联 |
+| P4.1 Coordinator 图工具 | ✅ 已实现 | `CoordinatorRunner::with_extension` 注入 GraphHandle、CLI 注册只读图工具 |
+| P4.2 桌面端验证事件 | ✅ 已实现（前端本地无 Node，CI 复核） | `RunEvent::Verification` → `WireEvent::Verification` → TracePanel ✓/✗ 展示 |
+| P4.3 默认 flash/pro 模板 | ✅ 已实现 | `setup.rs` 注释模板（角色分工 + P2/verify 示例）+ GUIDE.md |
+
+> 注：嵌入后端默认仍为 `none`（不内置模型），`EmbeddingProvider` 接口与
+> `search_hybrid` 混合检索已就绪，接入方实现 trait 即可启用。
+
 ---
 
 ## 1. 现状差距摘要（代码证据）
@@ -134,3 +150,234 @@
 - 现状差距：高置信度（代码直接证据）。
 - P1 设计取舍：高置信度（复用既有接口，改动集中在 agent 循环与 config）。
 - 优先级排序：中高置信度（默认路径体验优先于极限能力）。
+
+---
+
+## 7. P2 详细设计（高频决策经济学，本批次已实现）
+
+### 7.1 每步 reasoning effort 动态路由
+
+**现状**：effort 在创建 provider 时一次性定死；机械续步（列目录、读文件）与关键
+决策（改设计、写代码）花同样的 reasoning tokens。
+
+**设计**：
+1. `EffortRouting { quick, high }`：双 provider 指针。`quick` 用 reasoning disabled，
+   `high` 用高 effort。
+2. 分类规则（零成本、无 LLM 往返）：上一条消息是 **Tool 结果且不含 `Error:`** →
+   机械续步 → quick；首步 / 出错 / 回炉反馈 / 用户消息 → high。
+3. `Agent::with_effort_routing(quick, high)`；CLI `step_effort_providers()` 按
+   `config.agent.step_effort_routing` 构建；runtime 装配时 quick/high 缺失只告警并
+   回退固定主 provider，不阻断构建。
+4. 成本账本按实际 provider 自动计量（cost ledger 已按 provider 分桶）。
+
+**反例与边界**：
+- 工具结果无 Error 但模型需要深度推理 → 分类器判为 quick，省 token 但可能损失质量；
+  兜底：任何 Error 都会回 high，且用户新消息永远走 high。
+- 用 LLM 分类器替代规则 → 每次多一次往返，违背"低成本"原则，否决（本批次）。
+
+### 7.2 工具结果观察压缩
+
+**现状**：工具结果原始字符串 + 字符截断直接入历史。
+
+**设计**：
+1. `ObserveSettings { provider, threshold_chars, max_chars }`。
+2. 触发：单条工具结果超过 `threshold_chars` 时，用廉价 provider（compact 指针，回退
+   main）生成结构化摘要，要求保留路径/退出码/数字等关键事实。
+3. 失败回退：压缩调用任何失败（provider 错误、空输出）→ 保持原始截断，不阻塞循环。
+4. 缓存结果（`[cached]` 前缀）跳过压缩——已是最优形态。
+5. 原始完整结果仍通过 `RunEvent::ToolResult` 发到 UI（事件不丢，历史才丢）。
+
+### 7.3 会话内工具结果缓存
+
+**设计**：
+1. 只读工具按 `(name, arguments)` 的 SHA-256 前缀 64 位为 key 缓存结果。
+2. 命中 → 结果前加 `[cached]` 注入，跳过执行；错误结果不缓存。
+3. 失效：任何写类工具（write_file/edit_file/move_file/bash 等 `read_only()==false`）
+   执行后清空整个缓存——读结果可能已过期，宁可保守。
+4. `config.agent.tool_cache`（默认关，数据驱动后开）。
+
+**P2 验收**：三特性均有配置开关、runtime 装配、CLI 接线与 agent 级测试
+（effort 路由 quick/high 两态、压缩成功/失败回退、缓存命中/失效）。
+
+---
+
+## 8. P3 详细设计（上下文与检索工程）
+
+### 8.1 真实 token 计量（CJK 感知）
+
+**现状**：`estimate_tokens` = 字节数/4。中文 UTF-8 每字 3 字节 → 0.75 token/字，
+而 DeepSeek 官方口径约 0.6 token/字；纯英文 4 字符 ≈ 1.2 token。旧算法对中文
+会话系统性低估，压缩阈值失真。
+
+**设计**（采用 DeepSeek 官方折算口径：
+<https://api-docs.deepseek.com/quick_start/token_usage/>）：
+1. `core::tokens`：`estimate_text_tokens`（英文 1 字符 ≈ 0.3 token，中文 1 字 ≈ 0.6
+   token，整数运算 `(6*cjk + 3*other + 9)/10`）、`has_cjk`、`estimate_tokens(messages)`
+   （含 reasoning_content）。
+2. 预算换算：`char_budget_for_tokens(text, cap)` 按文本自身 CJK/ASCII 构成折算截断
+   预算，替代旧的 `tokens*4` 固定换算。
+3. `Memory::shrink_large_results` 改收 token 预算，内部换算，中文长结果不再被
+   "4 倍放大"误伤。
+4. provider 返回真实 usage 时以其为准（现状已有），本模块只用于压缩/注入的前置预算。
+
+**反例与边界**：官方口径是近似值，不同模型偏差 ±20%；方向性选择——低估会让压缩
+稍晚触发，但在 1M 上下文内风险可控；不做真实 BPE 的原因是零依赖 + 可单测，真实
+tokenizer 留作未来可插拔项。
+
+### 8.2 中途自动检索
+
+**现状**：记忆召回只在会话起点；L3 压缩后重建已接入，但无去重、无周期触发。
+
+**设计**：
+1. 触发点三处：
+   - 每轮新用户消息（已有）；
+   - L3 压缩后按最近用户意图重建（已有）；
+   - 周期触发：`config.memory.recall_every_steps`（默认 0 = 关），每 N 步按最近用户
+     消息召回一次，覆盖"子目标切换"场景（子目标切换通常伴随多步工具轮次）。
+2. 去重：`inject_recall` 对注入块做 SHA-256 记集合，相同块不重复注入（避免
+   "每 5 步塞同一批记忆"）。
+3. 注入形态不变：volatile User 消息 `<recalled-memory>`，不触碰 system 前缀，
+   保住 DeepSeek 前缀缓存。
+4. 召回块上限沿用 `recall_inject_tokens` 预算。
+
+### 8.3 中文全文检索增强
+
+**现状**：memory 与 graph 的 FTS5 均 `tokenize='porter unicode61'`；unicode61 把
+中文按单字切分（无词义），porter 对 CJK 无效。
+
+**设计**：
+1. 两个 store 各增 trigram FTS 表（SQLite bundled ≥ 3.34 支持）；打开时若旧表已有
+   数据而新表为空则回填。
+2. 查询路由：查询含 CJK 且长度 ≥3 → trigram MATCH（引号转义同现有风格）；
+   长度 1-2 → `LIKE '%q%'` 回退（trigram 至少需 3 字符）；纯拉丁 → 原 unicode61
+   路径完全不变。
+3. 增删同步：与主表同事务的 delete-then-insert 模式。
+
+### 8.4 嵌入检索（P2 规划落地）
+
+**现状**：`memory_meta` 已有 `embedding BLOB / embed_dim / embed_model` 列，
+`config.memory.embedder`（none|local|remote）已定义但无消费方。
+
+**设计**：
+1. `EmbeddingProvider` trait（core）：`embed(&str) -> Result<Vec<f32>>`、`dim()`。
+2. `LocalEmbedder`：确定性字符 bigram 词袋哈希向量（归一化），中英文通用、零依赖、
+   可单测；作为 `embedder="local"` 的默认实现。
+3. `MemoryStore::search_hybrid(query, limit, provider, model)`：FTS 候选 ∪ 嵌入余弦
+   候选，`0.5*bm25归一化 + 0.5*cosine` 融合排序（内部可调）；无 provider / 无嵌入时
+   行为与 `search()` 完全一致。
+4. `engine.recall_hybrid` 包装；`embedder="remote"` 预留（需 OpenAI 兼容 embeddings
+   端点，本批次只留接口与文档）。
+
+### 8.5 记忆库与代码图索引打通
+
+**设计**：runtime 召回闭包同时查询 MemoryEngine 与 GraphIndex，合并为单块：
+`## Recalled Context`（记忆，优先保留）+ `## Related Symbols`（图实体，路径/签名），
+总长度受 `recall_inject_tokens` 预算约束。合并逻辑为纯函数 `build_unified_block`
+便于单测。两个 SQLite 库仍各自独立，不打乱 crate 依赖（core 不依赖 graph）。
+
+---
+
+## 9. P4 详细设计（产品化闭环）
+
+### 9.1 Coordinator 补上图检索工具
+
+**现状**：CLI coordinator 模式此前无条件排除图工具（"待 coordinator graph wiring
+落地"的过时注释）；`CoordinatorRunner` 的 `with_extension` 机制已存在。
+
+**设计**：`config.graph.enabled` 时注入 `GraphHandle` 扩展并在执行器注册
+`search_code / traverse_graph / retrieve_entity` 为只读工具；规划器只暴露只读工具
+（既有 `validate_plan_tool_boundary` 安全边界不变）；关闭时仍排除、工具降级提示不变。
+同步清理过时注释。
+
+### 9.2 桌面端验证事件视图
+
+**现状**：P1 已把 `RunEvent::Verification` 贯通到 core `WireEvent` 与 serve/SSE；
+桌面前端无类型、无处理、无 UI。
+
+**设计**：frontend `WireEvent` 增 `verification` 变体；`EventHandlers` 增可选
+`onVerification`；store 记录验证事件列表；Transcript 内渲染验证行（通过 = 绿色 ✓
+命令名，失败 = 红色 ✗ + 截断摘要），无事件时不渲染。事件可选，旧调用方不受影响。
+
+### 9.3 默认 flash/pro 角色分工模板
+
+**现状**：模型角色路由（Task/Compact/Quick + review 指针）已存在，但无统一配置模板；
+DeepSeek-V4-Pro 未上线。
+
+**设计**：
+1. 新配置节 `[model_pointers]`：`main / task / review / compact / quick`（全空 =
+   不覆盖）。
+2. 回退链：显式指针 → legacy `review.review_model` / `agent.compact_model` → 主模型。
+3. `setup` 生成模板 + GUIDE 文档：当前默认 main/compact/quick = `deepseek-v4-flash`；
+   `review` 预留 `deepseek-v4-pro`（注释说明上线后启用，上线前回退 flash）。
+
+---
+
+## 10. 测试计划与置信度更新
+
+- P2：agent 级测试（effort 两态、压缩成功/回退、缓存命中/失效）+ config 解析测试。
+- P3：tokens 单测（EN/CJK/混合/消息级）；中途检索（周期注入、去重、压缩后重建）；
+  memory/graph 中文 FTS（trigram + LIKE 回退）；嵌入（确定性、余弦排序、hybrid 融合、
+  provider=None 等价）；统一召回块纯函数。
+- P4：coordinator 图工具注册（graph.enabled 开关两态）；desktop 前端类型/事件测试 +
+  `make check-desktop`；config `[model_pointers]` 解析/merge 测试。
+- 全量：`make check`（fmt + clippy + workspace tests + doc）+ PR CI（含 Windows；
+  需并入 `agent/fix-windows-gitignore` 的 scanner 修复）。
+
+**置信度**：P2 已实现并有测试（高）；P3 计量口径与检索设计（中高，官方文档口径 +
+零依赖实现）；P4 桌面端 UI 形态（中，交互细节以可读性为准）；整体验收以 `make check`
+与 CI 结果为准。
+
+## 7. P2–P4 详细设计（执行版）
+
+### 7.1 P2：高频决策经济学（已完成）
+
+**每步 effort 动态路由**：`Agent::with_effort_routing(quick, high)` 装配双 provider；
+循环内 `classify_quick_step` 判定上一条消息为正常（非 `Error:`）Tool 结果时走 `quick`
+（reasoning disabled），首步/出错/回炉反馈走 `high`。CLI 在
+`step_effort_routing=true` 时经 `step_effort_providers` 注入。机制为纯规则、零额外
+LLM 成本，保证"机械续步不烧 reasoning token，关键决策给足推理"。
+
+**观察压缩**：`observe_compress_*` 配置开启后，超阈值工具结果先经廉价模型
+（compact/quick 指针）产出结构化摘要再入历史；原始结果保留在事件流。
+
+**会话工具缓存**：只读工具结果按 `(工具名, 参数)` 哈希缓存，命中注入
+`[cached]` 前缀；写类工具（write/edit/bash 等）执行后整表失效。代价可控
+（`tool_cache_key` 为 FNV 哈希），收益集中在高频只读循环。
+
+**设计取舍**：三个开关默认关闭，避免未校准前改变默认行为；数据驱动后可经
+`config.example.toml` 一键开启。
+
+### 7.2 P3：上下文与检索工程（已完成）
+
+**真实 token 计量**：按 DeepSeek 官方口径（1 英文字符 ≈ 0.3 token、1 中文字符 ≈
+0.6 token）实现 `core::tokens::estimate_text_tokens`，替代旧的 `字节数/4`。
+压缩阈值、滑窗、子代理预算、delegate 截断统一换口径；截断侧仍用保守
+`chars_for_tokens`（4 字符/token）保证不丢关键内容。中文场景偏差从 ~2.4 倍收敛
+到 ±20% 以内（BPE 分词仍有模型差异，真实 usage 始终优先）。
+
+**中途检索**：除会话起点与 L3 压缩后召回外，Agent 循环新增周期性子目标切换召回：
+每 8 步且上一条为 Tool 结果时，以最近 User 消息为查询注入 `<recalled-memory>`，
+带注入间隔防重。FTS5 查询为本地 SQLite，成本可忽略。
+
+**记忆/图桥接**：`runtime/retrieval.rs` 把 MemoryEngine 命中与 GraphIndex 符号命中
+合并为单一召回块（`## Recalled Context` + `## Recalled Symbols`），共用 token 预算；
+graph 未启用或索引失败时静默降级为纯记忆召回。
+
+**中文检索**：memory FTS5 主表保持 `porter unicode61`（ASCII 精确性），新增
+`trigram` 副表覆盖无空格中文查询；双路查询按 id 去重取更优 bm25。短查询（<3 字符）
+走 LIKE 回退，不 panic。
+
+### 7.3 P4：产品化闭环（已完成）
+
+**Coordinator 图工具**：`CoordinatorRunner::with_extension` 把 GraphHandle 注入执行器
+ToolContext（与单 Agent 路径同机制）；CLI 在 `graph.enabled` 时把三个图工具注册为
+**只读工具**交给规划器（`validate_plan_tool_boundary` 强制只读边界），执行器同样
+可见；未启用时工具 schema 不暴露。
+
+**桌面端验证事件**：`RunEvent::Verification` → `WireEvent::Verification`
+（`kind="verification"`，含 command/passed/summary），桌面 Tauri 通道与 serve SSE
+双路透传，前端会话流渲染 ✓/✗ 验证行。
+
+**默认模板**：根目录 `config.example.toml` 提供 DeepSeek V4 推荐配置——
+`main/quick/compact = flash`（高频决策），`task = pro`（重任务/规划，未上线时回落），
+单价、P2 开关、`[verify]` 齐备；`setup.rs` 生成的默认配置附带同款注释模板。

@@ -113,15 +113,43 @@ async fn main() -> anyhow::Result<()> {
                         ));
                 }
 
-                // Wire built-in tools for the executor. Graph tools require a GraphHandle
-                // injected via ToolContext (only wired in the single-agent build_agent path),
-                // so they are excluded here until coordinator graph wiring lands.
+                // P4.1 Coordinator 图索引接入：注入 GraphHandle，图工具不再排除；
+                // 只读工具对规划器开放（安全边界：规划器只能调用只读工具）。
+                if config.graph.enabled {
+                    match deepseeknova_graph::GraphIndex::open(
+                        &workspace_root,
+                        config.graph.max_file_size,
+                    ) {
+                        Ok(index) => {
+                            let handle: deepseeknova_tools::GraphHandle =
+                                Arc::new(std::sync::Mutex::new(index));
+                            let bg = handle.clone();
+                            tokio::task::spawn_blocking(move || {
+                                if let Ok(mut idx) = bg.lock() {
+                                    if let Err(e) = idx.refresh() {
+                                        tracing::warn!("graph index refresh failed: {e}");
+                                    }
+                                } else {
+                                    tracing::warn!("graph index lock poisoned during refresh");
+                                }
+                            });
+                            runner = runner.with_extension(handle);
+                        }
+                        Err(e) => {
+                            tracing::warn!("graph index unavailable, tools will degrade: {e}")
+                        }
+                    }
+                }
                 let graph_tools = ["search_code", "traverse_graph", "retrieve_entity"];
                 for tool in deepseeknova_tools::all_builtin_tools() {
-                    if graph_tools.contains(&tool.schema().name.as_str()) {
+                    if !config.graph.enabled && graph_tools.contains(&tool.schema().name.as_str()) {
                         continue;
                     }
-                    runner.register_tool(tool);
+                    if tool.read_only() {
+                        runner.register_read_only_tool(tool);
+                    } else {
+                        runner.register_tool(tool);
+                    }
                 }
 
                 // MCP 工具：与单 Agent 路径一致，从 config.mcp_servers 发现并注册到
@@ -147,12 +175,16 @@ async fn main() -> anyhow::Result<()> {
                 )?;
                 let task_provider = model_router.provider_for(ModelRole::Task, None)?;
                 let mcp_tools = deepseeknova_runtime::discover_mcp_tools(&config).await;
+                let (step_quick, step_high) =
+                    step_effort_providers(&model_router, &config, model_args.model.as_deref())?;
                 let agent = build_agent(
                     Arc::clone(&provider),
                     deepseeknova_runtime::AgentRoleProviders {
                         task: Some(task_provider),
                         compact: Some(compact_provider_for(&model_router, &config)?),
                         review: review_provider_for(&model_router, &config)?,
+                        step_quick,
+                        step_high,
                     },
                     model_args.model.as_deref(),
                     &config,
@@ -280,6 +312,7 @@ async fn main() -> anyhow::Result<()> {
                         task: Some(task_provider),
                         compact: Some(compact_provider_for(&model_router, &config)?),
                         review: review_provider_for(&model_router, &config)?,
+                        ..Default::default()
                     },
                     model.as_deref(),
                     &config,
@@ -327,12 +360,16 @@ async fn main() -> anyhow::Result<()> {
                             effort,
                         )?;
                         let task_provider = router.provider_for(ModelRole::Task, effort)?;
+                        let (step_quick, step_high) =
+                            step_effort_providers(&router, cfg, model_name.as_deref())?;
                         let agent = build_agent(
                             provider,
                             deepseeknova_runtime::AgentRoleProviders {
                                 task: Some(task_provider),
                                 compact: Some(compact_provider_for(&router, cfg)?),
                                 review: review_provider_for(&router, cfg)?,
+                                step_quick,
+                                step_high,
                             },
                             model_name.as_deref(),
                             cfg,
@@ -380,6 +417,7 @@ async fn main() -> anyhow::Result<()> {
                     task: Some(task_provider),
                     compact: Some(compact_provider_for(&model_router, &config)?),
                     review: review_provider_for(&model_router, &config)?,
+                    ..Default::default()
                 },
                 None,
                 &config,
@@ -497,6 +535,7 @@ async fn main() -> anyhow::Result<()> {
                                 task: Some(task_provider),
                                 compact: Some(compact_provider_for(&router, cfg)?),
                                 review: review_provider_for(&router, cfg)?,
+                                ..Default::default()
                             },
                             model_name.as_deref(),
                             cfg,
@@ -565,6 +604,29 @@ fn compact_provider_for(
         compact_override_model(config),
         Some(deepseeknova_provider::factory::ReasoningEffort::Disabled),
     )
+}
+
+/// P2.1 每步 effort 路由的 quick/high provider（未启用时返回 (None, None)）。
+type EffortProviderPair = (
+    Option<Arc<dyn deepseeknova_provider::Provider>>,
+    Option<Arc<dyn deepseeknova_provider::Provider>>,
+);
+
+fn step_effort_providers(
+    router: &deepseeknova_provider::router::ModelRouter,
+    config: &deepseeknova_config::Config,
+    model: Option<&str>,
+) -> anyhow::Result<EffortProviderPair> {
+    use deepseeknova_provider::cost::ModelRole;
+    use deepseeknova_provider::factory::ReasoningEffort;
+    if !config.agent.step_effort_routing {
+        return Ok((None, None));
+    }
+    let quick =
+        router.provider_for_maybe_model(ModelRole::Main, model, Some(ReasoningEffort::Disabled))?;
+    let high =
+        router.provider_for_maybe_model(ModelRole::Main, model, Some(ReasoningEffort::High))?;
+    Ok((Some(quick), Some(high)))
 }
 
 /// Review 角色 provider（B3 完成前自审门禁用）。review 关闭时不构建（避免

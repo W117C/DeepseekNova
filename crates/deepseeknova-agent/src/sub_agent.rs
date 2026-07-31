@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 /// Approximate characters-per-token for rough heuristics.
-const CHARS_PER_TOKEN: f32 = 4.0;
+use crate::tokens::estimate_tokens;
 
 // ---------------------------------------------------------------------------
 // SubAgentConfig — independent context for a single sub-agent type
@@ -414,19 +414,6 @@ async fn run_sub_agent_loop(
     Err(anyhow::anyhow!(
         "sub-agent reached max steps ({max_steps}) without completing the task"
     ))
-}
-
-// ---------------------------------------------------------------------------
-// Token estimation helpers
-// ---------------------------------------------------------------------------
-
-/// Rough token count estimate from message content length.
-fn estimate_tokens(messages: &[Message]) -> u32 {
-    let char_count: usize = messages
-        .iter()
-        .map(|m| m.content.len() + m.reasoning_content.as_ref().map(|r| r.len()).unwrap_or(0))
-        .sum();
-    (char_count as f32 / CHARS_PER_TOKEN).ceil() as u32
 }
 
 /// Build a compaction digest by asking the provider to summarize old messages.

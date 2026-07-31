@@ -98,6 +98,12 @@ pub enum RunEvent {
         call_id: String,
         result: String,
     },
+    /// P4 完成前确定性验证：一条验证命令的结果（供前端渲染）。
+    Verification {
+        command: String,
+        passed: bool,
+        summary: String,
+    },
     Usage(Usage),
     TurnComplete,
     ApprovalRequest {
@@ -149,6 +155,11 @@ pub enum WireEvent {
     ToolResult {
         call_id: String,
         result: String,
+    },
+    Verification {
+        command: String,
+        passed: bool,
+        summary: String,
     },
     Usage {
         prompt_tokens: u32,
@@ -229,6 +240,15 @@ impl From<RunEvent> for WireEvent {
                 arguments,
             },
             RunEvent::ToolResult { call_id, result } => WireEvent::ToolResult { call_id, result },
+            RunEvent::Verification {
+                command,
+                passed,
+                summary,
+            } => WireEvent::Verification {
+                command,
+                passed,
+                summary,
+            },
             RunEvent::Usage(u) => {
                 let usage_info: WireUsageInfo = u.into();
                 WireEvent::Usage {

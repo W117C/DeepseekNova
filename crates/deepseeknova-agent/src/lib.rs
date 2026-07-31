@@ -33,6 +33,7 @@ pub mod plan_mode;
 mod review;
 pub mod sub_agent;
 pub mod test_utils;
+pub mod tokens;
 mod verify;
 
 pub use agent::*;

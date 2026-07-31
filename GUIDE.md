@@ -122,6 +122,12 @@ temperature = 0.7
 max_steps = 25                     # Max tool-calling iterations per turn
 system_prompt = "You are a helpful software engineer."
 compaction_threshold = 32000       # Tokens before memory compaction
+concurrent_tools = true            # 同批读类工具并发、写类保序串行（P1）
+# step_effort_routing = true       # 每步在 quick（thinking off）/ high 间切换（P2）
+# observe_compress = true          # 超阈值工具输出由廉价模型摘要后入历史（P2）
+# observe_compress_threshold_chars = 12000
+# observe_compress_max_chars = 4000
+# tool_cache = true                # 会话内只读工具结果缓存，写后失效（P2）
 
 [tools]
 sandbox = true                     # Enable sandbox for shell commands
@@ -180,6 +186,27 @@ max_cycles = 1                        # 失败回炉上限
 
 验证通过后继续原有流程（B3 自审 / Done）。命令需同时满足 `[security]` 的
 `allowed_commands`（启用时），未命中白名单会作为验证失败处理。
+
+验证命令的逐条结果通过 `verification` 事件推送给前端（桌面端显示为 `✓ / ✗` 系统行，
+HTTP API 为 `event: verification` 的 SSE）。
+
+### 每步 effort 路由与观察压缩（P2）
+
+`step_effort_routing = true` 时，Agent 在每步按规则选择 provider：上一步是正常工具
+结果 → `quick` 指针模型（thinking off，省 reasoning token）；首步、工具报错、验证/
+审查回炉 → `high` 推理。实现上由 CLI 为同一 main 模型构建两个 effort 实例
+（Disabled / High）；运行时未注入这两个实例时回落固定主 provider 并告警。
+
+`observe_compress = true` 时，超过 `observe_compress_threshold_chars` 的工具输出会由
+廉价模型（compact 指针优先）压缩为 `observe_compress_max_chars` 字符以内的结构化摘要
+再进入历史；前端事件流仍透出原始结果。压缩失败自动回退原有截断行为。
+
+`tool_cache = true` 时，会话内只读工具按（工具名, 参数）缓存结果，同参重复读调用直接
+复用（标记 `[cached]`）；任何写工具执行后缓存整体失效。
+
+Coordinator 模式（`run --planner-model ...`）现在同样接入代码图索引：图检索工具
+（search_code / traverse_graph / retrieve_entity）对执行器可用，只读工具对规划器开放；
+`[graph] enabled = false` 时自动排除。
 
 ### Environment Variables
 

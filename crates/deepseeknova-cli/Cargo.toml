@@ -20,6 +20,7 @@ deepseeknova-config = { workspace = true }
 deepseeknova-provider = { workspace = true }
 deepseeknova-agent = { workspace = true }
 deepseeknova-tools = { workspace = true }
+deepseeknova-graph = { workspace = true }
 deepseeknova-runtime = { workspace = true }
 deepseeknova-scanner = { workspace = true }
 deepseeknova-security = { workspace = true }

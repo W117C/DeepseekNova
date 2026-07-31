@@ -14,6 +14,21 @@ All notable changes to DeepseekNova will be documented in this file.
 
 ### Added
 
+- **并行工具执行**：同批读类工具经 `JoinSet` 并发执行、写类工具保序串行；
+  `agent.concurrent_tools` 从配置占位变为生效开关（默认 true）。权限预检先行，
+  结果按原始调用顺序回写事件与历史。
+- **`[verify]` 完成前确定性验证**（默认关）：写入轮完成后按 `commands` 经 bash 工具
+  验证（沙箱/白名单/资源限制全部生效），失败以 User 消息回炉修复，超过 `max_cycles`
+  后 `Paused(verify_failed)` 交人工；新增 `verification` WireEvent（桌面端/SSE 可见）。
+- **P2 高频决策经济学**：`step_effort_routing` 每步按规则在 quick（thinking off）/
+  high 间切换 provider；`observe_compress` 用廉价模型把超阈值工具输出摘要后入历史
+  （事件流保留原始结果）；`tool_cache` 会话内只读工具结果缓存（写执行后失效）。
+- **P3 上下文与检索**：真实 token 计量（tiktoken，失败回退字符/4 启发式）；L3 压缩后
+  按最近用户意图自动召回记忆注入；记忆检索中文二元组增强（FTS5 中文命中）；任务-文件
+  关联沉淀（`record_task` 为触碰文件写入 `file:<path>` 记忆）。
+- **P4 产品化**：Coordinator 模式接入代码图索引与图检索工具，只读工具对规划器开放
+  （安全边界：规划器仅可调用只读工具）；CLI setup 模板补充 P2/verify/角色分工示例。
+
 - `[review]` 完成前自审（默认关）：文件写入后由廉价模型审查 diff，issues 回炉一轮修复，
   仍有问题以 `Paused(review_issues)` 交人工；非 git/解析失败一律降级放行。
 - 新增 `deepseeknova-scanner` crate 与 `deepseeknova scan` 子命令：内置正则规则

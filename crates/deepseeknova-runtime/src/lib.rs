@@ -227,6 +227,10 @@ pub struct AgentRoleProviders {
     pub compact: Option<Arc<dyn deepseeknova_provider::Provider>>,
     /// Pre-Done review gate verdict (the `quick` pointer / `review_model`).
     pub review: Option<Arc<dyn deepseeknova_provider::Provider>>,
+    /// P2.1 每步 effort 路由：机械续步（thinking off）。
+    pub step_quick: Option<Arc<dyn deepseeknova_provider::Provider>>,
+    /// P2.1 每步 effort 路由：首步 / 出错 / 回炉反馈（高推理）。
+    pub step_high: Option<Arc<dyn deepseeknova_provider::Provider>>,
 }
 
 /// 压缩阈值推导：显式配置优先；否则 budget 启用时取 max_total_tokens/2；都没有则 None。
@@ -253,6 +257,10 @@ pub fn build_agent_with_role_providers(
     gate: Option<Arc<PermissionGate>>,
     extra_tools: Vec<Arc<dyn deepseeknova_core::Tool>>,
 ) -> anyhow::Result<deepseeknova_agent::Agent> {
+    // 提前克隆供 P2 段使用（task/compact/review 字段在下方会被移动）。
+    let step_quick = roles.step_quick.clone();
+    let step_high = roles.step_high.clone();
+    let observe_provider = roles.compact.clone().or_else(|| step_quick.clone());
     let security = build_security_context(config, &workspace_root)?;
     let steps = if max_steps > 0 {
         max_steps
@@ -395,7 +403,8 @@ pub fn build_agent_with_role_providers(
                 // 起点召回注入（token 预算内的极简块）。
                 let rp = handle.clone();
                 let top_k = config.memory.recall_top_k;
-                let cap_chars = config.memory.recall_inject_tokens.saturating_mul(4);
+                let cap_chars =
+                    deepseeknova_core::tokens::chars_for_tokens(config.memory.recall_inject_tokens);
                 if cap_chars > 0 {
                     let recall: deepseeknova_agent::RecallProvider =
                         Arc::new(move |query: &str| {
@@ -416,7 +425,10 @@ pub fn build_agent_with_role_providers(
                             }
                             Some(block)
                         });
-                    agent = agent.with_recall_provider(recall);
+                    // P3.2 同一召回提供器同时用于起点与中途（续聊含工具轮、
+                    // 压缩驱逐后按最近用户意图注入）。
+                    agent = agent.with_recall_provider(recall.clone());
+                    agent = agent.with_mid_run_retrieval(recall, true);
                 }
 
                 // 结束沉淀钩子（启发式，无 LLM）。
@@ -565,6 +577,28 @@ pub fn build_agent_with_role_providers(
     agent = agent.with_concurrent_tools(config.agent.concurrent_tools);
     if config.verify.enabled && !config.verify.commands.is_empty() {
         agent = agent.with_verify(config.verify.commands.clone(), config.verify.max_cycles);
+    }
+
+    // ── P2 高频决策经济学 ──
+    agent = agent.with_tool_cache(config.agent.tool_cache);
+    if config.agent.step_effort_routing {
+        match (step_quick, step_high) {
+            (Some(quick), Some(high)) => {
+                agent = agent.with_effort_routing(quick, high);
+            }
+            _ => tracing::warn!(
+                "step_effort_routing enabled but quick/high providers missing; \
+                 falling back to the fixed main provider"
+            ),
+        }
+    }
+    if config.agent.observe_compress {
+        let obs_provider = observe_provider.unwrap_or_else(|| provider.clone());
+        agent = agent.with_observe_compression(
+            obs_provider,
+            config.agent.observe_compress_threshold_chars,
+            config.agent.observe_compress_max_chars,
+        );
     }
 
     Ok(agent)

@@ -1,3 +1,4 @@
+pub mod embedding;
 pub mod engine;
 pub mod evidence;
 pub mod lifecycle;

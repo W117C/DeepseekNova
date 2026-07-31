@@ -19,6 +19,7 @@ export interface EventHandlers {
   onToolCallDelta?: (id: string, argsDelta: string) => void;
   onToolCallEnd?: (id: string, name: string, arguments_: string) => void;
   onToolResult?: (callId: string, result: string) => void;
+  onVerification?: (ev: { command: string; passed: boolean; summary: string }) => void;
   onUsage?: (usage: UsageInfo) => void;
   onTurnComplete?: () => void;
   onApprovalRequest?: (req: { id: string; title: string; description: string | null }) => void;
@@ -40,6 +41,7 @@ export async function submitPrompt(request: SubmitRequest, handlers: EventHandle
       case "tool_call_delta": handlers.onToolCallDelta?.(event.id, event.args_delta); break;
       case "tool_call_end": handlers.onToolCallEnd?.(event.id, event.name, event.arguments); break;
       case "tool_result": handlers.onToolResult?.(event.call_id, event.result); break;
+      case "verification": handlers.onVerification?.({ command: event.command, passed: event.passed, summary: event.summary }); break;
       case "usage": handlers.onUsage?.({
         prompt_tokens: event.prompt_tokens, completion_tokens: event.completion_tokens,
         total_tokens: event.total_tokens, cache_hit_tokens: event.cache_hit_tokens,
