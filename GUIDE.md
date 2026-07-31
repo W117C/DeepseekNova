@@ -160,7 +160,9 @@ cache_hit_price_per_mtok = 0.028
 按 模型×角色 的 token 用量与成本估算。
 
 coordinator 模式（`run --planner-model ...`）的 Delegate 子代理使用 `task` 指针，
-其历史压缩使用 `compact` 指针并按 Compact 角色计量。
+其历史压缩使用 `compact` 指针并按 Compact 角色计量。Agent 的 L3 压缩同样走
+`compact` 指针（`agent.compact_model` 仅在指针未设时作为覆盖，照样计量）；
+完成前自审门禁（`[review]`）走 `quick` 指针（`review.review_model` 同理作为覆盖）。
 
 ### Environment Variables
 
