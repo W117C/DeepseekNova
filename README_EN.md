@@ -136,7 +136,7 @@ model = "deepseek-chat"
 | Frontend | React 18 + Vite 5 + Zustand |
 | Desktop | Tauri 2.0 |
 | Tracing | OpenTelemetry (OTLP) |
-| Tests | 391 tests · cargo-llvm-cov · 3-platform CI |
+| Tests | 511 tests · cargo-llvm-cov · 3-platform CI |
 
 ## 📄 License
 

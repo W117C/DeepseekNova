@@ -235,7 +235,7 @@ deepseeknova desktop
 | 前端 | React 18 + Vite 5 + Zustand |
 | 桌面 | Tauri 2.0 |
 | 追踪 | OpenTelemetry (OTLP) |
-| 测试 | 391 tests · cargo-llvm-cov · CI 三平台 |
+| 测试 | 511 tests · cargo-llvm-cov · CI 三平台 |
 
 ## 📄 License
 
