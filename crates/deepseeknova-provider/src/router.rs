@@ -134,6 +134,21 @@ impl ModelRouter {
         )))
     }
 
+    /// Provider for a role with an optional explicit model override:
+    /// `Some(model)` routes via [`Self::provider_for_model`], `None` via
+    /// [`Self::provider_for`]. Accounting stays under `role` either way.
+    pub fn provider_for_maybe_model(
+        &self,
+        role: ModelRole,
+        model_override: Option<&str>,
+        effort: Option<ReasoningEffort>,
+    ) -> anyhow::Result<Arc<dyn Provider>> {
+        match model_override {
+            Some(model) => self.provider_for_model(model, role, effort),
+            None => self.provider_for(role, effort),
+        }
+    }
+
     fn default_provider(
         &self,
         role: ModelRole,
@@ -259,6 +274,19 @@ mod tests {
         assert!(r.set_pointer(ModelRole::Quick, "no-such").is_err());
         r.set_pointer(ModelRole::Quick, "small").unwrap();
         assert_eq!(r.pointer(ModelRole::Quick).as_deref(), Some("small"));
+    }
+
+    #[test]
+    fn maybe_model_override_and_fallback() {
+        let r = router();
+        // None → 走角色指针（Task→small）
+        r.provider_for_maybe_model(ModelRole::Task, None, None)
+            .unwrap();
+        assert_eq!(r.cached_instances(), 1, "small 一个实例");
+        // Some → 显式覆盖（big），仍按该角色计量
+        r.provider_for_maybe_model(ModelRole::Task, Some("big"), None)
+            .unwrap();
+        assert_eq!(r.cached_instances(), 2, "big 新增一个实例");
     }
 
     #[test]
