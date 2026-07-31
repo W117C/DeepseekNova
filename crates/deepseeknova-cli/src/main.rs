@@ -180,7 +180,7 @@ async fn main() -> anyhow::Result<()> {
                 return Ok(());
             }
 
-            let sessions_root = sessions_root();
+            let sessions_root = sessions_root(&config);
             // Resume applies only to the first `/new` cycle.
             let mut resume_next = *resume;
 
@@ -321,7 +321,7 @@ async fn main() -> anyhow::Result<()> {
 
             // Discover MCP tools once (see Chat branch for rationale).
             let mcp_tools = deepseeknova_runtime::discover_mcp_tools(&config).await;
-            let sessions_root = sessions_root();
+            let sessions_root = sessions_root(&config);
 
             loop {
                 let history: Arc<tokio::sync::Mutex<Vec<deepseeknova_core::Message>>> =
@@ -439,10 +439,18 @@ fn build_agent(
     )
 }
 
-/// Directory where chat sessions are persisted (`~/.deepseeknova/sessions`).
-/// Returns `None` when the home directory can't be resolved (persistence off).
-fn sessions_root() -> Option<std::path::PathBuf> {
-    dirs::home_dir().map(|h| h.join(".deepseeknova").join("sessions"))
+/// Directory where chat sessions are persisted, driven by `[session]` config:
+/// `enabled = false` disables persistence entirely; empty `root` keeps the
+/// pre-B2 default `~/.deepseeknova/sessions`; non-empty `root` is used as-is.
+fn sessions_root(config: &deepseeknova_config::Config) -> Option<std::path::PathBuf> {
+    if !config.session.enabled {
+        return None;
+    }
+    if config.session.root.is_empty() {
+        dirs::home_dir().map(|h| h.join(".deepseeknova").join("sessions"))
+    } else {
+        Some(std::path::PathBuf::from(&config.session.root))
+    }
 }
 
 /// Build the chat persistence context for one session.
@@ -612,5 +620,23 @@ fn truncate_str(s: &str, max: usize) -> String {
             end -= 1;
         }
         format!("{}…", &s[..end])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sessions_root_honors_session_config() {
+        let mut c = deepseeknova_config::Config::default();
+        assert!(sessions_root(&c).is_some(), "default = enabled, home path");
+        c.session.root = "/tmp/custom-sessions".into();
+        assert_eq!(
+            sessions_root(&c).unwrap(),
+            std::path::PathBuf::from("/tmp/custom-sessions")
+        );
+        c.session.enabled = false;
+        assert!(sessions_root(&c).is_none(), "disabled kills persistence");
     }
 }

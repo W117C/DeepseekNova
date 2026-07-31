@@ -263,7 +263,10 @@ where
                             started_output = false;
                         }
                         Ok(RunEvent::Paused { reason, .. }) => {
-                            println!("\n⏸ paused: {reason} — 会话已保存，直接继续输入即可接着跑");
+                            println!(
+                                "\n⏸ paused: {reason} — 上下文已保留在本会话内存中，继续输入即可接着跑\
+                                 （本轮进度尚未写入磁盘，退出进程后不会出现在 --resume 中）"
+                            );
                         }
                         Err(e) => {
                             eprintln!("\nerror: {e}");
