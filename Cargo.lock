@@ -1124,6 +1124,7 @@ dependencies = [
  "deepseeknova-core",
  "deepseeknova-provider",
  "deepseeknova-runtime",
+ "deepseeknova-scanner",
  "deepseeknova-security",
  "deepseeknova-serve",
  "deepseeknova-skills",

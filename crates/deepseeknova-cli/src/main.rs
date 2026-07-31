@@ -197,6 +197,55 @@ async fn main() -> anyhow::Result<()> {
             stream_events(&plan_runner, input).await?;
         }
 
+        // ── Scan (matcher + optional AI investigation) ───────────────────
+        Some(Commands::Scan {
+            path,
+            format,
+            no_ai,
+            severity_min,
+        }) => {
+            use deepseeknova_provider::cost::ModelRole;
+            let root = std::path::PathBuf::from(path.as_deref().unwrap_or("."));
+            let root = deepseeknova_security::path::secure_resolve(
+                &std::env::current_dir().unwrap_or_default(),
+                &root,
+            )
+            .unwrap_or(root);
+            let min = deepseeknova_scanner::rule::Severity::parse(severity_min)
+                .unwrap_or(deepseeknova_scanner::rule::Severity::Low);
+
+            info!(
+                "scan: path={}, format={format}, no_ai={no_ai}",
+                root.display()
+            );
+            let rules = deepseeknova_scanner::rule::builtin_rules();
+            let mut findings = deepseeknova_scanner::scan::scan_files(&root, &rules)?;
+            // severity 过滤：min 为下限，保留 severity <= min（High 序最小）。
+            findings.retain(|f| f.severity <= min);
+
+            if !*no_ai && !findings.is_empty() {
+                let mcp_tools = deepseeknova_runtime::discover_mcp_tools(&config).await;
+                let provider = model_router.provider_for(ModelRole::Task, None)?;
+                for f in &mut findings {
+                    let agent = build_agent(
+                        Arc::clone(&provider),
+                        deepseeknova_runtime::AgentRoleProviders::default(),
+                        None,
+                        &config,
+                        5,
+                        mcp_tools.clone(),
+                    )?;
+                    f.verdict = deepseeknova_scanner::investigate::investigate(f, &agent).await;
+                }
+            }
+
+            let report = deepseeknova_scanner::report::ScanReport::new(findings);
+            match format.as_str() {
+                "json" => println!("{}", report.to_json()?),
+                _ => println!("{}", report.to_markdown()),
+            }
+        }
+
         // ── Chat (with /new loop) ────────────────────────────────────────
         Some(Commands::Chat { model, resume, tui }) => {
             info!("chat: model={model:?}, resume={resume}, tui={tui}");
@@ -794,5 +843,15 @@ mod tests {
         c.model_pointers.compact = None;
         c.agent.compact_model.clear();
         assert_eq!(compact_override_model(&c), None);
+    }
+
+    #[test]
+    fn severity_min_filter_direction() {
+        use deepseeknova_scanner::rule::Severity;
+        // "medium" 下限应保留 High 与 Medium，排除 Low。
+        let min = Severity::Medium;
+        assert!(Severity::High <= min, "High kept under medium floor");
+        assert!(Severity::Medium <= min);
+        assert!(!(Severity::Low <= min), "Low excluded under medium floor");
     }
 }

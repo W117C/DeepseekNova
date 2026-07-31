@@ -116,6 +116,7 @@ deepseeknova-permission = { version = "0.4.0", path = "crates/deepseeknova-permi
 deepseeknova-provider = { version = "0.4.0", path = "crates/deepseeknova-provider" }
 deepseeknova-runtime = { version = "0.4.0", path = "crates/deepseeknova-runtime" }
 deepseeknova-sandbox = { version = "0.4.0", path = "crates/deepseeknova-sandbox" }
+deepseeknova-scanner = { version = "0.4.0", path = "crates/deepseeknova-scanner" }
 deepseeknova-security = { version = "0.4.0", path = "crates/deepseeknova-security" }
 deepseeknova-serve = { version = "0.4.0", path = "crates/deepseeknova-serve" }
 deepseeknova-skills = { version = "0.4.0", path = "crates/deepseeknova-skills" }

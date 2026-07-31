@@ -61,6 +61,21 @@ pub enum Commands {
 
         prompt: Vec<String>,
     },
+    /// Scan the codebase for security issues (regex matchers + optional AI investigation).
+    Scan {
+        /// Root path to scan (default: current directory).
+        #[arg(long)]
+        path: Option<String>,
+        /// Output format: "md" or "json".
+        #[arg(long, default_value = "md")]
+        format: String,
+        /// Skip the AI investigation stage (matcher-only output).
+        #[arg(long)]
+        no_ai: bool,
+        /// Minimum severity to report: high|medium|low.
+        #[arg(long, default_value = "low")]
+        severity_min: String,
+    },
     /// Interactive chat session
     Chat {
         #[arg(long)]
