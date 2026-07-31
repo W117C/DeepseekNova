@@ -95,6 +95,23 @@ async fn main() -> anyhow::Result<()> {
                     runner = runner.with_permission_gate(gate);
                 }
 
+                // Delegate 动作路由：子代理走 task 指针，压缩走 compact 指针。
+                // 压缩是机械摘要，按 Disabled 分类省掉 reasoning tokens。
+                if config.delegate.enabled {
+                    use deepseeknova_provider::cost::ModelRole;
+                    use deepseeknova_provider::factory::ReasoningEffort;
+                    let task_provider =
+                        model_router.provider_for(ModelRole::Task, Some(ReasoningEffort::High))?;
+                    let compact_provider = model_router
+                        .provider_for(ModelRole::Compact, Some(ReasoningEffort::Disabled))?;
+                    runner =
+                        runner.with_sub_agent_runner(deepseeknova_runtime::build_sub_agent_runner(
+                            &config,
+                            task_provider,
+                            Some(compact_provider),
+                        ));
+                }
+
                 // Wire built-in tools for the executor. Graph tools require a GraphHandle
                 // injected via ToolContext (only wired in the single-agent build_agent path),
                 // so they are excluded here until coordinator graph wiring lands.
