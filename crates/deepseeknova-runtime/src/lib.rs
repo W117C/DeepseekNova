@@ -561,6 +561,12 @@ pub fn build_agent_with_role_providers(
         );
     }
 
+    // ── P1 并行工具执行 + 完成前确定性验证 ──
+    agent = agent.with_concurrent_tools(config.agent.concurrent_tools);
+    if config.verify.enabled && !config.verify.commands.is_empty() {
+        agent = agent.with_verify(config.verify.commands.clone(), config.verify.max_cycles);
+    }
+
     Ok(agent)
 }
 
