@@ -87,6 +87,10 @@ pub struct Config {
     /// Prompt budget guard evaluated at agent step boundaries (B2).
     #[serde(default)]
     pub budget: BudgetConfig,
+
+    /// Pre-completion self-review gate (B3, default off).
+    #[serde(default)]
+    pub review: ReviewConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -803,6 +807,50 @@ impl Default for BudgetConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Review（完成前自审，B3）
+// ---------------------------------------------------------------------------
+
+/// Pre-completion self-review configuration (default OFF).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewConfig {
+    /// Whether the pre-Done review gate runs (default: false — data-driven
+    /// flip after ≥50 triggers evaluated manually).
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Model for the review verdict. Empty = main provider.
+    #[serde(default)]
+    pub review_model: String,
+
+    /// Cap (estimated tokens) on the diff excerpt sent to the reviewer.
+    #[serde(default = "default_diff_cap")]
+    pub diff_cap_tokens: usize,
+
+    /// Fix cycles allowed before pausing for human review (default: 1).
+    #[serde(default = "default_review_cycles")]
+    pub max_cycles: usize,
+}
+
+fn default_diff_cap() -> usize {
+    3000
+}
+
+fn default_review_cycles() -> usize {
+    1
+}
+
+impl Default for ReviewConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            review_model: String::new(),
+            diff_cap_tokens: default_diff_cap(),
+            max_cycles: default_review_cycles(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Loading & merging
 // ---------------------------------------------------------------------------
 
@@ -873,6 +921,7 @@ impl Config {
         self.model_pointers.merge(other.model_pointers);
         self.session = other.session;
         self.budget = other.budget;
+        self.review = other.review;
     }
 
     /// Apply DEEPSEEKNOVA_* environment variable overrides.
@@ -1258,5 +1307,25 @@ mod tests {
         assert_eq!(c.budget.max_total_tokens, 64_000);
         assert_eq!(c.budget.max_memory_tokens, 32_000);
         assert!(c.session.enabled);
+    }
+
+    #[test]
+    fn review_config_defaults_off() {
+        let c = Config::default();
+        assert!(!c.review.enabled, "review must default OFF per spec");
+        assert_eq!(c.review.review_model, "");
+        assert_eq!(c.review.diff_cap_tokens, 3000);
+        assert_eq!(c.review.max_cycles, 1);
+    }
+
+    #[test]
+    fn review_config_parses_overrides() {
+        let toml =
+            "[review]\nenabled = true\nreview_model = \"deepseek-chat\"\ndiff_cap_tokens = 1500\n";
+        let c: Config = toml::from_str(toml).unwrap();
+        assert!(c.review.enabled);
+        assert_eq!(c.review.review_model, "deepseek-chat");
+        assert_eq!(c.review.diff_cap_tokens, 1500);
+        assert_eq!(c.review.max_cycles, 1); // 未覆盖取默认
     }
 }
