@@ -225,6 +225,8 @@ pub struct AgentRoleProviders {
     pub task: Option<Arc<dyn deepseeknova_provider::Provider>>,
     /// Agent L3 compaction (the `compact` pointer).
     pub compact: Option<Arc<dyn deepseeknova_provider::Provider>>,
+    /// Pre-Done review gate verdict (the `quick` pointer / `review_model`).
+    pub review: Option<Arc<dyn deepseeknova_provider::Provider>>,
 }
 
 /// Like [`build_agent`], but routes delegate-engine sub-agents and Agent L3
@@ -499,16 +501,23 @@ pub fn build_agent_with_role_providers(
 
     // ── B3 完成前自审（默认关）──
     if config.review.enabled {
-        // 审查模型：非空按名解析（同 compact_model 先例），空/失败回退主 provider。
+        // 审查模型优先级：调用方注入（经 router 计量）> review_model 直连回退
+        // （无 router 的调用方）> 复用主 provider。
         let review_provider: Arc<dyn deepseeknova_provider::Provider> =
-            if !config.review.review_model.is_empty() {
+            if let Some(r) = roles.review {
+                r
+            } else if !config.review.review_model.is_empty() {
+                // 直连回退：不经 CostLedger 计量；desktop 接入 router 后可移除。
                 match config
                     .resolve_provider_for_model(&config.review.review_model)
                     .cloned()
                 {
-                    Some(mut cfg) => {
-                        cfg.model = Some(config.review.review_model.clone());
-                        match deepseeknova_provider::factory::create_provider(&cfg) {
+                    Some(cfg) => {
+                        match deepseeknova_provider::factory::create_provider_with_model(
+                            &cfg,
+                            &config.review.review_model,
+                            None,
+                        ) {
                             Ok(p) => p.into(),
                             Err(e) => {
                                 tracing::warn!(
@@ -1166,6 +1175,34 @@ mod tests {
         config.review.enabled = true; // review_model 空 → 复用主 provider
         let provider = std::sync::Arc::new(stub_provider());
         let agent = build_agent(&config, std::env::temp_dir(), provider, 5, None, vec![]).unwrap();
+        let _ = agent;
+    }
+
+    #[test]
+    fn role_providers_review_injection_wins_over_review_model() {
+        // review 注入胜过 review_model 直连回退（同 compact 优先级语义）。
+        let mut config = Config::default();
+        config.graph.enabled = false;
+        config.memory.enabled = false;
+        config.review.enabled = true;
+        config.review.review_model = "no-such-model".into();
+        let main_p = std::sync::Arc::new(stub_provider());
+        let review_p: std::sync::Arc<dyn deepseeknova_provider::Provider> =
+            std::sync::Arc::new(stub_provider());
+        let roles = AgentRoleProviders {
+            review: Some(review_p),
+            ..Default::default()
+        };
+        let agent = build_agent_with_role_providers(
+            &config,
+            std::env::temp_dir(),
+            main_p,
+            roles,
+            5,
+            None,
+            vec![],
+        )
+        .unwrap();
         let _ = agent;
     }
 
