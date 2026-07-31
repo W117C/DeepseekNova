@@ -149,7 +149,10 @@ async fn main() -> anyhow::Result<()> {
                 let mcp_tools = deepseeknova_runtime::discover_mcp_tools(&config).await;
                 let agent = build_agent(
                     Arc::clone(&provider),
-                    Some(task_provider),
+                    deepseeknova_runtime::AgentRoleProviders {
+                        task: Some(task_provider),
+                        compact: Some(compact_provider_for(&model_router, &config)?),
+                    },
                     model_args.model.as_deref(),
                     &config,
                     model_args.max_steps,
@@ -221,7 +224,10 @@ async fn main() -> anyhow::Result<()> {
                     model_router.provider_for(ModelRole::Task, Some(baseline_effort))?;
                 let agent = build_agent(
                     provider,
-                    Some(task_provider),
+                    deepseeknova_runtime::AgentRoleProviders {
+                        task: Some(task_provider),
+                        compact: Some(compact_provider_for(&model_router, &config)?),
+                    },
                     model.as_deref(),
                     &config,
                     0,
@@ -270,7 +276,10 @@ async fn main() -> anyhow::Result<()> {
                         let task_provider = router.provider_for(ModelRole::Task, effort)?;
                         let agent = build_agent(
                             provider,
-                            Some(task_provider),
+                            deepseeknova_runtime::AgentRoleProviders {
+                                task: Some(task_provider),
+                                compact: Some(compact_provider_for(&router, cfg)?),
+                            },
                             model_name.as_deref(),
                             cfg,
                             0, // no max_steps limit in chat mode
@@ -313,7 +322,10 @@ async fn main() -> anyhow::Result<()> {
             );
             let agent = build_agent(
                 Arc::clone(&provider),
-                Some(task_provider),
+                deepseeknova_runtime::AgentRoleProviders {
+                    task: Some(task_provider),
+                    compact: Some(compact_provider_for(&model_router, &config)?),
+                },
                 None,
                 &config,
                 0,
@@ -426,7 +438,10 @@ async fn main() -> anyhow::Result<()> {
                         let task_provider = router.provider_for(ModelRole::Task, effort)?;
                         let agent = build_agent(
                             provider,
-                            Some(task_provider),
+                            deepseeknova_runtime::AgentRoleProviders {
+                                task: Some(task_provider),
+                                compact: Some(compact_provider_for(&router, cfg)?),
+                            },
                             model_name.as_deref(),
                             cfg,
                             0,
@@ -473,13 +488,37 @@ fn resolve_provider_cfg<'a>(
     }
 }
 
+/// Compact 覆盖模型判定：指针优先；指针未设而 B2 的 agent.compact_model
+/// 非空时，以该模型为显式覆盖（经 router 构建，照样计量）。
+fn compact_override_model(config: &deepseeknova_config::Config) -> Option<&str> {
+    if config.model_pointers.compact.is_none() && !config.agent.compact_model.is_empty() {
+        Some(config.agent.compact_model.as_str())
+    } else {
+        None
+    }
+}
+
+/// Compact 角色 provider（Agent L3 压缩用）。L3 摘要是机械任务，按 Disabled
+/// 分类省 reasoning tokens（与 coordinator compact 决策一致）。
+fn compact_provider_for(
+    router: &deepseeknova_provider::router::ModelRouter,
+    config: &deepseeknova_config::Config,
+) -> anyhow::Result<Arc<dyn deepseeknova_provider::Provider>> {
+    router.provider_for_maybe_model(
+        deepseeknova_provider::cost::ModelRole::Compact,
+        compact_override_model(config),
+        Some(deepseeknova_provider::factory::ReasoningEffort::Disabled),
+    )
+}
+
 /// Build an agent with built-in tools registered, plus any `extra_tools`
 /// (e.g. MCP tools discovered via [`deepseeknova_runtime::discover_mcp_tools`]).
-/// `task_provider` routes the delegation engine (sub-agents) to the Task-role
-/// model when supplied; `None` falls back to the main provider.
+/// `roles` routes the delegation engine (sub-agents) to the Task-role model
+/// and Agent L3 compaction to the Compact-role model when supplied; unset
+/// roles fall back to the main provider.
 fn build_agent(
     provider: Arc<dyn deepseeknova_provider::Provider>,
-    task_provider: Option<Arc<dyn deepseeknova_provider::Provider>>,
+    roles: deepseeknova_runtime::AgentRoleProviders,
     _model: Option<&str>,
     config: &deepseeknova_config::Config,
     max_steps: usize,
@@ -489,11 +528,11 @@ fn build_agent(
     // Delegate to the shared runtime builder (security + sandbox + permission
     // gate wiring lives in one place). CLI is non-interactive, so no approval
     // responder is attached — the gate falls back to Allow on `Ask`.
-    deepseeknova_runtime::build_agent_with_task_provider(
+    deepseeknova_runtime::build_agent_with_role_providers(
         config,
         workspace_root,
         provider,
-        task_provider,
+        roles,
         max_steps,
         None,
         extra_tools,
@@ -699,5 +738,20 @@ mod tests {
         );
         c.session.enabled = false;
         assert!(sessions_root(&c).is_none(), "disabled kills persistence");
+    }
+
+    #[test]
+    fn compact_override_prefers_pointer_over_compact_model() {
+        // 指针未设 + compact_model 非空 → override 为 compact_model
+        let mut c = deepseeknova_config::Config::default();
+        c.agent.compact_model = "cheap".into();
+        assert_eq!(compact_override_model(&c), Some("cheap"));
+        // 指针已设 → 指针胜，无 override
+        c.model_pointers.compact = Some("ptr-model".into());
+        assert_eq!(compact_override_model(&c), None);
+        // 双无 → 无 override
+        c.model_pointers.compact = None;
+        c.agent.compact_model.clear();
+        assert_eq!(compact_override_model(&c), None);
     }
 }
