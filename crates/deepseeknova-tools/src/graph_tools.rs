@@ -60,24 +60,22 @@ impl Tool for SearchCodeTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "search_code".to_string(),
-            description:
-                "按符号名/关键词定位代码实体（函数、结构体、trait 等），替代全片 grep。返回排名后的实体列表：kind、name、path、行区间与签名。"
-                    .to_string(),
+            description: "Finds code entities by symbol.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Symbol name or keyword to search for."
+                        "description": "Symbol/keyword."
                     },
                     "kind": {
                         "type": "string",
                         "enum": ["directory", "file", "struct", "enum", "trait", "class", "function", "method"],
-                        "description": "Restrict results to this entity kind (optional)."
+                        "description": "Kind (optional)."
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Max results to return (default 10, capped at 50)."
+                        "description": "Max (10 default, 50 cap)."
                     }
                 },
                 "required": ["query"]
@@ -149,20 +147,18 @@ impl Tool for TraverseGraphTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "traverse_graph".to_string(),
-            description:
-                "沿代码图边遍历实体邻居：查找 callers（谁调用它）/callees（它调用谁）等关系，用于影响面与调用链分析。"
-                    .to_string(),
+            description: "Traverses graph neighbors.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "entity": {
                         "type": "string",
-                        "description": "Entity to start from: name, 'path:name', or full id."
+                        "description": "Entity."
                     },
                     "direction": {
                         "type": "string",
                         "enum": ["callers", "callees", "both"],
-                        "description": "Traversal direction (default both)."
+                        "description": "Direction (default both)."
                     },
                     "edge_kinds": {
                         "type": "array",
@@ -170,11 +166,11 @@ impl Tool for TraverseGraphTool {
                             "type": "string",
                             "enum": ["contains", "imports", "calls", "implements", "references"]
                         },
-                        "description": "Edge kinds to follow (default ['calls'])."
+                        "description": "Edges (default calls)."
                     },
                     "hops": {
                         "type": "integer",
-                        "description": "Max traversal depth (default 2, capped at 3)."
+                        "description": "Depth (2 default, cap 3)."
                     }
                 },
                 "required": ["entity"]
@@ -272,20 +268,18 @@ impl Tool for RetrieveEntityTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "retrieve_entity".to_string(),
-            description:
-                "按实体名精确取码。skeleton（默认）返回 doc+签名+子实体签名；full 只返回该实体的行区间源码（省 token，优于整文件读取）。"
-                    .to_string(),
+            description: "skeleton=doc+signatures; full=source lines.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "entity": {
                         "type": "string",
-                        "description": "Entity to retrieve: name, 'path:name', or full id."
+                        "description": "Entity."
                     },
                     "view": {
                         "type": "string",
                         "enum": ["skeleton", "full"],
-                        "description": "skeleton = doc + signatures (default); full = exact source lines of the entity only."
+                        "description": "skeleton/full."
                     }
                 },
                 "required": ["entity"]

@@ -19,23 +19,21 @@ impl Tool for GrepTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "grep".to_string(),
-            description:
-                "Searches for a regex pattern in files. Returns matching lines with file path and line number."
-                    .to_string(),
+            description: "Regex search; matches with path:line.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "pattern": {
                         "type": "string",
-                        "description": "Regex pattern to search for."
+                        "description": "Regex."
                     },
                     "path": {
                         "type": "string",
-                        "description": "Directory or file to search in (defaults to current dir)."
+                        "description": "Target (default: cwd)."
                     },
                     "glob": {
                         "type": "string",
-                        "description": "Only search files matching this glob (e.g. '*.rs')."
+                        "description": "Glob."
                     }
                 },
                 "required": ["pattern"]

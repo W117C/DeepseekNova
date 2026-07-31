@@ -38,15 +38,13 @@ impl Tool for RememberTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "remember".to_string(),
-            description:
-                "持久记住一条信息（跨会话/重启保留），带唯一 key 与可选 tags。相同 key 覆盖更新。"
-                    .to_string(),
+            description: "Persists a memory (key overwrites).".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "key": {"type": "string", "description": "Unique identifier for this memory."},
-                    "value": {"type": "string", "description": "Content to store."},
-                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Optional tags."}
+                    "key": {"type": "string", "description": "Key."},
+                    "value": {"type": "string", "description": "Value."},
+                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Tags."}
                 },
                 "required": ["key", "value"]
             }),
@@ -87,10 +85,10 @@ impl Tool for ForgetTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "forget".to_string(),
-            description: "按 key 删除一条持久记忆。".to_string(),
+            description: "Deletes a memory.".to_string(),
             parameters: json!({
                 "type": "object",
-                "properties": {"key": {"type": "string", "description": "Key to remove."}},
+                "properties": {"key": {"type": "string", "description": "Key."}},
                 "required": ["key"]
             }),
         }
@@ -135,11 +133,11 @@ impl Tool for RecallTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "recall".to_string(),
-            description: "在持久记忆库中按相关度检索（跨会话），返回最匹配的条目。".to_string(),
+            description: "Searches memories.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "Search query."},
+                    "query": {"type": "string", "description": "Query."},
                     "top_k": {"type": "integer", "description": "Max results (default 10).", "default": 10}
                 },
                 "required": ["query"]

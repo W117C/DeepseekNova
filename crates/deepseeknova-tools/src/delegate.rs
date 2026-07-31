@@ -32,18 +32,17 @@ impl Tool for DelegateTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "delegate".to_string(),
-            description: "把一个自包含子任务委派给独立子代理执行，返回其结果摘要。子代理有独立上下文、\
-                不能再委派（禁递归）。agent 取值：explorer（只读调研）、coder（改代码）、tester（跑测试）、reviewer（只读审查）。".to_string(),
+            description: "Delegates a subtask to a sub-agent; no re-delegation.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "agent": {
                         "type": "string",
                         "enum": ["explorer", "coder", "tester", "reviewer"],
-                        "description": "Preset sub-agent to delegate to."
+                        "description": "Agent."
                     },
-                    "goal": {"type": "string", "description": "Self-contained task for the sub-agent."},
-                    "context": {"type": "string", "description": "Optional extra context prepended to the goal."}
+                    "goal": {"type": "string", "description": "Goal."},
+                    "context": {"type": "string", "description": "Context."}
                 },
                 "required": ["agent", "goal"]
             }),

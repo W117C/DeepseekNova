@@ -31,25 +31,21 @@ impl Tool for ReadFileTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "read_file".to_string(),
-            description: "Reads the contents of a file at the specified path. \
-                 For large files, first locate the relevant section with grep/search_code, \
-                 then use start_line/end_line to read only the needed range, and finally \
-                 apply edits with edit_file — avoid loading whole files into context."
-                .to_string(),
+            description: "Reads a file; large: locate, read range, edit.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Absolute or relative path to the file."
+                        "description": "Path."
                     },
                     "start_line": {
                         "type": "integer",
-                        "description": "Optional. First line to read (1-based, inclusive). Omit to start from the beginning."
+                        "description": "First line (1-based)."
                     },
                     "end_line": {
                         "type": "integer",
-                        "description": "Optional. Last line to read (1-based, inclusive). Omit to read to the end."
+                        "description": "Last line (1-based)."
                     }
                 },
                 "required": ["path"]
@@ -155,19 +151,17 @@ impl Tool for WriteFileTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "write_file".to_string(),
-            description: "Writes content to a file atomically (temp file + rename). \
-                If a checkpoint manager is configured, the file is snapshotted before writing."
-                .to_string(),
+            description: "Writes a file atomically.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Path to the file to write."
+                        "description": "Path."
                     },
                     "content": {
                         "type": "string",
-                        "description": "Content to write to the file."
+                        "description": "Content."
                     }
                 },
                 "required": ["path", "content"]
@@ -286,17 +280,16 @@ impl Tool for EditFileTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "edit_file".to_string(),
-            description: "在文件中按 SEARCH/REPLACE 做精确替换。可传 edits 数组一次改多处；\
-                 每个 search 必须在文件中唯一命中（0 或多处命中则整次失败、不产生半改），\
-                 SEARCH 须逐字匹配含空白缩进。必须先 read_file 并回传其 snippet_id。"
+            description: "SEARCH/REPLACE edit; search must match once (0 or >=2 fails); \
+                 needs read_file snippet_id."
                 .to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "要编辑的文件路径。" },
+                    "path": { "type": "string", "description": "File." },
                     "edits": {
                         "type": "array",
-                        "description": "多块替换：[{search, replace}, ...]，按顺序各替换一处唯一匹配。单处编辑也可直接用顶层 search/replace。",
+                        "description": "Blocks or search/replace.",
                         "items": {
                             "type": "object",
                             "properties": {
@@ -306,9 +299,9 @@ impl Tool for EditFileTool {
                             "required": ["search", "replace"]
                         }
                     },
-                    "search": { "type": "string", "description": "单块模式：要查找的唯一文本。" },
-                    "replace": { "type": "string", "description": "单块模式：替换文本。" },
-                    "snippet_id": { "type": "string", "description": "先前 read_file 返回的 snippet_id（必填）。" }
+                    "search": { "type": "string", "description": "Search." },
+                    "replace": { "type": "string", "description": "Replace." },
+                    "snippet_id": { "type": "string", "description": "From read_file." }
                 },
                 "required": ["path", "snippet_id"]
             }),
@@ -432,20 +425,17 @@ impl Tool for MoveFileTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "move_file".to_string(),
-            description: "Moves or renames a file from source to destination. \
-                If a checkpoint manager is configured, both source and destination \
-                are snapshotted before moving."
-                .to_string(),
+            description: "Moves/renames a file.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "source": {
                         "type": "string",
-                        "description": "Source path."
+                        "description": "From."
                     },
                     "destination": {
                         "type": "string",
-                        "description": "Destination path."
+                        "description": "To."
                     }
                 },
                 "required": ["source", "destination"]
