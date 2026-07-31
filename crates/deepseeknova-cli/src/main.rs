@@ -224,7 +224,9 @@ async fn main() -> anyhow::Result<()> {
 
             if !*no_ai && !findings.is_empty() {
                 let mcp_tools = deepseeknova_runtime::discover_mcp_tools(&config).await;
-                let provider = model_router.provider_for(ModelRole::Task, None)?;
+                let provider = model_router
+                    .provider_for(ModelRole::Task, None)
+                    .map_err(|e| anyhow::anyhow!("{e}（可用 --no-ai 跳过 AI 调查）"))?;
                 // agent 一次性构建，跨 findings 复用（Agent::run_stream 每次调用克隆状态）。
                 let agent = build_agent(
                     Arc::clone(&provider),

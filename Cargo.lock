@@ -1353,7 +1353,6 @@ dependencies = [
  "async-trait",
  "deepseeknova-core",
  "deepseeknova-graph",
- "deepseeknova-security",
  "futures",
  "regex",
  "serde",
