@@ -7,7 +7,7 @@ use deepseeknova_provider::{Provider, ValidatedRequest};
 use std::path::Path;
 use tracing::warn;
 
-/// 审查配置（runtime 从 [review] 装配）。
+/// 审查配置（runtime 从 `[review]` 配置段装配）。
 pub(crate) struct ReviewSettings {
     pub diff_cap_tokens: usize,
     pub max_cycles: usize,
