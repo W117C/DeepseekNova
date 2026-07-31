@@ -6,14 +6,15 @@
 2. [Installation & Setup](#installation--setup)
 3. [Configuration](#configuration)
 4. [Tools Reference](#tools-reference)
-5. [Skills](#skills)
-6. [HTTP API](#http-api)
-7. [TUI](#tui)
-8. [MCP Integration](#mcp-integration)
-9. [Plan Mode](#plan-mode)
-10. [Sub-Agents](#sub-agents)
-11. [Sandbox](#sandbox)
-12. [Advanced Configuration](#advanced-configuration)
+5. [Security Scan (CLI)](#security-scan-cli)
+6. [Skills](#skills)
+7. [HTTP API](#http-api)
+8. [TUI](#tui)
+9. [MCP Integration](#mcp-integration)
+10. [Plan Mode](#plan-mode)
+11. [Sub-Agents](#sub-agents)
+12. [Sandbox](#sandbox)
+13. [Advanced Configuration](#advanced-configuration)
 
 ## Concepts
 
@@ -225,6 +226,27 @@ coordinator 模式（`run --planner-model ...`）的 Delegate 子代理使用 `t
 | Tool | Description | Read-only |
 |---|---|---|
 | `skill__<name>` | Activate a skill (one per registered skill) | Yes |
+
+## Security Scan (CLI)
+
+`deepseeknova scan`（deepsec 式，P1）：内置正则 matcher 零 AI 定位候选点
+（硬编码密钥、SQL 拼接、命令注入面、Rust panic 面），再对每个 finding 起
+一次性 agent（`task` 指针）调查判真伪，token 计入 Task 角色；命中结果按
+severity 分组输出，`--no-ai` 跳过 AI 调查只出 matcher 结果。
+
+| 参数 | 说明 |
+|---|---|
+| `--path <dir>` | 扫描根目录（默认当前目录）；路径逃逸工作区时 fail-closed 直接报错 |
+| `--format md\|json` | 报表格式，默认 `md` |
+| `--no-ai` | 跳过 AI 调查，只输出 matcher 命中 |
+| `--severity-min high\|medium\|low` | 报告的最低严重级别，默认 `low`（全部） |
+
+示例：
+
+```bash
+deepseeknova scan --format json --no-ai
+deepseeknova scan --path crates/deepseeknova-cli --severity-min high
+```
 
 ## Skills
 
