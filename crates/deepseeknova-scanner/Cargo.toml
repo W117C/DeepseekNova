@@ -1,0 +1,19 @@
+[package]
+name = "deepseeknova-scanner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+deepseeknova-core = { path = "../deepseeknova-core" }
+deepseeknova-graph = { path = "../deepseeknova-graph" }
+deepseeknova-security = { path = "../deepseeknova-security" }
+anyhow = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+walkdir = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

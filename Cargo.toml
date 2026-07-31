@@ -21,6 +21,7 @@ members = [
     "crates/deepseeknova-telemetry",
     "crates/deepseeknova-desktop",
     "crates/deepseeknova-security",
+    "crates/deepseeknova-scanner",
 ]
 resolver = "2"
 default-members = [
@@ -44,6 +45,7 @@ default-members = [
     "crates/deepseeknova-skills",
     "crates/deepseeknova-telemetry",
     "crates/deepseeknova-security",
+    "crates/deepseeknova-scanner",
 ]
 
 [workspace.lints.rust]
