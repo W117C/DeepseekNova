@@ -45,7 +45,7 @@
 
 ## 2. 项目简介
 
-DeepseekNova 是一个 Rust 编写的 AI Agent 框架，包含 21 个 crate。主要结构：
+DeepseekNova 是一个 Rust 编写的 AI Agent 框架，包含 22 个 crate。主要结构：
 
 ```
 crates/
@@ -64,6 +64,7 @@ crates/
 ├── deepseeknova-checkpoint/   # 检查点
 ├── deepseeknova-store/        # 存储层
 ├── deepseeknova-security/     # 安全审计、路径检查、策略
+├── deepseeknova-scanner/      # 安全扫描（deepsec 式静态规则 + AI 调查 + 报表）
 ├── deepseeknova-sandbox/      # 沙箱（bubblewrap、seatbelt）
 ├── deepseeknova-skills/       # 技能加载
 ├── deepseeknova-telemetry/    # 遥测
@@ -83,7 +84,10 @@ make check-desktop  # 桌面端本地验证（前端 lint/test + 桌面端 Rust 
 make test           # cargo test --all
 make fmt            # 格式化代码
 make clippy-fix     # clippy 自动修复
+make audit          # 安全审计（经工作区 .cargo/config.toml 的 audit 别名实际执行 cargo deny --all-features check，需预装 cargo-deny）
 ```
+
+> **云端安全审查不可用时的回退验收路径**：交付/推送前若云端安全审查（如 L3 深度安全审查）因外部资源不可用（如积分耗尽）暂时无法执行，先以项目内既有手段留存验收证据：运行 `make check` 与 `make audit`，记录两者结果与待补审查项，待服务恢复后补跑云端审查，不因此新增脚本、修改 CI 或引入新工具。注意 `make audit` 配方中的 `cargo audit` 会命中工作区 `.cargo/config.toml` 的 `audit` 别名，实际执行 `cargo deny --all-features check`（与 CI `.github/workflows/security.yml` 的 cargo deny 任务对齐，本地需预装 cargo-deny，配方中的 `cargo install cargo-audit` 回退分支会被该别名遮蔽、不生效）；CI 侧另有带 RUSTSEC ignore 清单的 cargo-audit 任务，推送后由 security.yml 自动覆盖，ignore 理由见 `deny.toml` 的 `[advisories].ignore`。
 
 > **注意**：`make check` 与 CI 的主要 Rust 检查任务（check / clippy / test / coverage / bench / docs）均通过 `--exclude deepseeknova-desktop` 排除桌面端 crate（CI 由独立的 `check-desktop` 与 `frontend` 任务单独覆盖）。改动 desktop 相关代码后，请在本地额外运行 `make check-desktop` 作为替代验证；该目标会按序执行前端 `npm run lint`（tsc --noEmit）、`npm test`（node --test，自动发现 test/*.test.mjs），以及 `cargo check` / `cargo clippy --all-targets -- -D warnings` / `cargo test`（均 `-p deepseeknova-desktop`），与 CI 对齐。其中 Rust 侧编译需要前端产物 dist/，缺失时请先运行 `make frontend`。
 

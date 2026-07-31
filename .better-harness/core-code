@@ -13,6 +13,7 @@
 crates/deepseeknova-security/src/
 crates/deepseeknova-sandbox/src/
 crates/deepseeknova-permission/src/
+crates/deepseeknova-scanner/src/
 crates/deepseeknova-tools/src/
 crates/deepseeknova-agent/src/
 #
@@ -27,7 +28,6 @@ crates/deepseeknova-desktop/src/
 crates/deepseeknova-event/src/
 crates/deepseeknova-graph/src/
 crates/deepseeknova-mcp/src/
-crates/deepseeknova-orch/src/
 crates/deepseeknova-provider/src/
 crates/deepseeknova-runtime/src/
 crates/deepseeknova-serve/src/
