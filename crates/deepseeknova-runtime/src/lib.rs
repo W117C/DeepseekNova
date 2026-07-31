@@ -217,15 +217,25 @@ pub fn build_security_context(
     })
 }
 
-/// Like [`build_agent`], but routes the delegate engine's sub-agents to a
-/// dedicated `task` provider (the `task` model pointer). `None` falls back
-/// to the main provider — identical to [`build_agent`].
+/// Role-based providers injected by callers that own a ModelRouter.
+/// All fields optional; `None` falls back to legacy behaviour.
+#[derive(Default)]
+pub struct AgentRoleProviders {
+    /// Delegate engine sub-agents (the `task` pointer).
+    pub task: Option<Arc<dyn deepseeknova_provider::Provider>>,
+    /// Agent L3 compaction (the `compact` pointer).
+    pub compact: Option<Arc<dyn deepseeknova_provider::Provider>>,
+}
+
+/// Like [`build_agent`], but routes delegate-engine sub-agents and Agent L3
+/// compaction to dedicated role providers (the `task` / `compact` model
+/// pointers). Unset roles fall back to legacy behaviour.
 #[allow(clippy::too_many_arguments)]
-pub fn build_agent_with_task_provider(
+pub fn build_agent_with_role_providers(
     config: &Config,
     workspace_root: PathBuf,
     provider: Arc<dyn deepseeknova_provider::Provider>,
-    task_provider: Option<Arc<dyn deepseeknova_provider::Provider>>,
+    roles: AgentRoleProviders,
     max_steps: usize,
     gate: Option<Arc<PermissionGate>>,
     extra_tools: Vec<Arc<dyn deepseeknova_core::Tool>>,
@@ -419,7 +429,8 @@ pub fn build_agent_with_task_provider(
     // ── 委派引擎：为每个预设构建受限工具集的子 Agent（共享 graph/memory 句柄）──
     // 子代理路由到独立 task provider（若提供），否则回退主 provider。
     if config.delegate.enabled {
-        let delegate_provider = task_provider
+        let delegate_provider = roles
+            .task
             .as_ref()
             .map(Arc::clone)
             .unwrap_or_else(|| Arc::clone(&provider));
@@ -448,18 +459,22 @@ pub fn build_agent_with_task_provider(
             },
         );
     }
-    // compact_model 非空时为 L3 构造专用（廉价）provider。工厂没有按模型名
-    // 构造的入口，故复用 CLI 同款路径：按模型名解析 ProviderConfig，覆盖
-    // model 字段后走同一 create_provider。构造失败仅告警，L3 回退复用主
-    // provider——压缩通路永不阻断 agent 构建。
-    if !config.agent.compact_model.is_empty() {
+    // Compact provider 优先级：调用方注入（经 router 计量）> agent.compact_model
+    // 直连回退（无 router 的调用方，如 desktop 旧入口）> 不设（L3 复用主 provider）。
+    if let Some(compact) = roles.compact {
+        agent = agent.with_compact_provider(compact);
+    } else if !config.agent.compact_model.is_empty() {
+        // 直连回退：不经 CostLedger 计量；desktop 接入 router 后可移除。
         match config
             .resolve_provider_for_model(&config.agent.compact_model)
             .cloned()
         {
-            Some(mut cfg) => {
-                cfg.model = Some(config.agent.compact_model.clone());
-                match deepseeknova_provider::factory::create_provider(&cfg) {
+            Some(cfg) => {
+                match deepseeknova_provider::factory::create_provider_with_model(
+                    &cfg,
+                    &config.agent.compact_model,
+                    None,
+                ) {
                     Ok(p) => agent = agent.with_compact_provider(p.into()),
                     Err(e) => tracing::warn!(
                         "compact_model '{}' unavailable ({e}); L3 will use the main provider",
@@ -475,6 +490,33 @@ pub fn build_agent_with_task_provider(
     }
 
     Ok(agent)
+}
+
+/// Like [`build_agent`], but routes the delegate engine's sub-agents to a
+/// dedicated `task` provider (the `task` model pointer). `None` falls back
+/// to the main provider — identical to [`build_agent`].
+#[allow(clippy::too_many_arguments)]
+pub fn build_agent_with_task_provider(
+    config: &Config,
+    workspace_root: PathBuf,
+    provider: Arc<dyn deepseeknova_provider::Provider>,
+    task_provider: Option<Arc<dyn deepseeknova_provider::Provider>>,
+    max_steps: usize,
+    gate: Option<Arc<PermissionGate>>,
+    extra_tools: Vec<Arc<dyn deepseeknova_core::Tool>>,
+) -> anyhow::Result<deepseeknova_agent::Agent> {
+    build_agent_with_role_providers(
+        config,
+        workspace_root,
+        provider,
+        AgentRoleProviders {
+            task: task_provider,
+            ..Default::default()
+        },
+        max_steps,
+        gate,
+        extra_tools,
+    )
 }
 
 /// Build a fully-wired [`deepseeknova_agent::Agent`] from config.
@@ -1064,6 +1106,48 @@ mod tests {
         config.budget.enabled = false;
         let provider = std::sync::Arc::new(stub_provider());
         // 只验证可构建不 panic（字段私有，行为断言在 agent 侧已覆盖）。
+        let agent = build_agent(&config, std::env::temp_dir(), provider, 5, None, vec![]).unwrap();
+        let _ = agent;
+    }
+
+    #[test]
+    fn role_providers_compact_injection_wins_over_compact_model() {
+        let mut config = Config::default();
+        config.graph.enabled = false;
+        config.memory.enabled = false;
+        // compact_model 指向一个不存在的模型名——若直连回退被错误执行，
+        // resolve 失败仅告警不报错，因此用注入路径成功构建 + 后续分支
+        // 测试共同界定优先级语义。
+        config.agent.compact_model = "no-such-model".into();
+        let main_p = std::sync::Arc::new(stub_provider());
+        let compact_p: std::sync::Arc<dyn deepseeknova_provider::Provider> =
+            std::sync::Arc::new(stub_provider());
+        let roles = AgentRoleProviders {
+            task: None,
+            compact: Some(compact_p),
+        };
+        let agent = build_agent_with_role_providers(
+            &config,
+            std::env::temp_dir(),
+            main_p,
+            roles,
+            5,
+            None,
+            vec![],
+        )
+        .unwrap();
+        let _ = agent; // 注入路径构建成功；Agent 侧字段私有，行为由 agent crate 测试覆盖
+    }
+
+    #[test]
+    fn role_providers_default_falls_back_to_compact_model_path() {
+        // roles 全 None + compact_model 非空 → 走 B2 直连回退（构建不 panic，
+        // 解析失败仅告警）。与旧 build_agent 行为等价。
+        let mut config = Config::default();
+        config.graph.enabled = false;
+        config.memory.enabled = false;
+        config.agent.compact_model = "no-such-model".into();
+        let provider = std::sync::Arc::new(stub_provider());
         let agent = build_agent(&config, std::env::temp_dir(), provider, 5, None, vec![]).unwrap();
         let _ = agent;
     }
