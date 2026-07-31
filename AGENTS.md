@@ -85,7 +85,7 @@ make fmt            # 格式化代码
 make clippy-fix     # clippy 自动修复
 ```
 
-> **注意**：`make check` 与 CI 的主要 Rust 检查任务（check / clippy / test / coverage / bench / docs）均通过 `--exclude deepseeknova-desktop` 排除桌面端 crate（CI 由独立的 `check-desktop` 与 `frontend` 任务单独覆盖）。改动 desktop 相关代码后，请在本地额外运行 `make check-desktop` 作为替代验证；该目标会按序执行前端 `npm run lint`（tsc --noEmit）、`npm test`（node --test test/），以及 `cargo check` / `cargo clippy --all-targets -- -D warnings` / `cargo test`（均 `-p deepseeknova-desktop`），与 CI 对齐。其中 Rust 侧编译需要前端产物 dist/，缺失时请先运行 `make frontend`。
+> **注意**：`make check` 与 CI 的主要 Rust 检查任务（check / clippy / test / coverage / bench / docs）均通过 `--exclude deepseeknova-desktop` 排除桌面端 crate（CI 由独立的 `check-desktop` 与 `frontend` 任务单独覆盖）。改动 desktop 相关代码后，请在本地额外运行 `make check-desktop` 作为替代验证；该目标会按序执行前端 `npm run lint`（tsc --noEmit）、`npm test`（node --test，自动发现 test/*.test.mjs），以及 `cargo check` / `cargo clippy --all-targets -- -D warnings` / `cargo test`（均 `-p deepseeknova-desktop`），与 CI 对齐。其中 Rust 侧编译需要前端产物 dist/，缺失时请先运行 `make frontend`。
 
 > **核心变更影响分析（core-change-watch）**：本项目的核心代码边界定义在 `.better-harness/core-code`，该边界**仅在 `--languages auto` 下生效**。工具默认语言集不含 Rust，缺省运行会在边界匹配前过滤掉 `.rs` 文件，导致核心命中与 `reviewRecommended` 判定失真。因此任何核心变更审查必须使用 `core-change-watch evidence-pack --languages auto`；默认（无 `--languages` 参数）运行的结果不得作为核心审查依据。
 
@@ -106,7 +106,7 @@ make clippy-fix     # clippy 自动修复
 最小调试入口：
 
 - **CLI**：日志经 `tracing` 输出到终端（固定 INFO 级，见 `crates/deepseeknova-cli/src/main.rs`，不读 `RUST_LOG`；启用 `[telemetry] enabled=true` 时改装 OTLP 管线、日志经 OTLP 导出，终端不再打印 INFO 文本，属刻意权衡）；运行时派生数据在工作区 `.deepseeknova/`（`graph.db` 代码图索引、`memory.db` 记忆库）；配置层级为 `~/.deepseeknova/config.toml`（用户）+ `./deepseeknova.toml`（项目）；release 产物在 `target/release/deepseeknova-cli`。聚焦测试：`cargo test -p <crate> <测试名过滤词>`
-- **桌面端**：前端产物在 `crates/deepseeknova-desktop/frontend/dist/`（Rust 侧编译依赖它，缺失先 `make frontend`）；前端类型检查/测试在 frontend 目录运行 `npm run lint` / `npm test`（node --test test/）；Rust 侧聚焦测试 `cargo test -p deepseeknova-desktop <测试名过滤词>`；一键验证 `make check-desktop`
+- **桌面端**：前端产物在 `crates/deepseeknova-desktop/frontend/dist/`（Rust 侧编译依赖它，缺失先 `make frontend`）；前端类型检查/测试在 frontend 目录运行 `npm run lint` / `npm test`（node --test，自动发现 test/*.test.mjs）；Rust 侧聚焦测试 `cargo test -p deepseeknova-desktop <测试名过滤词>`；一键验证 `make check-desktop`
 
 ---
 
