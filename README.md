@@ -25,7 +25,7 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 [![Rust](https://img.shields.io/badge/rust-stable%201.97-orange.svg)](https://www.rust-lang.org)
 [![Crates](https://img.shields.io/badge/crates-21-green.svg)](#-21-个-crate)
-[![Tests](https://img.shields.io/badge/tests-391-brightgreen.svg)](#-技术栈)
+[![Tests](https://img.shields.io/badge/tests-511-brightgreen.svg)](#-技术栈)
 
 </div>
 
