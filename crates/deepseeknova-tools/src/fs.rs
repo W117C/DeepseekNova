@@ -20,6 +20,10 @@ const MAX_READ_SIZE: u64 = 1024 * 1024; // 1 MB
 #[derive(Deserialize)]
 struct ReadFileArgs {
     path: String,
+    #[serde(default)]
+    start_line: Option<usize>,
+    #[serde(default)]
+    end_line: Option<usize>,
 }
 
 #[async_trait]
@@ -27,13 +31,25 @@ impl Tool for ReadFileTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "read_file".to_string(),
-            description: "Reads the contents of a file at the specified path.".to_string(),
+            description: "Reads the contents of a file at the specified path. \
+                 For large files, first locate the relevant section with grep/search_code, \
+                 then use start_line/end_line to read only the needed range, and finally \
+                 apply edits with edit_file — avoid loading whole files into context."
+                .to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
                         "description": "Absolute or relative path to the file."
+                    },
+                    "start_line": {
+                        "type": "integer",
+                        "description": "Optional. First line to read (1-based, inclusive). Omit to start from the beginning."
+                    },
+                    "end_line": {
+                        "type": "integer",
+                        "description": "Optional. Last line to read (1-based, inclusive). Omit to read to the end."
                     }
                 },
                 "required": ["path"]
@@ -64,6 +80,31 @@ impl Tool for ReadFileTool {
 
         let content = fs::read_to_string(&path).await?;
 
+        // Ranged read (1-based inclusive): only the body returned to the model is
+        // sliced; the snippet is still registered on the WHOLE file content so
+        // edit_file's snippet validation stays compatible.
+        let (display, range_note) = match (parsed.start_line, parsed.end_line) {
+            (None, None) => (content.clone(), String::new()),
+            (s, e) => {
+                let lines: Vec<&str> = content.lines().collect();
+                let total = lines.len();
+                let start = s.unwrap_or(1).max(1);
+                if start > total {
+                    anyhow::bail!("start_line {start} exceeds file length ({total} lines)");
+                }
+                let end = e.unwrap_or(total).min(total); // clamp end to file length (lenient)
+                if end < start {
+                    anyhow::bail!("end_line {end} is before start_line {start}");
+                }
+                let slice: String = lines[start - 1..end]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, l)| format!("{}: {}\n", start + i, l)) // line-number prefix
+                    .collect();
+                (slice, format!("[Lines {start}-{end} of {total}]\n"))
+            }
+        };
+
         // Register snippet and append snippet ID for the model to reference
         let mut tracker = crate::snippet::global_tracker().lock().await;
         let snippet_id = tracker.register(&path.to_string_lossy(), &content);
@@ -71,8 +112,9 @@ impl Tool for ReadFileTool {
 
         // Return content with snippet marker for edit validation
         Ok(format!(
-            "{}\n\n[SNIPPET ID: {}]\n[Snippet generated from: {}]\n",
-            content.trim_end(),
+            "{}{}\n\n[SNIPPET ID: {}]\n[Snippet generated from: {}]\n",
+            range_note,
+            display.trim_end(),
             snippet_id,
             path.display()
         ))
@@ -421,6 +463,50 @@ fn sanitize_path(workspace: &Path, raw: &str) -> anyhow::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_ctx(dir: &Path) -> ToolContext {
+        ToolContext::new("call-test")
+            .with_workspace(dir.to_path_buf())
+            .with_extension(deepseeknova_security::context::SecurityContext::with_safe_defaults())
+    }
+
+    #[tokio::test]
+    async fn read_file_ranged_returns_only_slice() {
+        let dir = std::env::temp_dir().join(format!("dnv-c1-read-{}", std::process::id()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let dir = tokio::fs::canonicalize(&dir).await.unwrap();
+        let f = dir.join("big.txt");
+        let body: String = (1..=10).map(|i| format!("line{i}\n")).collect();
+        tokio::fs::write(&f, &body).await.unwrap();
+
+        let ctx = test_ctx(&dir);
+        let tool = ReadFileTool;
+        let args = r#"{"path":"big.txt","start_line":3,"end_line":5}"#;
+        let out = tool.execute(&ctx, args).await.unwrap();
+        // Only line3..line5 present, not line1/line2/line6
+        assert!(out.contains("line3") && out.contains("line5"));
+        assert!(!out.contains("line1") && !out.contains("line6"));
+        // Snippet marker still present
+        assert!(out.contains("[SNIPPET ID:"));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn read_file_full_still_default() {
+        let dir = std::env::temp_dir().join(format!("dnv-c1-readfull-{}", std::process::id()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let dir = tokio::fs::canonicalize(&dir).await.unwrap();
+        tokio::fs::write(dir.join("s.txt"), "a\nb\nc\n")
+            .await
+            .unwrap();
+        let ctx = test_ctx(&dir);
+        let out = ReadFileTool
+            .execute(&ctx, r#"{"path":"s.txt"}"#)
+            .await
+            .unwrap();
+        assert!(out.contains('a') && out.contains('b') && out.contains('c'));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
 
     #[test]
     fn test_sanitize_path_traversal() {
