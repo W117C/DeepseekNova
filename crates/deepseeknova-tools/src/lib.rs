@@ -59,3 +59,34 @@ pub fn all_builtin_tools_with_sandbox(sandbox: Arc<dyn Sandbox>) -> Vec<Arc<dyn 
         Arc::new(DelegateTool),
     ]
 }
+
+#[cfg(test)]
+mod schema_budget {
+    use super::*;
+
+    /// 全量内置工具 schema 序列化后的总字符数上限。schema 属稳定前缀，
+    /// 每次缓存 MISS 全额重付——加此上限防止文案慢性膨胀（支柱③）。
+    /// 收紧准则：压缩后取实测值 + ~10% 余量。
+    const MAX_SCHEMA_CHARS: usize = 5000; // AFTER=4613 × 1.1 ≈ 5074，进位到最近千位
+
+    #[test]
+    fn builtin_tool_schemas_stay_within_budget() {
+        let tools = all_builtin_tools();
+        let total: usize = tools
+            .iter()
+            .map(|t| {
+                let s = t.schema();
+                s.name.len()
+                    + s.description.len()
+                    + serde_json::to_string(&s.parameters)
+                        .map(|j| j.len())
+                        .unwrap_or(0)
+            })
+            .sum();
+        println!("BUILTIN_SCHEMA_TOTAL_CHARS = {total}");
+        assert!(
+            total <= MAX_SCHEMA_CHARS,
+            "schema total {total} exceeds budget {MAX_SCHEMA_CHARS}"
+        );
+    }
+}

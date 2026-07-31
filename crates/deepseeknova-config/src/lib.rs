@@ -482,6 +482,8 @@ pub struct AgentConfig {
     pub max_steps: usize,
 
     /// Token budget for conversation history before compaction triggers.
+    /// 留空（None）且 `[budget] enabled=true` 时，运行时按 `budget.max_total_tokens / 2`
+    /// 推导（默认 128000 → 64000）；显式设置优先；budget 关闭则不压缩。
     #[serde(default)]
     pub compaction_threshold_tokens: Option<u32>,
 

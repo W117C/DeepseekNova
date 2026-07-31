@@ -31,39 +31,33 @@ impl Tool for TodoWriteTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "todo_write".to_string(),
-            description:
-                "Creates and updates a structured task list for the current coding session. \
-                 Use this to track progress across multi-step tasks. \
-                 Set merge=true to update existing items; merge=false (default) to replace the \
-                 entire list."
-                    .to_string(),
+            description: "Task list; merge=true merges by id.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "merge": {
                         "type": "boolean",
-                        "description": "If true, merge the provided todos with the existing list \
-                            by matching on id. If false (default), replace the entire list.",
+                        "description": "merge or replace.",
                         "default": false
                     },
                     "todos": {
                         "type": "array",
-                        "description": "The list of todo items.",
+                        "description": "Items.",
                         "items": {
                             "type": "object",
                             "properties": {
                                 "id": {
                                     "type": "string",
-                                    "description": "Unique identifier for this todo item."
+                                    "description": "Id."
                                 },
                                 "content": {
                                     "type": "string",
-                                    "description": "Description of what needs to be done."
+                                    "description": "Task."
                                 },
                                 "status": {
                                     "type": "string",
                                     "enum": ["pending", "in_progress", "completed", "cancelled"],
-                                    "description": "Current state of the todo item."
+                                    "description": "State."
                                 }
                             },
                             "required": ["id", "content", "status"]

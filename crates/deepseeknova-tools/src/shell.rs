@@ -43,13 +43,13 @@ impl Tool for ShellTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "bash".to_string(),
-            description: "Executes a shell command and returns stdout and stderr.".to_string(),
+            description: "Runs a command.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "command": {
                         "type": "string",
-                        "description": "The shell command to execute."
+                        "description": "Command."
                     }
                 },
                 "required": ["command"]

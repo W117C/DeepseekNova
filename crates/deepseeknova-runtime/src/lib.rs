@@ -229,6 +229,17 @@ pub struct AgentRoleProviders {
     pub review: Option<Arc<dyn deepseeknova_provider::Provider>>,
 }
 
+/// 压缩阈值推导：显式配置优先；否则 budget 启用时取 max_total_tokens/2；都没有则 None。
+fn derive_compaction_threshold(config: &Config) -> Option<u32> {
+    if let Some(explicit) = config.agent.compaction_threshold_tokens {
+        return Some(explicit);
+    }
+    if config.budget.enabled {
+        return Some((config.budget.max_total_tokens / 2) as u32);
+    }
+    None
+}
+
 /// Like [`build_agent`], but routes delegate-engine sub-agents and Agent L3
 /// compaction to dedicated role providers (the `task` / `compact` model
 /// pointers). Unset roles fall back to legacy behaviour.
@@ -468,6 +479,10 @@ pub fn build_agent_with_role_providers(
                 max_memory_tokens: config.budget.max_memory_tokens,
             },
         );
+    }
+    // 压缩阈值：显式配置优先，否则由 budget 推导（lossless L1 shrink 默认开启）。
+    if let Some(threshold) = derive_compaction_threshold(config) {
+        agent = agent.with_compaction_threshold(Some(threshold));
     }
     // Compact provider 优先级：调用方注入（经 router 计量）> agent.compact_model
     // 直连回退（无 router 的调用方，如 desktop 旧入口）> 不设（L3 复用主 provider）。
@@ -795,7 +810,7 @@ pub fn build_sub_agent_runner(
                 .with_max_steps(p.max_steps),
         );
     }
-    if let Some(threshold) = config.agent.compaction_threshold_tokens {
+    if let Some(threshold) = derive_compaction_threshold(config) {
         runner = runner.with_compaction_threshold(threshold);
     }
     if let Some(compact) = compact_provider {
@@ -892,6 +907,17 @@ mod tests {
             compact.calls.load(std::sync::atomic::Ordering::SeqCst) >= 1,
             "compaction should go through the compact provider"
         );
+    }
+
+    #[test]
+    fn compaction_threshold_derives_from_budget() {
+        let mut c = Config::default(); // budget 默认启用、max_total=128000
+        assert_eq!(derive_compaction_threshold(&c), Some(64_000));
+        c.agent.compaction_threshold_tokens = Some(32_000);
+        assert_eq!(derive_compaction_threshold(&c), Some(32_000)); // 显式优先
+        c.agent.compaction_threshold_tokens = None;
+        c.budget.enabled = false;
+        assert_eq!(derive_compaction_threshold(&c), None); // budget 关 → None
     }
 
     #[test]

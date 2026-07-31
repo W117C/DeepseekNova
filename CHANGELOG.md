@@ -9,6 +9,8 @@ All notable changes to DeepseekNova will be documented in this file.
 - `agent.on_max_steps` 默认值为 `"pause"`：max_steps 耗尽不再返回错误，而是发出
   `Paused` 事件并优雅结束（CLI 非交互以退出码 3 结束并打印 resume 提示）。
   依赖旧行为的自动化请显式配置 `[agent] on_max_steps = "error"`。
+- `edit_file` 语义收紧：SEARCH 须在文件中**唯一**命中（旧版替换首个匹配）；0 或多处命中
+  时整次调用失败、不产生半改。多处编辑请用新的 `edits: [{search, replace}, ...]` 数组。
 
 ### Added
 
@@ -18,10 +20,15 @@ All notable changes to DeepseekNova will be documented in this file.
   （硬编码密钥、SQL 拼接、命令注入、rust-unwrap 等）扫描工作区，可选一次性 agent
   AI 调查并输出 md/json 报表；支持 `--path`、`--format md|json`、`--no-ai`、
   `--severity-min high|medium|low`。
+- `read_file` 支持 `start_line`/`end_line` 区间读，只把需要的行送入上下文（省 token）。
+- `edit_file` 支持 `edits` 多块数组，一次调用原子地替换多处（全有或全无）。
 
 ### Changed
 
 - 删除实验性 `deepseeknova-orch` crate（GOAP + Swarm，零业务调用）；其唯一有消费者的组件 `ProgressTracker` 已解耦收编至 `deepseeknova-core::progress`。多智能体能力改由 `deepseeknova-agent` 的 delegate/子代理路径提供。CLI dev-dependency、quickstart 示例的 GOAP 段、release 脚本与 README crate 表中的 orch 引用一并清除。
+- `compaction_threshold_tokens` 留空时运行时按 `budget.max_total_tokens / 2` 推导，
+  让无损的 L1 结果截断默认生效；显式配置与 `[budget] enabled=false` 时行为不变。
+- 内置工具 schema 文案精简 41%（7819→4613 字符），降低每次缓存未命中的固定 token 开销。
 
 ## [0.4.0] — 2026-07-19
 
