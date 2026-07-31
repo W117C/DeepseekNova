@@ -152,6 +152,7 @@ async fn main() -> anyhow::Result<()> {
                     deepseeknova_runtime::AgentRoleProviders {
                         task: Some(task_provider),
                         compact: Some(compact_provider_for(&model_router, &config)?),
+                        review: review_provider_for(&model_router, &config)?,
                     },
                     model_args.model.as_deref(),
                     &config,
@@ -227,6 +228,7 @@ async fn main() -> anyhow::Result<()> {
                     deepseeknova_runtime::AgentRoleProviders {
                         task: Some(task_provider),
                         compact: Some(compact_provider_for(&model_router, &config)?),
+                        review: review_provider_for(&model_router, &config)?,
                     },
                     model.as_deref(),
                     &config,
@@ -279,6 +281,7 @@ async fn main() -> anyhow::Result<()> {
                             deepseeknova_runtime::AgentRoleProviders {
                                 task: Some(task_provider),
                                 compact: Some(compact_provider_for(&router, cfg)?),
+                                review: review_provider_for(&router, cfg)?,
                             },
                             model_name.as_deref(),
                             cfg,
@@ -325,6 +328,7 @@ async fn main() -> anyhow::Result<()> {
                 deepseeknova_runtime::AgentRoleProviders {
                     task: Some(task_provider),
                     compact: Some(compact_provider_for(&model_router, &config)?),
+                    review: review_provider_for(&model_router, &config)?,
                 },
                 None,
                 &config,
@@ -441,6 +445,7 @@ async fn main() -> anyhow::Result<()> {
                             deepseeknova_runtime::AgentRoleProviders {
                                 task: Some(task_provider),
                                 compact: Some(compact_provider_for(&router, cfg)?),
+                                review: review_provider_for(&router, cfg)?,
                             },
                             model_name.as_deref(),
                             cfg,
@@ -509,6 +514,29 @@ fn compact_provider_for(
         compact_override_model(config),
         Some(deepseeknova_provider::factory::ReasoningEffort::Disabled),
     )
+}
+
+/// Review 角色 provider（B3 完成前自审门禁用）。review 关闭时不构建（避免
+/// 无关路径因 quick 指针的 API key 缺失阻断构建）；review_model 非空时按名
+/// 经 router 构建（照样计量）；空则走 quick 指针（门禁属快速操作类，未设时
+/// 回落 main 指针）。评审判定受益于 reasoning，不强制降档 effort。
+fn review_provider_for(
+    router: &deepseeknova_provider::router::ModelRouter,
+    config: &deepseeknova_config::Config,
+) -> anyhow::Result<Option<Arc<dyn deepseeknova_provider::Provider>>> {
+    if !config.review.enabled {
+        return Ok(None);
+    }
+    let override_model = if config.review.review_model.is_empty() {
+        None
+    } else {
+        Some(config.review.review_model.as_str())
+    };
+    Ok(Some(router.provider_for_maybe_model(
+        deepseeknova_provider::cost::ModelRole::Quick,
+        override_model,
+        None,
+    )?))
 }
 
 /// Build an agent with built-in tools registered, plus any `extra_tools`
@@ -738,6 +766,19 @@ mod tests {
         );
         c.session.enabled = false;
         assert!(sessions_root(&c).is_none(), "disabled kills persistence");
+    }
+
+    #[test]
+    fn review_provider_none_when_disabled() {
+        // review.enabled = false → 不构建 review provider（避免无关路径因
+        // quick 指针的 API key 缺失而阻断 agent 构建）。
+        let config = deepseeknova_config::Config::default();
+        let router = deepseeknova_provider::router::ModelRouter::from_config(
+            &config,
+            std::sync::Arc::new(deepseeknova_provider::cost::CostLedger::new()),
+        )
+        .unwrap();
+        assert!(review_provider_for(&router, &config).unwrap().is_none());
     }
 
     #[test]
