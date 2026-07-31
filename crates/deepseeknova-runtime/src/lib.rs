@@ -411,6 +411,14 @@ pub fn build_agent_with_task_provider(
                     }
                 });
                 agent = agent.with_distill_hook(distill);
+
+                // B3 审查计数：memory 启用时落 counters 表；关闭时 agent 内 tracing 兜底。
+                if config.review.enabled {
+                    let ch = handle.clone();
+                    agent = agent.with_review_counter(std::sync::Arc::new(move |name: &str| {
+                        let _ = ch.bump_counter(name);
+                    }));
+                }
             }
             Err(e) => tracing::warn!("memory engine unavailable, tools will degrade: {e}"),
         }
@@ -472,6 +480,46 @@ pub fn build_agent_with_task_provider(
                 config.agent.compact_model
             ),
         }
+    }
+
+    // ── B3 完成前自审（默认关）──
+    if config.review.enabled {
+        // 审查模型：非空按名解析（同 compact_model 先例），空/失败回退主 provider。
+        let review_provider: Arc<dyn deepseeknova_provider::Provider> =
+            if !config.review.review_model.is_empty() {
+                match config
+                    .resolve_provider_for_model(&config.review.review_model)
+                    .cloned()
+                {
+                    Some(mut cfg) => {
+                        cfg.model = Some(config.review.review_model.clone());
+                        match deepseeknova_provider::factory::create_provider(&cfg) {
+                            Ok(p) => p.into(),
+                            Err(e) => {
+                                tracing::warn!(
+                                    "review_model '{}' unavailable ({e}); using main provider",
+                                    config.review.review_model
+                                );
+                                provider.clone()
+                            }
+                        }
+                    }
+                    None => {
+                        tracing::warn!(
+                            "review_model '{}' has no matching provider; using main provider",
+                            config.review.review_model
+                        );
+                        provider.clone()
+                    }
+                }
+            } else {
+                provider.clone()
+            };
+        agent = agent.with_review(
+            review_provider,
+            config.review.diff_cap_tokens,
+            config.review.max_cycles,
+        );
     }
 
     Ok(agent)
@@ -1064,6 +1112,17 @@ mod tests {
         config.budget.enabled = false;
         let provider = std::sync::Arc::new(stub_provider());
         // 只验证可构建不 panic（字段私有，行为断言在 agent 侧已覆盖）。
+        let agent = build_agent(&config, std::env::temp_dir(), provider, 5, None, vec![]).unwrap();
+        let _ = agent;
+    }
+
+    #[test]
+    fn build_agent_with_review_enabled_constructs() {
+        let mut config = Config::default();
+        config.graph.enabled = false;
+        config.memory.enabled = false;
+        config.review.enabled = true; // review_model 空 → 复用主 provider
+        let provider = std::sync::Arc::new(stub_provider());
         let agent = build_agent(&config, std::env::temp_dir(), provider, 5, None, vec![]).unwrap();
         let _ = agent;
     }
