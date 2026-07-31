@@ -1221,6 +1221,7 @@ mod tests {
         let roles = AgentRoleProviders {
             task: None,
             compact: Some(compact_p),
+            ..Default::default()
         };
         let agent = build_agent_with_role_providers(
             &config,
