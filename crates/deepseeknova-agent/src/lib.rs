@@ -30,6 +30,8 @@ pub mod coordinator;
 pub mod delegate;
 pub mod memory;
 pub mod plan_mode;
+#[allow(dead_code)] // wired in Task 4
+mod review;
 pub mod sub_agent;
 pub mod test_utils;
 
