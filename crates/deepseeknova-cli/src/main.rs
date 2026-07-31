@@ -207,7 +207,8 @@ async fn main() -> anyhow::Result<()> {
             use deepseeknova_provider::cost::ModelRole;
             let workspace_root = std::env::current_dir().unwrap_or_default();
             let raw_root = std::path::PathBuf::from(path.as_deref().unwrap_or("."));
-            // 逃逸企图直接中止（fail-closed，与工具侧惯例一致）；其余解析失败回落 raw。
+            // 逃逸企图（`..`/绝对路径/symlink）直接中止（fail-closed）；
+            // 仅路径不存在等非安全失败回落归一化路径（扫描结果为空）。
             let root = resolve_scan_root(&workspace_root, &raw_root)?;
             let min = deepseeknova_scanner::rule::Severity::parse(severity_min)
                 .unwrap_or(deepseeknova_scanner::rule::Severity::Low);
@@ -785,27 +786,52 @@ async fn stream_coordinator(runner: &dyn Runner, input: RunInput) -> anyhow::Res
     Ok(())
 }
 
-/// 解析 scan 根目录：逃逸企图（`..` 遍历 / 符号链接逃逸）fail-closed 直接中止；
-/// 仅非安全类解析失败（如 canonicalize 失败）回落 raw 路径。
+/// 解析并校验扫描根：词法归一 + 规范化双重包含性检查。
+/// `..`/绝对路径逃逸与 symlink 逃逸均 fail-closed 中止；仅"路径不存在"
+/// 这类非安全失败回落归一化路径（扫描结果为空，不泄露）。
 fn resolve_scan_root(
-    workspace_root: &std::path::Path,
+    workspace: &std::path::Path,
     raw: &std::path::Path,
 ) -> anyhow::Result<std::path::PathBuf> {
     let abs = if raw.is_absolute() {
         raw.to_path_buf()
     } else {
-        workspace_root.join(raw)
+        workspace.join(raw)
     };
-    // Path::starts_with 是词法前缀匹配，不折叠 `..`——先规范化再做包含性检查，
-    // 与 secure_resolve 的第一道防线保持一致。
-    let normalized = deepseeknova_security::path::normalize_path(&abs);
-    if !normalized.starts_with(workspace_root) {
+    let norm = normalize_path(&abs);
+    if !norm.starts_with(workspace) {
         anyhow::bail!("scan path escapes the workspace root: {}", raw.display());
     }
-    Ok(
-        deepseeknova_security::path::secure_resolve(workspace_root, raw)
-            .unwrap_or_else(|_| raw.to_path_buf()),
-    )
+    // symlink 逃逸：canonicalize 解析符号链接后复核包含性。
+    if let Ok(canon) = std::fs::canonicalize(&norm) {
+        let ws_canon = std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+        if !canon.starts_with(&ws_canon) {
+            anyhow::bail!(
+                "scan path escapes the workspace root via symlink: {}",
+                raw.display()
+            );
+        }
+    }
+    Ok(norm)
+}
+
+/// 词法归一化路径：折叠 `..`、丢弃 `.`（保留根前缀）。
+/// 与 security crate 的 normalize_path 语义一致，用于 resolve_scan_root 的
+/// starts_with 预检查（词法前缀匹配不折叠 `..`，必须先归一）。
+fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
+    let mut normalized = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            std::path::Component::CurDir => {}
+            _ => {
+                normalized.push(component);
+            }
+        }
+    }
+    normalized
 }
 
 fn truncate_str(s: &str, max: usize) -> String {
@@ -903,6 +929,25 @@ mod tests {
         let res = resolve_scan_root(&root, std::path::Path::new("a/b/c")).unwrap();
         assert_eq!(res, root.join("a/b/c"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // symlink 场景依赖 unix 的 symlink()；非 unix 下链接不存在时
+    // canonicalize 失败走回落分支（返回 Ok），因此整个测试 cfg 门控。
+    #[cfg(unix)]
+    #[test]
+    fn scan_root_aborts_on_symlink_escape() {
+        let ws = std::env::temp_dir().join(format!("dnv-symlink-{}", std::process::id()));
+        let outside = ws.with_extension("outside"); // 同级外部目录
+        std::fs::create_dir_all(outside.join("sub")).unwrap();
+        std::fs::write(outside.join("sub/secret.rs"), "let api_key = \"sk-x\";\n").unwrap();
+        std::fs::create_dir_all(&ws).unwrap();
+        let _ = std::fs::remove_file(ws.join("link"));
+        std::os::unix::fs::symlink(&outside, ws.join("link")).unwrap();
+        let ws_root = std::path::PathBuf::from(&ws);
+        let err = resolve_scan_root(&ws_root, std::path::Path::new("link/sub")).unwrap_err();
+        assert!(err.to_string().contains("symlink"));
+        let _ = std::fs::remove_dir_all(&ws);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 
     #[test]
