@@ -220,6 +220,7 @@ pub fn build_security_context(
 /// Role-based providers injected by callers that own a ModelRouter.
 /// All fields optional; `None` falls back to legacy behaviour.
 #[derive(Default)]
+#[non_exhaustive]
 pub struct AgentRoleProviders {
     /// Delegate engine sub-agents (the `task` pointer).
     pub task: Option<Arc<dyn deepseeknova_provider::Provider>>,
@@ -425,10 +426,77 @@ pub fn build_agent_with_role_providers(
                             }
                             Some(block)
                         });
-                    // P3.2 同一召回提供器同时用于起点与中途（续聊含工具轮、
-                    // 压缩驱逐后按最近用户意图注入）。
-                    agent = agent.with_recall_provider(recall.clone());
-                    agent = agent.with_mid_run_retrieval(recall, true);
+                    agent = agent.with_recall_provider(recall);
+
+                    // P3.2/P3.3 中途检索（F1 修复：配置真实生效）：
+                    // `mid_run_recall=false` 不装配；top_k / inject_tokens /
+                    // require_tool_turn 全部来自配置；图索引启用时同时注入
+                    // 代码图命中（mid_run_graph_top_k）。
+                    if config.memory.mid_run_recall {
+                        let mid_mem = handle.clone();
+                        let mid_graph = graph_ext.clone();
+                        let mid_top_k = config.memory.mid_run_recall_top_k;
+                        let mid_graph_top_k = config.memory.mid_run_graph_top_k;
+                        let mid_cap = deepseeknova_core::tokens::chars_for_tokens(
+                            config.memory.mid_run_inject_tokens,
+                        );
+                        let mid: deepseeknova_agent::RecallProvider =
+                            Arc::new(move |query: &str| {
+                                if mid_cap == 0 {
+                                    return None;
+                                }
+                                let mut block = String::new();
+                                let mut budget = mid_cap;
+                                if let Ok(hits) = mid_mem.recall(query, mid_top_k) {
+                                    let mut lines: Vec<String> = Vec::new();
+                                    for h in hits {
+                                        let snippet: String =
+                                            h.entry.content.chars().take(120).collect();
+                                        let line = format!("- [memory] {snippet}\n");
+                                        if line.len() > budget {
+                                            break;
+                                        }
+                                        lines.push(line);
+                                    }
+                                    if !lines.is_empty() {
+                                        block.push_str("## Recalled Context\n");
+                                        for l in lines {
+                                            budget -= l.len();
+                                            block.push_str(&l);
+                                        }
+                                    }
+                                }
+                                if let Some(ref g) = mid_graph {
+                                    if let Ok(idx) = g.lock() {
+                                        if let Ok(nodes) = idx.search(query, None, mid_graph_top_k)
+                                        {
+                                            let mut lines: Vec<String> = Vec::new();
+                                            for n in nodes {
+                                                let line =
+                                                    format!("- [graph] {} ({})\n", n.name, n.path);
+                                                if line.len() > budget {
+                                                    break;
+                                                }
+                                                lines.push(line);
+                                            }
+                                            if !lines.is_empty() {
+                                                block.push_str("## Graph Hits\n");
+                                                for l in lines {
+                                                    block.push_str(&l);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if block.is_empty() {
+                                    None
+                                } else {
+                                    Some(block)
+                                }
+                            });
+                        agent = agent
+                            .with_mid_run_retrieval(mid, config.memory.mid_run_require_tool_turn);
+                    }
                 }
 
                 // 结束沉淀钩子（启发式，无 LLM）。
@@ -1329,5 +1397,66 @@ mod tests {
         assert_eq!(runtime.events.receiver_count(), 0);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn mid_run_test_workspace(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "dnv-midrun-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn mid_run_config_off_leaves_agent_unwired() {
+        let mut config = Config::default();
+        config.graph.enabled = false;
+        config.memory.mid_run_recall = false;
+        let workspace = mid_run_test_workspace("off");
+        let provider = std::sync::Arc::new(stub_provider());
+        let agent = build_agent_with_role_providers(
+            &config,
+            workspace.clone(),
+            provider,
+            AgentRoleProviders::default(),
+            5,
+            None,
+            vec![],
+        )
+        .unwrap();
+        assert!(
+            !agent.mid_run_retrieval_enabled(),
+            "mid_run_recall=false must not wire mid-run retrieval"
+        );
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn mid_run_config_on_wires_retrieval() {
+        let mut config = Config::default();
+        config.graph.enabled = false;
+        config.memory.mid_run_recall = true;
+        let workspace = mid_run_test_workspace("on");
+        let provider = std::sync::Arc::new(stub_provider());
+        let agent = build_agent_with_role_providers(
+            &config,
+            workspace.clone(),
+            provider,
+            AgentRoleProviders::default(),
+            5,
+            None,
+            vec![],
+        )
+        .unwrap();
+        assert!(
+            agent.mid_run_retrieval_enabled(),
+            "mid_run_recall=true must wire mid-run retrieval"
+        );
+        let _ = std::fs::remove_dir_all(&workspace);
     }
 }
