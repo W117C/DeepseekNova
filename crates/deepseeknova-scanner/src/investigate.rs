@@ -27,20 +27,36 @@ Matched line: {excerpt}
 
 /// Extract the first balanced `{...}` JSON object containing a
 /// `true_positive` key and parse it. Returns `None` on any failure.
+///
+/// String/escape-aware scan mirrors the B3 review gate's `extract_json`
+/// (crates/deepseeknova-agent/src/review.rs): braces inside string literals
+/// (e.g. `"note": "a: {"`) never distort the depth, and a stray `}` is
+/// clamped with `saturating_sub`. Each balanced slice is tried in turn;
+/// a slice that fails to deserialize is skipped and scanning continues.
 fn parse_verdict(reply: &str) -> Option<Verdict> {
     let bytes = reply.as_bytes();
     let mut start = None;
-    let mut depth = 0i32;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escape = false;
     for (i, &b) in bytes.iter().enumerate() {
+        if escape {
+            escape = false;
+            continue;
+        }
         match b {
-            b'{' => {
+            b'\\' if in_string => escape = true,
+            // Only track string state inside a candidate object: prefix
+            // quotes (like B3's scan starting at the first `{`) are ignored.
+            b'"' if start.is_some() => in_string = !in_string,
+            b'{' if !in_string => {
                 if depth == 0 {
                     start = Some(i);
                 }
                 depth += 1;
             }
-            b'}' => {
-                depth -= 1;
+            b'}' if !in_string => {
+                depth = depth.saturating_sub(1);
                 if depth == 0 {
                     if let Some(s) = start {
                         let slice = &reply[s..=i];
@@ -130,5 +146,19 @@ mod tests {
             reply: "I could not determine anything useful.".into(),
         };
         assert!(investigate(&finding(), &runner).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn parses_verdict_with_unbalanced_brace_in_note() {
+        // note 内含未配对花括号——字符串感知解析必须仍能取出 JSON。
+        let runner = MockRunner {
+            reply: r#"{"true_positive": false, "note": "template value: {"}"#.into(),
+        };
+        let v = investigate(&finding(), &runner).await;
+        assert!(
+            v.is_some(),
+            "brace inside string literal must not break parsing"
+        );
+        assert!(!v.unwrap().true_positive);
     }
 }
