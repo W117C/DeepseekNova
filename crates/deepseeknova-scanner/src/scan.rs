@@ -80,9 +80,9 @@ fn is_excluded(root: &Path, path: &Path, ignores: &[String]) -> bool {
     ignores.iter().any(|ig| {
         let ig = ig.trim_end_matches('/');
         !ig.is_empty()
-            && (rel_str.starts_with(ig)
-                || rel_str.contains(&format!("/{ig}/"))
-                || rel_str.contains(&format!("{ig}/")))
+            && (rel_str == ig
+                || rel_str.starts_with(&format!("{ig}/"))
+                || rel_str.contains(&format!("/{ig}/")))
     })
 }
 
@@ -146,6 +146,27 @@ mod tests {
         ]);
         let findings = scan_files(&root, &builtin_rules()).unwrap();
         assert!(findings.is_empty(), "gitignored + target excluded");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn gitignore_matches_on_component_boundary_not_substring() {
+        let root = tmp_with(&[
+            (".gitignore", "dist/\n"),
+            // 同前缀但不同组件的文件不应被排除
+            ("distutils/x.rs", "let api_key = \"sk-abcdefgh\";\n"),
+            // 真正在 dist/ 下的应被排除
+            ("dist/y.rs", "let api_key = \"sk-abcdefgh\";\n"),
+        ]);
+        let findings = scan_files(&root, &builtin_rules()).unwrap();
+        assert!(
+            findings.iter().any(|f| f.path.contains("distutils")),
+            "sibling dir sharing a prefix must still be scanned"
+        );
+        assert!(
+            !findings.iter().any(|f| f.path.starts_with("dist/")),
+            "真正 gitignored 的目录仍排除"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
