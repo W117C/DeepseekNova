@@ -262,6 +262,9 @@ where
                             println!();
                             started_output = false;
                         }
+                        Ok(RunEvent::Paused { reason, .. }) => {
+                            println!("\n⏸ paused: {reason} — 会话已保存，直接继续输入即可接着跑");
+                        }
                         Err(e) => {
                             eprintln!("\nerror: {e}");
                             break;

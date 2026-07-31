@@ -533,6 +533,17 @@ async fn stream_events(runner: &dyn Runner, input: RunInput) -> anyhow::Result<(
                     println!("{}", output.text);
                 }
             }
+            deepseeknova_core::RunEvent::Paused { reason, session_id } => {
+                eprintln!("\n⏸ paused: {reason}");
+                match session_id {
+                    Some(id) => {
+                        eprintln!("resume with: deepseeknova chat --resume   (session {id})")
+                    }
+                    None => eprintln!("resume with: deepseeknova chat --resume"),
+                }
+                // 非交互（CI/脚本）可判定的专用退出码：3 = paused。
+                std::process::exit(3);
+            }
             _ => {}
         }
     }
@@ -572,6 +583,17 @@ async fn stream_coordinator(runner: &dyn Runner, input: RunInput) -> anyhow::Res
             deepseeknova_core::RunEvent::ReasoningDelta { text, .. } => {
                 // Show reasoning in dim text for coordinator planning.
                 print!("\x1b[2m{text}\x1b[0m");
+            }
+            deepseeknova_core::RunEvent::Paused { reason, session_id } => {
+                eprintln!("\n⏸ paused: {reason}");
+                match session_id {
+                    Some(id) => {
+                        eprintln!("resume with: deepseeknova chat --resume   (session {id})")
+                    }
+                    None => eprintln!("resume with: deepseeknova chat --resume"),
+                }
+                // 非交互（CI/脚本）可判定的专用退出码：3 = paused。
+                std::process::exit(3);
             }
             _ => {}
         }
