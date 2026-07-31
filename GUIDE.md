@@ -159,6 +159,9 @@ cache_hit_price_per_mtok = 0.028
 会话内：`/model` 查看指针，`/model use <role> <model>` 热切换（不写盘），`/cost` 查看
 按 模型×角色 的 token 用量与成本估算。
 
+coordinator 模式（`run --planner-model ...`）的 Delegate 子代理使用 `task` 指针，
+其历史压缩使用 `compact` 指针并按 Compact 角色计量。
+
 ### Environment Variables
 
 | Variable | Description |
