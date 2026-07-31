@@ -76,13 +76,17 @@ fn is_excluded(root: &Path, path: &Path, ignores: &[String]) -> bool {
             return true;
         }
     }
-    let rel_str = rel.to_string_lossy();
+    matches_gitignore(rel.to_string_lossy().as_ref(), ignores)
+}
+
+/// Minimal .gitignore prefix match. OS path separators are normalized to `/`
+/// so patterns like `ignored/` also exclude `ignored\x.rs` on Windows.
+fn matches_gitignore(rel: &str, ignores: &[String]) -> bool {
+    let rel = rel.replace('\\', "/");
     ignores.iter().any(|ig| {
         let ig = ig.trim_end_matches('/');
         !ig.is_empty()
-            && (rel_str == ig
-                || rel_str.starts_with(&format!("{ig}/"))
-                || rel_str.contains(&format!("/{ig}/")))
+            && (rel == ig || rel.starts_with(&format!("{ig}/")) || rel.contains(&format!("/{ig}/")))
     })
 }
 
@@ -168,6 +172,20 @@ mod tests {
             "真正 gitignored 的目录仍排除"
         );
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn gitignore_matches_windows_backslash_paths() {
+        let ignores = vec!["ignored/".to_string()];
+        let dist_ignore = ["dist/".to_string()];
+        assert!(
+            matches_gitignore(r"ignored\x.rs", &ignores),
+            "backslash-separated rel path must match the gitignore dir"
+        );
+        assert!(
+            !matches_gitignore(r"distutils\x.rs", &dist_ignore),
+            "sibling dir sharing a prefix must not match on Windows-style paths either"
+        );
     }
 
     #[test]
