@@ -41,6 +41,7 @@ pub mod prefix;
 pub mod progress;
 pub mod registry;
 pub mod runner;
+pub mod tokens;
 pub mod tool;
 pub mod types;
 

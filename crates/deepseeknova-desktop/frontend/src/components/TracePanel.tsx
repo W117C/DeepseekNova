@@ -11,10 +11,11 @@ import { useI18n } from "../i18n";
 import type { WireEvent } from "../types";
 
 interface TraceStep {
-  type: "thinking" | "tool_call" | "tool_result" | "text" | "error" | "done";
+  type: "thinking" | "tool_call" | "tool_result" | "verification" | "text" | "error" | "done";
   label: string;
   detail?: string;
   mono?: string;
+  failed?: boolean;
   ts: number;
 }
 
@@ -91,6 +92,22 @@ function buildTraceSteps(
           type: "tool_result",
           label: "工具返回",
           detail: event.result.length > 300 ? event.result.slice(0, 300) + "…" : event.result,
+          ts,
+        });
+        break;
+
+      case "verification":
+        flushText();
+        flushReasoning();
+        steps.push({
+          type: "verification",
+          label: event.passed ? `✓ ${event.command}` : `✗ ${event.command}`,
+          failed: !event.passed,
+          detail: event.passed
+            ? undefined
+            : event.summary.length > 300
+              ? event.summary.slice(0, 300) + "…"
+              : event.summary,
           ts,
         });
         break;
@@ -196,7 +213,7 @@ export default function TracePanel() {
 
           return (
             <div className="trace-node" key={idx}>
-              <div className={`trace-dot ${step.type}`} />
+              <div className={`trace-dot ${step.type}${step.failed ? " failed" : ""}`} />
               <div className="trace-content">
                 <div className="trace-label">
                   {step.mono && <span className="trace-label-mono">{step.mono}</span>}

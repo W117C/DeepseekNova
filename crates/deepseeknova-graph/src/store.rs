@@ -35,6 +35,8 @@ CREATE INDEX IF NOT EXISTS idx_edges_src ON edges(src);
 CREATE INDEX IF NOT EXISTS idx_edges_dst ON edges(dst);
 CREATE VIRTUAL TABLE IF NOT EXISTS symbol_fts USING fts5(
   name, signature, doc, id UNINDEXED, path UNINDEXED, tokenize='porter unicode61');
+CREATE VIRTUAL TABLE IF NOT EXISTS symbol_fts_cjk USING fts5(
+  name, signature, doc, id UNINDEXED, path UNINDEXED, tokenize='trigram');
 CREATE TABLE IF NOT EXISTS raw_calls(path TEXT, caller TEXT, callee TEXT);
 CREATE TABLE IF NOT EXISTS raw_imports(path TEXT, text TEXT);
 CREATE INDEX IF NOT EXISTS idx_raw_calls_path ON raw_calls(path);
@@ -85,6 +87,16 @@ impl Store {
         }
         let conn = Connection::open(db_path)?;
         conn.execute_batch(SCHEMA)?;
+        // 首次升级：trigram 辅助表为空时从主表回填一次。
+        let cjk_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM symbol_fts_cjk", [], |r| r.get(0))?;
+        if cjk_count == 0 {
+            conn.execute(
+                "INSERT INTO symbol_fts_cjk(name, signature, doc, id, path)
+                 SELECT name, signature, doc, id, path FROM symbol_fts",
+                [],
+            )?;
+        }
         // 迁移：旧版库缺 raw_calls/raw_imports 事实，清空 files 强制下次全量重解析
         let version: Option<String> = conn
             .query_row(
@@ -188,6 +200,7 @@ impl Store {
             )?;
             tx.execute("DELETE FROM nodes WHERE path = ?1", [rel_path])?;
             tx.execute("DELETE FROM symbol_fts WHERE path = ?1", [rel_path])?;
+            tx.execute("DELETE FROM symbol_fts_cjk WHERE path = ?1", [rel_path])?;
             tx.execute("DELETE FROM raw_calls WHERE path = ?1", [rel_path])?;
             tx.execute("DELETE FROM raw_imports WHERE path = ?1", [rel_path])?;
 
@@ -251,6 +264,7 @@ impl Store {
             )?;
             tx.execute("DELETE FROM nodes WHERE path = ?1", [path])?;
             tx.execute("DELETE FROM symbol_fts WHERE path = ?1", [path])?;
+            tx.execute("DELETE FROM symbol_fts_cjk WHERE path = ?1", [path])?;
             tx.execute("DELETE FROM raw_calls WHERE path = ?1", [path])?;
             tx.execute("DELETE FROM raw_imports WHERE path = ?1", [path])?;
             tx.execute("DELETE FROM files WHERE path = ?1", [path])?;
@@ -343,24 +357,44 @@ impl Store {
         let tokens: Vec<String> = query
             .split_whitespace()
             .filter(|t| !t.is_empty())
-            .map(|t| format!("\"{}\"", t.replace('\"', "\"\"")))
+            .map(|t| t.to_string())
             .collect();
         if tokens.is_empty() {
             return Ok(Vec::new());
         }
-        let match_expr = tokens.join(" OR ");
+
+        // 短查询（≤2 字符，含中文短词）无法走 FTS/trigram → LIKE 回退。
+        if !tokens.iter().any(|t| t.chars().count() >= 3) {
+            return self.search_like(&tokens, kind, limit);
+        }
+
+        // 含 CJK 且存在 ≥3 字符 token → trigram 表（中文子串检索）。
+        let cjk_mode = Self::has_cjk(query) && tokens.iter().any(|t| t.chars().count() >= 3);
+        let table = if cjk_mode {
+            "symbol_fts_cjk"
+        } else {
+            "symbol_fts"
+        };
+        let match_expr = tokens
+            .iter()
+            .filter(|t| !cjk_mode || t.chars().count() >= 3)
+            .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(" OR ");
 
         let mut hits: Vec<Node> = Vec::new();
-        let base = "SELECT n.id, n.kind, n.name, n.path, n.start_line, n.end_line,\n                    n.signature, n.doc, n.score\n             FROM nodes n JOIN symbol_fts f ON n.id = f.id\n             WHERE symbol_fts MATCH ?1";
+        let base = format!(
+            "SELECT n.id, n.kind, n.name, n.path, n.start_line, n.end_line,\n                    n.signature, n.doc, n.score\n             FROM nodes n JOIN {table} f ON n.id = f.id\n             WHERE {table} MATCH ?1"
+        );
         if let Some(k) = kind {
-            let sql = format!("{base} AND n.kind = ?2 ORDER BY bm25(symbol_fts) LIMIT ?3");
+            let sql = format!("{base} AND n.kind = ?2 ORDER BY bm25({table}) LIMIT ?3");
             let mut stmt = self.conn.prepare(&sql)?;
             let rows = stmt.query_map((&match_expr, k.as_str(), limit as i64), node_from_row)?;
             for row in rows {
                 hits.push(row?);
             }
         } else {
-            let sql = format!("{base} ORDER BY bm25(symbol_fts) LIMIT ?2");
+            let sql = format!("{base} ORDER BY bm25({table}) LIMIT ?2");
             let mut stmt = self.conn.prepare(&sql)?;
             let rows = stmt.query_map((&match_expr, limit as i64), node_from_row)?;
             for row in rows {
@@ -371,6 +405,61 @@ impl Store {
         let (mut exact, rest): (Vec<Node>, Vec<Node>) = hits
             .into_iter()
             .partition(|n| n.name.eq_ignore_ascii_case(query.trim()));
+        exact.extend(rest);
+        Ok(exact)
+    }
+
+    /// 是否含 CJK 字符（决定走 trigram 表）。
+    fn has_cjk(text: &str) -> bool {
+        text.chars().any(|c| {
+            matches!(c as u32,
+                0x3000..=0x303F | 0x3400..=0x4DBF | 0x4E00..=0x9FFF
+                | 0xF900..=0xFAFF | 0xFF00..=0xFFEF)
+        })
+    }
+
+    /// LIKE 回退：短词（1-2 字符）做子串匹配（NOCASE），按 PageRank score 排序，
+    /// 名称精确命中稳定置前。
+    fn search_like(
+        &self,
+        tokens: &[String],
+        kind: Option<NodeKind>,
+        limit: usize,
+    ) -> Result<Vec<Node>, GraphError> {
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        let mut clauses: Vec<String> = Vec::new();
+        for (i, t) in tokens.iter().enumerate() {
+            let n = i + 1;
+            clauses.push(format!(
+                "(n.name LIKE ?{n} COLLATE NOCASE OR n.signature LIKE ?{n} COLLATE NOCASE \
+                 OR n.doc LIKE ?{n} COLLATE NOCASE)"
+            ));
+            params.push(Box::new(format!("%{t}%")));
+        }
+        let mut sql = format!(
+            "SELECT n.id, n.kind, n.name, n.path, n.start_line, n.end_line,\n                    n.signature, n.doc, n.score\n             FROM nodes n WHERE {}",
+            clauses.join(" OR ")
+        );
+        if let Some(k) = kind {
+            sql.push_str(" AND n.kind = ?");
+            params.push(Box::new(k.as_str().to_string()));
+        }
+        let limit_idx = params.len() + 1;
+        sql.push_str(&format!(" ORDER BY n.score DESC LIMIT ?{limit_idx}"));
+        params.push(Box::new(limit as i64));
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let raw_params = rusqlite::params_from_iter(params.iter().map(|p| p.as_ref()));
+        let mut hits: Vec<Node> = Vec::new();
+        let rows = stmt.query_map(raw_params, node_from_row)?;
+        for row in rows {
+            hits.push(row?);
+        }
+        // 名称精确命中稳定置前（partition 保持相对顺序）
+        let needle = tokens.join(" ");
+        let (mut exact, rest): (Vec<Node>, Vec<Node>) = hits
+            .into_iter()
+            .partition(|n| n.name.eq_ignore_ascii_case(&needle));
         exact.extend(rest);
         Ok(exact)
     }
@@ -553,6 +642,10 @@ fn insert_node(conn: &Connection, node: &Node) -> Result<(), GraphError> {
         "INSERT INTO symbol_fts(name, signature, doc, id, path) VALUES(?1, ?2, ?3, ?4, ?5)",
         (&node.name, &node.signature, &node.doc, &node.id, &node.path),
     )?;
+    conn.execute(
+        "INSERT INTO symbol_fts_cjk(name, signature, doc, id, path) VALUES(?1, ?2, ?3, ?4, ?5)",
+        (&node.name, &node.signature, &node.doc, &node.id, &node.path),
+    )?;
     Ok(())
 }
 
@@ -723,5 +816,64 @@ mod tests {
         store.refresh(root, 1_048_576).unwrap();
         let hits = store.search("PermissionGate", None, 10).unwrap();
         assert_eq!(hits[0].name, "PermissionGate");
+    }
+
+    #[test]
+    fn fts_search_finds_chinese_doc_via_trigram() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "src/zh.rs",
+            "/// 处理路径分隔符归一化\npub fn normalize_path() {}\n",
+        );
+        let mut store = Store::open(&root.join(".deepseeknova/graph.db")).unwrap();
+        store.refresh(root, 1_048_576).unwrap();
+
+        let hits = store.search("路径分隔符", None, 10).unwrap();
+        assert!(
+            hits.iter().any(|n| n.name == "normalize_path"),
+            "trigram 应命中中文 doc 中的函数实体"
+        );
+    }
+
+    #[test]
+    fn fts_search_short_english_falls_back_to_like() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "src/ai.rs",
+            "/// Go bindings for the AI runtime\npub fn go_runtime() {}\n",
+        );
+        let mut store = Store::open(&root.join(".deepseeknova/graph.db")).unwrap();
+        store.refresh(root, 1_048_576).unwrap();
+
+        // "go" 仅 2 字符：LIKE NOCASE 子串匹配（旧 unicode61 无前缀匹配不稳）。
+        let hits = store.search("go", None, 10).unwrap();
+        assert!(
+            hits.iter().any(|n| n.name == "go_runtime"),
+            "短词 LIKE 回退应命中 go_runtime"
+        );
+    }
+
+    #[test]
+    fn fts_search_short_chinese_falls_back_to_like() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "src/zh2.rs",
+            "/// 验证命令超时处理\npub fn verify_timeout() {}\n",
+        );
+        let mut store = Store::open(&root.join(".deepseeknova/graph.db")).unwrap();
+        store.refresh(root, 1_048_576).unwrap();
+
+        // "超时" 2 字中文：trigram 无法匹配，走 LIKE 回退。
+        let hits = store.search("超时", None, 10).unwrap();
+        assert!(
+            hits.iter().any(|n| n.name == "verify_timeout"),
+            "中文短词 LIKE 回退应命中"
+        );
     }
 }

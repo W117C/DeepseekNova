@@ -18,12 +18,12 @@ use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-/// Approximate characters-per-token for rough heuristics.
-const CHARS_PER_TOKEN: f32 = 4.0;
-
 // Re-export the approval trait (defined in core, next to `RunEvent`) so
 // existing `deepseeknova_agent::ApprovalResponder` references keep resolving.
 pub use deepseeknova_core::runner::ApprovalResponder;
+
+// P3.1 统一 CJK-aware token 估算（实现见 tokens.rs，本文件仅 re-export）。
+pub use crate::tokens::estimate_tokens;
 
 // ---------------------------------------------------------------------------
 // Agent — the main agent runner
@@ -72,6 +72,8 @@ pub struct Agent {
     repo_map_provider: Option<RepoMapProvider>,
 
     recall_provider: Option<RecallProvider>,
+    /// P3.3 中途检索（续聊开头 / 压缩后注入记忆 + 代码图命中）。
+    mid_run: Option<MidRunRetrieval>,
     distill_hook: Option<DistillHook>,
 
     /// max_steps 到顶行为：true = 优雅暂停（默认），false = 旧版报错。
@@ -163,6 +165,7 @@ impl Agent {
             extensions: Vec::new(),
             repo_map_provider: None,
             recall_provider: None,
+            mid_run: None,
             distill_hook: None,
             pause_on_max_steps: true,
             l3_enabled: true,
@@ -260,6 +263,21 @@ impl Agent {
     /// User 消息注入（不改动被缓存的 system 前缀）。
     pub fn with_recall_provider(mut self, provider: RecallProvider) -> Self {
         self.recall_provider = Some(provider);
+        self
+    }
+
+    /// 附加中途检索提供器。续聊且上一轮有工具活动时（或压缩发生后），以
+    /// 当前/最近用户消息为查询召回记忆与代码图实体，作为 volatile User 消息
+    /// 注入。`require_tool_turn = false` 时每个续聊轮次都注入。
+    pub fn with_mid_run_retrieval(
+        mut self,
+        provider: RecallProvider,
+        require_tool_turn: bool,
+    ) -> Self {
+        self.mid_run = Some(MidRunRetrieval {
+            provider,
+            require_tool_turn,
+        });
         self
     }
 
@@ -435,6 +453,7 @@ impl Runner for Agent {
         let extensions = self.extensions.clone();
         let repo_map_provider = self.repo_map_provider.clone();
         let recall_provider = self.recall_provider.clone();
+        let mid_run = self.mid_run.clone();
         let distill_hook = self.distill_hook.clone();
         let pause_on_max_steps = self.pause_on_max_steps;
         let l3_enabled = self.l3_enabled;
@@ -463,6 +482,7 @@ impl Runner for Agent {
         let effort_routing = self.effort_routing.clone();
         let observe = self.observe.clone();
         let tool_cache = self.tool_cache;
+        let recall_provider_for_loop = recall_provider.clone();
 
         // Create a cancellation token and wire Ctrl-C (SIGINT) to cancel it.
         // This enables graceful interruption of the agent loop (e.g. Ctrl-C).
@@ -535,17 +555,18 @@ impl Runner for Agent {
             // reasoning，故通过 replay 不变量校验。
             if !seeded {
                 if let Some(ref rp) = recall_provider {
-                    if let Some(block) = rp(&input.prompt) {
-                        if !block.is_empty() {
-                            memory.add_message(Message {
-                                role: Role::User,
-                                content: format!("<recalled-memory>\n{block}\n</recalled-memory>"),
-                                name: None,
-                                tool_calls: None,
-                                tool_call_id: None,
-                                reasoning_content: None,
-                            });
-                        }
+                    inject_recall(rp, &mut memory, &input.prompt);
+                }
+            }
+
+            // P3.3 中途检索：续聊轮次开头，上一轮有工具活动时注入一次
+            // 记忆 + 代码图命中（query = 当前用户消息）。
+            if seeded {
+                if let Some(ref mid) = mid_run {
+                    let active =
+                        !mid.require_tool_turn || history_last_turn_used_tools(&memory.get_all());
+                    if active {
+                        inject_recall(&mid.provider, &mut memory, &input.prompt);
                     }
                 }
             }
@@ -580,6 +601,8 @@ impl Runner for Agent {
                 effort_routing,
                 observe,
                 tool_cache,
+                recall_provider_for_loop,
+                mid_run,
             )
             .await;
 
@@ -610,6 +633,19 @@ impl Runner for Agent {
                         Ok(()) => (TaskOutcome::Success, None),
                         Err(e) => (TaskOutcome::Failure, Some(e.to_string())),
                     };
+                    // P3.3 任务-文件关联：从写类工具参数提取触碰文件。
+                    let mut seen_files = std::collections::HashSet::new();
+                    let files: Vec<String> = msgs
+                        .iter()
+                        .filter(|m| m.role == Role::Assistant)
+                        .filter_map(|m| m.tool_calls.as_ref())
+                        .flatten()
+                        .flat_map(|tc| {
+                            extract_touched_paths(&tc.function.name, &tc.function.arguments)
+                        })
+                        .filter(|p| seen_files.insert(p.clone()))
+                        .take(20)
+                        .collect();
                     hook(TaskObservation {
                         task_description: task_text.clone(),
                         tool_calls,
@@ -617,6 +653,7 @@ impl Runner for Agent {
                         outcome,
                         user_feedback,
                         session_id: "agent".to_string(),
+                        files,
                     });
                 }
             }
@@ -670,6 +707,8 @@ async fn run_agent_loop(
     effort_routing: Option<EffortRouting>,
     observe: Option<ObserveSettings>,
     tool_cache: bool,
+    recall_provider: Option<RecallProvider>,
+    mid_run: Option<MidRunRetrieval>,
 ) -> anyhow::Result<()> {
     // Add user prompt
     memory.add_message(Message {
@@ -766,14 +805,21 @@ async fn run_agent_loop(
 
             if tokens > threshold || budget_wants_compress {
                 let before = tokens;
-                memory.shrink_large_results(threshold.max(1) as usize * 4);
+                let mut compacted = false;
+                // P3.1：传入 token 阈值，shrink 内部按每条消息的 CJK/ASCII
+                // 构成换算字符预算，中文场景不再被 4 倍放大。
+                memory.shrink_large_results(threshold.max(1));
                 let after_shrink = estimate_tokens(&memory.get_all());
+                if after_shrink < before {
+                    compacted = true;
+                }
 
                 info!("shrunk tool results: {} -> {} tokens", before, after_shrink);
 
                 if after_shrink > threshold {
                     warn!("context still over threshold after shrinking tool results. sliding window...");
                     memory.slide_window();
+                    compacted = true;
                     let after_slide = estimate_tokens(&memory.get_all());
                     info!("slid window: {} -> {} tokens", after_shrink, after_slide);
 
@@ -789,6 +835,22 @@ async fn run_agent_loop(
                         if l3.try_compact(p, memory).await {
                             let after_l3 = estimate_tokens(&memory.get_all());
                             info!("L3 compacted: {} -> {} tokens", after_slide, after_l3);
+                            compacted = true;
+                        }
+                    }
+                }
+
+                // P3.3 压缩后重建：无论 L1/L2/L3，只要历史发生了驱逐就按
+                // 最近用户意图召回注入，避免下一步决策上下文过薄。
+                if compacted {
+                    let rp = mid_run
+                        .as_ref()
+                        .map(|m| &m.provider)
+                        .or(recall_provider.as_ref());
+                    if let Some(rp) = rp {
+                        let last_user = crate::compaction::last_user_message(&memory.get_all());
+                        if let Some(q) = last_user {
+                            inject_recall(rp, memory, &q.content);
                         }
                     }
                 }
@@ -804,7 +866,7 @@ async fn run_agent_loop(
         // P2.1 每步 provider 选择：机械续步（上一步是正常工具结果）走 quick，
         // 首步 / 出错 / 回炉反馈走 high。
         let step_provider: &Arc<dyn Provider> = if let Some(r) = effort_routing.as_ref() {
-            if classify_quick_step(&memory) {
+            if classify_quick_step(memory) {
                 &r.quick
             } else {
                 &r.high
@@ -1556,6 +1618,46 @@ fn classify_quick_step(memory: &Memory) -> bool {
     }
 }
 
+/// P3.3 中途检索设置。
+#[derive(Clone)]
+pub(crate) struct MidRunRetrieval {
+    pub(crate) provider: RecallProvider,
+    pub(crate) require_tool_turn: bool,
+}
+
+/// 上一轮是否有工具活动：从历史末尾向前扫，遇到 Tool 消息 → true；
+/// 遇到 User 边界 → false（说明上一轮没有工具调用）。
+fn history_last_turn_used_tools(messages: &[Message]) -> bool {
+    for m in messages.iter().rev() {
+        match m.role {
+            Role::Tool => return true,
+            Role::User => return false,
+            _ => continue,
+        }
+    }
+    false
+}
+
+/// 召回注入：把命中块作为 volatile User 消息插入（不触碰 system 前缀，
+/// 保住 DeepSeek-V4 前缀缓存）。返回是否实际注入。
+fn inject_recall(provider: &RecallProvider, memory: &mut Memory, query: &str) -> bool {
+    let Some(block) = provider(query) else {
+        return false;
+    };
+    if block.is_empty() {
+        return false;
+    }
+    memory.add_message(Message {
+        role: Role::User,
+        content: format!("<recalled-memory>\n{block}\n</recalled-memory>"),
+        name: None,
+        tool_calls: None,
+        tool_call_id: None,
+        reasoning_content: None,
+    });
+    true
+}
+
 /// P2.3 工具缓存 key：(工具名, 参数) 的 SHA-256 前缀 64 位。
 fn tool_cache_key(name: &str, args: &str) -> u64 {
     use sha2::{Digest, Sha256};
@@ -1565,6 +1667,28 @@ fn tool_cache_key(name: &str, args: &str) -> u64 {
     h.update(args.as_bytes());
     let d = h.finalize();
     u64::from_le_bytes([d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]])
+}
+
+/// P3.3 从写类工具调用参数提取触碰文件路径（write/edit 用 `path`，
+/// move 用 `source`/`destination`）。解析失败返回空。
+fn extract_touched_paths(name: &str, args: &str) -> Vec<String> {
+    if !matches!(name, "write_file" | "edit_file" | "move_file") {
+        return Vec::new();
+    }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(args) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    if let Some(p) = v.get("path").and_then(|x| x.as_str()) {
+        out.push(p.to_string());
+    }
+    if let Some(s) = v.get("source").and_then(|x| x.as_str()) {
+        out.push(s.to_string());
+    }
+    if let Some(d) = v.get("destination").and_then(|x| x.as_str()) {
+        out.push(d.to_string());
+    }
+    out
 }
 
 /// P2.2 观察压缩：用廉价模型把大输出压成结构化摘要；任何失败返回 None（回退截断）。
@@ -1590,19 +1714,6 @@ async fn compress_observation(obs: &ObserveSettings, tool: &str, raw: &str) -> O
     } else {
         Some(capped)
     }
-}
-
-// ---------------------------------------------------------------------------
-// Token estimation helpers (public for testing)
-// ---------------------------------------------------------------------------
-
-/// Rough token count estimate from message content length.
-pub fn estimate_tokens(messages: &[Message]) -> u32 {
-    let char_count: usize = messages
-        .iter()
-        .map(|m| m.content.len() + m.reasoning_content.as_ref().map(|r| r.len()).unwrap_or(0))
-        .sum();
-    (char_count as f32 / CHARS_PER_TOKEN).ceil() as u32
 }
 
 // ---------------------------------------------------------------------------
@@ -3080,6 +3191,72 @@ mod tests {
             calls.load(std::sync::atomic::Ordering::SeqCst),
             2,
             "write must invalidate the cache: read(1) exec, write, read(2) exec, read(3) cached"
+        );
+    }
+
+    #[test]
+    fn inject_recall_adds_volatile_user_message() {
+        let mut memory = Memory::new();
+        let rp: RecallProvider = Arc::new(|_| Some("hit".to_string()));
+        assert!(inject_recall(&rp, &mut memory, "query"));
+        let msgs = memory.get_all();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].role, Role::User);
+        assert!(msgs[0].content.contains("hit"));
+
+        let empty: RecallProvider = Arc::new(|_| None);
+        assert!(!inject_recall(&empty, &mut memory, "query"));
+        assert_eq!(memory.get_all().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn mid_run_retrieval_injects_on_seeded_tool_turn() {
+        // 续聊历史包含一次工具交换 → 新轮次开头触发中途召回注入。
+        let history = Arc::new(tokio::sync::Mutex::new(vec![
+            Message {
+                role: Role::User,
+                content: "initial task".into(),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+            Message {
+                role: Role::Assistant,
+                content: String::new(),
+                name: None,
+                tool_calls: Some(vec![ToolCall {
+                    id: "x1".into(),
+                    ty: "function".to_string(),
+                    function: FunctionCall {
+                        name: "read_file".into(),
+                        arguments: "{}".into(),
+                    },
+                }]),
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+            Message {
+                role: Role::Tool,
+                content: "ok".into(),
+                name: None,
+                tool_calls: None,
+                tool_call_id: Some("x1".into()),
+                reasoning_content: None,
+            },
+        ]));
+        let provider = Arc::new(MockProvider::text("done"));
+        let rp: RecallProvider = Arc::new(|_| Some("mid-hit".to_string()));
+        let agent = Agent::new(provider, 3)
+            .with_conversation_history(history.clone())
+            .with_mid_run_retrieval(rp, true);
+
+        let events = drain(agent, "continue the task").await;
+        assert!(events.iter().any(|e| matches!(e, RunEvent::Done(_))));
+        let store = history.lock().await;
+        assert!(
+            store.iter().any(|m| m.content.contains("mid-hit")),
+            "mid-run retrieval must inject on a seeded tool-active turn"
         );
     }
 }

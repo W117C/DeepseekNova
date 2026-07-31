@@ -130,6 +130,23 @@ max_retries = 3
 [agent]
 max_steps = {max_steps}
 concurrent_tools = true
+# P2 高频决策（默认关，详见 GUIDE.md）：
+# step_effort_routing = true   # 每步按规则切换 reasoning effort（quick/high）
+# observe_compress = true      # 超阈值工具输出由廉价模型摘要后入历史
+# tool_cache = true            # 会话内只读工具结果缓存（写后失效）
+
+# 完成前确定性验证（默认关）：
+# [verify]
+# enabled = true
+# commands = ["cargo check --quiet"]
+# max_cycles = 1
+
+# 角色分工模板（可选）：同一 provider 下按角色路由不同模型
+# [model_pointers]
+# main = "{model}"
+# task = "{model}"
+# compact = "{model}"
+# quick = "{model}"
 
 [permissions]
 default_mode = "{perm_mode}"

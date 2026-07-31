@@ -166,6 +166,25 @@ impl MemoryEngine {
             }
         }
 
+        // 3) 任务-文件关联（P3.3）：为每个触碰文件写入确定性 file-link 记忆，
+        // 让后续"这个文件相关的经验"检索能命中。
+        for f in obs.files.iter().take(20) {
+            let f = redact_one(f);
+            if f.trim().is_empty() {
+                continue;
+            }
+            let link = redact_one(&format!("file: {f}\nTask: {}", obs.task_description));
+            let mut fe = make_entry(
+                link.clone(),
+                MemoryCategory::Task,
+                vec!["file-link".into(), "task".into()],
+                "auto-distill",
+                0.5,
+            );
+            fe.id = content_id("file", &f);
+            self.store.store(&fe)?;
+        }
+
         self.store.bump_distill_count()?;
         info!(outcome = ?obs.outcome, "task experience captured");
         Ok(true)
@@ -218,6 +237,7 @@ mod tests {
             outcome,
             user_feedback: feedback.map(|s| s.to_string()),
             session_id: "sess".into(),
+            files: vec![],
         }
     }
 
@@ -269,6 +289,31 @@ mod tests {
             .unwrap());
         let hits = eng.recall("web server", 5).unwrap();
         assert!(hits.iter().any(|h| h.entry.source == "auto-distill"));
+    }
+
+    #[test]
+    fn record_task_writes_deduped_file_links() {
+        let eng = MemoryEngine::open_in_memory(true).unwrap();
+        let mut o = obs(6, 4, TaskOutcome::Success, None);
+        o.files = vec![
+            "src/main.rs".into(),
+            "src/lib.rs".into(),
+            "src/main.rs".into(),
+        ];
+        eng.record_task(&o, &guards()).unwrap();
+        let hits = eng.recall("file: src/main.rs", 10).unwrap();
+        assert!(
+            hits.iter()
+                .any(|h| h.entry.tags.contains(&"file-link".to_string())),
+            "file-link memory must be searchable"
+        );
+        let links: Vec<_> = eng
+            .list(MemoryCategory::Task)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.tags.contains(&"file-link".to_string()))
+            .collect();
+        assert_eq!(links.len(), 2, "distinct files deduped");
     }
 
     #[test]

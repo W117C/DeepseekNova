@@ -1123,6 +1123,7 @@ dependencies = [
  "deepseeknova-agent",
  "deepseeknova-config",
  "deepseeknova-core",
+ "deepseeknova-graph",
  "deepseeknova-provider",
  "deepseeknova-runtime",
  "deepseeknova-scanner",

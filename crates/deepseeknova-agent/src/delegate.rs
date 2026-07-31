@@ -128,7 +128,8 @@ async fn collect_final_text(agent: &Agent, input: RunInput) -> anyhow::Result<St
 
 /// 头尾截断到 token 预算（chars ≈ tokens×4），中部省略。
 fn cap_output(text: &str, cap_tokens: usize) -> String {
-    let cap_chars = cap_tokens.saturating_mul(4).max(80);
+    // P3.1：按文本自身构成换算字符预算（纯 ASCII ≈ tokens×4，纯 CJK ≈ tokens）。
+    let cap_chars = crate::tokens::char_budget_for_tokens(text, cap_tokens as u32);
     let total = text.chars().count();
     if total <= cap_chars {
         return text.to_string();

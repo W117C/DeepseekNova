@@ -403,7 +403,8 @@ pub fn build_agent_with_role_providers(
                 // 起点召回注入（token 预算内的极简块）。
                 let rp = handle.clone();
                 let top_k = config.memory.recall_top_k;
-                let cap_chars = config.memory.recall_inject_tokens.saturating_mul(4);
+                let cap_chars =
+                    deepseeknova_core::tokens::chars_for_tokens(config.memory.recall_inject_tokens);
                 if cap_chars > 0 {
                     let recall: deepseeknova_agent::RecallProvider =
                         Arc::new(move |query: &str| {
@@ -424,7 +425,10 @@ pub fn build_agent_with_role_providers(
                             }
                             Some(block)
                         });
-                    agent = agent.with_recall_provider(recall);
+                    // P3.2 同一召回提供器同时用于起点与中途（续聊含工具轮、
+                    // 压缩驱逐后按最近用户意图注入）。
+                    agent = agent.with_recall_provider(recall.clone());
+                    agent = agent.with_mid_run_retrieval(recall, true);
                 }
 
                 // 结束沉淀钩子（启发式，无 LLM）。
