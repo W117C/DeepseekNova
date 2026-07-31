@@ -354,10 +354,14 @@ impl Tool for EditFileTool {
         // Attempt search/replace
         let blocks = parsed.blocks()?;
 
-        // 逐块校验：每块必须在当前内容中唯一命中（0 或 ≥2 → 整次失败，零半改）。
-        // 先在不可变副本上算出所有替换点，再一次性构建结果，保证原子性。
+        // 逐块顺序应用：每块必须在当前（已应用前面各块的）工作副本上唯一命中，
+        // 0 或 ≥2 处命中 → 整次失败并带块号。任何失败都不写盘，
+        // 原子性由末尾单次 tmp+rename 保证。
         let mut working = original.clone();
         for (i, b) in blocks.iter().enumerate() {
+            if b.search.is_empty() {
+                anyhow::bail!("edit block #{}: search text must not be empty", i + 1);
+            }
             let count = working.matches(&b.search).count();
             if count == 0 {
                 anyhow::bail!(
