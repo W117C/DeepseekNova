@@ -4,10 +4,12 @@
 //! 失败结果以 User 消息回喂循环（不能伪装成 Tool 结果——无对应 tool_call_id
 //! 会破坏 DeepSeek V4 replay 不变量）；超过 max_cycles 后优雅 Paused。
 
+use deepseeknova_core::RunEvent;
 use deepseeknova_core::Tool;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
@@ -42,6 +44,7 @@ pub(crate) async fn run_verify_pass(
     security: &deepseeknova_security::context::SecurityContext,
     extensions: &[Arc<crate::agent::ExtensionApplier>],
     cancel: &CancellationToken,
+    tx: &mpsc::Sender<anyhow::Result<RunEvent>>,
 ) -> VerifyOutcome {
     let Some(bash) = tool_map.get("bash") else {
         warn!("verify skipped: bash tool not registered");
@@ -63,10 +66,25 @@ pub(crate) async fn run_verify_pass(
         );
         let args = serde_json::json!({ "command": cmd }).to_string();
         match bash.execute(&ctx, &args).await {
-            Ok(_) => {}
+            Ok(_) => {
+                tx.send(Ok(RunEvent::Verification {
+                    command: cmd.clone(),
+                    passed: true,
+                    summary: "ok".to_string(),
+                }))
+                .await
+                .ok();
+            }
             Err(e) => {
                 let msg = format!("command `{cmd}` failed: {e:#}");
                 let capped: String = msg.chars().take(FAILURE_CAP_CHARS).collect();
+                tx.send(Ok(RunEvent::Verification {
+                    command: cmd.clone(),
+                    passed: false,
+                    summary: capped.clone(),
+                }))
+                .await
+                .ok();
                 return VerifyOutcome::Fail(capped);
             }
         }
@@ -111,6 +129,11 @@ mod tests {
         }
     }
 
+    fn channel() -> mpsc::Sender<anyhow::Result<RunEvent>> {
+        let (tx, _rx) = mpsc::channel(8);
+        tx
+    }
+
     #[tokio::test]
     async fn verify_passes_when_all_commands_succeed() {
         let map: HashMap<String, Arc<dyn Tool>> = HashMap::from([(
@@ -126,6 +149,7 @@ mod tests {
             &sec,
             &[],
             &cancel,
+            &channel(),
         )
         .await;
         assert_eq!(outcome, VerifyOutcome::Pass);
@@ -148,6 +172,7 @@ mod tests {
             &sec,
             &[],
             &cancel,
+            &channel(),
         )
         .await;
         match outcome {
@@ -171,6 +196,7 @@ mod tests {
             &sec,
             &[],
             &cancel,
+            &channel(),
         )
         .await;
         assert_eq!(outcome, VerifyOutcome::Skipped);

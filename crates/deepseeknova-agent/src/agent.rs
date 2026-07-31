@@ -847,6 +847,7 @@ async fn run_agent_loop(
                             &security,
                             &extensions,
                             cancel,
+                            tx,
                         )
                         .await
                         {
