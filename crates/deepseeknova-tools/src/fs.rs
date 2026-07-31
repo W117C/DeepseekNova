@@ -238,12 +238,47 @@ impl EditFileTool {
 }
 
 #[derive(Deserialize)]
-struct EditFileArgs {
-    path: String,
+struct EditBlock {
     search: String,
     replace: String,
+}
+
+#[derive(Deserialize)]
+struct EditFileArgs {
+    path: String,
     #[serde(default)]
     snippet_id: Option<String>,
+    // 单块（向后兼容）
+    #[serde(default)]
+    search: Option<String>,
+    #[serde(default)]
+    replace: Option<String>,
+    // 多块
+    #[serde(default)]
+    edits: Vec<EditBlock>,
+}
+
+impl EditFileArgs {
+    /// 归一为块列表：优先 edits；否则用顶层 search/replace 组一个单块。
+    fn blocks(&self) -> anyhow::Result<Vec<EditBlock>> {
+        if !self.edits.is_empty() {
+            return Ok(self
+                .edits
+                .iter()
+                .map(|b| EditBlock {
+                    search: b.search.clone(),
+                    replace: b.replace.clone(),
+                })
+                .collect());
+        }
+        match (&self.search, &self.replace) {
+            (Some(s), Some(r)) => Ok(vec![EditBlock {
+                search: s.clone(),
+                replace: r.clone(),
+            }]),
+            _ => anyhow::bail!("provide either `edits: [...]` or both `search` and `replace`"),
+        }
+    }
 }
 
 #[async_trait]
@@ -251,33 +286,31 @@ impl Tool for EditFileTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "edit_file".to_string(),
-            description: "Replaces the first exact match of SEARCH with REPLACE in a file. \
-                 SEARCH must match exactly including whitespace and indentation. \
-                 You MUST provide the snippet_id from a prior read_file call. \
-                 If a checkpoint manager is configured, the file is snapshotted before editing."
+            description: "在文件中按 SEARCH/REPLACE 做精确替换。可传 edits 数组一次改多处；\
+                 每个 search 必须在文件中唯一命中（0 或多处命中则整次失败、不产生半改），\
+                 SEARCH 须逐字匹配含空白缩进。必须先 read_file 并回传其 snippet_id。"
                 .to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the file to edit."
+                    "path": { "type": "string", "description": "要编辑的文件路径。" },
+                    "edits": {
+                        "type": "array",
+                        "description": "多块替换：[{search, replace}, ...]，按顺序各替换一处唯一匹配。单处编辑也可直接用顶层 search/replace。",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "search": { "type": "string" },
+                                "replace": { "type": "string" }
+                            },
+                            "required": ["search", "replace"]
+                        }
                     },
-                    "search": {
-                        "type": "string",
-                        "description": "Exact text to find."
-                    },
-                    "replace": {
-                        "type": "string",
-                        "description": "Text to replace with."
-                    },
-                    "snippet_id": {
-                        "type": "string",
-                        "description": "Snippet ID from a prior read_file call. \
-                             Required — you MUST call read_file first and pass its snippet_id here."
-                    }
+                    "search": { "type": "string", "description": "单块模式：要查找的唯一文本。" },
+                    "replace": { "type": "string", "description": "单块模式：替换文本。" },
+                    "snippet_id": { "type": "string", "description": "先前 read_file 返回的 snippet_id（必填）。" }
                 },
-                "required": ["path", "search", "replace", "snippet_id"]
+                "required": ["path", "snippet_id"]
             }),
         }
     }
@@ -291,7 +324,7 @@ impl Tool for EditFileTool {
         let path = sanitize_path(&ctx.workspace_root, &parsed.path)?;
 
         // snippet_id is now required — enforce read-then-edit contract
-        let snip_id = parsed.snippet_id.ok_or_else(|| {
+        let snip_id = parsed.snippet_id.as_deref().ok_or_else(|| {
             anyhow::anyhow!(
                 "snippet_id is required. You MUST call read_file first and pass its snippet_id to edit_file."
             )
@@ -311,7 +344,7 @@ impl Tool for EditFileTool {
         // Validate snippet (mandatory — read-then-edit contract)
         {
             let tracker = crate::snippet::global_tracker().lock().await;
-            if let Err(current) = tracker.validate(&snip_id, &original) {
+            if let Err(current) = tracker.validate(snip_id, &original) {
                 drop(tracker);
                 return Ok(format!("SNIPPET STALE: The file has changed since you read it.\nCurrent content:\n---\n{}\n---\nPlease re-read the file first.", current));
             }
@@ -319,50 +352,46 @@ impl Tool for EditFileTool {
         }
 
         // Attempt search/replace
-        if let Some(pos) = original.find(&parsed.search) {
-            let edited = format!(
-                "{}{}{}",
-                &original[..pos],
-                parsed.replace,
-                &original[pos + parsed.search.len()..]
-            );
+        let blocks = parsed.blocks()?;
 
-            // Atomic write via temp file
-            let tmp_path = path.with_extension(
-                path.extension()
-                    .map(|e| format!("{}.tmp", e.to_string_lossy()))
-                    .unwrap_or_else(|| "tmp".to_string()),
-            );
-            let mut tmp = fs::File::create(&tmp_path).await?;
-            tmp.write_all(edited.as_bytes()).await?;
-            tmp.flush().await?;
-            fs::rename(&tmp_path, &path).await?;
-
-            Ok(format!("replaced 1 occurrence in {}", path.display()))
-        } else {
-            // Search not found — provide candidate lines for LLM-assisted recovery
-            let candidates: Vec<String> = original
-                .lines()
-                .enumerate()
-                .filter(|(_, l)| {
-                    let search_trimmed = parsed.search.trim();
-                    l.contains(search_trimmed) || l.trim() == search_trimmed
-                })
-                .take(5)
-                .map(|(i, l)| format!("  line {}: {}", i + 1, l.trim()))
-                .collect();
-
-            let mut msg = format!(
-                "SEARCH block not found in {}.\nThe exact text must match including whitespace.\n",
-                path.display()
-            );
-            if !candidates.is_empty() {
-                msg.push_str("\nSimilar lines found (check whitespace/indentation):\n");
-                msg.push_str(&candidates.join("\n"));
+        // 逐块校验：每块必须在当前内容中唯一命中（0 或 ≥2 → 整次失败，零半改）。
+        // 先在不可变副本上算出所有替换点，再一次性构建结果，保证原子性。
+        let mut working = original.clone();
+        for (i, b) in blocks.iter().enumerate() {
+            let count = working.matches(&b.search).count();
+            if count == 0 {
+                anyhow::bail!(
+                    "edit block #{} not found: search text has 0 matches (must be exactly 1)",
+                    i + 1
+                );
             }
-            msg.push_str("\n\nPlease read the file again with read_file to get a fresh snippet and see current content.");
-            anyhow::bail!("{}", msg);
+            if count > 1 {
+                anyhow::bail!(
+                    "edit block #{} ambiguous: search text has {} matches (must be exactly 1); add surrounding context to disambiguate",
+                    i + 1,
+                    count
+                );
+            }
+            // 唯一命中：应用（replacen 只替 1 处，等价于唯一替换）
+            working = working.replacen(&b.search, &b.replace, 1);
         }
+
+        // 原子写
+        let tmp_path = path.with_extension(
+            path.extension()
+                .map(|e| format!("{}.tmp", e.to_string_lossy()))
+                .unwrap_or_else(|| "tmp".to_string()),
+        );
+        let mut tmp = fs::File::create(&tmp_path).await?;
+        tmp.write_all(working.as_bytes()).await?;
+        tmp.flush().await?;
+        fs::rename(&tmp_path, &path).await?;
+
+        Ok(format!(
+            "applied {} edit block(s) to {}",
+            blocks.len(),
+            path.display()
+        ))
     }
 }
 
@@ -468,6 +497,69 @@ mod tests {
         ToolContext::new("call-test")
             .with_workspace(dir.to_path_buf())
             .with_extension(deepseeknova_security::context::SecurityContext::with_safe_defaults())
+    }
+
+    async fn seed_edit(dir: &std::path::Path, body: &str) -> (String, ToolContext) {
+        tokio::fs::write(dir.join("e.rs"), body).await.unwrap();
+        let ctx = test_ctx(dir);
+        // 先 read_file 拿 snippet_id（整文件）
+        let out = ReadFileTool
+            .execute(&ctx, r#"{"path":"e.rs"}"#)
+            .await
+            .unwrap();
+        let sid = out
+            .split("[SNIPPET ID: ")
+            .nth(1)
+            .unwrap()
+            .split(']')
+            .next()
+            .unwrap()
+            .to_string();
+        (sid, ctx)
+    }
+
+    #[tokio::test]
+    async fn edit_file_multi_block_all_or_nothing() {
+        let dir = std::env::temp_dir().join(format!("dnv-c1-edit-{}", std::process::id()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let (sid, ctx) = seed_edit(&dir, "AAA\nBBB\nCCC\n").await;
+        let args = format!(
+            r#"{{"path":"e.rs","snippet_id":"{sid}","edits":[{{"search":"AAA","replace":"XXX"}},{{"search":"CCC","replace":"ZZZ"}}]}}"#
+        );
+        let out = EditFileTool::new().execute(&ctx, &args).await.unwrap();
+        assert!(out.contains("2"));
+        let after = tokio::fs::read_to_string(dir.join("e.rs")).await.unwrap();
+        assert_eq!(after, "XXX\nBBB\nZZZ\n");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn edit_file_ambiguous_match_fails_whole_call() {
+        let dir = std::env::temp_dir().join(format!("dnv-c1-editamb-{}", std::process::id()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let (sid, ctx) = seed_edit(&dir, "dup\ndup\nkeep\n").await;
+        // 第 1 块唯一 OK，第 2 块 "dup" 命中 2 处 → 整次失败，文件不变
+        let args = format!(
+            r#"{{"path":"e.rs","snippet_id":"{sid}","edits":[{{"search":"keep","replace":"k2"}},{{"search":"dup","replace":"d2"}}]}}"#
+        );
+        let res = EditFileTool::new().execute(&ctx, &args).await;
+        assert!(res.is_err(), "ambiguous block must fail whole call");
+        let after = tokio::fs::read_to_string(dir.join("e.rs")).await.unwrap();
+        assert_eq!(after, "dup\ndup\nkeep\n", "no partial edit");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn edit_file_single_block_backcompat_unique() {
+        let dir = std::env::temp_dir().join(format!("dnv-c1-edit1-{}", std::process::id()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let (sid, ctx) = seed_edit(&dir, "hello world\n").await;
+        let args =
+            format!(r#"{{"path":"e.rs","snippet_id":"{sid}","search":"world","replace":"rust"}}"#);
+        EditFileTool::new().execute(&ctx, &args).await.unwrap();
+        let after = tokio::fs::read_to_string(dir.join("e.rs")).await.unwrap();
+        assert_eq!(after, "hello rust\n");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[tokio::test]
