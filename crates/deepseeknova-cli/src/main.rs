@@ -70,14 +70,16 @@ async fn main() -> anyhow::Result<()> {
 
             if let Some(ref planner_model) = coordinator.planner_model {
                 // ── Coordinator mode ──────────────────────────────────────
-                let planner_provider = resolve_provider(&config, &Some(planner_model.clone()))?;
+                use deepseeknova_provider::cost::ModelRole;
+                let planner_provider =
+                    model_router.provider_for_model(planner_model, ModelRole::Main, None)?;
                 let executor_model = coordinator
                     .executor_model
                     .clone()
                     .or_else(|| model_args.model.clone());
-                let executor_provider = resolve_provider_for_task(
-                    &config,
-                    &executor_model,
+                let executor_provider = model_router.provider_for_maybe_model(
+                    ModelRole::Task,
+                    executor_model.as_deref(),
                     Some(deepseeknova_provider::factory::ReasoningEffort::High),
                 )?;
                 let max_nodes = coordinator.max_graph_nodes;
@@ -98,7 +100,6 @@ async fn main() -> anyhow::Result<()> {
                 // Delegate 动作路由：子代理走 task 指针，压缩走 compact 指针。
                 // 压缩是机械摘要，按 Disabled 分类省掉 reasoning tokens。
                 if config.delegate.enabled {
-                    use deepseeknova_provider::cost::ModelRole;
                     use deepseeknova_provider::factory::ReasoningEffort;
                     let task_provider =
                         model_router.provider_for(ModelRole::Task, Some(ReasoningEffort::High))?;
@@ -138,11 +139,17 @@ async fn main() -> anyhow::Result<()> {
                 stream_coordinator(&runner, input).await?;
             } else {
                 // ── Single-agent mode ─────────────────────────────────────
-                let provider = resolve_provider(&config, &model_args.model)?;
+                use deepseeknova_provider::cost::ModelRole;
+                let provider = model_router.provider_for_maybe_model(
+                    ModelRole::Main,
+                    model_args.model.as_deref(),
+                    None,
+                )?;
+                let task_provider = model_router.provider_for(ModelRole::Task, None)?;
                 let mcp_tools = deepseeknova_runtime::discover_mcp_tools(&config).await;
                 let agent = build_agent(
                     Arc::clone(&provider),
-                    None,
+                    Some(task_provider),
                     model_args.model.as_deref(),
                     &config,
                     model_args.max_steps,
@@ -167,7 +174,9 @@ async fn main() -> anyhow::Result<()> {
             let prompt_str = prompt.join(" ");
             info!("plan: model={model:?}, prompt={prompt_str}");
 
-            let provider = resolve_provider(&config, model)?;
+            use deepseeknova_provider::cost::ModelRole;
+            let provider =
+                model_router.provider_for_maybe_model(ModelRole::Main, model.as_deref(), None)?;
             let mut plan_runner = PlanModeRunner::new(provider);
 
             // When coordinator flags are present, attach a Planner so the
@@ -202,9 +211,23 @@ async fn main() -> anyhow::Result<()> {
             if *tui {
                 let history: Arc<tokio::sync::Mutex<Vec<deepseeknova_core::Message>>> =
                     Arc::new(tokio::sync::Mutex::new(Vec::new()));
-                let provider = resolve_provider_for_task(&config, model, Some(baseline_effort))?;
-                let agent = build_agent(provider, None, model.as_deref(), &config, 0, mcp_tools)?
-                    .with_conversation_history(history);
+                use deepseeknova_provider::cost::ModelRole;
+                let provider = model_router.provider_for_maybe_model(
+                    ModelRole::Main,
+                    model.as_deref(),
+                    Some(baseline_effort),
+                )?;
+                let task_provider =
+                    model_router.provider_for(ModelRole::Task, Some(baseline_effort))?;
+                let agent = build_agent(
+                    provider,
+                    Some(task_provider),
+                    model.as_deref(),
+                    &config,
+                    0,
+                    mcp_tools,
+                )?
+                .with_conversation_history(history);
                 deepseeknova_tui::TuiRunner::new(Arc::new(agent))
                     .run()
                     .await?;
@@ -238,11 +261,12 @@ async fn main() -> anyhow::Result<()> {
                           model_name: Option<String>|
                           -> anyhow::Result<Box<dyn Runner + Send>> {
                         use deepseeknova_provider::cost::ModelRole;
-                        let provider = match &model_name {
-                            // `/model switch <name>` 显式覆盖，仍按 Main 角色计量
-                            Some(m) => router.provider_for_model(m, ModelRole::Main, effort)?,
-                            None => router.provider_for(ModelRole::Main, effort)?,
-                        };
+                        // `/model switch <name>` 显式覆盖，仍按 Main 角色计量。
+                        let provider = router.provider_for_maybe_model(
+                            ModelRole::Main,
+                            model_name.as_deref(),
+                            effort,
+                        )?;
                         let task_provider = router.provider_for(ModelRole::Task, effort)?;
                         let agent = build_agent(
                             provider,
@@ -276,7 +300,9 @@ async fn main() -> anyhow::Result<()> {
         Some(Commands::Serve { addr }) => {
             info!("serve command: addr={addr}");
 
-            let provider = resolve_provider(&config, &None)?;
+            use deepseeknova_provider::cost::ModelRole;
+            let provider = model_router.provider_for(ModelRole::Main, None)?;
+            let task_provider = model_router.provider_for(ModelRole::Task, None)?;
             let mcp_tools = deepseeknova_runtime::discover_mcp_tools(&config).await;
             // Share a pending-approvals map between the agent's approval
             // responder and the server's POST /v1/approval route so the gate's
@@ -285,8 +311,15 @@ async fn main() -> anyhow::Result<()> {
             let responder: Arc<dyn deepseeknova_core::runner::ApprovalResponder> = Arc::new(
                 deepseeknova_serve::ServerApprovalResponder::new(pending.clone()),
             );
-            let agent = build_agent(Arc::clone(&provider), None, None, &config, 0, mcp_tools)?
-                .with_approval_responder(responder);
+            let agent = build_agent(
+                Arc::clone(&provider),
+                Some(task_provider),
+                None,
+                &config,
+                0,
+                mcp_tools,
+            )?
+            .with_approval_responder(responder);
             let runner: Arc<dyn Runner> = Arc::new(agent);
 
             let server = deepseeknova_serve::Server::with_pending(runner, pending);
@@ -384,11 +417,12 @@ async fn main() -> anyhow::Result<()> {
                           model_name: Option<String>|
                           -> anyhow::Result<Box<dyn Runner + Send>> {
                         use deepseeknova_provider::cost::ModelRole;
-                        let provider = match &model_name {
-                            // `/model switch <name>` 显式覆盖，仍按 Main 角色计量
-                            Some(m) => router.provider_for_model(m, ModelRole::Main, effort)?,
-                            None => router.provider_for(ModelRole::Main, effort)?,
-                        };
+                        // `/model switch <name>` 显式覆盖，仍按 Main 角色计量。
+                        let provider = router.provider_for_maybe_model(
+                            ModelRole::Main,
+                            model_name.as_deref(),
+                            effort,
+                        )?;
                         let task_provider = router.provider_for(ModelRole::Task, effort)?;
                         let agent = build_agent(
                             provider,
@@ -437,41 +471,6 @@ fn resolve_provider_cfg<'a>(
     } else {
         &config.providers[0]
     }
-}
-
-/// Resolve the provider from config for a given model name.
-fn resolve_provider(
-    config: &deepseeknova_config::Config,
-    model: &Option<String>,
-) -> anyhow::Result<Arc<dyn deepseeknova_provider::Provider>> {
-    resolve_provider_for_task(config, model, None)
-}
-
-/// Resolve a provider, applying a reasoning-effort task classification.
-///
-/// Used to cap per-node executor reasoning below the planner's depth: in the
-/// two-model coordinator the planner already performs the deep reasoning, so
-/// paying DeepSeek Max-effort reasoning tokens on every mechanical execution
-/// node is wasteful. A `High` ceiling keeps executor reasoning useful while
-/// preventing a `Max` config default from applying to each node.
-fn resolve_provider_for_task(
-    config: &deepseeknova_config::Config,
-    model: &Option<String>,
-    task: Option<deepseeknova_provider::factory::ReasoningEffort>,
-) -> anyhow::Result<Arc<dyn deepseeknova_provider::Provider>> {
-    let provider_cfg = if let Some(ref model_name) = model {
-        config
-            .resolve_provider_for_model(model_name)
-            .or_else(|| config.providers.first())
-            .ok_or_else(|| anyhow::anyhow!("no provider found for model '{model_name}'"))?
-    } else {
-        config
-            .providers
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("no providers configured"))?
-    };
-
-    Ok(deepseeknova_provider::factory::create_provider_for_task(provider_cfg, task)?.into())
 }
 
 /// Build an agent with built-in tools registered, plus any `extra_tools`
