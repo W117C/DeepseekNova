@@ -108,3 +108,6 @@
 - [x] 任务 3：deps_code 工具（entity 可选 + direction + external；依赖/依赖方/外部 [external]/无 entity 全库汇总；加入 graph_query_tools()）；GRAPH_RETRIEVAL_HINT 补第 7 条；tools 新增 3 条测试。
 - [x] 任务 4 前半：GUIDE（A3.1 补 deps_code + 新增 A3.2 节）、graph README、CHANGELOG 已更新。
 - [x] 收尾：cargo fmt + make check EXIT=0（681 通过）；反向验证红（1 failed）→还原绿（graph 32+1、tools 62+12+7）；分支 feat/code-intel 已推送。
+
+## 交付
+- 分支 feat/code-intel @ c386c1a，已推送 origin；PR: https://github.com/W117C/DeepseekNova/pull/57
