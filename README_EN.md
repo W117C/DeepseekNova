@@ -4,7 +4,7 @@
 
 ### A DeepSeek-Native AI Coding Agent Framework
 
-**21 Rust crates · 47 Tauri commands · 3 frontends (CLI / TUI / Desktop)**
+**22 Rust crates · 44 Tauri commands · 3 frontends (CLI / TUI / Desktop)**
 
 A Rust-from-scratch AI agent framework — not a wrapper. Built specifically for DeepSeek models.
 
@@ -34,7 +34,7 @@ A Rust-from-scratch AI agent framework — not a wrapper. Built specifically for
 - **Deep reasoning + tool calling** — streaming reasoning output, 4-level reasoning effort, 13+ built-in tools
 - **Prefix-cache architecture** — cross-turn prompt prefix hits, real-time token tracking, budget control
 - **Sandboxed execution** — macOS Seatbelt / Linux bubblewrap isolation, 12 permission rules
-- **Multi-agent orchestration** *(experimental)* — GOAP planner, Swarm coordination, Agent Federation
+- **Multi-agent delegation** — delegate-based sub-agents (explorer / coder / tester / reviewer) with constrained tool sets, semaphore concurrency, and capped result summaries; isolated context, no recursion. Historical GOAP/Swarm/Federation experiments were removed in B0 (see DESIGN.md).
 - **MCP protocol** — stdio + HTTP dual transport, auto-discovery
 - **Project knowledge** — Wiki generation, knowledge cards, 4-layer memory distillation, file checkpoints
 
@@ -43,7 +43,7 @@ A Rust-from-scratch AI agent framework — not a wrapper. Built specifically for
 ```
 Frontend    Tauri 2.0 + React 18 + TypeScript (Desktop)
             ratatui (TUI) · clap (CLI)
-               │ 47 Tauri Commands / IPC
+               │ 44 Tauri Commands / IPC
 Desktop RT  Tauri 2.0 · Channel<WireEvent>
                │
 Runtime     Agent Loop · Coordinator · Plan-Mode Runner
@@ -64,19 +64,20 @@ Provider    DeepSeek V4 Pro/Flash   Tools: File · Glob · Grep · Shell
 | `deepseeknova-provider` | DeepSeek / OpenAI-compatible / Anthropic streaming |
 | `deepseeknova-tools` | 13+ built-in tools |
 | `deepseeknova-mcp` | MCP protocol client (stdio / HTTP) |
+| `deepseeknova-graph` | Code graph engine (tree-sitter + SQLite FTS5 + PageRank + repo map) |
 | `deepseeknova-sandbox` | Sandbox trait + macOS Seatbelt / Linux bubblewrap |
 | `deepseeknova-permission` | Allow / Ask / Deny permission gate |
 | `deepseeknova-security` | Path restrictions, resource limits, audit logging |
+| `deepseeknova-scanner` | deepsec-style security scanning: rule matching + optional AI investigation (`scan` subcommand) |
 | `deepseeknova-checkpoint` | Filesystem snapshots + transactional rollback |
 | `deepseeknova-context` | Workspace indexing, project memory, session state |
 | `deepseeknova-skills` | Markdown skill system (.claude/skills compatible) |
 | `deepseeknova-store` | JSONL session persistence + rotation + compression |
-| `deepseeknova-orch` | GOAP planning, Swarm coordination, Agent Federation *(experimental)* |
 | `deepseeknova-telemetry` | OpenTelemetry distributed tracing (OTLP) |
 | `deepseeknova-event` | Agent lifecycle event bus |
 | `deepseeknova-runtime` | Composition root: registry + context + events + permission + security |
 | `deepseeknova-config` | Layered TOML config (default → user → project → env → CLI) |
-| `deepseeknova-cli` | CLI frontend: chat / plan / serve / setup |
+| `deepseeknova-cli` | CLI frontend: chat / plan / scan / serve / setup |
 | `deepseeknova-tui` | ratatui terminal UI |
 | `deepseeknova-serve` | axum HTTP server + SSE streaming |
 | `deepseeknova-desktop` | Tauri 2.0 desktop app + React frontend |
@@ -136,7 +137,7 @@ model = "deepseek-chat"
 | Frontend | React 18 + Vite 5 + Zustand |
 | Desktop | Tauri 2.0 |
 | Tracing | OpenTelemetry (OTLP) |
-| Tests | 391 tests · cargo-llvm-cov · 3-platform CI |
+| Tests | 511 tests · cargo-llvm-cov · 3-platform CI |
 
 ## 📄 License
 

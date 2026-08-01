@@ -34,9 +34,8 @@ jobs:
         working-directory: crates/deepseeknova-desktop/frontend
         run: npm ci
 
-      - name: TypeScript check
-        working-directory: crates/deepseeknova-desktop/frontend
-        run: npx tsc --noEmit
+      # 前端 lint/test 由 ci.yml 的 frontend 任务统一把门（同触发条件），
+      # 此处不重复执行，本 workflow 只负责构建验证。
 
       - name: Build frontend
         working-directory: crates/deepseeknova-desktop/frontend

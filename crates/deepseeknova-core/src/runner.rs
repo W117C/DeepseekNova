@@ -62,6 +62,17 @@ pub struct RunOutput {
 
 pub type RunEventStream = Pin<Box<dyn Stream<Item = anyhow::Result<RunEvent>> + Send>>;
 
+/// Resolves a permission-gate `Ask` decision by asking a frontend for a user
+/// decision. Returning `true` allows the pending tool call; `false` denies it.
+///
+/// Frontends that can prompt a user (desktop app, HTTP server) implement this.
+/// When no responder is attached, the agent falls back to allowing `Ask`
+/// decisions so non-interactive callers (CLI, tests) keep working.
+#[async_trait::async_trait]
+pub trait ApprovalResponder: Send + Sync {
+    async fn request(&self, id: &str, title: &str, description: Option<&str>) -> bool;
+}
+
 /// RunEvent has no Error variant — errors ride the Stream's Result.
 #[derive(Debug, Clone)]
 pub enum RunEvent {
@@ -87,12 +98,25 @@ pub enum RunEvent {
         call_id: String,
         result: String,
     },
+    /// P4 完成前确定性验证：一条验证命令的结果（供前端渲染）。
+    Verification {
+        command: String,
+        passed: bool,
+        summary: String,
+    },
     Usage(Usage),
     TurnComplete,
     ApprovalRequest {
         id: String,
         title: String,
         description: Option<String>,
+    },
+    /// The run stopped gracefully before completion (max-steps pause or
+    /// budget rejection). The task is resumable: frontends should surface
+    /// `reason` and, when present, which saved session to resume.
+    Paused {
+        reason: String,
+        session_id: Option<String>,
     },
     Done(RunOutput),
 }
@@ -132,6 +156,11 @@ pub enum WireEvent {
         call_id: String,
         result: String,
     },
+    Verification {
+        command: String,
+        passed: bool,
+        summary: String,
+    },
     Usage {
         prompt_tokens: u32,
         completion_tokens: u32,
@@ -152,6 +181,10 @@ pub enum WireEvent {
     Done {
         text: String,
         usage: Option<WireUsageInfo>,
+    },
+    Paused {
+        reason: String,
+        session_id: Option<String>,
     },
     Error {
         message: String,
@@ -207,6 +240,15 @@ impl From<RunEvent> for WireEvent {
                 arguments,
             },
             RunEvent::ToolResult { call_id, result } => WireEvent::ToolResult { call_id, result },
+            RunEvent::Verification {
+                command,
+                passed,
+                summary,
+            } => WireEvent::Verification {
+                command,
+                passed,
+                summary,
+            },
             RunEvent::Usage(u) => {
                 let usage_info: WireUsageInfo = u.into();
                 WireEvent::Usage {
@@ -230,10 +272,42 @@ impl From<RunEvent> for WireEvent {
                 title,
                 description,
             },
+            RunEvent::Paused { reason, session_id } => WireEvent::Paused { reason, session_id },
             RunEvent::Done(output) => WireEvent::Done {
                 text: output.text,
                 usage: output.usage.map(|u| u.into()),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paused_event_maps_to_wire() {
+        let ev = RunEvent::Paused {
+            reason: "reached max steps (10)".into(),
+            session_id: Some("chat-20260729-120000".into()),
+        };
+        let wire: WireEvent = ev.into();
+        match wire {
+            WireEvent::Paused { reason, session_id } => {
+                assert_eq!(reason, "reached max steps (10)");
+                assert_eq!(session_id.as_deref(), Some("chat-20260729-120000"));
+            }
+            other => panic!("expected Paused, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn paused_wire_event_serializes_with_kind_tag() {
+        let wire = WireEvent::Paused {
+            reason: "budget: over limit".into(),
+            session_id: None,
+        };
+        let json = serde_json::to_string(&wire).unwrap();
+        assert!(json.contains("\"kind\":\"paused\""), "json = {json}");
     }
 }

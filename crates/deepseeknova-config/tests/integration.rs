@@ -155,6 +155,9 @@ fn find_model_by_name() {
             supports_tools: true,
             supports_vision: false,
             planner_only: false,
+            input_price_per_mtok: None,
+            output_price_per_mtok: None,
+            cache_hit_price_per_mtok: None,
         }],
         ..Config::default()
     };
@@ -192,6 +195,9 @@ fn resolve_provider_for_model() {
             supports_tools: true,
             supports_vision: false,
             planner_only: false,
+            input_price_per_mtok: None,
+            output_price_per_mtok: None,
+            cache_hit_price_per_mtok: None,
         }],
         ..Config::default()
     };
@@ -231,4 +237,135 @@ fn mcp_server_config_serde() {
     assert_eq!(srv.command, "npx");
     assert_eq!(srv.args[0], "-y");
     assert!(srv.enabled);
+}
+
+#[test]
+fn telemetry_disabled_by_default() {
+    let cfg = Config::default();
+    assert!(!cfg.telemetry.enabled);
+    assert!(cfg.telemetry.otlp_endpoint.is_none());
+}
+
+#[test]
+fn telemetry_toml_parse() {
+    let toml = r#"
+[telemetry]
+enabled = true
+otlp_endpoint = "http://localhost:4317"
+"#;
+    let cfg: Config = toml::from_str(toml).unwrap();
+    assert!(cfg.telemetry.enabled);
+    assert_eq!(
+        cfg.telemetry.otlp_endpoint.as_deref(),
+        Some("http://localhost:4317")
+    );
+}
+
+#[test]
+fn telemetry_merge_overrides_endpoint() {
+    let mut base = Config::default();
+    base.telemetry.enabled = true;
+    base.telemetry.otlp_endpoint = Some("http://base:4317".into());
+
+    // Overlay with an endpoint: both fields overwrite.
+    let mut overlay = Config::default();
+    overlay.telemetry.enabled = true;
+    overlay.telemetry.otlp_endpoint = Some("http://overlay:4317".into());
+    base.merge(overlay);
+    assert!(base.telemetry.enabled);
+    assert_eq!(
+        base.telemetry.otlp_endpoint.as_deref(),
+        Some("http://overlay:4317")
+    );
+
+    // Overlay without endpoint: enabled overwrites, endpoint preserved.
+    base.merge(Config::default());
+    assert!(!base.telemetry.enabled);
+    assert_eq!(
+        base.telemetry.otlp_endpoint.as_deref(),
+        Some("http://overlay:4317")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Model pointers & pricing (multi-model orchestration)
+// ---------------------------------------------------------------------------
+
+fn pointer_config_toml() -> &'static str {
+    r#"
+        [[providers]]
+        name = "deepseek"
+        kind = "openai"
+
+        [[models]]
+        name = "big"
+        provider = "deepseek"
+        input_price_per_mtok = 0.28
+        output_price_per_mtok = 0.42
+
+        [[models]]
+        name = "small"
+        provider = "deepseek"
+
+        [model_pointers]
+        main = "big"
+        task = "small"
+    "#
+}
+
+#[test]
+fn model_pointers_parse_and_validate() {
+    let cfg: deepseeknova_config::Config = toml::from_str(pointer_config_toml()).unwrap();
+    assert_eq!(cfg.model_pointers.main.as_deref(), Some("big"));
+    assert_eq!(cfg.model_pointers.task.as_deref(), Some("small"));
+    assert_eq!(cfg.model_pointers.compact, None);
+    assert_eq!(cfg.model_pointers.quick, None);
+    let big = cfg.find_model("big").unwrap();
+    assert_eq!(big.input_price_per_mtok, Some(0.28));
+    assert_eq!(big.output_price_per_mtok, Some(0.42));
+    assert_eq!(big.cache_hit_price_per_mtok, None);
+    cfg.validate().unwrap();
+}
+
+#[test]
+fn dangling_pointer_rejected() {
+    let mut cfg: deepseeknova_config::Config = toml::from_str(pointer_config_toml()).unwrap();
+    cfg.model_pointers.quick = Some("no-such-model".to_string());
+    let err = cfg.validate().unwrap_err().to_string();
+    assert!(
+        err.contains("quick"),
+        "error should name the pointer: {err}"
+    );
+    assert!(
+        err.contains("no-such-model"),
+        "error should name the model: {err}"
+    );
+    assert!(err.contains("big"), "error should list candidates: {err}");
+}
+
+#[test]
+fn negative_price_rejected() {
+    let mut cfg: deepseeknova_config::Config = toml::from_str(pointer_config_toml()).unwrap();
+    cfg.models[0].input_price_per_mtok = Some(-1.0);
+    assert!(cfg.validate().is_err());
+}
+
+#[test]
+fn non_finite_price_rejected() {
+    let mut cfg: deepseeknova_config::Config = toml::from_str(pointer_config_toml()).unwrap();
+    cfg.models[0].input_price_per_mtok = Some(f64::NAN);
+    assert!(cfg.validate().is_err());
+    cfg.models[0].input_price_per_mtok = Some(f64::INFINITY);
+    assert!(cfg.validate().is_err());
+}
+
+#[test]
+fn model_pointers_merge_project_over_user() {
+    let mut user: deepseeknova_config::Config = toml::from_str(pointer_config_toml()).unwrap();
+    let mut project = deepseeknova_config::Config::default();
+    project.model_pointers.main = Some("small".to_string());
+    user.merge(project);
+    // 项目层覆盖 main；未设置的 task 保留用户层的值
+    assert_eq!(user.model_pointers.main.as_deref(), Some("small"));
+    assert_eq!(user.model_pointers.task.as_deref(), Some("small"));
 }

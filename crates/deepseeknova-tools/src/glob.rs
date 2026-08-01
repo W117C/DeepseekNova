@@ -17,18 +17,17 @@ impl Tool for GlobTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "glob".to_string(),
-            description: "Finds files matching a glob pattern (e.g. '**/*.rs', 'src/*.ts')."
-                .to_string(),
+            description: "Finds files by glob.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "pattern": {
                         "type": "string",
-                        "description": "Glob pattern to match."
+                        "description": "Pattern."
                     },
                     "path": {
                         "type": "string",
-                        "description": "Directory to search in (defaults to current dir)."
+                        "description": "Dir (default: cwd)."
                     }
                 },
                 "required": ["pattern"]

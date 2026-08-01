@@ -20,13 +20,18 @@ deepseeknova-config = { workspace = true }
 deepseeknova-provider = { workspace = true }
 deepseeknova-agent = { workspace = true }
 deepseeknova-tools = { workspace = true }
+deepseeknova-graph = { workspace = true }
+deepseeknova-checkpoint = { workspace = true }
+chrono = { workspace = true }
 deepseeknova-runtime = { workspace = true }
+deepseeknova-scanner = { workspace = true }
+deepseeknova-security = { workspace = true }
 deepseeknova-skills = { workspace = true }
 deepseeknova-serve = { workspace = true }
+deepseeknova-telemetry = { workspace = true }
+deepseeknova-store = { workspace = true }
+deepseeknova-tui = { workspace = true }
 dirs = { workspace = true }
 
 [dev-dependencies]
-deepseeknova-security = { workspace = true }
-deepseeknova-mcp = { workspace = true }
-deepseeknova-orch = { workspace = true }
 serde_json = { workspace = true }

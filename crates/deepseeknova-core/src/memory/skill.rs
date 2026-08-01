@@ -74,6 +74,8 @@ pub struct TaskObservation {
     pub outcome: TaskOutcome,
     pub user_feedback: Option<String>,
     pub session_id: String,
+    /// 任务触碰的文件路径（写类工具参数提取），用于任务-文件关联沉淀（P3.3）。
+    pub files: Vec<String>,
 }
 
 /// Outcome of a task execution.
@@ -257,6 +259,7 @@ mod tests {
             outcome: TaskOutcome::Success,
             user_feedback: None,
             session_id: "s1".into(),
+            files: vec![],
         };
         assert!(manager.should_extract_skill(&obs));
 
@@ -267,6 +270,7 @@ mod tests {
             outcome: TaskOutcome::Success,
             user_feedback: None,
             session_id: "s1".into(),
+            files: vec![],
         };
         assert!(!manager.should_extract_skill(&obs_small));
 
@@ -277,6 +281,7 @@ mod tests {
             outcome: TaskOutcome::Failure,
             user_feedback: None,
             session_id: "s1".into(),
+            files: vec![],
         };
         assert!(!manager.should_extract_skill(&obs_fail));
     }

@@ -6,6 +6,7 @@
 import { useState, useMemo } from "react";
 import { useStore } from "../store";
 import { useI18n } from "../i18n";
+import { renameSession } from "../bridge";
 import type { SessionSummary } from "../types";
 
 export default function Sidebar() {
@@ -185,12 +186,51 @@ function SessionItem({
   active: boolean;
   onClick: () => void;
 }) {
+  // 双击重命名（rename_session）
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(session.title);
+  const setSessions = useStore((s) => s.setSessions);
+
+  const commit = async () => {
+    setEditing(false);
+    const title = draft.trim();
+    if (!title || title === session.title) {
+      setDraft(session.title);
+      return;
+    }
+    try {
+      await renameSession(session.id, title);
+      const sessions = useStore.getState().sessions;
+      setSessions(sessions.map((s) => (s.id === session.id ? { ...s, title } : s)));
+    } catch (err) {
+      console.warn("rename_session failed:", err);
+      setDraft(session.title);
+    }
+  };
+
   return (
     <div
       className={`sidebar-item ${active ? "active" : ""}`}
       onClick={onClick}
+      onDoubleClick={() => { setDraft(session.title); setEditing(true); }}
     >
-      <span className="sidebar-item-title">{session.title}</span>
+      {editing ? (
+        <input
+          className="input"
+          style={{ fontSize: 12, padding: "2px 5px" }}
+          value={draft}
+          autoFocus
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") commit();
+            if (e.key === "Escape") { setDraft(session.title); setEditing(false); }
+          }}
+          onClick={(e) => e.stopPropagation()}
+        />
+      ) : (
+        <span className="sidebar-item-title" title="双击重命名">{session.title}</span>
+      )}
     </div>
   );
 }

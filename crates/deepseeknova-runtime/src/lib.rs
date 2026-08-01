@@ -18,6 +18,44 @@ use deepseeknova_security::context::SecurityContext;
 use deepseeknova_security::limits::ResourceLimits;
 use deepseeknova_security::policy::SecurityPolicy;
 
+/// Retrieval-strategy hint appended to the system prompt when the code graph
+/// is enabled, steering the model toward graph tools over brute-force grep.
+const GRAPH_RETRIEVAL_HINT: &str = "\n\n## 代码检索策略\n\
+定位代码时优先使用图检索工具，避免全片 grep 或整文件读取：\n\
+1. `search_code` 按符号名/关键词定位候选实体；\n\
+2. `traverse_graph` 查看调用者/被调用者关系；\n\
+3. `retrieve_entity`（view=skeleton）看骨架，确认目标后再 view=full 或 read_file 取实现。";
+
+/// A3 从用户输入提取 repo map 个性化 seeds：标识符 token（≥3 字符、
+/// 去停用词、去重、上限 8），用于对图节点做 personalized PageRank。
+fn repo_map_seeds(query: &str) -> Vec<String> {
+    const STOP: &[&str] = &[
+        "the", "and", "for", "with", "this", "that", "from", "into", "file", "code", "please",
+        "help", "need", "want", "make", "fix", "add", "new", "use", "using", "should", "could",
+        "would", "about", "your", "you", "our", "are", "not", "but", "can", "has", "have", "how",
+        "what", "why", "where", "when", "which", "there", "their", "these", "those", "also",
+        "then", "than", "will", "was", "were", "been", "being", "tell", "explain", "write",
+        "build", "check", "review", "test", "run", "show", "list",
+    ];
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for token in query
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|t| t.len() >= 3)
+    {
+        if STOP.contains(&token.to_lowercase().as_str()) {
+            continue;
+        }
+        if seen.insert(token.to_lowercase()) {
+            out.push(token.to_string());
+        }
+        if out.len() >= 8 {
+            break;
+        }
+    }
+    out
+}
+
 /// Runtime is the composition root. It wires registry, context, events,
 /// and permission together. Agent, Planner, SubAgent, Server all share
 /// one Runtime.
@@ -69,7 +107,7 @@ impl Runtime {
 }
 
 /// Build a PermissionGate from Config.
-fn build_permission_gate(config: &Config) -> PermissionGate {
+pub fn build_permission_gate(config: &Config) -> PermissionGate {
     let mut allow = Vec::new();
     let mut ask = Vec::new();
     let mut deny = Vec::new();
@@ -94,12 +132,33 @@ fn build_permission_gate(config: &Config) -> PermissionGate {
         deepseeknova_config::PermissionMode::Deny => Decision::Deny,
     };
 
-    PermissionGate::new(Policy {
+    let gate = PermissionGate::new(Policy {
         mode,
         allow,
         ask,
         deny,
-    })
+    });
+    // 可选速率限制：滚动一分钟内超出上限的工具调用直接 Deny。
+    match config.permissions.rate_limit_per_minute {
+        Some(limit) => gate.with_rate_limit(limit),
+        None => gate,
+    }
+}
+
+/// Return an `Arc<PermissionGate>` when permission enforcement is enabled in
+/// config (pinned to `workspace_root`), otherwise `None`. Shared by the agent
+/// builder and the CLI coordinator so gate activation stays consistent.
+pub fn permission_gate_for(
+    config: &Config,
+    workspace_root: &std::path::Path,
+) -> Option<Arc<PermissionGate>> {
+    if config.permissions.enabled {
+        Some(Arc::new(
+            build_permission_gate(config).with_workspace_root(workspace_root.to_path_buf()),
+        ))
+    } else {
+        None
+    }
 }
 
 /// Parse a capability name (case-insensitive) from config.
@@ -188,12 +247,1015 @@ pub fn build_security_context(
     })
 }
 
+/// Role-based providers injected by callers that own a ModelRouter.
+/// All fields optional; `None` falls back to legacy behaviour.
+#[derive(Default)]
+#[non_exhaustive]
+pub struct AgentRoleProviders {
+    /// Delegate engine sub-agents (the `task` pointer).
+    pub task: Option<Arc<dyn deepseeknova_provider::Provider>>,
+    /// Agent L3 compaction (the `compact` pointer).
+    pub compact: Option<Arc<dyn deepseeknova_provider::Provider>>,
+    /// Pre-Done review gate verdict (the `quick` pointer / `review_model`).
+    pub review: Option<Arc<dyn deepseeknova_provider::Provider>>,
+    /// P2.1 每步 effort 路由：机械续步（thinking off）。
+    pub step_quick: Option<Arc<dyn deepseeknova_provider::Provider>>,
+    /// P2.1 每步 effort 路由：首步 / 出错 / 回炉反馈（高推理）。
+    pub step_high: Option<Arc<dyn deepseeknova_provider::Provider>>,
+}
+
+/// 压缩阈值推导：显式配置优先；否则 budget 启用时取 max_total_tokens/2；都没有则 None。
+fn derive_compaction_threshold(config: &Config) -> Option<u32> {
+    if let Some(explicit) = config.agent.compaction_threshold_tokens {
+        return Some(explicit);
+    }
+    if config.budget.enabled {
+        return Some((config.budget.max_total_tokens / 2) as u32);
+    }
+    None
+}
+
+/// Like [`build_agent`], but routes delegate-engine sub-agents and Agent L3
+/// compaction to dedicated role providers (the `task` / `compact` model
+/// pointers). Unset roles fall back to legacy behaviour.
+#[allow(clippy::too_many_arguments)]
+pub fn build_agent_with_role_providers(
+    config: &Config,
+    workspace_root: PathBuf,
+    provider: Arc<dyn deepseeknova_provider::Provider>,
+    roles: AgentRoleProviders,
+    max_steps: usize,
+    gate: Option<Arc<PermissionGate>>,
+    extra_tools: Vec<Arc<dyn deepseeknova_core::Tool>>,
+) -> anyhow::Result<deepseeknova_agent::Agent> {
+    // 提前克隆供 P2 段使用（task/compact/review 字段在下方会被移动）。
+    let step_quick = roles.step_quick.clone();
+    let step_high = roles.step_high.clone();
+    let observe_provider = roles.compact.clone().or_else(|| step_quick.clone());
+    let security = build_security_context(config, &workspace_root)?;
+    let steps = if max_steps > 0 {
+        max_steps
+    } else {
+        config.agent.max_steps
+    };
+
+    let mut agent = deepseeknova_agent::Agent::new(Arc::clone(&provider), steps)
+        .with_workspace_root(workspace_root.clone())
+        .with_security(security.clone());
+
+    if let Some(ref sp) = config.agent.system_prompt {
+        agent = agent.with_system_prompt(sp.clone());
+    }
+
+    // Permission gate — opt-in. Reuse the caller-supplied (session-cached) gate
+    // when given, otherwise build a fresh one per config. Caching the gate
+    // across a session preserves its per-tool approval decision cache so the
+    // user isn't re-prompted for the same operation every turn.
+    let gate = gate.or_else(|| permission_gate_for(config, &workspace_root));
+    if let Some(ref g) = gate {
+        agent = agent.with_permission_gate(g.clone());
+    }
+
+    // Tools — sandboxed shell only when explicitly enabled. Tools disabled via
+    // `config.tools.overrides` (e.g. the desktop settings toggles) are skipped
+    // at registration so the model never sees their schemas.
+    let mut disabled: std::collections::HashSet<&str> = config
+        .tools
+        .overrides
+        .iter()
+        .filter(|o| o.disabled)
+        .map(|o| o.name.as_str())
+        .collect();
+    // Graph retrieval tools only exist when the code graph is enabled. When
+    // disabled, exclude them from registration so the model never sees their
+    // schemas (they'd otherwise degrade with a "graph unavailable" message).
+    if !config.graph.enabled {
+        disabled.insert("search_code");
+        disabled.insert("traverse_graph");
+        disabled.insert("retrieve_entity");
+    }
+    // 记忆关闭时排除记忆工具（模型看不到其 schema），与 graph 同款处理。
+    if !config.memory.enabled {
+        disabled.insert("remember");
+        disabled.insert("recall");
+        disabled.insert("forget");
+    }
+    // 委派关闭时排除 delegate 工具。
+    if !config.delegate.enabled {
+        disabled.insert("delegate");
+    }
+    // A1 检查点：写前快照共享管理器，跨进程持久化（CLI checkpoint list/rollback）。
+    let checkpoint: Option<Arc<tokio::sync::Mutex<deepseeknova_checkpoint::CheckpointManager>>> =
+        if config.checkpoint.enabled {
+            let path = workspace_root.join(&config.checkpoint.path);
+            let manager = match deepseeknova_checkpoint::CheckpointManager::load_from(&path) {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::warn!("checkpoint load failed ({e}); starting fresh");
+                    deepseeknova_checkpoint::CheckpointManager::new()
+                }
+            }
+            .with_persistence(path);
+            Some(Arc::new(tokio::sync::Mutex::new(manager)))
+        } else {
+            None
+        };
+    let register = |agent: &mut deepseeknova_agent::Agent,
+                    tools: Vec<Arc<dyn deepseeknova_core::Tool>>| {
+        for tool in tools {
+            if disabled.contains(tool.schema().name.as_str()) {
+                continue;
+            }
+            agent.register_tool(tool);
+        }
+    };
+    if config.sandbox.enabled {
+        let sandbox: Arc<dyn deepseeknova_sandbox::Sandbox> =
+            Arc::from(deepseeknova_sandbox::platform_sandbox_with(
+                &config.sandbox.writable_paths,
+                config.sandbox.allow_network,
+            ));
+        register(
+            &mut agent,
+            deepseeknova_tools::all_builtin_tools_with_sandbox_and_checkpoint(
+                sandbox,
+                checkpoint.clone(),
+            ),
+        );
+    } else {
+        register(
+            &mut agent,
+            deepseeknova_tools::all_builtin_tools_with_sandbox_and_checkpoint(
+                Arc::new(deepseeknova_sandbox::NoOpSandbox),
+                checkpoint,
+            ),
+        );
+    }
+
+    // Dynamically-discovered tools (MCP, etc). Same disable-filter as built-ins;
+    // their namespaced names (`mcp__server__tool`) can be toggled via overrides.
+    register(&mut agent, extra_tools);
+
+    // 句柄提升到外层，供主 agent 与子代理共享（delegate 需要）。
+    let mut graph_ext: Option<deepseeknova_tools::GraphHandle> = None;
+    let mut memory_ext: Option<deepseeknova_tools::MemoryHandle> = None;
+
+    // ── 代码图：可选、后台构建、注入检索工具句柄与检索策略提示 ──
+    // Open the on-disk index synchronously (cheap: just opens SQLite), then
+    // refresh it on a blocking thread so the expensive tree-sitter parse never
+    // stalls build_agent's return or the tokio worker pool. A refresh failure
+    // only warns — the agent still runs, graph tools just degrade gracefully.
+    if config.graph.enabled {
+        match deepseeknova_graph::GraphIndex::open(&workspace_root, config.graph.max_file_size) {
+            Ok(index) => {
+                let handle: deepseeknova_tools::GraphHandle =
+                    Arc::new(std::sync::Mutex::new(index));
+                let bg = handle.clone();
+                tokio::task::spawn_blocking(move || match bg.lock() {
+                    Ok(mut idx) => {
+                        if let Err(e) = idx.refresh() {
+                            tracing::warn!("graph index refresh failed: {e}");
+                        }
+                    }
+                    Err(_) => tracing::warn!("graph index lock poisoned during refresh"),
+                });
+                agent = agent.with_extension(handle.clone());
+                graph_ext = Some(handle.clone());
+                agent = agent.with_appended_system_prompt(GRAPH_RETRIEVAL_HINT);
+
+                // Feed a global repo map into the agent's system prompt at run
+                // start. Uses an empty personalization seed (global map); per-
+                // turn personalized seeds are a future enhancement.
+                // TODO(graph): personalized seeds from user input
+                let budget = config.graph.repo_map_tokens;
+                if budget > 0 {
+                    let map_handle = handle.clone();
+                    let provider: deepseeknova_agent::RepoMapProvider =
+                        Arc::new(move |query: &str| {
+                            let seeds = repo_map_seeds(query);
+                            map_handle
+                                .lock()
+                                .ok()
+                                .and_then(|idx| idx.repo_map(budget, &seeds).ok())
+                                .filter(|s| !s.is_empty())
+                        });
+                    agent = agent.with_repo_map_provider(provider);
+                }
+            }
+            Err(e) => tracing::warn!("graph index unavailable, tools will degrade: {e}"),
+        }
+    }
+
+    // ── 记忆引擎：持久化、注入工具句柄、装配起点召回 + 结束沉淀 ──
+    if config.memory.enabled {
+        let db = workspace_root.join(&config.memory.db_path);
+        match deepseeknova_core::memory::engine::MemoryEngine::open(
+            &db,
+            config.memory.redact_secrets,
+        ) {
+            Ok(engine) => {
+                let handle: deepseeknova_tools::MemoryHandle = Arc::new(engine);
+                agent = agent.with_extension(handle.clone());
+                memory_ext = Some(handle.clone());
+
+                // 起点召回注入（token 预算内的极简块）。
+                let rp = handle.clone();
+                let top_k = config.memory.recall_top_k;
+                let cap_chars =
+                    deepseeknova_core::tokens::chars_for_tokens(config.memory.recall_inject_tokens);
+                if cap_chars > 0 {
+                    let recall: deepseeknova_agent::RecallProvider =
+                        Arc::new(move |query: &str| {
+                            let hits = rp.recall(query, top_k).ok()?;
+                            if hits.is_empty() {
+                                return None;
+                            }
+                            let mut block = String::from("## Recalled Context\n");
+                            let mut budget = cap_chars;
+                            for h in &hits {
+                                let snippet: String = h.entry.content.chars().take(160).collect();
+                                let line = format!("- [{}] {}\n", h.entry.id, snippet);
+                                if line.len() > budget {
+                                    break;
+                                }
+                                budget -= line.len();
+                                block.push_str(&line);
+                            }
+                            Some(block)
+                        });
+                    agent = agent.with_recall_provider(recall);
+
+                    // P3.2/P3.3 中途检索（F1 修复：配置真实生效）：
+                    // `mid_run_recall=false` 不装配；top_k / inject_tokens /
+                    // require_tool_turn 全部来自配置；图索引启用时同时注入
+                    // 代码图命中（mid_run_graph_top_k）。
+                    if config.memory.mid_run_recall {
+                        let mid_mem = handle.clone();
+                        let mid_graph = graph_ext.clone();
+                        let mid_top_k = config.memory.mid_run_recall_top_k;
+                        let mid_graph_top_k = config.memory.mid_run_graph_top_k;
+                        let mid_cap = deepseeknova_core::tokens::chars_for_tokens(
+                            config.memory.mid_run_inject_tokens,
+                        );
+                        let mid: deepseeknova_agent::RecallProvider =
+                            Arc::new(move |query: &str| {
+                                if mid_cap == 0 {
+                                    return None;
+                                }
+                                let mut block = String::new();
+                                let mut budget = mid_cap;
+                                if let Ok(hits) = mid_mem.recall(query, mid_top_k) {
+                                    let mut lines: Vec<String> = Vec::new();
+                                    for h in hits {
+                                        let snippet: String =
+                                            h.entry.content.chars().take(120).collect();
+                                        let line = format!("- [memory] {snippet}\n");
+                                        if line.len() > budget {
+                                            break;
+                                        }
+                                        lines.push(line);
+                                    }
+                                    if !lines.is_empty() {
+                                        block.push_str("## Recalled Context\n");
+                                        for l in lines {
+                                            budget -= l.len();
+                                            block.push_str(&l);
+                                        }
+                                    }
+                                }
+                                if let Some(ref g) = mid_graph {
+                                    if let Ok(idx) = g.lock() {
+                                        if let Ok(nodes) = idx.search(query, None, mid_graph_top_k)
+                                        {
+                                            let mut lines: Vec<String> = Vec::new();
+                                            for n in nodes {
+                                                let line =
+                                                    format!("- [graph] {} ({})\n", n.name, n.path);
+                                                if line.len() > budget {
+                                                    break;
+                                                }
+                                                lines.push(line);
+                                            }
+                                            if !lines.is_empty() {
+                                                block.push_str("## Graph Hits\n");
+                                                for l in lines {
+                                                    block.push_str(&l);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if block.is_empty() {
+                                    None
+                                } else {
+                                    Some(block)
+                                }
+                            });
+                        agent = agent
+                            .with_mid_run_retrieval(mid, config.memory.mid_run_require_tool_turn);
+                    }
+                }
+
+                // 结束沉淀钩子（启发式，无 LLM）。
+                let dh = handle.clone();
+                let guards = deepseeknova_core::memory::engine::DistillGuards {
+                    auto_learn: config.memory.auto_learn,
+                    min_tool_calls: config.memory.min_tool_calls,
+                    min_steps: config.memory.min_steps,
+                    max_per_day: config.memory.max_distillations_per_day,
+                    max_per_session: config.memory.max_distillations_per_session,
+                };
+                let distill: deepseeknova_agent::DistillHook = Arc::new(move |obs| {
+                    if let Err(e) = dh.record_task(&obs, &guards) {
+                        tracing::warn!("memory distill failed: {e}");
+                    }
+                });
+                agent = agent.with_distill_hook(distill);
+
+                // B3 审查计数：memory 启用时落 counters 表；关闭时 agent 内 tracing 兜底。
+                if config.review.enabled {
+                    let ch = handle.clone();
+                    agent = agent.with_review_counter(std::sync::Arc::new(move |name: &str| {
+                        let _ = ch.bump_counter(name);
+                    }));
+                }
+            }
+            Err(e) => tracing::warn!("memory engine unavailable, tools will degrade: {e}"),
+        }
+    }
+
+    // ── 委派引擎：为每个预设构建受限工具集的子 Agent（共享 graph/memory 句柄）──
+    // 子代理路由到独立 task provider（若提供），否则回退主 provider。
+    if config.delegate.enabled {
+        let delegate_provider = roles
+            .task
+            .as_ref()
+            .map(Arc::clone)
+            .unwrap_or_else(|| Arc::clone(&provider));
+        let engine = build_delegate_engine(
+            config,
+            delegate_provider,
+            &workspace_root,
+            &security,
+            gate.clone(),
+            graph_ext.clone(),
+            memory_ext.clone(),
+        );
+        let handle: deepseeknova_tools::DelegateHandle = engine;
+        agent = agent.with_extension(handle);
+    }
+
+    // ── B2 续航：max_steps 行为 / L3 压缩 / 预算守门 ──
+    agent = agent
+        .with_on_max_steps(&config.agent.on_max_steps)
+        .with_l3_compaction(config.agent.l3_compaction);
+    if config.budget.enabled {
+        agent = agent.with_budget(
+            deepseeknova_agent::budget::controller::PromptBudgetController {
+                max_total_tokens: config.budget.max_total_tokens,
+                max_memory_tokens: config.budget.max_memory_tokens,
+            },
+        );
+    }
+    // 压缩阈值：显式配置优先，否则由 budget 推导（lossless L1 shrink 默认开启）。
+    if let Some(threshold) = derive_compaction_threshold(config) {
+        agent = agent.with_compaction_threshold(Some(threshold));
+    }
+    // Compact provider 优先级：调用方注入（经 router 计量）> agent.compact_model
+    // 直连回退（无 router 的调用方，如 desktop 旧入口）> 不设（L3 复用主 provider）。
+    if let Some(compact) = roles.compact {
+        agent = agent.with_compact_provider(compact);
+    } else if !config.agent.compact_model.is_empty() {
+        // 直连回退：不经 CostLedger 计量；desktop 接入 router 后可移除。
+        match config
+            .resolve_provider_for_model(&config.agent.compact_model)
+            .cloned()
+        {
+            Some(cfg) => {
+                match deepseeknova_provider::factory::create_provider_with_model(
+                    &cfg,
+                    &config.agent.compact_model,
+                    None,
+                ) {
+                    Ok(p) => agent = agent.with_compact_provider(p.into()),
+                    Err(e) => tracing::warn!(
+                        "compact_model '{}' unavailable ({e}); L3 will use the main provider",
+                        config.agent.compact_model
+                    ),
+                }
+            }
+            None => tracing::warn!(
+                "compact_model '{}' has no matching provider; L3 will use the main provider",
+                config.agent.compact_model
+            ),
+        }
+    }
+
+    // ── B3 完成前自审（默认关）──
+    if config.review.enabled {
+        // 审查模型优先级：调用方注入（经 router 计量）> review_model 直连回退
+        // （无 router 的调用方）> 复用主 provider。
+        let review_provider: Arc<dyn deepseeknova_provider::Provider> =
+            if let Some(r) = roles.review {
+                r
+            } else if !config.review.review_model.is_empty() {
+                // 直连回退：不经 CostLedger 计量；desktop 接入 router 后可移除。
+                match config
+                    .resolve_provider_for_model(&config.review.review_model)
+                    .cloned()
+                {
+                    Some(cfg) => {
+                        match deepseeknova_provider::factory::create_provider_with_model(
+                            &cfg,
+                            &config.review.review_model,
+                            None,
+                        ) {
+                            Ok(p) => p.into(),
+                            Err(e) => {
+                                tracing::warn!(
+                                    "review_model '{}' unavailable ({e}); using main provider",
+                                    config.review.review_model
+                                );
+                                provider.clone()
+                            }
+                        }
+                    }
+                    None => {
+                        tracing::warn!(
+                            "review_model '{}' has no matching provider; using main provider",
+                            config.review.review_model
+                        );
+                        provider.clone()
+                    }
+                }
+            } else {
+                provider.clone()
+            };
+        agent = agent.with_review(
+            review_provider,
+            config.review.diff_cap_tokens,
+            config.review.max_cycles,
+        );
+    }
+
+    // ── P1 并行工具执行 + 完成前确定性验证 ──
+    agent = agent.with_concurrent_tools(config.agent.concurrent_tools);
+    if config.verify.enabled && !config.verify.commands.is_empty() {
+        agent = agent.with_verify(config.verify.commands.clone(), config.verify.max_cycles);
+    }
+
+    // ── P2 高频决策经济学 ──
+    agent = agent.with_tool_cache(config.agent.tool_cache);
+    if config.agent.step_effort_routing {
+        match (step_quick, step_high) {
+            (Some(quick), Some(high)) => {
+                agent = agent.with_effort_routing(quick, high);
+            }
+            _ => tracing::warn!(
+                "step_effort_routing enabled but quick/high providers missing; \
+                 falling back to the fixed main provider"
+            ),
+        }
+    }
+    if config.agent.observe_compress {
+        let obs_provider = observe_provider.unwrap_or_else(|| provider.clone());
+        agent = agent.with_observe_compression(
+            obs_provider,
+            config.agent.observe_compress_threshold_chars,
+            config.agent.observe_compress_max_chars,
+        );
+    }
+
+    Ok(agent)
+}
+
+/// Like [`build_agent`], but routes the delegate engine's sub-agents to a
+/// dedicated `task` provider (the `task` model pointer). `None` falls back
+/// to the main provider — identical to [`build_agent`].
+#[allow(clippy::too_many_arguments)]
+pub fn build_agent_with_task_provider(
+    config: &Config,
+    workspace_root: PathBuf,
+    provider: Arc<dyn deepseeknova_provider::Provider>,
+    task_provider: Option<Arc<dyn deepseeknova_provider::Provider>>,
+    max_steps: usize,
+    gate: Option<Arc<PermissionGate>>,
+    extra_tools: Vec<Arc<dyn deepseeknova_core::Tool>>,
+) -> anyhow::Result<deepseeknova_agent::Agent> {
+    build_agent_with_role_providers(
+        config,
+        workspace_root,
+        provider,
+        AgentRoleProviders {
+            task: task_provider,
+            ..Default::default()
+        },
+        max_steps,
+        gate,
+        extra_tools,
+    )
+}
+
+/// Build a fully-wired [`deepseeknova_agent::Agent`] from config.
+///
+/// Single composition point for the security dual-layer, shared by CLI and
+/// desktop so their wiring can't drift:
+/// - always injects the [`SecurityContext`] (capabilities, path confinement,
+///   resource limits);
+/// - attaches the [`PermissionGate`] only when `config.permissions.enabled`;
+/// - wires the shell tool to the OS sandbox only when `config.sandbox.enabled`
+///   (otherwise `NoOpSandbox`), so activation is opt-in and Windows/CI stay on
+///   the no-isolation path by default.
+///
+/// Callers add frontend-specific pieces (conversation history, approval
+/// responder) on the returned agent via its builder methods.
+///
+/// `extra_tools` are registered after the built-in tools and pass through the
+/// same `config.tools.overrides` disable filter. Callers use it to inject
+/// dynamically-discovered tools (e.g. MCP tools from [`discover_mcp_tools`]);
+/// pass an empty vec when there are none.
+pub fn build_agent(
+    config: &Config,
+    workspace_root: PathBuf,
+    provider: Arc<dyn deepseeknova_provider::Provider>,
+    max_steps: usize,
+    gate: Option<Arc<PermissionGate>>,
+    extra_tools: Vec<Arc<dyn deepseeknova_core::Tool>>,
+) -> anyhow::Result<deepseeknova_agent::Agent> {
+    build_agent_with_task_provider(
+        config,
+        workspace_root,
+        provider,
+        None,
+        max_steps,
+        gate,
+        extra_tools,
+    )
+}
+
+/// Connect to every enabled MCP server in `config` and return their tools,
+/// ready to hand to [`build_agent`] as `extra_tools`.
+///
+/// This is the config-level entry point (contrast with
+/// [`deepseeknova_mcp::adapter::discover_mcp_tools`], which lists tools for a
+/// single already-connected server). It never fails: connection or listing
+/// errors are logged and that server is skipped. An empty `mcp_servers` list
+/// returns an empty vec without any I/O.
+///
+/// The returned tools own their transport connections (via `Arc`), so the
+/// connections — and, for stdio servers, the child processes (`kill_on_drop`)
+/// — live exactly as long as the tools are held by the agent.
+pub async fn discover_mcp_tools(config: &Config) -> Vec<Arc<dyn deepseeknova_core::Tool>> {
+    if config.mcp_servers.is_empty() {
+        return Vec::new();
+    }
+
+    let discovered =
+        deepseeknova_mcp::discover_and_connect(config, std::time::Duration::from_secs(30)).await;
+
+    // List tools per server concurrently; a slow or broken `tools/list` on one
+    // server must not stall the others.
+    let listings = discovered.into_iter().map(|server| async move {
+        let client = Arc::new(deepseeknova_mcp::McpClient::from_connection(
+            server.connection,
+        ));
+        match deepseeknova_mcp::adapter::discover_mcp_tools(&server.name, client).await {
+            Ok(tools) => tools,
+            Err(e) => {
+                tracing::warn!("MCP server '{}' tools/list failed: {e}", server.name);
+                Vec::new()
+            }
+        }
+    });
+
+    futures::future::join_all(listings)
+        .await
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
+/// 合并内置委派预设与 `config.delegate.agents` 覆盖（按 name 匹配覆盖字段，
+/// 未匹配则新增）。供委派引擎与 coordinator 的 SubAgentRunner 共用。
+fn merged_delegate_presets(config: &Config) -> Vec<deepseeknova_agent::DelegatePreset> {
+    let mut presets = deepseeknova_agent::builtin_presets();
+    for ov in &config.delegate.agents {
+        if let Some(p) = presets.iter_mut().find(|p| p.name == ov.name) {
+            if let Some(sp) = &ov.system_prompt {
+                p.system_prompt = sp.clone();
+            }
+            if let Some(tools) = &ov.tools {
+                p.tools = tools.clone();
+            }
+            if let Some(ms) = ov.max_steps {
+                p.max_steps = ms;
+            }
+        } else {
+            presets.push(deepseeknova_agent::DelegatePreset {
+                name: ov.name.clone(),
+                system_prompt: ov.system_prompt.clone().unwrap_or_default(),
+                tools: ov.tools.clone().unwrap_or_default(),
+                max_steps: ov.max_steps.unwrap_or(10),
+            });
+        }
+    }
+    presets
+}
+
+/// 构建委派引擎：合并内置预设与配置覆盖，为每个预设造一个受限工具集的子 Agent
+/// （共享主 agent 的 graph/memory 句柄与安全策略）。禁递归：剔除任何 "delegate" 工具。
+#[allow(clippy::too_many_arguments)]
+fn build_delegate_engine(
+    config: &Config,
+    provider: Arc<dyn deepseeknova_provider::Provider>,
+    workspace_root: &std::path::Path,
+    security: &SecurityContext,
+    gate: Option<Arc<PermissionGate>>,
+    graph_ext: Option<deepseeknova_tools::GraphHandle>,
+    memory_ext: Option<deepseeknova_tools::MemoryHandle>,
+) -> Arc<deepseeknova_agent::DelegateEngine> {
+    use deepseeknova_core::Tool;
+
+    // 子代理工具源（沿用主 agent 的沙箱选择）。
+    // 注：子代理刻意不接收 MCP/extra_tools——它们只从内置工具集派生受限子集，
+    // 因此 MCP 工具天然只暴露给主 agent（等价于向 build_agent 传 vec![]）。
+    let base: Vec<Arc<dyn Tool>> = if config.sandbox.enabled {
+        let sandbox: Arc<dyn deepseeknova_sandbox::Sandbox> =
+            Arc::from(deepseeknova_sandbox::platform_sandbox_with(
+                &config.sandbox.writable_paths,
+                config.sandbox.allow_network,
+            ));
+        deepseeknova_tools::all_builtin_tools_with_sandbox(sandbox)
+    } else {
+        deepseeknova_tools::all_builtin_tools()
+    };
+
+    // 合并内置预设 + 配置覆盖。
+    let presets = merged_delegate_presets(config);
+
+    let mut agents: std::collections::HashMap<String, Arc<deepseeknova_agent::Agent>> =
+        std::collections::HashMap::new();
+    for p in &presets {
+        // 禁递归：即便配置误加 "delegate" 也剔除。
+        let sub_tools: Vec<Arc<dyn Tool>> = base
+            .iter()
+            .filter(|t| {
+                let n = t.schema().name;
+                n != "delegate" && p.tools.iter().any(|allow| allow == &n)
+            })
+            .cloned()
+            .collect();
+        let mut sub = deepseeknova_agent::Agent::new(Arc::clone(&provider), p.max_steps)
+            .with_workspace_root(workspace_root.to_path_buf())
+            .with_security(security.clone())
+            .with_system_prompt(p.system_prompt.clone());
+        for t in sub_tools {
+            sub.register_tool(t);
+        }
+        if let Some(g) = &graph_ext {
+            sub = sub.with_extension(g.clone());
+        }
+        if let Some(m) = &memory_ext {
+            sub = sub.with_extension(m.clone());
+        }
+        if let Some(gate) = &gate {
+            sub = sub.with_permission_gate(gate.clone());
+        }
+        agents.insert(p.name.clone(), Arc::new(sub));
+    }
+
+    Arc::new(deepseeknova_agent::DelegateEngine::new(
+        agents,
+        config.delegate.max_concurrent,
+        config.delegate.output_cap_tokens,
+    ))
+}
+
+/// Build a [`SubAgentRunner`](deepseeknova_agent::SubAgentRunner) for
+/// coordinator `Delegate` actions: sub-agent turns use `task_provider` (the
+/// `task` model pointer), history compaction uses `compact_provider` (the
+/// `compact` pointer), falling back to the task provider when `None`.
+///
+/// Presets and tool restrictions mirror the delegate engine: merged builtin
+/// presets + `config.delegate.agents` overrides, sandbox-aware builtin
+/// tools, `"delegate"` always excluded (no recursion), no MCP tools.
+pub fn build_sub_agent_runner(
+    config: &Config,
+    task_provider: Arc<dyn deepseeknova_provider::Provider>,
+    compact_provider: Option<Arc<dyn deepseeknova_provider::Provider>>,
+) -> deepseeknova_agent::SubAgentRunner {
+    use deepseeknova_core::Tool;
+
+    // 子代理工具源（与委派引擎同款：沿用沙箱选择，不接 MCP 工具）。
+    let base: Vec<Arc<dyn Tool>> = if config.sandbox.enabled {
+        let sandbox: Arc<dyn deepseeknova_sandbox::Sandbox> =
+            Arc::from(deepseeknova_sandbox::platform_sandbox_with(
+                &config.sandbox.writable_paths,
+                config.sandbox.allow_network,
+            ));
+        deepseeknova_tools::all_builtin_tools_with_sandbox(sandbox)
+    } else {
+        deepseeknova_tools::all_builtin_tools()
+    };
+
+    let mut runner = deepseeknova_agent::SubAgentRunner::new(task_provider);
+    for p in merged_delegate_presets(config) {
+        // 禁递归：即便配置误加 "delegate" 也剔除。
+        let sub_tools: Vec<Arc<dyn Tool>> = base
+            .iter()
+            .filter(|t| {
+                let n = t.schema().name;
+                n != "delegate" && p.tools.iter().any(|allow| allow == &n)
+            })
+            .cloned()
+            .collect();
+        runner.register(
+            deepseeknova_agent::SubAgentConfig::new(p.name.clone(), p.system_prompt.clone())
+                .with_tools(sub_tools)
+                .with_max_steps(p.max_steps),
+        );
+    }
+    if let Some(threshold) = derive_compaction_threshold(config) {
+        runner = runner.with_compaction_threshold(threshold);
+    }
+    if let Some(compact) = compact_provider {
+        runner = runner.with_compact_provider(compact);
+    }
+    runner
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use deepseeknova_config::Config;
     use deepseeknova_context::ContextEngine;
     use deepseeknova_security::capability::Capability;
+
+    // Minimal Provider stub: never actually called by these tests (they only
+    // assert on the synchronously-registered tool set), but build_agent needs
+    // a concrete provider to construct the agent.
+    struct StubProvider;
+
+    #[async_trait::async_trait]
+    impl deepseeknova_provider::Provider for StubProvider {
+        async fn generate(
+            &self,
+            _validated: deepseeknova_provider::ValidatedRequest<'_>,
+        ) -> anyhow::Result<deepseeknova_core::Message> {
+            Ok(deepseeknova_core::Message {
+                role: deepseeknova_core::Role::Assistant,
+                content: String::new(),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            })
+        }
+    }
+
+    fn stub_provider() -> StubProvider {
+        StubProvider
+    }
+
+    // --- build_sub_agent_runner (coordinator Delegate wiring) ---
+
+    /// Counting stub: proves the compact provider (not the task provider)
+    /// served the compaction request.
+    struct CountingProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl deepseeknova_provider::Provider for CountingProvider {
+        async fn generate(
+            &self,
+            _validated: deepseeknova_provider::ValidatedRequest<'_>,
+        ) -> anyhow::Result<deepseeknova_core::Message> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(deepseeknova_core::Message {
+                role: deepseeknova_core::Role::Assistant,
+                content: "digest".into(),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn sub_agent_runner_registers_presets_and_uses_compact_provider() {
+        use deepseeknova_core::Runner;
+        use futures::StreamExt;
+
+        let mut config = Config::default();
+        // 阈值 1 token → 首步必触发压缩。
+        config.agent.compaction_threshold_tokens = Some(1);
+
+        let task = std::sync::Arc::new(stub_provider());
+        let compact = std::sync::Arc::new(CountingProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let runner = build_sub_agent_runner(&config, task, Some(compact.clone()));
+
+        let mut stream = runner
+            .run_stream(deepseeknova_core::RunInput {
+                prompt: "sub_agent:explorer\ngoal: investigate something long enough".into(),
+                images: Vec::new(),
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+
+        assert!(
+            compact.calls.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            "compaction should go through the compact provider"
+        );
+    }
+
+    #[test]
+    fn compaction_threshold_derives_from_budget() {
+        let mut c = Config::default(); // budget 默认启用、max_total=128000
+        assert_eq!(derive_compaction_threshold(&c), Some(64_000));
+        c.agent.compaction_threshold_tokens = Some(32_000);
+        assert_eq!(derive_compaction_threshold(&c), Some(32_000)); // 显式优先
+        c.agent.compaction_threshold_tokens = None;
+        c.budget.enabled = false;
+        assert_eq!(derive_compaction_threshold(&c), None); // budget 关 → None
+    }
+
+    #[test]
+    fn sub_agent_runner_builds_with_delegate_tool_override() {
+        // "delegate" 恒被过滤（与 build_delegate_engine 同款谓词）；此处验证
+        // 含 delegate 覆盖的配置能安全构造。SubAgentRunner 无公开工具观测
+        // 接口，过滤逻辑由 build_delegate_engine 的既有测试共同守护。
+        let mut config = Config::default();
+        config
+            .delegate
+            .agents
+            .push(deepseeknova_config::DelegateAgentOverride {
+                name: "explorer".into(),
+                system_prompt: None,
+                tools: Some(vec!["delegate".into(), "read_file".into()]),
+                max_steps: None,
+            });
+        let task = std::sync::Arc::new(stub_provider());
+        let _runner = build_sub_agent_runner(&config, task, None);
+    }
+
+    #[tokio::test]
+    async fn build_agent_wires_graph_when_enabled() {
+        let mut config = Config::default();
+        config.graph.enabled = true;
+        let root = std::env::temp_dir().join(format!("dnv-graph-wire-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/x.rs"), "pub fn foo() {}\n").unwrap();
+
+        let provider = std::sync::Arc::new(stub_provider());
+        let agent = build_agent(&config, root.clone(), provider, 5, None, vec![]).unwrap();
+        let names = agent.tool_names();
+        assert!(names.iter().any(|n| n == "search_code"));
+        assert!(names.iter().any(|n| n == "traverse_graph"));
+        assert!(names.iter().any(|n| n == "retrieve_entity"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn build_agent_skips_graph_when_disabled() {
+        let mut config = Config::default();
+        config.graph.enabled = false;
+        let provider = std::sync::Arc::new(stub_provider());
+        let agent = build_agent(&config, std::env::temp_dir(), provider, 5, None, vec![]).unwrap();
+        assert!(!agent.tool_names().iter().any(|n| n == "search_code"));
+        assert!(!agent.tool_names().iter().any(|n| n == "traverse_graph"));
+        assert!(!agent.tool_names().iter().any(|n| n == "retrieve_entity"));
+    }
+
+    #[tokio::test]
+    async fn build_agent_registers_memory_tools_when_enabled() {
+        let mut config = Config::default();
+        config.memory.enabled = true;
+        config.graph.enabled = false;
+        let root = std::env::temp_dir().join(format!("dnv-mem-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let provider = std::sync::Arc::new(stub_provider());
+        let agent = build_agent(&config, root.clone(), provider, 5, None, vec![]).unwrap();
+        let names = agent.tool_names();
+        assert!(names.iter().any(|n| n == "recall"));
+        assert!(names.iter().any(|n| n == "remember"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn build_agent_skips_memory_tools_when_disabled() {
+        let mut config = Config::default();
+        config.memory.enabled = false;
+        config.graph.enabled = false;
+        let provider = std::sync::Arc::new(stub_provider());
+        let agent = build_agent(&config, std::env::temp_dir(), provider, 5, None, vec![]).unwrap();
+        assert!(!agent.tool_names().iter().any(|n| n == "recall"));
+    }
+
+    #[tokio::test]
+    async fn build_agent_registers_delegate_tool_when_enabled() {
+        let mut config = Config::default();
+        config.delegate.enabled = true;
+        config.graph.enabled = false;
+        config.memory.enabled = false;
+        let provider = std::sync::Arc::new(stub_provider());
+        let agent = build_agent(&config, std::env::temp_dir(), provider, 5, None, vec![]).unwrap();
+        assert!(agent.tool_names().iter().any(|n| n == "delegate"));
+    }
+
+    #[tokio::test]
+    async fn build_agent_with_task_provider_compiles_and_registers_delegate() {
+        let mut config = Config::default();
+        config.delegate.enabled = true;
+        config.graph.enabled = false;
+        config.memory.enabled = false;
+        let main: Arc<dyn deepseeknova_provider::Provider> = Arc::new(stub_provider());
+        let task: Arc<dyn deepseeknova_provider::Provider> = Arc::new(stub_provider());
+        let agent = build_agent_with_task_provider(
+            &config,
+            std::env::temp_dir(),
+            main,
+            Some(task),
+            0,
+            None,
+            vec![],
+        )
+        .unwrap();
+        assert!(agent.tool_names().iter().any(|n| n == "delegate"));
+    }
+
+    #[test]
+    fn build_agent_skips_delegate_when_disabled() {
+        let mut config = Config::default();
+        config.delegate.enabled = false;
+        config.graph.enabled = false;
+        config.memory.enabled = false;
+        let provider = std::sync::Arc::new(stub_provider());
+        let agent = build_agent(&config, std::env::temp_dir(), provider, 5, None, vec![]).unwrap();
+        assert!(!agent.tool_names().iter().any(|n| n == "delegate"));
+    }
+
+    // A no-op tool with a caller-chosen name, used to exercise extra_tools.
+    struct NamedStubTool(&'static str);
+
+    #[async_trait::async_trait]
+    impl deepseeknova_core::Tool for NamedStubTool {
+        fn schema(&self) -> deepseeknova_core::types::ToolSchema {
+            deepseeknova_core::types::ToolSchema {
+                name: self.0.to_string(),
+                description: "stub".into(),
+                parameters: serde_json::json!({"type": "object"}),
+            }
+        }
+        async fn execute(
+            &self,
+            _ctx: &deepseeknova_core::tool::ToolContext,
+            _args: &str,
+        ) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+    }
+
+    #[test]
+    fn build_agent_registers_extra_tools() {
+        let mut config = Config::default();
+        config.graph.enabled = false;
+        config.memory.enabled = false;
+        let provider = std::sync::Arc::new(stub_provider());
+        let extra: Vec<Arc<dyn deepseeknova_core::Tool>> =
+            vec![Arc::new(NamedStubTool("mcp__srv__do_thing"))];
+        let agent = build_agent(&config, std::env::temp_dir(), provider, 5, None, extra).unwrap();
+        assert!(agent.tool_names().iter().any(|n| n == "mcp__srv__do_thing"));
+    }
+
+    #[test]
+    fn build_agent_skips_extra_tool_disabled_via_overrides() {
+        let mut config = Config::default();
+        config.graph.enabled = false;
+        config.memory.enabled = false;
+        config.tools.overrides = vec![deepseeknova_config::ToolOverride {
+            name: "mcp__srv__do_thing".into(),
+            disabled: true,
+            timeout_secs: None,
+            max_file_size: None,
+        }];
+        let provider = std::sync::Arc::new(stub_provider());
+        let extra: Vec<Arc<dyn deepseeknova_core::Tool>> =
+            vec![Arc::new(NamedStubTool("mcp__srv__do_thing"))];
+        let agent = build_agent(&config, std::env::temp_dir(), provider, 5, None, extra).unwrap();
+        assert!(!agent.tool_names().iter().any(|n| n == "mcp__srv__do_thing"));
+    }
+
+    #[tokio::test]
+    async fn discover_mcp_tools_empty_config_returns_empty() {
+        let config = Config::default();
+        assert!(discover_mcp_tools(&config).await.is_empty());
+    }
 
     #[test]
     fn build_security_context_default_grants_all_capabilities() {
@@ -283,6 +1345,102 @@ mod tests {
     }
 
     #[test]
+    fn build_agent_applies_b2_config() {
+        let mut config = Config::default();
+        config.graph.enabled = false;
+        config.memory.enabled = false;
+        config.agent.on_max_steps = "error".into();
+        config.agent.l3_compaction = false;
+        config.budget.enabled = false;
+        let provider = std::sync::Arc::new(stub_provider());
+        // 只验证可构建不 panic（字段私有，行为断言在 agent 侧已覆盖）。
+        let agent = build_agent(&config, std::env::temp_dir(), provider, 5, None, vec![]).unwrap();
+        let _ = agent;
+    }
+
+    #[test]
+    fn build_agent_with_review_enabled_constructs() {
+        let mut config = Config::default();
+        config.graph.enabled = false;
+        config.memory.enabled = false;
+        config.review.enabled = true; // review_model 空 → 复用主 provider
+        let provider = std::sync::Arc::new(stub_provider());
+        let agent = build_agent(&config, std::env::temp_dir(), provider, 5, None, vec![]).unwrap();
+        let _ = agent;
+    }
+
+    #[test]
+    fn role_providers_review_injection_wins_over_review_model() {
+        // review 注入胜过 review_model 直连回退（同 compact 优先级语义）。
+        let mut config = Config::default();
+        config.graph.enabled = false;
+        config.memory.enabled = false;
+        config.review.enabled = true;
+        config.review.review_model = "no-such-model".into();
+        let main_p = std::sync::Arc::new(stub_provider());
+        let review_p: std::sync::Arc<dyn deepseeknova_provider::Provider> =
+            std::sync::Arc::new(stub_provider());
+        let roles = AgentRoleProviders {
+            review: Some(review_p),
+            ..Default::default()
+        };
+        let agent = build_agent_with_role_providers(
+            &config,
+            std::env::temp_dir(),
+            main_p,
+            roles,
+            5,
+            None,
+            vec![],
+        )
+        .unwrap();
+        let _ = agent;
+    }
+
+    #[test]
+    fn role_providers_compact_injection_wins_over_compact_model() {
+        let mut config = Config::default();
+        config.graph.enabled = false;
+        config.memory.enabled = false;
+        // compact_model 指向一个不存在的模型名——若直连回退被错误执行，
+        // resolve 失败仅告警不报错，因此用注入路径成功构建 + 后续分支
+        // 测试共同界定优先级语义。
+        config.agent.compact_model = "no-such-model".into();
+        let main_p = std::sync::Arc::new(stub_provider());
+        let compact_p: std::sync::Arc<dyn deepseeknova_provider::Provider> =
+            std::sync::Arc::new(stub_provider());
+        let roles = AgentRoleProviders {
+            task: None,
+            compact: Some(compact_p),
+            ..Default::default()
+        };
+        let agent = build_agent_with_role_providers(
+            &config,
+            std::env::temp_dir(),
+            main_p,
+            roles,
+            5,
+            None,
+            vec![],
+        )
+        .unwrap();
+        let _ = agent; // 注入路径构建成功；Agent 侧字段私有，行为由 agent crate 测试覆盖
+    }
+
+    #[test]
+    fn role_providers_default_falls_back_to_compact_model_path() {
+        // roles 全 None + compact_model 非空 → 走 B2 直连回退（构建不 panic，
+        // 解析失败仅告警）。与旧 build_agent 行为等价。
+        let mut config = Config::default();
+        config.graph.enabled = false;
+        config.memory.enabled = false;
+        config.agent.compact_model = "no-such-model".into();
+        let provider = std::sync::Arc::new(stub_provider());
+        let agent = build_agent(&config, std::env::temp_dir(), provider, 5, None, vec![]).unwrap();
+        let _ = agent;
+    }
+
+    #[test]
     fn runtime_builds_with_default_config() {
         let config = Config::default();
         // Use a temp dir to avoid scanning the full project tree
@@ -296,5 +1454,86 @@ mod tests {
         assert_eq!(runtime.events.receiver_count(), 0);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn mid_run_test_workspace(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "dnv-midrun-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn mid_run_config_off_leaves_agent_unwired() {
+        let mut config = Config::default();
+        config.graph.enabled = false;
+        config.memory.mid_run_recall = false;
+        let workspace = mid_run_test_workspace("off");
+        let provider = std::sync::Arc::new(stub_provider());
+        let agent = build_agent_with_role_providers(
+            &config,
+            workspace.clone(),
+            provider,
+            AgentRoleProviders::default(),
+            5,
+            None,
+            vec![],
+        )
+        .unwrap();
+        assert!(
+            !agent.mid_run_retrieval_enabled(),
+            "mid_run_recall=false must not wire mid-run retrieval"
+        );
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn mid_run_config_on_wires_retrieval() {
+        let mut config = Config::default();
+        config.graph.enabled = false;
+        config.memory.mid_run_recall = true;
+        let workspace = mid_run_test_workspace("on");
+        let provider = std::sync::Arc::new(stub_provider());
+        let agent = build_agent_with_role_providers(
+            &config,
+            workspace.clone(),
+            provider,
+            AgentRoleProviders::default(),
+            5,
+            None,
+            vec![],
+        )
+        .unwrap();
+        assert!(
+            agent.mid_run_retrieval_enabled(),
+            "mid_run_recall=true must wire mid-run retrieval"
+        );
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn repo_map_seeds_extracts_identifiers_and_skips_stopwords() {
+        let seeds =
+            repo_map_seeds("please fix CheckpointManager and add tests for repo_map wiring");
+        assert!(seeds.iter().any(|s| s == "CheckpointManager"));
+        assert!(seeds.iter().any(|s| s == "repo_map"));
+        assert!(
+            !seeds
+                .iter()
+                .any(|s| matches!(s.as_str(), "please" | "and" | "fix" | "add" | "for")),
+            "stopwords must be excluded, got {seeds:?}"
+        );
+
+        let many =
+            repo_map_seeds("alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu");
+        assert!(many.len() <= 8, "seed cap must hold, got {many:?}");
+        let deduped = repo_map_seeds("token token token again again");
+        assert!(deduped.len() <= 2, "seeds must dedupe, got {deduped:?}");
     }
 }

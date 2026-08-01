@@ -16,15 +16,13 @@ impl Tool for LsTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "ls".to_string(),
-            description:
-                "Lists files and directories in a given path. Defaults to current directory."
-                    .to_string(),
+            description: "Lists a directory.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Directory path to list (defaults to .)."
+                        "description": "Path."
                     }
                 },
                 "required": []

@@ -11,10 +11,12 @@ use tauri::{
     Manager,
 };
 
-/// Type alias for the approval channel sender.
-type ApprovalSender = tokio::sync::oneshot::Sender<(String, bool)>;
-/// Type alias for the shared approval channel.
-type ApprovalChannel = std::sync::Arc<tokio::sync::Mutex<Option<ApprovalSender>>>;
+/// Shared map of pending approval requests, keyed by request id. The agent's
+/// approval responder inserts a `oneshot` sender per `Ask` decision;
+/// `respond_approval` resolves it when the user answers.
+pub(crate) type ApprovalChannel = std::sync::Arc<
+    tokio::sync::Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<bool>>>,
+>;
 
 /// Cumulative usage statistics gathered from all agent runs.
 #[derive(Debug, Default, Clone, serde::Serialize)]
@@ -34,6 +36,19 @@ pub struct AppState {
     pub approval_tx: ApprovalChannel,
     pub history: std::sync::Arc<tokio::sync::Mutex<Vec<deepseeknova_core::Message>>>,
     pub usage: std::sync::Arc<tokio::sync::Mutex<CumulativeUsage>>,
+    /// Session-cached config: loaded once per session, cleared on new_session.
+    pub session_config: tokio::sync::Mutex<Option<deepseeknova_config::Config>>,
+    /// Session-cached permission gate. Caching it across prompts preserves its
+    /// per-tool approval decision cache (so the user isn't re-prompted).
+    pub session_gate:
+        tokio::sync::Mutex<Option<std::sync::Arc<deepseeknova_permission::PermissionGate>>>,
+    /// Session-cached MCP tools. Discovered once per session (spawning stdio
+    /// server processes) and reused across prompts; cleared on new_session so
+    /// the connections — and child processes — are released.
+    pub session_mcp_tools:
+        tokio::sync::Mutex<Option<Vec<std::sync::Arc<dyn deepseeknova_core::Tool>>>>,
+    /// Shared multi-agent progress tracker, polled by the UI (fed by delegate engine).
+    pub progress: std::sync::Arc<deepseeknova_core::progress::ProgressTracker>,
 }
 
 pub fn run() {
@@ -47,9 +62,15 @@ pub fn run() {
         .manage(AppState {
             runner: tokio::sync::Mutex::new(None),
             cancel: tokio::sync::Mutex::new(None),
-            approval_tx: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            approval_tx: std::sync::Arc::new(tokio::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
             history: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
             usage: std::sync::Arc::new(tokio::sync::Mutex::new(CumulativeUsage::default())),
+            session_config: tokio::sync::Mutex::new(None),
+            session_gate: tokio::sync::Mutex::new(None),
+            session_mcp_tools: tokio::sync::Mutex::new(None),
+            progress: std::sync::Arc::new(deepseeknova_core::progress::ProgressTracker::new()),
         })
         .invoke_handler(tauri::generate_handler![
             // Core
@@ -64,6 +85,7 @@ pub fn run() {
             commands::sessions::list_sessions,
             commands::sessions::create_session,
             commands::sessions::delete_session,
+            commands::sessions::rename_session,
             // Skills & Providers
             commands::skills::list_skills,
             commands::skills::list_providers,
@@ -91,6 +113,7 @@ pub fn run() {
             commands::mcp::toggle_mcp_server,
             // Sub-Agents
             commands::subagents::list_subagents,
+            commands::subagents::get_orch_progress,
             // Diagnostics
             commands::diagnostics::run_diagnostics,
             // Billing
@@ -105,6 +128,27 @@ pub fn run() {
             // Settings
             commands::settings::save_settings,
             commands::settings::load_settings,
+            commands::settings::get_system_prompt,
+            commands::settings::set_system_prompt,
+            commands::settings::get_reasoning_params,
+            commands::settings::set_reasoning_params,
+            // Review
+            commands::review::get_changed_files,
+            commands::review::accept_file_change,
+            commands::review::reject_file_change,
+            // Worktree
+            commands::worktree::list_worktrees,
+            commands::worktree::switch_worktree,
+            // Triggers
+            commands::triggers::get_triggers,
+            commands::triggers::set_triggers,
+            // Tools
+            commands::tools::list_tools,
+            commands::tools::set_tool_enabled,
+            // Logs
+            commands::logs::get_log_config,
+            commands::logs::set_log_config,
+            commands::logs::export_logs,
             // Shortcuts
             commands::misc::get_shortcuts,
             // Update

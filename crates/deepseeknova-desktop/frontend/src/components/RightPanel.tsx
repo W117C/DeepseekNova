@@ -7,18 +7,14 @@
  * - 记忆：Reasonix 风格的记忆列表，带类型标签
  */
 
-import { useStore } from "../store";
 import { useState } from "react";
 import { useI18n } from "../i18n";
 import TracePanel from "./TracePanel";
 
 export default function RightPanel() {
   const { t } = useI18n();
-  const collapsed = useStore((s) => s.rightCollapsed);
   const [activeTab, setActiveTab] = useState<"files" | "knowledge" | "memory" | "trace">("files");
   const [previewFile, setPreviewFile] = useState<string | null>(null);
-
-  if (collapsed) return null;
 
   const tabs = [
     { id: "files" as const, label: t("panel.files"), icon: "📁" },

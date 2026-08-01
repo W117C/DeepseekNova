@@ -125,7 +125,7 @@ dependencies = [
  "objc2-foundation",
  "parking_lot",
  "percent-encoding",
- "windows-sys 0.60.2",
+ "windows-sys 0.52.0",
  "wl-clipboard-rs",
  "x11rb",
 ]
@@ -274,13 +274,13 @@ checksum = "8b75356056920673b02621b35afd0f7dda9306d03c79a30f5c56c44cf256e3de"
 
 [[package]]
 name = "async-trait"
-version = "0.1.89"
+version = "0.1.91"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9035ad2d096bed7955a320ee7e2230574d28fd3c3a0f186cbea1ff3c7eed5dbb"
+checksum = "ae36dc4177970ef04fde5178d3e2429882def40e57a451f919c098f72baa6cec"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.118",
+ "syn 3.0.3",
 ]
 
 [[package]]
@@ -740,9 +740,9 @@ dependencies = [
 
 [[package]]
 name = "clap"
-version = "4.6.1"
+version = "4.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ddb117e43bbf7dacf0a4190fef4d345b9bad68dfc649cb349e7d17d28428e51"
+checksum = "d91e0c145792ef73a6ad36d27c75ac09f1832222a3c209689d90f534685ee5b7"
 dependencies = [
  "clap_builder",
  "clap_derive",
@@ -750,9 +750,9 @@ dependencies = [
 
 [[package]]
 name = "clap_builder"
-version = "4.6.0"
+version = "4.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "714a53001bf66416adb0e2ef5ac857140e7dc3a0c48fb28b2f10762fc4b5069f"
+checksum = "f09628afdcc538b57f3c6341e9c8e9970f18e4a481690a64974d7023bd33548b"
 dependencies = [
  "anstream",
  "anstyle",
@@ -762,14 +762,14 @@ dependencies = [
 
 [[package]]
 name = "clap_derive"
-version = "4.6.1"
+version = "4.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2ce8604710f6733aa641a2b3731eaa1e8b3d9973d5e3565da11800813f997a9"
+checksum = "d012d2b9d65aca7f18f4d9878a045bc17899bba951561ba5ec3c2ba1eed9a061"
 dependencies = [
  "heck 0.5.0",
  "proc-macro2",
  "quote",
- "syn 2.0.118",
+ "syn 3.0.3",
 ]
 
 [[package]]
@@ -1085,10 +1085,12 @@ dependencies = [
  "async-trait",
  "deepseeknova-context",
  "deepseeknova-core",
+ "deepseeknova-permission",
  "deepseeknova-provider",
  "deepseeknova-security",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -1117,18 +1119,23 @@ name = "deepseeknova-cli"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "deepseeknova-agent",
+ "deepseeknova-checkpoint",
  "deepseeknova-config",
  "deepseeknova-core",
- "deepseeknova-mcp",
- "deepseeknova-orch",
+ "deepseeknova-graph",
  "deepseeknova-provider",
  "deepseeknova-runtime",
+ "deepseeknova-scanner",
  "deepseeknova-security",
  "deepseeknova-serve",
  "deepseeknova-skills",
+ "deepseeknova-store",
+ "deepseeknova-telemetry",
  "deepseeknova-tools",
+ "deepseeknova-tui",
  "dirs",
  "serde_json",
  "tokio",
@@ -1179,6 +1186,7 @@ dependencies = [
  "hex",
  "indexmap 2.14.0",
  "rand 0.8.6",
+ "regex",
  "rusqlite",
  "serde",
  "serde_jcs",
@@ -1199,16 +1207,14 @@ name = "deepseeknova-desktop"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "deepseeknova-agent",
  "deepseeknova-config",
  "deepseeknova-core",
- "deepseeknova-event",
- "deepseeknova-orch",
+ "deepseeknova-permission",
  "deepseeknova-provider",
  "deepseeknova-runtime",
  "deepseeknova-skills",
- "deepseeknova-store",
- "deepseeknova-tools",
  "dirs",
  "libc",
  "reqwest 0.12.28",
@@ -1237,6 +1243,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "deepseeknova-graph"
+version = "0.4.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tracing",
+ "tree-sitter",
+ "tree-sitter-javascript",
+ "tree-sitter-python",
+ "tree-sitter-rust",
+ "tree-sitter-typescript",
+]
+
+[[package]]
 name = "deepseeknova-mcp"
 version = "0.4.0"
 dependencies = [
@@ -1244,36 +1270,13 @@ dependencies = [
  "async-trait",
  "deepseeknova-config",
  "deepseeknova-core",
+ "futures",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tokio",
  "tokio-stream",
  "tracing",
-]
-
-[[package]]
-name = "deepseeknova-orch"
-version = "0.4.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "deepseeknova-agent",
- "deepseeknova-config",
- "deepseeknova-core",
- "deepseeknova-event",
- "deepseeknova-provider",
- "deepseeknova-tools",
- "rand 0.8.6",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tracing",
- "uuid",
 ]
 
 [[package]]
@@ -1281,6 +1284,7 @@ name = "deepseeknova-permission"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "deepseeknova-config",
  "deepseeknova-core",
  "serde",
@@ -1307,6 +1311,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tokio-stream",
+ "toml 0.8.2",
  "tracing",
 ]
 
@@ -1315,15 +1320,22 @@ name = "deepseeknova-runtime"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "deepseeknova-agent",
+ "deepseeknova-checkpoint",
  "deepseeknova-config",
  "deepseeknova-context",
  "deepseeknova-core",
  "deepseeknova-event",
+ "deepseeknova-graph",
+ "deepseeknova-mcp",
  "deepseeknova-permission",
  "deepseeknova-provider",
+ "deepseeknova-sandbox",
  "deepseeknova-security",
  "deepseeknova-tools",
+ "futures",
+ "serde_json",
  "tokio",
  "tracing",
 ]
@@ -1336,6 +1348,23 @@ dependencies = [
  "deepseeknova-core",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "deepseeknova-scanner"
+version = "0.4.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "deepseeknova-core",
+ "deepseeknova-graph",
+ "futures",
+ "regex",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "walkdir",
 ]
 
 [[package]]
@@ -1390,6 +1419,7 @@ version = "0.4.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "deepseeknova-context",
  "deepseeknova-core",
  "serde",
  "serde_json",
@@ -1419,8 +1449,10 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "deepseeknova-agent",
  "deepseeknova-checkpoint",
  "deepseeknova-core",
+ "deepseeknova-graph",
  "deepseeknova-sandbox",
  "deepseeknova-security",
  "glob",
@@ -1716,7 +1748,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2481,7 +2513,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -2721,7 +2753,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3534,7 +3566,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4110,9 +4142,9 @@ dependencies = [
 
 [[package]]
 name = "regex"
-version = "1.12.4"
+version = "1.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1292b7759ae1cb9ec195452d1390a074f0cd8541ab7a5a8c31cd6db45d4a6ba"
+checksum = "f020237b6c8eed93db2e2cb53c00c60a8e1bc73da7d073199a1180401450218d"
 dependencies = [
  "aho-corasick",
  "memchr",
@@ -4122,9 +4154,9 @@ dependencies = [
 
 [[package]]
 name = "regex-automata"
-version = "0.4.14"
+version = "0.4.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e1dd4122fc1595e8162618945476892eefca7b88c52820e74af6262213cae8f"
+checksum = "8fcfdb36bda0c880c5931cdc7a2bcdc8ba4556847b9d912bca70bc94708711ad"
 dependencies = [
  "aho-corasick",
  "memchr",
@@ -4289,7 +4321,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4302,7 +4334,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4853,6 +4885,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
+name = "streaming-iterator"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b2231b7c3057d5e4ad0156fb3dc807d900806020c5ffa3ee6ff2c8c76fb8520"
+
+[[package]]
 name = "string_cache"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4936,6 +4974,17 @@ name = "syn"
 version = "2.0.118"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1b9ae57f904213ebb649ce6895b8a66c66f0203b9319718f69a5612a065b1422"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "unicode-ident",
+]
+
+[[package]]
+name = "syn"
+version = "3.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53e9bae58849f64dfa4f5d5ae372c8341f7305f82a3868709269343628b659a3"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5241,14 +5290,15 @@ dependencies = [
 
 [[package]]
 name = "tauri-plugin-single-instance"
-version = "2.4.2"
+version = "2.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c8f29386f5e9fdc699182388a33ee80a56de436d91b67459e86afef426282af"
+checksum = "b3214becf9ef5783c0ae99a3bb25adf5353a7a16ebf53e74b909e29205735c6c"
 dependencies = [
  "serde",
  "serde_json",
  "tauri",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
  "windows-sys 0.60.2",
  "zbus",
@@ -5364,7 +5414,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5876,6 +5926,65 @@ dependencies = [
  "serde",
  "thiserror 2.0.18",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "tree-sitter"
+version = "0.24.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5387dffa7ffc7d2dae12b50c6f7aab8ff79d6210147c6613561fc3d474c6f75"
+dependencies = [
+ "cc",
+ "regex",
+ "regex-syntax",
+ "streaming-iterator",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-javascript"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf40bf599e0416c16c125c3cec10ee5ddc7d1bb8b0c60fa5c4de249ad34dc1b1"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-language"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "009994f150cc0cd50ff54917d5bc8bffe8cad10ca10d81c34da2ec421ae61782"
+
+[[package]]
+name = "tree-sitter-python"
+version = "0.23.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d065aaa27f3aaceaf60c1f0e0ac09e1cb9eb8ed28e7bcdaa52129cffc7f4b04"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-rust"
+version = "0.23.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca8ccb3e3a3495c8a943f6c3fd24c3804c471fd7f4f16087623c7fa4c0068e8a"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-typescript"
+version = "0.23.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c5f76ed8d947a75cc446d5fccd8b602ebf0cde64ccf2ffa434d873d7a575eff"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
 ]
 
 [[package]]
@@ -6433,7 +6542,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

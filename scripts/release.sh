@@ -69,7 +69,6 @@ LIBS=(
     "deepseeknova-mcp"
     "deepseeknova-tools"
     "deepseeknova-agent"
-    "deepseeknova-orch"
     "deepseeknova-runtime"
 )
 for lib in "${LIBS[@]}"; do

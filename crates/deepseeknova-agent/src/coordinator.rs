@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::agent::ExtensionApplier;
 use crate::SubAgentRunner;
 use deepseeknova_core::executor::{
     DelegateCallback, GraphExecutor, ReflectCallback, ReflectResult, ThinkCallback, ToolCallback,
@@ -11,6 +12,7 @@ use deepseeknova_core::tool::ToolContext;
 use deepseeknova_core::{
     Message, Role, RunEvent, RunEventStream, RunInput, RunOutput, Runner, Tool,
 };
+use deepseeknova_permission::{Decision, PermissionGate};
 use deepseeknova_provider::Provider;
 use deepseeknova_security::context::SecurityContext;
 use serde::{Deserialize, Serialize};
@@ -332,6 +334,10 @@ pub struct CoordinatorRunner {
     workspace_root: PathBuf,
     /// Security context injected into every executor tool execution.
     security: SecurityContext,
+    /// Optional permission gate applied before each executor tool call.
+    permission: Option<Arc<PermissionGate>>,
+    /// Build-time registered extensions injected into executor ToolContexts.
+    extensions: Vec<Arc<ExtensionApplier>>,
 }
 
 impl CoordinatorRunner {
@@ -348,6 +354,8 @@ impl CoordinatorRunner {
             cache_stable_prefix: true,
             workspace_root: std::env::current_dir().unwrap_or_default(),
             security: SecurityContext::with_safe_defaults(),
+            permission: None,
+            extensions: Vec::new(),
         }
     }
 
@@ -412,6 +420,22 @@ impl CoordinatorRunner {
         self.security = security;
         self
     }
+
+    /// Attach a permission gate applied before each executor tool call. The
+    /// coordinator is non-interactive, so an `Ask` decision falls back to allow;
+    /// `Deny` blocks the call.
+    pub fn with_permission_gate(mut self, gate: Arc<PermissionGate>) -> Self {
+        self.permission = Some(gate);
+        self
+    }
+
+    /// Register an extension injected into every executor ToolContext
+    /// (e.g. a shared code-graph index for graph tools).
+    pub fn with_extension<T: std::any::Any + Send + Sync + Clone>(mut self, ext: T) -> Self {
+        self.extensions
+            .push(Arc::new(move |reg| reg.insert(ext.clone())));
+        self
+    }
 }
 
 #[async_trait::async_trait]
@@ -432,6 +456,8 @@ impl Runner for CoordinatorRunner {
         let goal_mode = self.goal_mode;
         let workspace_root = self.workspace_root.clone();
         let security = self.security.clone();
+        let permission = self.permission.clone();
+        let extensions = self.extensions.clone();
 
         tokio::spawn(async move {
             if let Err(e) = run_coordinator(
@@ -444,6 +470,8 @@ impl Runner for CoordinatorRunner {
                 goal_mode,
                 workspace_root,
                 security,
+                permission,
+                extensions,
                 input,
                 &tx,
             )
@@ -472,6 +500,8 @@ async fn run_coordinator(
     goal_mode: bool,
     workspace_root: PathBuf,
     security: SecurityContext,
+    permission: Option<Arc<PermissionGate>>,
+    extensions: Vec<Arc<ExtensionApplier>>,
     input: RunInput,
     tx: &mpsc::Sender<anyhow::Result<RunEvent>>,
 ) -> anyhow::Result<()> {
@@ -541,6 +571,8 @@ async fn run_coordinator(
         sub_agent_runner,
         workspace_root,
         security,
+        permission,
+        extensions,
         planner_reasoning,
     });
 
@@ -718,6 +750,8 @@ struct CoordinatorCallbacks {
     sub_agent_runner: Option<Arc<SubAgentRunner>>,
     workspace_root: PathBuf,
     security: SecurityContext,
+    permission: Option<Arc<PermissionGate>>,
+    extensions: Vec<Arc<ExtensionApplier>>,
     /// Planner's reasoning content to pass as context to executor.
     planner_reasoning: Option<String>,
 }
@@ -768,10 +802,24 @@ impl ToolCallback for CoordinatorCallbacks {
             .get(tool_name)
             .ok_or_else(|| anyhow::anyhow!("unknown tool: {tool_name}"))?;
 
-        let ctx = ToolContext::new(uuid::Uuid::new_v4().to_string())
+        let args_str = serde_json::to_string(args)?;
+
+        // Permission gate (opt-in). Non-interactive, so `Ask` falls back to
+        // allow; `Deny` blocks the call.
+        if let Some(gate) = &self.permission {
+            if matches!(gate.check(tool.as_ref(), &args_str), Decision::Deny) {
+                return Ok(format!(
+                    "Error: tool '{tool_name}' blocked by permission policy"
+                ));
+            }
+        }
+
+        let mut ctx = ToolContext::new(uuid::Uuid::new_v4().to_string())
             .with_workspace(self.workspace_root.clone())
             .with_extension(self.security.clone());
-        let args_str = serde_json::to_string(args)?;
+        for apply in &self.extensions {
+            apply(&mut ctx.extensions);
+        }
         tool.execute(&ctx, &args_str).await
     }
 }
