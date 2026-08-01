@@ -14,6 +14,11 @@ All notable changes to DeepseekNova will be documented in this file.
 
 ### Added
 
+- **代码图多跳推理（CodeGraph 式增强）**：新增 `Dispatch` 边把 Rust trait 方法桥接到
+  全部同名 impl 方法（`dyn Trait` / 泛型调用点可列出候选实现，名称级匹配）；新增三个
+  只读工具 `trace_code`（多跳调用链，深度上限 6 并标注截断）、`impact_code`（按文件
+  聚合的影响面/重构爆炸半径）、`explore_code`（按文件分组的行号源码）；运行时在
+  `[graph] enabled` 时注册并更新检索策略提示词。
 - **系统提示词体系**：主 agent 新增英文默认系统提示词（决策引擎 + Observe→Plan→
   Tool→Verify→Reflect→Next Action 六阶段循环），未配置 `system_prompt` 时自动启用、
   配置覆盖优先；plan_mode/planner/delegate×4/review/compaction/scanner/图检索提示词

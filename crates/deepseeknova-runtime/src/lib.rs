@@ -27,7 +27,10 @@ whole-file reads:\n\
 1. `search_code` to locate candidate symbols/entities by name or keyword;\n\
 2. `traverse_graph` to inspect callers/callees;\n\
 3. `retrieve_entity` (view=skeleton) to inspect structure, then view=full or \
-read_file once the target is confirmed.";
+read_file once the target is confirmed;\n\
+4. `trace_code` to follow multi-hop call chains, including dynamic dispatch;\n\
+5. `impact_code` to estimate the blast radius of a refactor;\n\
+6. `explore_code` to read several entities' source grouped by file.";
 
 /// A3 从用户输入提取 repo map 个性化 seeds：标识符 token（≥3 字符、
 /// 去停用词、去重、上限 8），用于对图节点做 personalized PageRank。
@@ -402,6 +405,13 @@ pub fn build_agent_with_role_providers(
     // 句柄提升到外层，供主 agent 与子代理共享（delegate 需要）。
     let mut graph_ext: Option<deepseeknova_tools::GraphHandle> = None;
     let mut memory_ext: Option<deepseeknova_tools::MemoryHandle> = None;
+
+    // 高级图查询工具（trace_code / impact_code / explore_code）：仅在代码图启用时
+    // 注册，与三个基础图工具「禁用时不可见」的行为等价。注册点保持在 runtime，
+    // 不改动 all_builtin 工具列表（其 schema 预算测试在 tools crate 内冻结）。
+    if config.graph.enabled {
+        register(&mut agent, deepseeknova_tools::graph_query_tools());
+    }
 
     // ── 代码图：可选、后台构建、注入检索工具句柄与检索策略提示 ──
     // Open the on-disk index synchronously (cheap: just opens SQLite), then
@@ -1121,6 +1131,9 @@ mod tests {
         assert!(names.iter().any(|n| n == "search_code"));
         assert!(names.iter().any(|n| n == "traverse_graph"));
         assert!(names.iter().any(|n| n == "retrieve_entity"));
+        assert!(names.iter().any(|n| n == "trace_code"));
+        assert!(names.iter().any(|n| n == "impact_code"));
+        assert!(names.iter().any(|n| n == "explore_code"));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1133,6 +1146,9 @@ mod tests {
         assert!(!agent.tool_names().iter().any(|n| n == "search_code"));
         assert!(!agent.tool_names().iter().any(|n| n == "traverse_graph"));
         assert!(!agent.tool_names().iter().any(|n| n == "retrieve_entity"));
+        assert!(!agent.tool_names().iter().any(|n| n == "trace_code"));
+        assert!(!agent.tool_names().iter().any(|n| n == "impact_code"));
+        assert!(!agent.tool_names().iter().any(|n| n == "explore_code"));
     }
 
     #[tokio::test]
