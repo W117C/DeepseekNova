@@ -806,9 +806,19 @@ impl Tool for DepsCodeTool {
             Some("dependents") => "dependents",
             _ => "both",
         };
+        // entity 支持符号名或文件路径（如 src/main.js）：符号解析失败时按路径找文件节点。
         let (path, _, _) = match idx.location(entity) {
             Ok(loc) => loc,
-            Err(e) => return Ok(graph_error_message("locating the entity", &e)),
+            Err(_) => match idx.file_node(entity) {
+                Ok(Some(_)) => (entity.to_string(), 0, 0),
+                Ok(None) => {
+                    return Ok(graph_error_message(
+                        "locating the entity",
+                        &GraphError::EntityNotFound(entity.to_string()),
+                    ))
+                }
+                Err(e) => return Ok(graph_error_message("locating the entity", &e)),
+            },
         };
         let file_id = match idx.file_node(&path) {
             Ok(Some(id)) => id,
@@ -1146,6 +1156,30 @@ mod tests {
             .await
             .unwrap();
         assert!(out.contains("src/main.js"), "依赖方应含 main.js：{out}");
+    }
+
+    #[tokio::test]
+    async fn deps_code_accepts_file_path_entity() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/main.js"),
+            "import x from './util.js';\nexport function main_fn() { x(); }\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/util.js"), "export const x = 1;\n").unwrap();
+        let ctx = ctx_with_index(root);
+
+        let out = DepsCodeTool
+            .execute(&ctx, r#"{"entity":"src/main.js","direction":"deps"}"#)
+            .await
+            .unwrap();
+        assert!(out.contains("文件: src/main.js"), "{out}");
+        assert!(
+            out.contains("util.js"),
+            "文件路径实体应解析出文件依赖：{out}"
+        );
     }
 
     #[tokio::test]
