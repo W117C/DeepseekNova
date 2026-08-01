@@ -227,9 +227,21 @@ impl TuiRunner {
         // Spawn input reader（阻塞线程，crossterm 事件源）。
         let input_tx = tx.clone();
         tokio::task::spawn_blocking(move || {
-            while let Ok(event) = event::read() {
-                if input_tx.blocking_send(AppEvent::Input(event)).is_err() {
+            loop {
+                // TUI 退出后接收端关闭，轮询退出，避免进程悬挂在 event::read。
+                if input_tx.is_closed() {
                     break;
+                }
+                match event::poll(std::time::Duration::from_millis(100)) {
+                    Ok(true) => {
+                        if let Ok(event) = event::read() {
+                            if input_tx.blocking_send(AppEvent::Input(event)).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(_) => break,
                 }
             }
         });

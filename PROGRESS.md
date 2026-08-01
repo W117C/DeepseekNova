@@ -20,6 +20,9 @@
 - PR: https://github.com/W117C/DeepseekNova/pull/53
 - 本地：feat/tui-complete @ cbca2ef，工作树干净；main 未动
 
+## 追加修复（实测发现）
+- Esc 退出后进程悬挂：stdin 读取线程阻塞在 event::read，tokio 停机等待 → 已改为 poll(100ms)+is_closed 轮询，Esc 干净退出（PTY 实测 code 0）。
+
 ## 任务 3/4 备注
 - /undo 采用 trait 接法（备选 A）：TUI 定义 UndoController，CLI 在 crates/deepseeknova-cli/src/tui_undo.rs 用 CheckpointManager 实现，每次调用重新 load_from 磁盘，天然支持 &self 与多进程共享。
 - /resume 的 StoredMessage.role 是 String（"user"/"assistant"/"system"/"tool"），按字符串映射，tool 归 System 展示。
