@@ -17,6 +17,7 @@ ratatui = { workspace = true }
 crossterm = { workspace = true }
 deepseeknova-core = { workspace = true }
 deepseeknova-provider = { workspace = true }
+async-trait = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }

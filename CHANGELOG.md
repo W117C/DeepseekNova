@@ -22,6 +22,10 @@ All notable changes to DeepseekNova will be documented in this file.
   `/model effort <level>`、`/model thinking`、`/model switch <name>`、
   `/model use <role> <name>`（角色指针热切）、`/cost`（按模型×角色输出
   token 用量与美元估算）。
+- **TUI 会话管理**：新增 `SessionController` trait（CLI 用 ChatPersistence
+  实现），支持 `/new`（清空历史并更换 session id）、`/sessions`（列出并标记
+  当前会话）、`/resume <id>`（恢复历史到共享缓冲）；每个完成回合自动落盘
+  （用户 prompt + 助手输出），与 REPL 同一 JSONL 会话存储。
 
 - **检查点上线（A1）**：`[checkpoint]` 配置（默认开）把 CheckpointManager 装配进
   write/edit/move 工具（写前快照），快照持久化为 JSONL（跨进程可回滚）；新增 CLI

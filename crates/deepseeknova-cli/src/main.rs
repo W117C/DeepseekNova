@@ -301,6 +301,16 @@ async fn main() -> anyhow::Result<()> {
                 use deepseeknova_provider::factory::ReasoningEffort;
                 let history: Arc<tokio::sync::Mutex<Vec<deepseeknova_core::Message>>> =
                     Arc::new(tokio::sync::Mutex::new(Vec::new()));
+                // 会话管理：/new /sessions /resume + 回合落盘（与 REPL 同一持久化）。
+                let session_controller =
+                    build_chat_persistence(sessions_root(&config), history.clone(), false)
+                        .await
+                        .map(|p| {
+                            Arc::new(TuiSessionController {
+                                persist: tokio::sync::Mutex::new(p),
+                            })
+                                as Arc<dyn deepseeknova_tui::SessionController>
+                        });
                 let factory_router = Arc::clone(&model_router);
                 let cfg = config.clone();
                 let hist = history.clone();
@@ -332,6 +342,9 @@ async fn main() -> anyhow::Result<()> {
                     .with_model_router(Arc::clone(&model_router))
                     .with_baseline_effort(baseline_effort)
                     .with_current_model(model.clone());
+                if let Some(ctrl) = session_controller {
+                    tui = tui.with_session_controller(ctrl);
+                }
                 tui.run().await?;
                 return Ok(());
             }
@@ -856,6 +869,97 @@ async fn build_chat_persistence(
         turn,
         history,
     })
+}
+
+/// TUI 会话控制器：把 REPL 的 ChatPersistence 适配到 TUI 的 `/new` `/sessions`
+/// `/resume` 与回合落盘（TUI crate 不依赖 CLI 类型）。
+struct TuiSessionController {
+    persist: tokio::sync::Mutex<chat::ChatPersistence>,
+}
+
+#[async_trait::async_trait]
+impl deepseeknova_tui::SessionController for TuiSessionController {
+    async fn new_session(&self) -> anyhow::Result<()> {
+        let mut p = self.persist.lock().await;
+        p.history.lock().await.clear();
+        p.session_id = deepseeknova_store::new_session_id();
+        p.turn = 0;
+        Ok(())
+    }
+
+    async fn list_sessions(&self) -> anyhow::Result<Vec<String>> {
+        let p = self.persist.lock().await;
+        p.store.list_sessions()
+    }
+
+    async fn current_session(&self) -> Option<String> {
+        let p = self.persist.lock().await;
+        Some(p.session_id.clone())
+    }
+
+    async fn resume(&self, id: &str) -> anyhow::Result<usize> {
+        let mut p = self.persist.lock().await;
+        let turns = p.store.load(id)?;
+        if turns.is_empty() {
+            anyhow::bail!("session '{id}' is empty or does not exist");
+        }
+        let mut hist = p.history.lock().await;
+        hist.clear();
+        for t in &turns {
+            for m in &t.messages {
+                hist.push(m.into());
+            }
+        }
+        let restored = hist.len();
+        drop(hist);
+        p.session_id = id.to_string();
+        p.turn = turns.len() as u64;
+        Ok(restored)
+    }
+
+    async fn record_turn(
+        &self,
+        prompt: &str,
+        output_text: &str,
+        model: Option<String>,
+    ) -> anyhow::Result<()> {
+        let mut p = self.persist.lock().await;
+        p.turn += 1;
+        let messages = vec![
+            deepseeknova_core::Message {
+                role: deepseeknova_core::Role::User,
+                content: prompt.to_string(),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+            deepseeknova_core::Message {
+                role: deepseeknova_core::Role::Assistant,
+                content: output_text.to_string(),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+        ];
+        let stored_input = RunInput {
+            prompt: prompt.to_string(),
+            images: Vec::new(),
+            model_override: model,
+        };
+        let stored_turn = deepseeknova_store::SessionStore::build_turn(
+            &stored_input,
+            p.turn,
+            messages,
+            Some(deepseeknova_store::StoredOutput {
+                text: output_text.to_string(),
+                tool_calls: Vec::new(),
+            }),
+        );
+        p.store.append(&p.session_id, &stored_turn)?;
+        Ok(())
+    }
 }
 
 /// Stream events from any [`Runner`] to stdout in a consistent format.
