@@ -99,10 +99,7 @@ mod tests {
             timeout: Duration::from_millis(300),
         };
         // 不存在的命令 → spawn 失败或 shell 立即退出，都算未连接
-        match probe
-            .probe_one("definitely-no-such-command-xyz", &[])
-            .await
-        {
+        match probe.probe_one("definitely-no-such-command-xyz", &[]).await {
             McpStatus::Disconnected(_) => {}
             other => panic!("expected disconnected, got {other:?}"),
         }
@@ -116,10 +113,7 @@ mod tests {
         };
         // sh -c "printf ok; sleep 5"：整个字符串是单个 argv，不能被 shell 再拆
         match probe
-            .probe_one(
-                "sh",
-                &["-c".to_string(), "printf ok; sleep 5".to_string()],
-            )
+            .probe_one("sh", &["-c".to_string(), "printf ok; sleep 5".to_string()])
             .await
         {
             McpStatus::Connected => {}
