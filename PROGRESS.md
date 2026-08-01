@@ -60,3 +60,16 @@
 
 ## 决策记录（建议/偏离）
 - 任务 0 的 metadata --locked 预期调整见上（补录已发生，非未做）。
+
+## 任务书：Context7 文档检索（context7_docs）— 开工回执（2026-08-02）
+- 理解的目标：新增只读工具 context7_docs（库名+主题 → Context7 文档片段），域名固定 context7.com、NetworkAccess 把关、错误全转友好提示；runtime 常驻注册；文档同步；PR 提交。
+- 顺序：任务 0 基线 → 1 docs_tools.rs（URL 构造/解析/截断/域名校验纯函数 + 本地 TcpListener 端到端）→ 2 lib.rs 两行 + runtime 注册 + 断言 → 3 文档/反向验证/分支 PR。
+- 最大风险：本地 HTTP 端到端测试首次引入（tokio net 已在依赖内）；schema 预算测试不可碰 → 工具不进 all_builtin；PR #54 未合入导致基线数字与书不一致（见 BLOCKED.md）。
+- 基线证据（本轮实测）：main@dd373e1 工作树干净；make check EXIT=0；tools 45+12+7 绿 0 ignored；runtime 26 绿；schema 预算 4624/5000。
+- 决策：注册走 runtime（与 graph 工具同款），tools/src/lib.rs 只加模块声明与 pub use；不在 main 上叠加 PR #54。
+
+## 任务状态（Context7 文档检索）
+- [x] 任务 1：docs_tools.rs（Context7DocsTool + search/context URL 构造、first_result 解析、UTF-8 安全截断、域名固定纯函数 + 本地 TcpListener 端到端 3 条：成功/空结果/HTTP 500）；共 9 条新测试，全绿。
+- [x] 任务 2：tools/src/lib.rs 仅加 pub mod docs_tools; 与 pub use；runtime 在工具注册区常驻 register(docs_tools())，disabled 过滤沿用 register 闭包；memory 注册测试追加 context7_docs 断言（只加不改）；schema 预算测试原样且绿。
+- [x] 任务 3：GUIDE Library Docs 节（参数/来源/禁用方式）、tools README、CHANGELOG Added；cargo fmt + make check EXIT=0；反向验证：改坏 first_result 断言 → 红（1 failed）→ 还原 → 绿（tools 54+12+7、runtime 26）。
+- 跨 crate 协议记录（AGENTS.md §1）：预扫描=不碰 security/config/既有断言（memory 测试仅追加断言）、不新增外部依赖（reqwest/url/serde_json 均在 tools 依赖内）；备选路径 A=进 all_builtin 列表（实测 schema 预算 4624+约 400 > 5000，预算测试不可改）vs B=runtime 常驻注册（任务书拍板）——选 B；自检=单 crate 测试 + make check + 反向验证红→绿。

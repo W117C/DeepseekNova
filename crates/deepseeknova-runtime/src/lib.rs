@@ -395,6 +395,10 @@ pub fn build_agent_with_role_providers(
         );
     }
 
+    // 文档检索工具（context7_docs）：常驻注册，与 web_fetch 同级；执行时由
+    // NetworkAccess 能力把关，用户可用 tools.overrides 禁用。
+    register(&mut agent, deepseeknova_tools::docs_tools());
+
     // Dynamically-discovered tools (MCP, etc). Same disable-filter as built-ins;
     // their namespaced names (`mcp__server__tool`) can be toggled via overrides.
     register(&mut agent, extra_tools);
@@ -1147,6 +1151,10 @@ mod tests {
         let names = agent.tool_names();
         assert!(names.iter().any(|n| n == "recall"));
         assert!(names.iter().any(|n| n == "remember"));
+        assert!(
+            names.iter().any(|n| n == "context7_docs"),
+            "文档检索工具应常驻注册"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

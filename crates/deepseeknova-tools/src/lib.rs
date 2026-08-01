@@ -5,6 +5,7 @@
 //! Each tool implements the `Tool` trait with security-aware execution.
 
 pub mod delegate;
+pub mod docs_tools;
 pub mod fs;
 pub mod glob;
 pub mod graph_tools;
@@ -17,6 +18,7 @@ pub mod todo;
 pub mod web_fetch;
 
 pub use delegate::*;
+pub use docs_tools::*;
 pub use fs::*;
 pub use glob::*;
 pub use graph_tools::*;

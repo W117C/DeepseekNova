@@ -249,6 +249,18 @@ Coordinator 模式（`run --planner-model ...`）现在同样接入代码图索�
 |---|---|---|
 | `web_fetch` | Fetch and parse a URL | Yes |
 
+### Library Docs
+
+| Tool | Description | Read-only |
+|---|---|---|
+| `context7_docs` | Fetch latest third-party library docs snippets from Context7 | Yes |
+
+参数：`library`（库名，如 `serde`）、`query`（主题，如 `derive Serialize`）、
+`library_id`（可选，Context7 库 id，形如 `/serde-rs/serde`，提供后跳过搜索）、
+`max_chars`（输出上限，默认 6000）。文档来自 context7.com 公开索引的官方仓库与
+网站；无需 API key。端点固定 `context7.com`，执行需网络能力；可用
+`[tools] overrides` 把 `context7_docs` 标记为 disabled 来禁用（与其它内置工具同机制）。
+
 ### Memory
 
 | Tool | Description | Read-only |
