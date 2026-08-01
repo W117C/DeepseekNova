@@ -26,6 +26,12 @@ All notable changes to DeepseekNova will be documented in this file.
   实现），支持 `/new`（清空历史并更换 session id）、`/sessions`（列出并标记
   当前会话）、`/resume <id>`（恢复历史到共享缓冲）；每个完成回合自动落盘
   （用户 prompt + 助手输出），与 REPL 同一 JSONL 会话存储。
+- **TUI 完善**：命令面补齐 `/skills`（技能目录可配）、`/mcp`（列出已启用
+  server）、`/raw`（normal/lite/raw 显示模式）、`/undo`（新增 UndoController
+  trait，CLI 经 CheckpointManager 实现 `/undo` `/undo all` `/undo list`）；
+  输入升级为带可见光标的单行编辑（←/→/Home/End/Delete/Ctrl+U/Ctrl+W，
+  UTF-8 安全、超宽横向跟随）；运行事件按代际隔离，旧回合残留流不串台、
+  不触发落盘；`/resume` 恢复后把历史渲染进对话面板；GUIDE/TUI README 同步。
 
 - **检查点上线（A1）**：`[checkpoint]` 配置（默认开）把 CheckpointManager 装配进
   write/edit/move 工具（写前快照），快照持久化为 JSONL（跨进程可回滚）；新增 CLI

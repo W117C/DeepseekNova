@@ -8,7 +8,10 @@
 //! - deterministic verification (`✓` / `✗`)
 //! - pauses, errors, approval requests
 //! - status bar with model, phase, token usage and scrollback position
-//! - input history, scrollback, `/help` `/clear` `/quit`, Ctrl+C cancel
+//! - single-line input editing with a visible cursor (←/→/Home/End/Delete/
+//!   Ctrl+U/Ctrl+W), input history, scrollback, Ctrl+C cancel
+//! - slash commands: `/help` `/clear` `/quit` `/new` `/sessions` `/resume`
+//!   `/model` `/cost` `/skills` `/mcp` `/raw` `/undo`
 //!
 //! ```no_run
 //! use deepseeknova_tui::TuiRunner;
@@ -40,6 +43,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -67,6 +71,12 @@ pub struct TuiRunner {
     current_model: Option<String>,
     /// 可选会话控制器：启用 `/new` `/sessions` `/resume` 与回合落盘。
     session: Option<Arc<dyn SessionController>>,
+    /// `/skills` 扫描的技能目录（默认 `.deepseeknova/skills`、`.agents/skills`）。
+    skills_paths: Vec<PathBuf>,
+    /// `/mcp` 展示的已启用 MCP server 名（由 CLI 从配置传入）。
+    mcp_servers: Vec<String>,
+    /// 可选撤销控制器：启用 `/undo` `/undo all` `/undo list`。
+    undo: Option<Arc<dyn UndoController>>,
 }
 
 /// agent 重建工厂类型。
@@ -85,8 +95,8 @@ pub trait SessionController: Send + Sync {
     async fn list_sessions(&self) -> anyhow::Result<Vec<String>>;
     /// 当前会话 id。
     async fn current_session(&self) -> Option<String>;
-    /// 恢复指定会话到共享历史，返回恢复的消息数。
-    async fn resume(&self, id: &str) -> anyhow::Result<usize>;
+    /// 恢复指定会话到共享历史，返回可渲染的消息行。
+    async fn resume(&self, id: &str) -> anyhow::Result<Vec<ResumedLine>>;
     /// 落盘一个已完成回合（用户 prompt + 助手输出）。
     async fn record_turn(
         &self,
@@ -94,6 +104,31 @@ pub trait SessionController: Send + Sync {
         output_text: &str,
         model: Option<String>,
     ) -> anyhow::Result<()>;
+}
+
+/// 恢复会话中的一条消息。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumedLine {
+    pub role: ResumedRole,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumedRole {
+    User,
+    Assistant,
+    System,
+}
+
+/// 撤销控制器（由 CLI 用 CheckpointManager 实现，TUI 不依赖 config crate）。
+#[async_trait]
+pub trait UndoController: Send + Sync {
+    /// 快照列表（每行已是可展示文本，含 ✓/✗ 状态）。
+    async fn list(&self) -> anyhow::Result<Vec<String>>;
+    /// 回滚最近一个快照；无快照时返回 `None`。
+    async fn rollback_one(&self) -> anyhow::Result<Option<String>>;
+    /// 回滚全部快照，返回回滚数量。
+    async fn rollback_all(&self) -> anyhow::Result<usize>;
 }
 
 impl TuiRunner {
@@ -108,6 +143,12 @@ impl TuiRunner {
             current_effort: ReasoningEffort::High,
             current_model: None,
             session: None,
+            skills_paths: vec![
+                PathBuf::from(".deepseeknova/skills"),
+                PathBuf::from(".agents/skills"),
+            ],
+            mcp_servers: Vec::new(),
+            undo: None,
         }
     }
 
@@ -154,6 +195,24 @@ impl TuiRunner {
         self
     }
 
+    /// 指定 `/skills` 扫描的技能目录（默认为 `.deepseeknova/skills`、`.agents/skills`）。
+    pub fn with_skills_paths(mut self, paths: Vec<PathBuf>) -> Self {
+        self.skills_paths = paths;
+        self
+    }
+
+    /// 指定 `/mcp` 展示的已启用 MCP server 名。
+    pub fn with_mcp_servers(mut self, servers: Vec<String>) -> Self {
+        self.mcp_servers = servers;
+        self
+    }
+
+    /// 提供撤销控制器，启用 `/undo` `/undo all` `/undo list`。
+    pub fn with_undo_controller(mut self, controller: Arc<dyn UndoController>) -> Self {
+        self.undo = Some(controller);
+        self
+    }
+
     /// Enter the TUI and block until the user quits.
     pub async fn run(&mut self) -> anyhow::Result<()> {
         let mut terminal = ratatui::init();
@@ -180,6 +239,7 @@ impl TuiRunner {
             ..Default::default()
         };
         let mut current_run: Option<JoinHandle<()>> = None;
+        let mut session = RunSession::default();
 
         loop {
             terminal.draw(|f| app.draw(f))?;
@@ -210,6 +270,7 @@ impl TuiRunner {
                                         app.push_line(LineKind::User, &prompt);
                                         let tx = tx.clone();
                                         let runner = self.runner.clone();
+                                        let gen = session.begin();
                                         current_run = Some(tokio::spawn(async move {
                                             let input = RunInput {
                                                 prompt,
@@ -220,22 +281,33 @@ impl TuiRunner {
                                                 Ok(mut stream) => {
                                                     while let Some(event) = stream.next().await {
                                                         let ev = match event {
-                                                            Ok(e) => AppEvent::Runner(e),
-                                                            Err(e) => AppEvent::Runner(RunEvent::TextDelta(
-                                                                format!("\n❌ {e}")
-                                                            )),
+                                                            Ok(e) => e,
+                                                            Err(e) => RunEvent::TextDelta(
+                                                                format!("\n❌ {e}"),
+                                                            ),
                                                         };
-                                                        if tx.send(ev).await.is_err() {
+                                                        if tx
+                                                            .send(AppEvent::Runner { gen, ev })
+                                                            .await
+                                                            .is_err()
+                                                        {
                                                             break;
                                                         }
                                                     }
-                                                    let _ = tx.send(AppEvent::Done).await;
+                                                    let _ =
+                                                        tx.send(AppEvent::Done { gen }).await;
                                                 }
                                                 Err(e) => {
-                                                    let _ = tx.send(AppEvent::Runner(
-                                                        RunEvent::TextDelta(format!("\n❌ {e}"))
-                                                    )).await;
-                                                    let _ = tx.send(AppEvent::Done).await;
+                                                    let _ = tx
+                                                        .send(AppEvent::Runner {
+                                                            gen,
+                                                            ev: RunEvent::TextDelta(format!(
+                                                                "\n❌ {e}"
+                                                            )),
+                                                        })
+                                                        .await;
+                                                    let _ =
+                                                        tx.send(AppEvent::Done { gen }).await;
                                                 }
                                             }
                                         }));
@@ -243,6 +315,7 @@ impl TuiRunner {
                                     KeyAction::Cancel => {
                                         if let Some(handle) = current_run.take() {
                                             handle.abort();
+                                            session.cancel();
                                             app.running = false;
                                             app.push_line(LineKind::System, "已取消（Ctrl+C）");
                                         }
@@ -251,7 +324,10 @@ impl TuiRunner {
                                 }
                             }
                             AppEvent::Input(_) => {}
-                            AppEvent::Runner(ev) => {
+                            AppEvent::Runner { gen, ev } => {
+                                if !session.accepts(gen) {
+                                    continue;
+                                }
                                 // 回合完成时落盘（用户 prompt + 助手输出），供 /sessions /resume。
                                 if let RunEvent::Done(ref output) = ev {
                                     if let Some(ctrl) = &self.session {
@@ -275,7 +351,10 @@ impl TuiRunner {
                                 }
                                 app.apply_run_event(ev);
                             }
-                            AppEvent::Done => {
+                            AppEvent::Done { gen } => {
+                                if !session.finish(gen) {
+                                    continue;
+                                }
                                 app.flush_all();
                                 app.running = false;
                                 current_run = None;
@@ -300,6 +379,18 @@ impl TuiRunner {
             }
             "cost" => {
                 self.handle_cost(app);
+                false
+            }
+            "skills" => {
+                self.handle_skills(app);
+                false
+            }
+            "mcp" => {
+                self.handle_mcp(app);
+                false
+            }
+            "undo" => {
+                self.handle_undo(app, rest).await;
                 false
             }
             "new" => {
@@ -350,13 +441,21 @@ impl TuiRunner {
                 let target = rest.trim();
                 match &self.session {
                     Some(ctrl) if !target.is_empty() => match ctrl.resume(target).await {
-                        Ok(n) => {
+                        Ok(lines) => {
                             app.clear_display();
                             app.last_prompt = None;
                             app.push_line(
                                 LineKind::System,
-                                &format!("已恢复 '{target}' — {n} 条消息"),
+                                &format!("已恢复 '{target}' — {} 条消息", lines.len()),
                             );
+                            for line in lines {
+                                let kind = match line.role {
+                                    ResumedRole::User => LineKind::User,
+                                    ResumedRole::Assistant => LineKind::Agent,
+                                    ResumedRole::System => LineKind::System,
+                                };
+                                app.push_line(kind, &line.text);
+                            }
                         }
                         Err(e) => app.push_line(LineKind::Error, &format!("恢复会话失败: {e}")),
                     },
@@ -542,6 +641,91 @@ impl TuiRunner {
         }
     }
 
+    fn handle_skills(&self, app: &mut AppState) {
+        let mut found = false;
+        for path in &self.skills_paths {
+            let loader = deepseeknova_skills::SkillLoader::new(path);
+            match loader.load_all() {
+                Ok(skills) if !skills.is_empty() => {
+                    if !found {
+                        app.push_line(LineKind::System, "可用技能:");
+                        found = true;
+                    }
+                    for skill in &skills {
+                        app.push_line(
+                            LineKind::System,
+                            &format!("  • {} — {}", skill.name, skill.description),
+                        );
+                        if !skill.tools_allowed.is_empty() {
+                            app.push_line(
+                                LineKind::System,
+                                &format!("    tools: {}", skill.tools_allowed.join(", ")),
+                            );
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => app.push_line(
+                    LineKind::Error,
+                    &format!("加载技能失败 {}: {e}", path.display()),
+                ),
+            }
+        }
+        if !found {
+            app.push_line(
+                LineKind::System,
+                "（未找到技能，可创建 .md 文件放到 .deepseeknova/skills/）",
+            );
+        }
+    }
+
+    fn handle_mcp(&self, app: &mut AppState) {
+        if self.mcp_servers.is_empty() {
+            app.push_line(LineKind::System, "未配置 MCP 服务器");
+            app.push_line(
+                LineKind::System,
+                "在 deepseeknova.toml 的 [mcp] servers 中配置后重启生效",
+            );
+            return;
+        }
+        app.push_line(LineKind::System, "已配置 MCP 服务器:");
+        for name in &self.mcp_servers {
+            app.push_line(LineKind::System, &format!("  • {name}"));
+        }
+    }
+
+    async fn handle_undo(&self, app: &mut AppState, args: &str) {
+        let Some(ctrl) = &self.undo else {
+            app.push_line(LineKind::System, "撤销不可用（未提供 UndoController）");
+            return;
+        };
+        match args.trim() {
+            "" => match ctrl.rollback_one().await {
+                Ok(Some(msg)) => app.push_line(LineKind::System, &format!("✓ {msg}")),
+                Ok(None) => app.push_line(LineKind::System, "没有可回滚的快照"),
+                Err(e) => app.push_line(LineKind::Error, &format!("撤销失败: {e}")),
+            },
+            "all" => match ctrl.rollback_all().await {
+                Ok(n) => app.push_line(LineKind::System, &format!("已全部回滚 {n} 个快照")),
+                Err(e) => app.push_line(LineKind::Error, &format!("撤销失败: {e}")),
+            },
+            "list" => match ctrl.list().await {
+                Ok(lines) if !lines.is_empty() => {
+                    app.push_line(LineKind::System, "快照列表:");
+                    for line in lines {
+                        app.push_line(LineKind::System, &format!("  {line}"));
+                    }
+                }
+                Ok(_) => app.push_line(LineKind::System, "（没有快照）"),
+                Err(e) => app.push_line(LineKind::Error, &format!("列出快照失败: {e}")),
+            },
+            other => app.push_line(
+                LineKind::Error,
+                &format!("未知参数: {other}（用法: /undo | /undo all | /undo list）"),
+            ),
+        }
+    }
+
     /// 用工厂重建 runner（/model 系列命令）。失败只提示，不破坏当前会话。
     fn rebuild_runner(
         &mut self,
@@ -615,10 +799,168 @@ enum LineKind {
     Paused,
 }
 
+/// 对话面板显示模式（`/raw` 循环切换）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum DisplayMode {
+    #[default]
+    Normal,
+    Lite,
+    Raw,
+}
+
 #[derive(Debug, Clone)]
 struct UiLine {
     kind: LineKind,
     text: String,
+}
+
+/// 输入框状态：文本 + 光标（字节下标，始终停在 UTF-8 字符边界上）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct InputState {
+    text: String,
+    cursor: usize,
+}
+
+impl InputState {
+    fn set_text(&mut self, text: String) {
+        self.cursor = text.len();
+        self.text = text;
+    }
+
+    fn clear(&mut self) {
+        self.text.clear();
+        self.cursor = 0;
+    }
+
+    fn insert_char(&mut self, c: char) {
+        self.text.insert(self.cursor, c);
+        self.cursor += c.len_utf8();
+    }
+
+    fn backspace(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        let prev = self.text[..self.cursor]
+            .char_indices()
+            .next_back()
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        self.text.replace_range(prev..self.cursor, "");
+        self.cursor = prev;
+    }
+
+    fn delete(&mut self) {
+        if self.cursor >= self.text.len() {
+            return;
+        }
+        let next = self.text[self.cursor..]
+            .char_indices()
+            .nth(1)
+            .map(|(i, _)| self.cursor + i)
+            .unwrap_or(self.text.len());
+        self.text.replace_range(self.cursor..next, "");
+    }
+
+    fn move_left(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        self.cursor = self.text[..self.cursor]
+            .char_indices()
+            .next_back()
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+    }
+
+    fn move_right(&mut self) {
+        if self.cursor >= self.text.len() {
+            return;
+        }
+        let width = self.text[self.cursor..]
+            .chars()
+            .next()
+            .map(char::len_utf8)
+            .unwrap_or(0);
+        self.cursor += width;
+    }
+
+    fn home(&mut self) {
+        self.cursor = 0;
+    }
+
+    fn end(&mut self) {
+        self.cursor = self.text.len();
+    }
+
+    /// Ctrl+W：删除光标前一段词（含光标前的空白），留下词前的分隔空白。
+    fn delete_word_before(&mut self) {
+        let before = &self.text[..self.cursor];
+        let end = before.trim_end_matches(char::is_whitespace).len();
+        let start = before[..end]
+            .rfind(char::is_whitespace)
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        self.text.replace_range(start..self.cursor, "");
+        self.cursor = start;
+    }
+
+    /// 可见窗口：让光标始终落在 `width` 内；返回（文本起点, 可见片段）。
+    fn visible_window(&self, width: usize) -> (usize, &str) {
+        let width = width.max(1);
+        if self.text.len() <= width {
+            return (0, self.text.as_str());
+        }
+        let raw_start = if self.cursor < width {
+            0
+        } else {
+            self.cursor - width + 1
+        };
+        let start = floor_char_boundary(&self.text, raw_start);
+        let raw_end = (start + width).min(self.text.len());
+        let end = floor_char_boundary(&self.text, raw_end).max(start);
+        (start, &self.text[start..end])
+    }
+
+    /// 光标相对 `start` 的显示列（按 Unicode 宽度计，中文算 2 列）。
+    fn cursor_column(&self, start: usize) -> u16 {
+        Line::from(self.text[start..self.cursor].to_string()).width() as u16
+    }
+}
+
+fn floor_char_boundary(s: &str, mut idx: usize) -> usize {
+    if idx >= s.len() {
+        return s.len();
+    }
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
+
+/// 运行代际：每轮提交/取消递增，旧回合残留事件按 gen 丢弃。
+#[derive(Debug, Default, PartialEq, Eq)]
+struct RunSession {
+    gen: u64,
+}
+
+impl RunSession {
+    fn begin(&mut self) -> u64 {
+        self.gen += 1;
+        self.gen
+    }
+
+    fn cancel(&mut self) {
+        self.gen += 1;
+    }
+
+    fn finish(&mut self, gen: u64) -> bool {
+        gen == self.gen
+    }
+
+    fn accepts(&self, gen: u64) -> bool {
+        gen == self.gen
+    }
 }
 
 /// 回车后的处理结果。
@@ -632,7 +974,7 @@ enum KeyAction {
 #[derive(Default)]
 struct AppState {
     lines: Vec<UiLine>,
-    input: String,
+    input: InputState,
     history: Vec<String>,
     history_idx: Option<usize>,
     running: bool,
@@ -643,6 +985,7 @@ struct AppState {
     scroll_offset: usize,
     auto_scroll: bool,
     model_label: String,
+    display_mode: DisplayMode,
     /// 最近一次提交的 prompt（回合落盘用）。
     last_prompt: Option<String>,
 }
@@ -748,9 +1091,12 @@ impl AppState {
                 };
                 self.push_line(LineKind::System, &text);
             }
-            RunEvent::Paused { reason, .. } => {
+            RunEvent::Paused { reason, session_id } => {
                 self.flush_all();
                 self.push_line(LineKind::Paused, &format!("⏸ {reason}"));
+                if let Some(id) = session_id {
+                    self.push_line(LineKind::System, &format!("可 /resume {id}"));
+                }
                 self.running = false;
             }
             RunEvent::Done(output) => {
@@ -780,12 +1126,36 @@ impl AppState {
                     KeyAction::None
                 }
             }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if !self.running {
+                    self.input.clear();
+                }
+                KeyAction::None
+            }
+            KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if !self.running {
+                    self.input.delete_word_before();
+                }
+                KeyAction::None
+            }
+            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if !self.running {
+                    self.input.home();
+                }
+                KeyAction::None
+            }
+            KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if !self.running {
+                    self.input.end();
+                }
+                KeyAction::None
+            }
             KeyCode::Enter => {
                 if self.running {
                     return KeyAction::None;
                 }
                 let prompt = std::mem::take(&mut self.input);
-                let prompt = prompt.trim().to_string();
+                let prompt = prompt.text.trim().to_string();
                 if prompt.is_empty() {
                     return KeyAction::None;
                 }
@@ -798,11 +1168,36 @@ impl AppState {
                 KeyAction::Submit(prompt)
             }
             KeyCode::Char(c) => {
-                self.input.push(c);
+                if !self.running
+                    && !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT)
+                {
+                    self.input.insert_char(c);
+                }
                 KeyAction::None
             }
             KeyCode::Backspace => {
-                self.input.pop();
+                if !self.running {
+                    self.input.backspace();
+                }
+                KeyAction::None
+            }
+            KeyCode::Left => {
+                if !self.running {
+                    self.input.move_left();
+                }
+                KeyAction::None
+            }
+            KeyCode::Right => {
+                if !self.running {
+                    self.input.move_right();
+                }
+                KeyAction::None
+            }
+            KeyCode::Delete => {
+                if !self.running {
+                    self.input.delete();
+                }
                 KeyAction::None
             }
             KeyCode::Up => {
@@ -827,12 +1222,20 @@ impl AppState {
                 KeyAction::None
             }
             KeyCode::Home => {
-                self.scroll_offset = 0;
-                self.auto_scroll = false;
+                if self.running {
+                    self.scroll_offset = 0;
+                    self.auto_scroll = false;
+                } else {
+                    self.input.home();
+                }
                 KeyAction::None
             }
             KeyCode::End => {
-                self.auto_scroll = true;
+                if self.running {
+                    self.auto_scroll = true;
+                } else {
+                    self.input.end();
+                }
                 KeyAction::None
             }
             _ => KeyAction::None,
@@ -849,14 +1252,14 @@ impl AppState {
             None => self.history.len() - 1,
         };
         self.history_idx = Some(idx);
-        self.input = self.history[idx].clone();
+        self.input.set_text(self.history[idx].clone());
     }
 
     fn history_next(&mut self) {
         match self.history_idx {
             Some(i) if i + 1 < self.history.len() => {
                 self.history_idx = Some(i + 1);
-                self.input = self.history[i + 1].clone();
+                self.input.set_text(self.history[i + 1].clone());
             }
             Some(_) => {
                 self.history_idx = None;
@@ -874,6 +1277,18 @@ impl AppState {
                 self.clear_display();
                 CommandResult::Handled
             }
+            "raw" => {
+                self.display_mode = match self.display_mode {
+                    DisplayMode::Normal => DisplayMode::Lite,
+                    DisplayMode::Lite => DisplayMode::Raw,
+                    DisplayMode::Raw => DisplayMode::Normal,
+                };
+                self.push_line(
+                    LineKind::System,
+                    &format!("显示模式: {}", display_mode_label(self.display_mode)),
+                );
+                CommandResult::Handled
+            }
             "help" | "h" => {
                 self.push_line(LineKind::System, "可用命令:");
                 for line in [
@@ -882,9 +1297,20 @@ impl AppState {
                     "  /new           开始新会话",
                     "  /sessions      列出已保存会话",
                     "  /resume <id>   恢复指定会话",
+                    "  /model         模型与 effort 热切换",
+                    "  /cost          会话成本报表",
+                    "  /skills        列出可用技能",
+                    "  /mcp           列出已配置 MCP 服务器",
+                    "  /raw           切换显示模式（normal/lite/raw）",
+                    "  /undo          回滚最近一个快照",
+                    "  /undo all      回滚全部快照",
+                    "  /undo list     列出快照与状态",
                     "  /quit          退出 TUI（Esc）",
                     "  PageUp/Down    滚动回看",
                     "  ↑/↓            输入历史",
+                    "  ←/→/Home/End  输入内移动光标（空闲时）",
+                    "  Delete/Backspace 编辑输入",
+                    "  Ctrl+U/W       清空输入 / 删前一词",
                     "  Ctrl+C         取消当前运行",
                 ] {
                     self.push_line(LineKind::System, line);
@@ -904,6 +1330,18 @@ impl AppState {
             self.scroll_offset = max;
         } else {
             self.scroll_offset = self.scroll_offset.min(max);
+        }
+    }
+
+    /// 按当前显示模式过滤面板行（lite 隐藏推理）。
+    fn visible_lines(&self) -> Vec<&UiLine> {
+        if self.display_mode == DisplayMode::Lite {
+            self.lines
+                .iter()
+                .filter(|l| l.kind != LineKind::Reasoning)
+                .collect()
+        } else {
+            self.lines.iter().collect()
         }
     }
 
@@ -930,20 +1368,30 @@ impl AppState {
         let conv_block = Block::default().borders(Borders::ALL).title(title);
 
         let mut text_lines: Vec<Line> = Vec::new();
-        for line in &self.lines {
-            text_lines.push(Line::from(Span::styled(&line.text, style_for(line.kind))));
-        }
-        if !self.pending_reasoning.is_empty() {
+        for line in self.visible_lines() {
             text_lines.push(Line::from(Span::styled(
-                &self.pending_reasoning,
+                line_display_text(line, self.display_mode),
+                style_for(line.kind),
+            )));
+        }
+        if !self.pending_reasoning.is_empty() && self.display_mode != DisplayMode::Lite {
+            let text = if self.display_mode == DisplayMode::Raw {
+                format!("[reasoning] {}", self.pending_reasoning)
+            } else {
+                self.pending_reasoning.clone()
+            };
+            text_lines.push(Line::from(Span::styled(
+                text,
                 style_for(LineKind::Reasoning),
             )));
         }
         if !self.pending_text.is_empty() {
-            text_lines.push(Line::from(Span::styled(
-                &self.pending_text,
-                style_for(LineKind::Agent),
-            )));
+            let text = if self.display_mode == DisplayMode::Raw {
+                format!("[agent] {}", self.pending_text)
+            } else {
+                self.pending_text.clone()
+            };
+            text_lines.push(Line::from(Span::styled(text, style_for(LineKind::Agent))));
         }
 
         let paragraph = Paragraph::new(text_lines)
@@ -997,16 +1445,25 @@ impl AppState {
         } else {
             Style::default().fg(Color::Green)
         };
+        let pane = chunks[2];
+        let pane_width = pane.width.saturating_sub(2) as usize;
+        let (input_start, visible) = self.input.visible_window(pane_width.max(1));
         let input_text = if self.running {
             " (等待响应… Ctrl+C 取消) ".to_string()
         } else {
-            self.input.clone()
+            visible.to_string()
         };
         let input_block = Block::default()
             .borders(Borders::ALL)
             .title("> prompt  (/help, Esc 退出)");
         let input_widget = Paragraph::new(Span::styled(input_text, input_style)).block(input_block);
-        f.render_widget(input_widget, chunks[2]);
+        f.render_widget(input_widget, pane);
+
+        // 可见光标：仅空闲时显示，宽输入横向跟随。
+        if !self.running {
+            let col = self.input.cursor_column(input_start).min(pane_width as u16);
+            f.set_cursor_position((pane.x + 1 + col, pane.y + 1));
+        }
     }
 }
 
@@ -1036,12 +1493,48 @@ fn style_for(kind: LineKind) -> Style {
     }
 }
 
+fn display_mode_label(mode: DisplayMode) -> &'static str {
+    match mode {
+        DisplayMode::Normal => "normal（全量）",
+        DisplayMode::Lite => "lite（隐藏推理）",
+        DisplayMode::Raw => "raw（带类型前缀）",
+    }
+}
+
+fn kind_tag(kind: LineKind) -> &'static str {
+    match kind {
+        LineKind::User => "user",
+        LineKind::Agent => "agent",
+        LineKind::Reasoning => "reasoning",
+        LineKind::Tool => "tool",
+        LineKind::ToolResult => "tool_result",
+        LineKind::Verification { passed } => {
+            if passed {
+                "verify_ok"
+            } else {
+                "verify_fail"
+            }
+        }
+        LineKind::System => "system",
+        LineKind::Error => "error",
+        LineKind::Paused => "paused",
+    }
+}
+
+fn line_display_text(line: &UiLine, mode: DisplayMode) -> String {
+    if mode == DisplayMode::Raw {
+        format!("[{}] {}", kind_tag(line.kind), line.text)
+    } else {
+        line.text.clone()
+    }
+}
+
 // ── Internal types ─────────────────────────────────────────────
 
 enum AppEvent {
     Input(CEvent),
-    Runner(RunEvent),
-    Done,
+    Runner { gen: u64, ev: RunEvent },
+    Done { gen: u64 },
 }
 
 fn truncate_str(s: &str, max: usize) -> String {
@@ -1139,6 +1632,46 @@ mod tests {
     }
 
     #[test]
+    fn paused_event_with_session_suggests_resume() {
+        let mut app = AppState {
+            running: true,
+            ..Default::default()
+        };
+        app.apply_run_event(RunEvent::Paused {
+            reason: "max steps".into(),
+            session_id: Some("abc123".into()),
+        });
+        assert!(!app.running);
+        assert!(app
+            .lines
+            .iter()
+            .any(|l| l.text.contains("可 /resume abc123")));
+    }
+
+    #[test]
+    fn run_session_generation_isolates_events() {
+        let mut session = RunSession::default();
+        let g1 = session.begin();
+        assert_eq!(g1, 1);
+        assert!(session.accepts(g1));
+        assert!(!session.accepts(0), "上一回合的 gen 不接受");
+        assert!(!session.finish(0), "旧 Done 不清新回合");
+        assert!(session.accepts(g1));
+        assert!(session.finish(g1));
+
+        let g2 = session.begin();
+        assert_eq!(g2, 2);
+        assert!(session.accepts(g2));
+        session.cancel();
+        assert!(!session.accepts(g2), "取消后旧 gen 事件全部丢弃");
+        assert!(!session.finish(g2));
+
+        let g3 = session.begin();
+        assert_eq!(g3, 4, "cancel 也递增，begin 接着计数");
+        assert!(session.accepts(g3));
+    }
+
+    #[test]
     fn commands_quit_clear_and_report_unknown() {
         let mut app = AppState::default();
         assert!(matches!(app.execute_command("quit"), CommandResult::Quit));
@@ -1155,13 +1688,175 @@ mod tests {
         app.history.push("first".into());
         app.history.push("second".into());
         app.history_prev();
-        assert_eq!(app.input, "second");
+        assert_eq!(app.input.text, "second");
         app.history_prev();
-        assert_eq!(app.input, "first");
+        assert_eq!(app.input.text, "first");
         app.history_next();
-        assert_eq!(app.input, "second");
+        assert_eq!(app.input.text, "second");
         app.history_next();
-        assert_eq!(app.input, "");
+        assert_eq!(app.input.text, "");
+    }
+
+    #[test]
+    fn input_state_insert_and_delete() {
+        let mut input = InputState {
+            text: "你好".into(),
+            cursor: "你好".len(),
+        };
+        input.end();
+        input.insert_char('!');
+        assert_eq!(input.text, "你好!");
+        assert_eq!(input.cursor, input.text.len());
+
+        input.move_left();
+        input.move_left();
+        input.delete();
+        assert_eq!(input.text, "你!");
+        assert_eq!(input.cursor, "你".len());
+
+        input.backspace();
+        assert_eq!(input.text, "!");
+        assert_eq!(input.cursor, 0);
+
+        input.backspace();
+        assert_eq!(input.text, "!");
+        input.delete();
+        assert_eq!(input.text, "");
+    }
+
+    #[test]
+    fn input_state_cursor_moves_on_char_boundaries() {
+        let mut input = InputState {
+            text: "a你b".into(),
+            cursor: "a你b".len(),
+        };
+        input.home();
+        input.move_right();
+        assert_eq!(input.cursor, 1, "跳过 ASCII 一个字节");
+        input.move_right();
+        assert_eq!(input.cursor, 1 + "你".len(), "跳过中文整字符");
+        input.move_right();
+        assert_eq!(input.cursor, input.text.len());
+        input.move_right();
+        assert_eq!(input.cursor, input.text.len(), "到头不再动");
+
+        input.move_left();
+        assert_eq!(input.cursor, 1 + "你".len());
+        input.move_left();
+        assert_eq!(input.cursor, 1);
+        input.move_left();
+        assert_eq!(input.cursor, 0);
+        input.move_left();
+        assert_eq!(input.cursor, 0, "到首不再动");
+    }
+
+    #[test]
+    fn input_state_word_delete_and_clear() {
+        let mut input = InputState {
+            text: "hello world".into(),
+            cursor: "hello world".len(),
+        };
+        input.end();
+        input.delete_word_before();
+        assert_eq!(input.text, "hello ");
+        assert_eq!(input.cursor, 6);
+
+        input.delete_word_before();
+        assert_eq!(input.text, "");
+        assert_eq!(input.cursor, 0);
+
+        input.set_text("abc".into());
+        input.clear();
+        assert_eq!(input.text, "");
+        assert_eq!(input.cursor, 0);
+    }
+
+    #[test]
+    fn input_state_visible_window_follows_cursor() {
+        let mut input = InputState {
+            text: "abcdef".into(),
+            cursor: 0,
+        };
+        input.home();
+        let (start, visible) = input.visible_window(3);
+        assert_eq!((start, visible), (0, "abc"));
+
+        input.end();
+        let (start, visible) = input.visible_window(3);
+        assert_eq!((start, visible), (4, "ef"), "光标在尾时窗口跟随");
+        assert_eq!(input.cursor_column(start), 2);
+
+        let mut input = InputState {
+            text: "你a好".into(),
+            cursor: "你a好".len(),
+        };
+        input.end();
+        let (start, visible) = input.visible_window(3);
+        assert_eq!(visible, "好");
+        assert_eq!(input.cursor_column(start), 2, "中文按双列计");
+
+        let mut input = InputState {
+            text: "你a好".into(),
+            cursor: "你a好".len(),
+        };
+        input.end();
+        let (start, visible) = input.visible_window(10);
+        assert_eq!((start, visible), (0, "你a好"));
+        assert_eq!(input.cursor_column(start), 5, "你=2 好=2 a=1");
+    }
+
+    #[test]
+    fn input_keys_edit_and_scroll_modes() {
+        let mut app = AppState::default();
+        let key = |code: KeyCode| KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        };
+        app.handle_key(&key(KeyCode::Char('a')));
+        app.handle_key(&key(KeyCode::Char('b')));
+        app.handle_key(&key(KeyCode::Char('c')));
+        assert_eq!(app.input.text, "abc");
+
+        app.handle_key(&key(KeyCode::Left));
+        app.handle_key(&key(KeyCode::Left));
+        app.handle_key(&key(KeyCode::Char('X')));
+        assert_eq!(app.input.text, "aXbc");
+        assert_eq!(app.input.cursor, 2);
+
+        app.handle_key(&key(KeyCode::Delete));
+        assert_eq!(app.input.text, "aXc");
+
+        app.handle_key(&key(KeyCode::Home));
+        assert_eq!(app.input.cursor, 0);
+        app.handle_key(&key(KeyCode::End));
+        assert_eq!(app.input.cursor, 3);
+
+        let ctrl = |code: KeyCode| KeyEvent {
+            code,
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        };
+        app.handle_key(&ctrl(KeyCode::Char('u')));
+        assert_eq!(app.input.text, "");
+
+        app.handle_key(&key(KeyCode::Char('x')));
+        app.handle_key(&ctrl(KeyCode::Char('w')));
+        assert_eq!(app.input.text, "");
+
+        // 运行中：编辑键不生效，Home/End 走滚动。
+        app.running = true;
+        app.input.set_text("input".into());
+        app.handle_key(&key(KeyCode::Char('z')));
+        app.handle_key(&key(KeyCode::Left));
+        app.handle_key(&key(KeyCode::Backspace));
+        assert_eq!(app.input.text, "input");
+        app.handle_key(&key(KeyCode::Home));
+        assert_eq!(app.scroll_offset, 0);
+        app.handle_key(&key(KeyCode::End));
+        assert!(app.auto_scroll);
     }
 
     #[test]
@@ -1266,6 +1961,7 @@ mod tests {
         sessions: std::sync::Mutex<Vec<String>>,
         current: std::sync::Mutex<Option<String>>,
         resumed: std::sync::Mutex<Option<String>>,
+        resume_lines: std::sync::Mutex<Vec<ResumedLine>>,
         new_count: std::sync::Mutex<usize>,
     }
 
@@ -1282,9 +1978,9 @@ mod tests {
         async fn current_session(&self) -> Option<String> {
             self.current.lock().unwrap().clone()
         }
-        async fn resume(&self, id: &str) -> anyhow::Result<usize> {
+        async fn resume(&self, id: &str) -> anyhow::Result<Vec<ResumedLine>> {
             *self.resumed.lock().unwrap() = Some(id.to_string());
-            Ok(3)
+            Ok(self.resume_lines.lock().unwrap().clone())
         }
         async fn record_turn(
             &self,
@@ -1324,13 +2020,27 @@ mod tests {
     #[tokio::test]
     async fn session_resume_restores_and_clears() {
         let ctrl = Arc::new(MockSessionController::default());
+        *ctrl.resume_lines.lock().unwrap() = vec![
+            ResumedLine {
+                role: ResumedRole::User,
+                text: "hi".into(),
+            },
+            ResumedLine {
+                role: ResumedRole::Assistant,
+                text: "yo".into(),
+            },
+        ];
         let mut tui = TuiRunner::new(Arc::new(StubRunner)).with_session_controller(ctrl.clone());
         let mut app = AppState::default();
         app.push_line(LineKind::User, "old");
         tui.handle_command(&mut app, "resume abc").await;
         assert_eq!(ctrl.resumed.lock().unwrap().as_deref(), Some("abc"));
-        assert_eq!(app.lines.len(), 1);
-        assert!(app.lines[0].text.contains("已恢复 'abc' — 3 条消息"));
+        assert_eq!(app.lines.len(), 3, "清空后 = 提示行 + 2 条恢复历史");
+        assert!(app.lines[0].text.contains("已恢复 'abc' — 2 条消息"));
+        assert_eq!(app.lines[1].text, "hi");
+        assert_eq!(app.lines[1].kind, LineKind::User);
+        assert_eq!(app.lines[2].text, "yo");
+        assert_eq!(app.lines[2].kind, LineKind::Agent);
     }
 
     #[tokio::test]
@@ -1341,6 +2051,180 @@ mod tests {
         tui.handle_command(&mut app, "resume x").await;
         let texts: Vec<&str> = app.lines.iter().map(|l| l.text.as_str()).collect();
         assert!(texts.iter().any(|t| t.contains("会话管理不可用")));
+    }
+
+    #[tokio::test]
+    async fn skills_command_lists_skills_from_configured_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let skills_dir = dir.path().join("skills");
+        std::fs::create_dir_all(&skills_dir).unwrap();
+        std::fs::write(
+            skills_dir.join("review.md"),
+            "---\nname: code-reviewer\ndescription: Review code for bugs\n\
+             tools_allowed:\n  - read_file\n  - grep\n---\n\nbody\n",
+        )
+        .unwrap();
+
+        let mut tui = TuiRunner::new(Arc::new(StubRunner)).with_skills_paths(vec![skills_dir]);
+        let mut app = AppState::default();
+        tui.handle_command(&mut app, "skills").await;
+        let texts: Vec<&str> = app.lines.iter().map(|l| l.text.as_str()).collect();
+        assert!(texts.iter().any(|t| t.contains("code-reviewer")));
+        assert!(texts.iter().any(|t| t.contains("Review code for bugs")));
+        assert!(texts.iter().any(|t| t.contains("read_file, grep")));
+    }
+
+    #[tokio::test]
+    async fn skills_command_reports_none_for_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut tui =
+            TuiRunner::new(Arc::new(StubRunner)).with_skills_paths(vec![dir.path().to_path_buf()]);
+        let mut app = AppState::default();
+        tui.handle_command(&mut app, "skills").await;
+        assert!(app.lines.iter().any(|l| l.text.contains("未找到技能")));
+    }
+
+    #[tokio::test]
+    async fn mcp_command_lists_configured_servers() {
+        let mut tui = TuiRunner::new(Arc::new(StubRunner))
+            .with_mcp_servers(vec!["github".into(), "fs".into()]);
+        let mut app = AppState::default();
+        tui.handle_command(&mut app, "mcp").await;
+        let texts: Vec<&str> = app.lines.iter().map(|l| l.text.as_str()).collect();
+        assert!(texts.iter().any(|t| t.contains("github")));
+        assert!(texts.iter().any(|t| t.contains("fs")));
+    }
+
+    #[tokio::test]
+    async fn mcp_command_reports_none_when_empty() {
+        let mut tui = TuiRunner::new(Arc::new(StubRunner));
+        let mut app = AppState::default();
+        tui.handle_command(&mut app, "mcp").await;
+        assert!(app
+            .lines
+            .iter()
+            .any(|l| l.text.contains("未配置 MCP 服务器")));
+    }
+
+    #[test]
+    fn raw_command_cycles_and_filters_display() {
+        let mut app = AppState::default();
+        app.push_line(LineKind::Reasoning, "think");
+        app.push_line(LineKind::Agent, "answer");
+        assert_eq!(app.visible_lines().len(), 2);
+
+        app.execute_command("raw");
+        assert_eq!(app.display_mode, DisplayMode::Lite);
+        assert!(
+            app.visible_lines()
+                .iter()
+                .all(|l| l.kind != LineKind::Reasoning),
+            "lite 模式隐藏推理行"
+        );
+        assert_eq!(
+            app.visible_lines()
+                .iter()
+                .find(|l| l.kind == LineKind::Agent)
+                .unwrap()
+                .text,
+            "answer"
+        );
+        assert!(app.lines.iter().any(|l| l.text.contains("lite")));
+
+        app.execute_command("raw");
+        assert_eq!(app.display_mode, DisplayMode::Raw);
+        let tagged = line_display_text(
+            &UiLine {
+                kind: LineKind::Reasoning,
+                text: "think".into(),
+            },
+            DisplayMode::Raw,
+        );
+        assert_eq!(tagged, "[reasoning] think");
+
+        app.execute_command("raw");
+        assert_eq!(app.display_mode, DisplayMode::Normal);
+        assert!(
+            app.visible_lines()
+                .iter()
+                .any(|l| l.kind == LineKind::Reasoning),
+            "normal 模式恢复推理行"
+        );
+    }
+
+    #[derive(Default)]
+    struct MockUndoController {
+        list: std::sync::Mutex<Vec<String>>,
+        rolled_back: std::sync::Mutex<Option<String>>,
+        all_count: std::sync::Mutex<usize>,
+    }
+
+    #[async_trait]
+    impl UndoController for MockUndoController {
+        async fn list(&self) -> anyhow::Result<Vec<String>> {
+            Ok(self.list.lock().unwrap().clone())
+        }
+        async fn rollback_one(&self) -> anyhow::Result<Option<String>> {
+            Ok(self.rolled_back.lock().unwrap().clone())
+        }
+        async fn rollback_all(&self) -> anyhow::Result<usize> {
+            let n = self.list.lock().unwrap().len();
+            *self.all_count.lock().unwrap() = n;
+            Ok(n)
+        }
+    }
+
+    #[tokio::test]
+    async fn undo_rollback_one_reports_result() {
+        let ctrl = Arc::new(MockUndoController::default());
+        *ctrl.rolled_back.lock().unwrap() = Some("已回滚 /tmp/a.txt (hash abcdef12)".into());
+        let mut tui = TuiRunner::new(Arc::new(StubRunner)).with_undo_controller(ctrl);
+        let mut app = AppState::default();
+        tui.handle_command(&mut app, "undo").await;
+        assert!(app
+            .lines
+            .iter()
+            .any(|l| l.text.contains("已回滚 /tmp/a.txt")));
+
+        let ctrl = Arc::new(MockUndoController::default());
+        let mut tui = TuiRunner::new(Arc::new(StubRunner)).with_undo_controller(ctrl);
+        let mut app = AppState::default();
+        tui.handle_command(&mut app, "undo").await;
+        assert!(app
+            .lines
+            .iter()
+            .any(|l| l.text.contains("没有可回滚的快照")));
+    }
+
+    #[tokio::test]
+    async fn undo_all_and_list_route_to_controller() {
+        let ctrl = Arc::new(MockUndoController::default());
+        *ctrl.list.lock().unwrap() = vec![
+            "✓ [unchanged] a.txt (abc)".into(),
+            "✗ [modified] b.txt (def)".into(),
+        ];
+        let mut tui = TuiRunner::new(Arc::new(StubRunner)).with_undo_controller(ctrl.clone());
+        let mut app = AppState::default();
+        tui.handle_command(&mut app, "undo list").await;
+        let texts: Vec<&str> = app.lines.iter().map(|l| l.text.as_str()).collect();
+        assert!(texts.iter().any(|t| t.contains("[unchanged] a.txt")));
+        assert!(texts.iter().any(|t| t.contains("[modified] b.txt")));
+
+        let mut app = AppState::default();
+        tui.handle_command(&mut app, "undo all").await;
+        assert_eq!(*ctrl.all_count.lock().unwrap(), 2);
+        assert!(app
+            .lines
+            .iter()
+            .any(|l| l.text.contains("已全部回滚 2 个快照")));
+    }
+
+    #[tokio::test]
+    async fn undo_without_controller_reports_unavailable() {
+        let mut tui = TuiRunner::new(Arc::new(StubRunner));
+        let mut app = AppState::default();
+        tui.handle_command(&mut app, "undo").await;
+        assert!(app.lines.iter().any(|l| l.text.contains("撤销不可用")));
     }
 
     // RunOutput 构造辅助（避免暴露内部类型）。

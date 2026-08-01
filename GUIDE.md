@@ -452,33 +452,57 @@ while (true) {
 Launch the interactive terminal UI:
 
 ```bash
-deepseeknova chat
+deepseeknova chat --tui
 ```
 
 ### Layout
 
 ```
-┌─ 💬 ready ──────────────────────────────────────┐
-│                                                  │
-│  User: What files are in src/?                   │
-│  ⚙ ls ...                                       │
-│    → src/main.rs, src/lib.rs                     │
-│  Agent: The src/ directory contains...           │
-│                                                  │
-├──────────────────────────────────────────────────┤
-│ ↑150 ↓200 total:350 | 4 lines                    │
-├─ > prompt (Esc to quit) ────────────────────────┤
-│ your prompt here...                              │
-└──────────────────────────────────────────────────┘
+┌─ 💬 就绪 ─────────────────────────────────────────────┐
+│ 你: 看看 src/ 里有什么文件？                            │
+│ ⚙ ls ...                                              │
+│   → src/main.rs, src/lib.rs                            │
+│ 助手: src/ 目录包含 ...                                 │
+│                                                        │
+├────────────────────────────────────────────────────────┤
+│ model=deepseek-v4-flash ready | turn 1 | lines 4 | ... │
+├─ > prompt  (/help, Esc 退出) ──────────────────────────┤
+│ 你的输入...                                             │
+└────────────────────────────────────────────────────────┘
 ```
 
-### Key Bindings
+### 按键
 
 | Key | Action |
 |---|---|
-| `Enter` | Submit prompt |
-| `Esc` / `q` | Quit (when idle) |
-| `Backspace` | Delete last character |
+| `Enter` | 提交输入 |
+| `Esc` | 空闲时退出 TUI |
+| `Ctrl+C` | 取消当前运行 |
+| `↑` / `↓` | 输入历史 |
+| `←` / `→` | 输入内移动光标 |
+| `Home` / `End` | 空闲=输入光标到头/尾；运行中=滚动到顶/跟随 |
+| `Backspace` / `Delete` | 删除光标前/后字符 |
+| `Ctrl+U` / `Ctrl+W` | 清空输入 / 删前一词 |
+| `PageUp` / `PageDown` | 对话面板滚动回看 |
+
+### 斜杠命令
+
+| 命令 | 作用 |
+|---|---|
+| `/help` | 显示帮助 |
+| `/clear` | 清空对话面板 |
+| `/new` | 开始新会话（更换 session id） |
+| `/sessions` | 列出已保存会话 |
+| `/resume <id>` | 恢复指定会话并渲染历史 |
+| `/model` | 显示模型与指针；`/model effort <level>`、`/model thinking`、`/model switch <name>`、`/model use <role> <name>` |
+| `/cost` | 按模型×角色输出 token 用量与美元估算 |
+| `/skills` | 列出 `.deepseeknova/skills` 与 `.agents/skills` 中的技能 |
+| `/mcp` | 列出配置中已启用的 MCP server |
+| `/raw` | 切换显示模式 normal / lite / raw（lite 隐藏推理，raw 带类型前缀） |
+| `/undo` | 回滚最近一个检查点快照 |
+| `/undo all` | 回滚全部快照 |
+| `/undo list` | 列出快照与 ✓/✗ 状态 |
+| `/quit` | 退出 TUI |
 
 ## MCP Integration
 
