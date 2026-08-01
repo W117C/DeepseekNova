@@ -19,6 +19,9 @@ All notable changes to DeepseekNova will be documented in this file.
   只读工具 `trace_code`（多跳调用链，深度上限 6 并标注截断）、`impact_code`（按文件
   聚合的影响面/重构爆炸半径）、`explore_code`（按文件分组的行号源码）；运行时在
   `[graph] enabled` 时注册并更新检索策略提示词。
+- **Context7 库文档检索**：新增只读工具 `context7_docs`（库名 + 主题 → 最新第三方库
+  文档片段），无需 API key；端点固定 context7.com，执行受 NetworkAccess 能力把关，
+  错误全部转友好提示；由 runtime 常驻注册，可用 `[tools] overrides` 禁用。
 - **系统提示词体系**：主 agent 新增英文默认系统提示词（决策引擎 + Observe→Plan→
   Tool→Verify→Reflect→Next Action 六阶段循环），未配置 `system_prompt` 时自动启用、
   配置覆盖优先；plan_mode/planner/delegate×4/review/compaction/scanner/图检索提示词
