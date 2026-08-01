@@ -28,6 +28,7 @@
 //! # }
 //! ```
 
+use async_trait::async_trait;
 use crossterm::event::{self, Event as CEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use deepseeknova_core::chunk::Usage;
 use deepseeknova_core::runner::{RunEvent, RunInput, Runner};
@@ -64,6 +65,8 @@ pub struct TuiRunner {
     baseline_effort: ReasoningEffort,
     current_effort: ReasoningEffort,
     current_model: Option<String>,
+    /// 可选会话控制器：启用 `/new` `/sessions` `/resume` 与回合落盘。
+    session: Option<Arc<dyn SessionController>>,
 }
 
 /// agent 重建工厂类型。
@@ -72,6 +75,26 @@ type AgentFactory = Arc<
         + Send
         + Sync,
 >;
+
+/// 会话管理控制器（由 CLI 用 ChatPersistence 实现，TUI 不依赖 CLI 类型）。
+#[async_trait]
+pub trait SessionController: Send + Sync {
+    /// 开始新会话：清空共享历史并更换 session id。
+    async fn new_session(&self) -> anyhow::Result<()>;
+    /// 列出已保存会话 id。
+    async fn list_sessions(&self) -> anyhow::Result<Vec<String>>;
+    /// 当前会话 id。
+    async fn current_session(&self) -> Option<String>;
+    /// 恢复指定会话到共享历史，返回恢复的消息数。
+    async fn resume(&self, id: &str) -> anyhow::Result<usize>;
+    /// 落盘一个已完成回合（用户 prompt + 助手输出）。
+    async fn record_turn(
+        &self,
+        prompt: &str,
+        output_text: &str,
+        model: Option<String>,
+    ) -> anyhow::Result<()>;
+}
 
 impl TuiRunner {
     /// Wrap `runner` for display in the TUI.
@@ -84,6 +107,7 @@ impl TuiRunner {
             baseline_effort: ReasoningEffort::High,
             current_effort: ReasoningEffort::High,
             current_model: None,
+            session: None,
         }
     }
 
@@ -121,6 +145,12 @@ impl TuiRunner {
     /// 当前模型名（`/model switch` 后自动更新）。
     pub fn with_current_model(mut self, model: Option<String>) -> Self {
         self.current_model = model;
+        self
+    }
+
+    /// 提供会话控制器，启用 `/new` `/sessions` `/resume` 与回合落盘。
+    pub fn with_session_controller(mut self, controller: Arc<dyn SessionController>) -> Self {
+        self.session = Some(controller);
         self
     }
 
@@ -169,13 +199,14 @@ impl TuiRunner {
                                     KeyAction::Submit(prompt) => {
                                         // 命令交给 TUI 层处理（/model /cost 需要工厂与 router）。
                                         if let Some(cmd) = prompt.strip_prefix('/') {
-                                            if self.handle_command(&mut app, cmd) {
+                                            if self.handle_command(&mut app, cmd).await {
                                                 return Ok(());
                                             }
                                             continue;
                                         }
                                         app.running = true;
                                         app.turn += 1;
+                                        app.last_prompt = Some(prompt.clone());
                                         app.push_line(LineKind::User, &prompt);
                                         let tx = tx.clone();
                                         let runner = self.runner.clone();
@@ -220,7 +251,30 @@ impl TuiRunner {
                                 }
                             }
                             AppEvent::Input(_) => {}
-                            AppEvent::Runner(ev) => app.apply_run_event(ev),
+                            AppEvent::Runner(ev) => {
+                                // 回合完成时落盘（用户 prompt + 助手输出），供 /sessions /resume。
+                                if let RunEvent::Done(ref output) = ev {
+                                    if let Some(ctrl) = &self.session {
+                                        if let Some(prompt) = app.last_prompt.clone() {
+                                            match ctrl
+                                                .record_turn(
+                                                    &prompt,
+                                                    &output.text,
+                                                    self.current_model.clone(),
+                                                )
+                                                .await
+                                            {
+                                                Ok(()) => {}
+                                                Err(e) => app.push_line(
+                                                    LineKind::Error,
+                                                    &format!("会话落盘失败: {e}"),
+                                                ),
+                                            }
+                                        }
+                                    }
+                                }
+                                app.apply_run_event(ev);
+                            }
                             AppEvent::Done => {
                                 app.flush_all();
                                 app.running = false;
@@ -236,7 +290,8 @@ impl TuiRunner {
 
 impl TuiRunner {
     /// 处理以 `/` 开头的命令。返回 `true` 表示退出。
-    fn handle_command(&mut self, app: &mut AppState, cmd: &str) -> bool {
+    /// 处理以 `/` 开头的命令。返回 `true` 表示退出。
+    async fn handle_command(&mut self, app: &mut AppState, cmd: &str) -> bool {
         let (name, rest) = cmd.split_once(char::is_whitespace).unwrap_or((cmd, ""));
         match name {
             "model" => {
@@ -245,6 +300,75 @@ impl TuiRunner {
             }
             "cost" => {
                 self.handle_cost(app);
+                false
+            }
+            "new" => {
+                match &self.session {
+                    Some(ctrl) => match ctrl.new_session().await {
+                        Ok(()) => {
+                            app.clear_display();
+                            app.last_prompt = None;
+                            app.push_line(LineKind::System, "新会话已开始");
+                        }
+                        Err(e) => app.push_line(LineKind::Error, &format!("新建会话失败: {e}")),
+                    },
+                    None => app.push_line(
+                        LineKind::System,
+                        "会话管理不可用（未提供 SessionController）",
+                    ),
+                }
+                false
+            }
+            "sessions" => {
+                match &self.session {
+                    Some(ctrl) => match ctrl.list_sessions().await {
+                        Ok(mut ids) if !ids.is_empty() => {
+                            ids.sort();
+                            ids.reverse(); // id 按时间字典序，最新优先
+                            let current = ctrl.current_session().await;
+                            app.push_line(LineKind::System, "已保存会话（最新优先）:");
+                            for id in &ids {
+                                let marker = if current.as_deref() == Some(id.as_str()) {
+                                    "  (当前)"
+                                } else {
+                                    ""
+                                };
+                                app.push_line(LineKind::System, &format!("  {id}{marker}"));
+                            }
+                        }
+                        Ok(_) => app.push_line(LineKind::System, "（还没有已保存的会话）"),
+                        Err(e) => app.push_line(LineKind::Error, &format!("列出会话失败: {e}")),
+                    },
+                    None => app.push_line(
+                        LineKind::System,
+                        "会话管理不可用（未提供 SessionController）",
+                    ),
+                }
+                false
+            }
+            "resume" => {
+                let target = rest.trim();
+                match &self.session {
+                    Some(ctrl) if !target.is_empty() => match ctrl.resume(target).await {
+                        Ok(n) => {
+                            app.clear_display();
+                            app.last_prompt = None;
+                            app.push_line(
+                                LineKind::System,
+                                &format!("已恢复 '{target}' — {n} 条消息"),
+                            );
+                        }
+                        Err(e) => app.push_line(LineKind::Error, &format!("恢复会话失败: {e}")),
+                    },
+                    Some(_) => app.push_line(
+                        LineKind::Error,
+                        "用法: /resume <session-id>（见 /sessions）",
+                    ),
+                    None => app.push_line(
+                        LineKind::System,
+                        "会话管理不可用（未提供 SessionController）",
+                    ),
+                }
                 false
             }
             _ => matches!(app.execute_command(cmd), CommandResult::Quit),
@@ -519,6 +643,8 @@ struct AppState {
     scroll_offset: usize,
     auto_scroll: bool,
     model_label: String,
+    /// 最近一次提交的 prompt（回合落盘用）。
+    last_prompt: Option<String>,
 }
 
 impl AppState {
@@ -563,6 +689,15 @@ impl AppState {
     fn flush_all(&mut self) {
         self.flush_reasoning();
         self.flush_text();
+    }
+
+    /// 清空对话面板（/clear、/new、/resume 共用）。
+    fn clear_display(&mut self) {
+        self.lines.clear();
+        self.pending_text.clear();
+        self.pending_reasoning.clear();
+        self.scroll_offset = 0;
+        self.auto_scroll = true;
     }
 
     /// 单一入口消费 RunEvent（可测试）。
@@ -736,11 +871,7 @@ impl AppState {
         match name {
             "quit" | "exit" | "q" => CommandResult::Quit,
             "clear" => {
-                self.lines.clear();
-                self.pending_text.clear();
-                self.pending_reasoning.clear();
-                self.scroll_offset = 0;
-                self.auto_scroll = true;
+                self.clear_display();
                 CommandResult::Handled
             }
             "help" | "h" => {
@@ -748,6 +879,9 @@ impl AppState {
                 for line in [
                     "  /help          显示帮助",
                     "  /clear         清空对话面板",
+                    "  /new           开始新会话",
+                    "  /sessions      列出已保存会话",
+                    "  /resume <id>   恢复指定会话",
                     "  /quit          退出 TUI（Esc）",
                     "  PageUp/Down    滚动回看",
                     "  ↑/↓            输入历史",
@@ -1077,8 +1211,8 @@ mod tests {
         assert_eq!(effort_label(ReasoningEffort::Max), "max");
     }
 
-    #[test]
-    fn model_effort_rebuilds_via_factory() {
+    #[tokio::test]
+    async fn model_effort_rebuilds_via_factory() {
         let calls = Arc::new(std::sync::Mutex::new(0usize));
         let c2 = calls.clone();
         let factory = move |effort: Option<ReasoningEffort>,
@@ -1090,14 +1224,14 @@ mod tests {
         };
         let mut tui = TuiRunner::new(Arc::new(StubRunner)).with_agent_factory(factory);
         let mut app = AppState::default();
-        assert!(!tui.handle_command(&mut app, "model effort max"));
+        assert!(!tui.handle_command(&mut app, "model effort max").await);
         assert_eq!(*calls.lock().unwrap(), 1);
         assert!(matches!(tui.current_effort, ReasoningEffort::Max));
         assert!(app.lines.iter().any(|l| l.text.contains("模型已切换")));
     }
 
-    #[test]
-    fn model_switch_updates_label_and_model() {
+    #[tokio::test]
+    async fn model_switch_updates_label_and_model() {
         let factory = |_effort: Option<ReasoningEffort>,
                        model: Option<String>|
          -> anyhow::Result<Arc<dyn Runner>> {
@@ -1106,24 +1240,107 @@ mod tests {
         };
         let mut tui = TuiRunner::new(Arc::new(StubRunner)).with_agent_factory(factory);
         let mut app = AppState::default();
-        tui.handle_command(&mut app, "model switch deepseek-v4-pro");
+        tui.handle_command(&mut app, "model switch deepseek-v4-pro")
+            .await;
         assert_eq!(tui.current_model.as_deref(), Some("deepseek-v4-pro"));
         assert_eq!(tui.model_label, "deepseek-v4-pro");
     }
 
-    #[test]
-    fn cost_without_router_reports_unavailable() {
+    #[tokio::test]
+    async fn cost_without_router_reports_unavailable() {
         let mut tui = TuiRunner::new(Arc::new(StubRunner));
         let mut app = AppState::default();
-        tui.handle_command(&mut app, "cost");
+        tui.handle_command(&mut app, "cost").await;
         assert!(app.lines.iter().any(|l| l.text.contains("router 不可用")));
     }
 
-    #[test]
-    fn quit_command_returns_true() {
+    #[tokio::test]
+    async fn quit_command_returns_true() {
         let mut tui = TuiRunner::new(Arc::new(StubRunner));
         let mut app = AppState::default();
-        assert!(tui.handle_command(&mut app, "quit"));
+        assert!(tui.handle_command(&mut app, "quit").await);
+    }
+
+    #[derive(Default)]
+    struct MockSessionController {
+        sessions: std::sync::Mutex<Vec<String>>,
+        current: std::sync::Mutex<Option<String>>,
+        resumed: std::sync::Mutex<Option<String>>,
+        new_count: std::sync::Mutex<usize>,
+    }
+
+    #[async_trait]
+    impl SessionController for MockSessionController {
+        async fn new_session(&self) -> anyhow::Result<()> {
+            *self.new_count.lock().unwrap() += 1;
+            *self.current.lock().unwrap() = Some("new-id".into());
+            Ok(())
+        }
+        async fn list_sessions(&self) -> anyhow::Result<Vec<String>> {
+            Ok(self.sessions.lock().unwrap().clone())
+        }
+        async fn current_session(&self) -> Option<String> {
+            self.current.lock().unwrap().clone()
+        }
+        async fn resume(&self, id: &str) -> anyhow::Result<usize> {
+            *self.resumed.lock().unwrap() = Some(id.to_string());
+            Ok(3)
+        }
+        async fn record_turn(
+            &self,
+            _prompt: &str,
+            _output: &str,
+            _model: Option<String>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn session_new_clears_display_and_calls_controller() {
+        let ctrl = Arc::new(MockSessionController::default());
+        let mut tui = TuiRunner::new(Arc::new(StubRunner)).with_session_controller(ctrl.clone());
+        let mut app = AppState::default();
+        app.push_line(LineKind::User, "old");
+        assert!(!tui.handle_command(&mut app, "new").await);
+        assert_eq!(*ctrl.new_count.lock().unwrap(), 1);
+        assert_eq!(app.lines.len(), 1, "旧内容已清空，只剩提示行");
+        assert!(app.lines[0].text.contains("新会话已开始"));
+    }
+
+    #[tokio::test]
+    async fn session_list_marks_current() {
+        let ctrl = Arc::new(MockSessionController::default());
+        *ctrl.sessions.lock().unwrap() = vec!["b".into(), "a".into()];
+        *ctrl.current.lock().unwrap() = Some("a".into());
+        let mut tui = TuiRunner::new(Arc::new(StubRunner)).with_session_controller(ctrl);
+        let mut app = AppState::default();
+        tui.handle_command(&mut app, "sessions").await;
+        let texts: Vec<&str> = app.lines.iter().map(|l| l.text.as_str()).collect();
+        assert!(texts.iter().any(|t| t.contains("  b")));
+        assert!(texts.iter().any(|t| t.contains("  a  (当前)")));
+    }
+
+    #[tokio::test]
+    async fn session_resume_restores_and_clears() {
+        let ctrl = Arc::new(MockSessionController::default());
+        let mut tui = TuiRunner::new(Arc::new(StubRunner)).with_session_controller(ctrl.clone());
+        let mut app = AppState::default();
+        app.push_line(LineKind::User, "old");
+        tui.handle_command(&mut app, "resume abc").await;
+        assert_eq!(ctrl.resumed.lock().unwrap().as_deref(), Some("abc"));
+        assert_eq!(app.lines.len(), 1);
+        assert!(app.lines[0].text.contains("已恢复 'abc' — 3 条消息"));
+    }
+
+    #[tokio::test]
+    async fn session_commands_without_controller_report_unavailable() {
+        let mut tui = TuiRunner::new(Arc::new(StubRunner));
+        let mut app = AppState::default();
+        tui.handle_command(&mut app, "new").await;
+        tui.handle_command(&mut app, "resume x").await;
+        let texts: Vec<&str> = app.lines.iter().map(|l| l.text.as_str()).collect();
+        assert!(texts.iter().any(|t| t.contains("会话管理不可用")));
     }
 
     // RunOutput 构造辅助（避免暴露内部类型）。
