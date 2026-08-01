@@ -15,9 +15,10 @@ export default function CommandPalette() {
 
   const commands = [
     ...slashCommands,
-    { name: "mode plan", description: "切换到 Plan 模式", action: () => setMode("plan") },
-    { name: "mode act", description: "切换到 Act 模式", action: () => setMode("act") },
-    { name: "mode yolo", description: "切换到 YOLO 模式", action: () => setMode("yolo") },
+    { name: "mode agent", description: "切换到代理模式", action: () => setMode("agent") },
+    { name: "mode chat", description: "切换到对话模式", action: () => setMode("chat") },
+    { name: "mode plan", description: "切换到规划模式", action: () => setMode("plan") },
+    { name: "mode review", description: "切换到审查模式", action: () => setMode("review") },
     { name: "effort low", description: "低推理深度", action: () => setEffort("low") },
     { name: "effort max", description: "最大推理深度", action: () => setEffort("max") },
     { name: "settings", description: "打开设置", action: () => setShowSettings(true) },

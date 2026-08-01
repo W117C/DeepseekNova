@@ -59,6 +59,12 @@ pub struct StoredMessage {
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Assistant tool calls (schema v2). `serde(default)` keeps old files readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<deepseeknova_core::types::ToolCall>>,
+    /// DeepSeek-V4 reasoning content (schema v2), required for replay fidelity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -190,10 +196,21 @@ impl SessionStore {
                     content: m.content,
                     name: m.name,
                     tool_call_id: m.tool_call_id,
+                    tool_calls: m.tool_calls,
+                    reasoning_content: m.reasoning_content,
                 })
                 .collect(),
         }
     }
+}
+
+/// Generate a fresh chat session id of the form `chat-YYYYMMDD-HHMMSS` (UTC).
+///
+/// The timestamp layout is lexicographically ordered, so sorting session ids
+/// as strings yields chronological order — callers pick the newest session
+/// with a plain `max()` without touching the filesystem.
+pub fn new_session_id() -> String {
+    format!("chat-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S"))
 }
 
 // ---------------------------------------------------------------------------
@@ -230,9 +247,9 @@ impl From<&StoredMessage> for Message {
             },
             content: sm.content.clone(),
             name: sm.name.clone(),
-            tool_calls: None,
+            tool_calls: sm.tool_calls.clone(),
             tool_call_id: sm.tool_call_id.clone(),
-            reasoning_content: None,
+            reasoning_content: sm.reasoning_content.clone(),
         }
     }
 }
@@ -412,6 +429,8 @@ mod tests {
             content: "hello".to_string(),
             name: None,
             tool_call_id: None,
+            tool_calls: None,
+            reasoning_content: None,
         };
         let msg: Message = (&sm).into();
         assert_eq!(msg.role, Role::User);
@@ -422,6 +441,8 @@ mod tests {
             content: "you are helpful".to_string(),
             name: None,
             tool_call_id: None,
+            tool_calls: None,
+            reasoning_content: None,
         };
         let msg: Message = (&sm).into();
         assert_eq!(msg.role, Role::System);
@@ -438,5 +459,92 @@ mod tests {
         assert_eq!(ri.prompt, "test");
         assert_eq!(ri.images.len(), 1);
         assert_eq!(ri.model_override, Some("gpt-4".into()));
+    }
+
+    #[test]
+    fn new_session_id_has_expected_shape() {
+        let id = new_session_id();
+        assert!(id.starts_with("chat-"), "unexpected prefix: {id}");
+        // chat- (5) + YYYYMMDD (8) + - (1) + HHMMSS (6) = 20 chars.
+        assert_eq!(id.len(), 20, "unexpected length: {id}");
+        assert!(id[5..].chars().all(|c| c.is_ascii_digit() || c == '-'));
+    }
+
+    #[test]
+    fn append_then_load_round_trips() {
+        let root = test_root().join("roundtrip");
+        let _ = std::fs::remove_dir_all(&root);
+        let store = SessionStore::new(root.clone()).unwrap();
+        let sid = "chat-roundtrip";
+        let turn = SessionStore::build_turn(&sample_input(), 1, sample_messages(), None);
+        store.append(sid, &turn).unwrap();
+
+        let loaded = store.load(sid).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].turn, 1);
+        assert_eq!(loaded[0].input.prompt, "hello world");
+        assert_eq!(loaded[0].messages.len(), 2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stored_message_roundtrips_tool_calls_and_reasoning() {
+        use deepseeknova_core::types::{FunctionCall, ToolCall};
+        let msg = Message {
+            role: Role::Assistant,
+            content: String::new(),
+            name: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "call_1".into(),
+                ty: "function".into(),
+                function: FunctionCall {
+                    name: "read_file".into(),
+                    arguments: "{\"path\":\"src/lib.rs\"}".into(),
+                },
+            }]),
+            tool_call_id: None,
+            reasoning_content: Some("I should read the file first.".into()),
+        };
+        let turn = SessionStore::build_turn(&sample_input(), 1, vec![msg], None);
+        let json = serde_json::to_string(&turn).unwrap();
+        let parsed: StoredTurn = serde_json::from_str(&json).unwrap();
+        let restored: Message = (&parsed.messages[0]).into();
+        let tcs = restored.tool_calls.expect("tool_calls must survive");
+        assert_eq!(tcs.len(), 1);
+        assert_eq!(tcs[0].id, "call_1");
+        assert_eq!(tcs[0].function.name, "read_file");
+        assert_eq!(
+            restored.reasoning_content.as_deref(),
+            Some("I should read the file first.")
+        );
+    }
+
+    #[test]
+    fn legacy_stored_message_without_new_fields_still_parses() {
+        let legacy = "{\"role\":\"user\",\"content\":\"hi\"}";
+        let sm: StoredMessage = serde_json::from_str(legacy).unwrap();
+        assert!(sm.tool_calls.is_none());
+        assert!(sm.reasoning_content.is_none());
+        let m: Message = (&sm).into();
+        assert!(m.tool_calls.is_none());
+    }
+
+    #[test]
+    fn resume_primitives_degrade_gracefully_when_empty() {
+        // The `--resume` path relies on these two behaviours to fall back to a
+        // fresh session instead of erroring when nothing is saved yet.
+        let root = test_root().join("empty-resume");
+        let _ = std::fs::remove_dir_all(&root);
+        let store = SessionStore::new(root.clone()).unwrap();
+
+        // No sessions yet: listing is empty and max() yields no candidate.
+        let ids = store.list_sessions().unwrap();
+        assert!(ids.is_empty());
+        assert!(ids.into_iter().max().is_none());
+
+        // Loading a non-existent session is Ok(empty), not an error.
+        let loaded = store.load("chat-does-not-exist").unwrap();
+        assert!(loaded.is_empty());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

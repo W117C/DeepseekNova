@@ -16,12 +16,20 @@ use crate::AppState;
 
 // ---------------------------------------------------------------------------
 /// Frontend request to submit a prompt to the agent.
+///
+/// 新增字段均为 `#[serde(default)]` Option，旧调用方（serve/CLI/旧前端）不受影响。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubmitRequest {
     pub prompt: String,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
     pub thinking_enabled: Option<bool>,
+    /// 四档模式 agent/chat/plan/review（缺省 agent；一期仅记录，不改变执行路径）
+    #[serde(default)]
+    pub agent_mode: Option<String>,
+    /// 附件绝对路径列表；一期读取文本内容拼入 prompt 前缀
+    #[serde(default)]
+    pub attachments: Option<Vec<String>>,
 }
 
 /// A single skill summary for the frontend skills panel.
@@ -110,6 +118,12 @@ fn generate_id() -> String {
 // Commands — 沙箱配置 (Sandbox)
 // ===========================================================================
 
+/// Desktop UI sandbox settings, persisted to `.deepseeknova/sandbox.json`.
+///
+/// NOTE: UI-staging DTO, *separate* from the TOML `[sandbox]` config
+/// (`deepseeknova_config::SandboxConfig`) that `deepseeknova_runtime::build_agent`
+/// reads to actually activate the OS sandbox. Set `[sandbox].enabled = true` in
+/// the TOML config to enable sandboxing at run time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxConfig {
     pub enabled: bool,
@@ -151,6 +165,11 @@ fn network_config_path() -> std::path::PathBuf {
 // Commands — 权限规则 (Permissions)
 // ===========================================================================
 
+/// Desktop UI permission rule, persisted to `.deepseeknova/permissions.json`.
+///
+/// NOTE: UI-staging DTO, separate from the TOML `[permissions]` config
+/// (`deepseeknova_config::PermissionsConfig`) that gates real enforcement. Set
+/// `[permissions].enabled = true` in the TOML config to activate the gate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PermissionRule {
     pub name: String,
@@ -273,15 +292,20 @@ pub mod core;
 pub mod diagnostics;
 pub mod hooks;
 pub mod knowledge;
+pub mod logs;
 pub mod mcp;
 pub mod memory;
 pub mod misc;
 pub mod network;
 pub mod permissions;
+pub mod review;
 pub mod sandbox;
 pub mod sessions;
 pub mod settings;
 pub mod skills;
 pub mod subagents;
 pub mod tabs;
+pub mod tools;
+pub mod triggers;
 pub mod workspace;
+pub mod worktree;

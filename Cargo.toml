@@ -8,6 +8,7 @@ members = [
     "crates/deepseeknova-core",
     "crates/deepseeknova-mcp",
     "crates/deepseeknova-event",
+    "crates/deepseeknova-graph",
     "crates/deepseeknova-permission",
     "crates/deepseeknova-context",
     "crates/deepseeknova-runtime",
@@ -19,8 +20,8 @@ members = [
     "crates/deepseeknova-skills",
     "crates/deepseeknova-telemetry",
     "crates/deepseeknova-desktop",
-    "crates/deepseeknova-orch",
     "crates/deepseeknova-security",
+    "crates/deepseeknova-scanner",
 ]
 resolver = "2"
 default-members = [
@@ -32,6 +33,7 @@ default-members = [
     "crates/deepseeknova-core",
     "crates/deepseeknova-mcp",
     "crates/deepseeknova-event",
+    "crates/deepseeknova-graph",
     "crates/deepseeknova-permission",
     "crates/deepseeknova-context",
     "crates/deepseeknova-runtime",
@@ -42,8 +44,8 @@ default-members = [
     "crates/deepseeknova-serve",
     "crates/deepseeknova-skills",
     "crates/deepseeknova-telemetry",
-    "crates/deepseeknova-orch",
     "crates/deepseeknova-security",
+    "crates/deepseeknova-scanner",
 ]
 
 [workspace.lints.rust]
@@ -108,12 +110,13 @@ deepseeknova-context = { version = "0.4.0", path = "crates/deepseeknova-context"
 deepseeknova-core = { version = "0.4.0", path = "crates/deepseeknova-core" }
 deepseeknova-desktop = { path = "crates/deepseeknova-desktop" }
 deepseeknova-event = { version = "0.4.0", path = "crates/deepseeknova-event" }
+deepseeknova-graph = { version = "0.4.0", path = "crates/deepseeknova-graph" }
 deepseeknova-mcp = { version = "0.4.0", path = "crates/deepseeknova-mcp" }
-deepseeknova-orch = { version = "0.4.0", path = "crates/deepseeknova-orch" }
 deepseeknova-permission = { version = "0.4.0", path = "crates/deepseeknova-permission" }
 deepseeknova-provider = { version = "0.4.0", path = "crates/deepseeknova-provider" }
 deepseeknova-runtime = { version = "0.4.0", path = "crates/deepseeknova-runtime" }
 deepseeknova-sandbox = { version = "0.4.0", path = "crates/deepseeknova-sandbox" }
+deepseeknova-scanner = { version = "0.4.0", path = "crates/deepseeknova-scanner" }
 deepseeknova-security = { version = "0.4.0", path = "crates/deepseeknova-security" }
 deepseeknova-serve = { version = "0.4.0", path = "crates/deepseeknova-serve" }
 deepseeknova-skills = { version = "0.4.0", path = "crates/deepseeknova-skills" }

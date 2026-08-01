@@ -251,6 +251,7 @@ mod tests {
                 outcome: TaskOutcome::Success,
                 user_feedback: None,
                 session_id: "s1".into(),
+                files: vec!["src/memory.rs".into()],
             }),
         };
 

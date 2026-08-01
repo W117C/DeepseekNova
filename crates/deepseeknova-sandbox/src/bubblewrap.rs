@@ -14,6 +14,9 @@ pub struct BubblewrapSandbox {
     extra_readonly_binds: Vec<String>,
     /// Additional directories to bind-mount read-write inside the sandbox.
     readwrite_binds: Vec<String>,
+    /// When true, the sandbox re-shares the host network; otherwise network is
+    /// unshared (isolated).
+    allow_network: bool,
 }
 
 impl Default for BubblewrapSandbox {
@@ -21,6 +24,7 @@ impl Default for BubblewrapSandbox {
         Self {
             extra_readonly_binds: default_ro_binds(),
             readwrite_binds: Vec::new(),
+            allow_network: false,
         }
     }
 }
@@ -41,6 +45,16 @@ impl BubblewrapSandbox {
     pub fn with_readwrite_bind(mut self, host_path: impl Into<String>) -> Self {
         self.readwrite_binds.push(host_path.into());
         self
+    }
+
+    /// Build a sandbox from config-driven policy: writable bind mounts and an
+    /// optional network share. An empty policy matches [`Default`].
+    pub fn with_policy(writable_paths: &[String], allow_network: bool) -> Self {
+        Self {
+            extra_readonly_binds: default_ro_binds(),
+            readwrite_binds: writable_paths.to_vec(),
+            allow_network,
+        }
     }
 
     /// Build the bwrap arguments vector.
@@ -69,8 +83,12 @@ impl BubblewrapSandbox {
             args.push(bind.clone());
         }
 
-        // Disable network access.
-        args.push("--unshare-net".to_string());
+        // Network: unshared by default; re-share only when explicitly allowed.
+        if self.allow_network {
+            args.push("--share-net".to_string());
+        } else {
+            args.push("--unshare-net".to_string());
+        }
 
         // Disable IPC.
         args.push("--unshare-ipc".to_string());
@@ -144,15 +162,19 @@ fn default_ro_binds() -> Vec<String> {
     ]
 }
 
-/// Check whether `bwrap` is available on the system.
+/// Check whether `bwrap` is available on the system (cached per process so the
+/// probe subprocess is spawned at most once).
 fn bwrap_available() -> bool {
-    std::process::Command::new("bwrap")
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        std::process::Command::new("bwrap")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    })
 }
 
 #[cfg(test)]
@@ -204,6 +226,47 @@ mod tests {
         let bw = BubblewrapSandbox::default();
         let args = bw.build_args("sh", &["-c".into(), "echo hi".into()]);
         assert!(args.contains(&"--unshare-net".to_string()));
+    }
+
+    // --- with_policy ---
+
+    #[test]
+    fn with_policy_shares_network_when_allowed() {
+        let bw = BubblewrapSandbox::with_policy(&[], true);
+        let args = bw.build_args("sh", &["-c".into(), "echo hi".into()]);
+        assert!(args.contains(&"--share-net".to_string()));
+        // 开网后不得再出现隔离参数
+        assert!(!args.contains(&"--unshare-net".to_string()));
+    }
+
+    #[test]
+    fn with_policy_isolates_network_by_default() {
+        // 负例：未显式开网时仍保持 --unshare-net
+        let bw = BubblewrapSandbox::with_policy(&["/tmp/work".into()], false);
+        let args = bw.build_args("sh", &["-c".into(), "echo hi".into()]);
+        assert!(args.contains(&"--unshare-net".to_string()));
+        assert!(!args.contains(&"--share-net".to_string()));
+    }
+
+    #[test]
+    fn with_policy_adds_readwrite_binds() {
+        let bw = BubblewrapSandbox::with_policy(&["/tmp/work".into()], false);
+        let args = bw.build_args("sh", &["-c".into(), "echo hi".into()]);
+        // 可写目录以 `--bind <p> <p>` 成对出现
+        let pos = args.iter().position(|a| a == "--bind").expect("--bind");
+        assert_eq!(args[pos + 1], "/tmp/work");
+        assert_eq!(args[pos + 2], "/tmp/work");
+    }
+
+    #[test]
+    fn with_policy_empty_matches_default_args() {
+        // 负例：空策略与 Default 生成的参数完全一致（无 --bind）
+        let bw = BubblewrapSandbox::with_policy(&[], false);
+        let default_args =
+            BubblewrapSandbox::default().build_args("sh", &["-c".into(), "echo hi".into()]);
+        let policy_args = bw.build_args("sh", &["-c".into(), "echo hi".into()]);
+        assert_eq!(policy_args, default_args);
+        assert!(!policy_args.contains(&"--bind".to_string()));
     }
 
     #[test]

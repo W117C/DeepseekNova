@@ -159,7 +159,10 @@ impl Memory {
     /// Previously, `head_len` and `tail_len` could exceed `content.len()`, causing a panic.
     /// Now clamped to valid boundaries and uses floor_char_boundary to avoid splitting
     /// multi-byte UTF-8 characters.
-    pub fn shrink_large_results(&mut self, threshold_chars: usize) {
+    /// 按 **token 预算** 收缩大工具结果。预算先经 [`crate::tokens::char_budget_for_tokens`]
+    /// 按消息自身的 CJK/ASCII 构成换算为字符预算，再换算为字节上限做头尾截断，
+    /// 保证中文长结果不会被误判为"超限 4 倍"。
+    pub fn shrink_large_results(&mut self, threshold_tokens: u32) {
         for msg in self.messages.iter_mut().rev() {
             if msg.role != Role::Tool {
                 continue;
@@ -175,6 +178,10 @@ impl Memory {
             }
 
             let tlen = msg.content.len();
+            let budget_chars =
+                crate::tokens::char_budget_for_tokens(&msg.content, threshold_tokens);
+            // 字符预算 → 字节预算：ASCII 1:1，CJK 1:3，取 4 为安全上界。
+            let threshold_chars = budget_chars.saturating_mul(4);
 
             // P0 FIX: Only truncate if content is actually larger than threshold
             // and ensure head_len + tail_len never exceeds content length.

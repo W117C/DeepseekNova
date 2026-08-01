@@ -18,3 +18,6 @@ thiserror = { workspace = true }
 toml = { workspace = true }
 deepseeknova-core = { workspace = true }
 deepseeknova-config = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }

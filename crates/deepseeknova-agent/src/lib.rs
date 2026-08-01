@@ -25,14 +25,20 @@
 
 pub mod agent;
 pub mod budget;
+mod compaction;
 pub mod coordinator;
+pub mod delegate;
 pub mod memory;
 pub mod plan_mode;
+mod review;
 pub mod sub_agent;
 pub mod test_utils;
+pub mod tokens;
+mod verify;
 
 pub use agent::*;
 pub use coordinator::*;
+pub use delegate::*;
 pub use memory::*;
 pub use plan_mode::*;
 pub use sub_agent::*;

@@ -22,3 +22,6 @@ thiserror = { workspace = true }
 deepseeknova-core = { workspace = true }
 deepseeknova-config = { workspace = true }
 deepseeknova-context = { workspace = true }
+
+[dev-dependencies]
+toml = { workspace = true }

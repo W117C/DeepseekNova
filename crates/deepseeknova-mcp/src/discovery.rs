@@ -30,6 +30,14 @@ impl McpServerConnection {
             McpServerConnection::Http(conn) => conn.request(method, params, timeout).await,
         }
     }
+
+    /// The default per-request timeout configured for this transport.
+    pub fn request_timeout(&self) -> Duration {
+        match self {
+            McpServerConnection::Stdio(conn) => conn.request_timeout,
+            McpServerConnection::Http(conn) => conn.request_timeout,
+        }
+    }
 }
 
 /// Discover MCP servers from configuration and connect to them.
@@ -38,31 +46,46 @@ impl McpServerConnection {
 /// process and performs the MCP initialize handshake.
 ///
 /// For HTTP servers (config entries with a `url` field), connects via HTTP/SSE.
+///
+/// Servers are connected concurrently. [`join_all`](futures::future::join_all)
+/// preserves input order, so the returned Vec follows config order regardless
+/// of which handshake finishes first — keeping downstream tool registration
+/// (and thus prompt-cache keys) deterministic. Each connection attempt is
+/// bounded by `request_timeout` (covering the child-process spawn, which is
+/// otherwise unbounded), and failures/timeouts are logged and skipped.
 pub async fn discover_and_connect(
     config: &Config,
     request_timeout: Duration,
 ) -> Vec<DiscoveredMcpServer> {
-    let mut servers = Vec::new();
-
-    for server_cfg in &config.mcp_servers {
+    let attempts = config.mcp_servers.iter().map(|server_cfg| async move {
         if !server_cfg.enabled {
             info!("MCP server '{}' is disabled, skipping", server_cfg.name);
-            continue;
+            return None;
         }
 
         let name = server_cfg.name.clone();
-        match connect_one(server_cfg, request_timeout).await {
-            Ok(connection) => {
+        match tokio::time::timeout(request_timeout, connect_one(server_cfg, request_timeout)).await
+        {
+            Ok(Ok(connection)) => {
                 info!("MCP server '{name}' connected");
-                servers.push(DiscoveredMcpServer { name, connection });
+                Some(DiscoveredMcpServer { name, connection })
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 warn!("MCP server '{name}' failed to connect: {e}");
+                None
+            }
+            Err(_) => {
+                warn!("MCP server '{name}' connection timed out after {request_timeout:?}");
+                None
             }
         }
-    }
+    });
 
-    servers
+    futures::future::join_all(attempts)
+        .await
+        .into_iter()
+        .flatten()
+        .collect()
 }
 
 /// Connect to a single MCP server based on its config.
@@ -101,5 +124,43 @@ async fn connect_one(
             "MCP server '{}': must have either a command or an HTTP URL",
             cfg.name
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use deepseeknova_config::{Config, McpServerConfig};
+
+    fn bad_server(name: &str) -> McpServerConfig {
+        McpServerConfig {
+            name: name.into(),
+            // A command that does not exist: spawn fails fast, exercising the
+            // warn-and-skip path without blocking sibling servers.
+            command: "deepseeknova-nonexistent-mcp-binary".into(),
+            args: vec![],
+            env: vec![],
+            enabled: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_config_yields_no_servers() {
+        let config = Config::default();
+        let servers = discover_and_connect(&config, Duration::from_secs(1)).await;
+        assert!(servers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn failing_server_does_not_block_others() {
+        // Two unreachable servers plus one disabled one. None should connect,
+        // but the call must return (not hang) and skip all three gracefully.
+        let mut config = Config::default();
+        let mut disabled = bad_server("disabled");
+        disabled.enabled = false;
+        config.mcp_servers = vec![bad_server("first"), disabled, bad_server("second")];
+
+        let servers = discover_and_connect(&config, Duration::from_secs(2)).await;
+        assert!(servers.is_empty());
     }
 }

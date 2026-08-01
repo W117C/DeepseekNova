@@ -78,16 +78,18 @@ impl HistoryUnit {
     /// Estimated token count for this unit (char count / 4, rough).
     pub fn estimated_tokens(&self) -> usize {
         match self {
-            HistoryUnit::Standalone(msg) => msg.content.len() / 4,
+            HistoryUnit::Standalone(msg) => {
+                deepseeknova_core::tokens::estimate_text_tokens(&msg.content) as usize
+            }
             HistoryUnit::ToolExchange { assistant, results } => {
-                let mut total = assistant.content.len();
+                let mut total = deepseeknova_core::tokens::estimate_text_tokens(&assistant.content);
                 if let Some(ref r) = assistant.reasoning_content {
-                    total += r.len();
+                    total += deepseeknova_core::tokens::estimate_text_tokens(r);
                 }
                 for r in results {
-                    total += r.content.len();
+                    total += deepseeknova_core::tokens::estimate_text_tokens(&r.content);
                 }
-                total / 4
+                total as usize
             }
         }
     }

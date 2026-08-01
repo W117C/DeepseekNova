@@ -1,4 +1,5 @@
 use crate::connection::McpConnection;
+use crate::discovery::McpServerConnection;
 use crate::types::*;
 use anyhow::Context;
 use serde_json::Value;
@@ -6,19 +7,28 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// Typed client for MCP protocol operations.
-/// Wraps an McpConnection with domain-specific methods.
+/// Wraps an [`McpServerConnection`] (stdio or HTTP) with domain-specific
+/// methods, so the same client works over either transport.
 pub struct McpClient {
-    conn: Arc<McpConnection>,
+    conn: McpServerConnection,
 }
 
 impl McpClient {
+    /// Build a client from a stdio connection.
     pub fn new(conn: Arc<McpConnection>) -> Self {
+        Self {
+            conn: McpServerConnection::Stdio(conn),
+        }
+    }
+
+    /// Build a client from any discovered transport (stdio or HTTP).
+    pub fn from_connection(conn: McpServerConnection) -> Self {
         Self { conn }
     }
 
     /// Get the default timeout for requests.
     fn timeout(&self) -> Duration {
-        self.conn.request_timeout
+        self.conn.request_timeout()
     }
 
     // ------------------------------------------------------------------
