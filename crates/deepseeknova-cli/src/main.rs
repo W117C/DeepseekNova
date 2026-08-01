@@ -308,11 +308,8 @@ async fn main() -> anyhow::Result<()> {
                     .filter(|s| s.enabled)
                     .map(|s| deepseeknova_tui::McpServerInfo {
                         name: s.name.clone(),
-                        command: if s.args.is_empty() {
-                            s.command.clone()
-                        } else {
-                            format!("{} {}", s.command, s.args.join(" "))
-                        },
+                        command: s.command.clone(),
+                        args: s.args.clone(),
                     })
                     .collect();
                 // /undo：与 `checkpoint` 子命令同一快照库。

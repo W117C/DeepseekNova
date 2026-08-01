@@ -45,7 +45,8 @@ Optional capabilities are enabled by builders:
 (`/model use` + `/cost`), `with_session_controller`
 (`/new` `/sessions` `/resume` + turn persistence), `with_skills_paths`,
 `with_mcp_servers` + `with_mcp_probe` (`/mcp` live status: short-timeout spawn
-probe that marks a still-alive stdio server as connected), and
+probe with the real command argv that marks a still-alive stdio server as
+connected), and
 `with_undo_controller` (`/undo`).
 
 ```rust,no_run

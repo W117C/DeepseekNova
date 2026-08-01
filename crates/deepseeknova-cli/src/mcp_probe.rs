@@ -1,5 +1,6 @@
-//! `/mcp` 实时连接探测：短超时 spawn stdio MCP 启动命令，进程存活视为已连接
-//! （MCP stdio 服务器会阻塞等待 stdin，能撑过超时即说明进程正常）。
+//! `/mcp` 实时连接探测：短超时按真实 argv 启动 stdio MCP 命令，进程存活视为
+//! 已连接（MCP stdio 服务器会阻塞等待 stdin，能撑过超时即说明进程正常）。
+//! 直接用 `Command::new(command).args(args)`，避免 shell 重新解析参数。
 
 use async_trait::async_trait;
 use deepseeknova_tui::{McpProbe, McpServerInfo, McpStatus};
@@ -23,22 +24,16 @@ impl McpProbe for CliMcpProbe {
     async fn probe(&self, servers: &[McpServerInfo]) -> Vec<McpStatus> {
         let mut out = Vec::with_capacity(servers.len());
         for server in servers {
-            out.push(self.probe_one(&server.command).await);
+            out.push(self.probe_one(&server.command, &server.args).await);
         }
         out
     }
 }
 
 impl CliMcpProbe {
-    async fn probe_one(&self, command: &str) -> McpStatus {
-        let (shell, flag) = if cfg!(windows) {
-            ("cmd", "/C")
-        } else {
-            ("sh", "-c")
-        };
-        let mut child = match Command::new(shell)
-            .arg(flag)
-            .arg(command)
+    async fn probe_one(&self, command: &str, args: &[String]) -> McpStatus {
+        let mut child = match Command::new(command)
+            .args(args)
             // 保持 stdin 打开：模拟 MCP 服务器等待输入，避免假阴性。
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
@@ -77,7 +72,10 @@ mod tests {
         let probe = CliMcpProbe {
             timeout: Duration::from_millis(300),
         };
-        assert_eq!(probe.probe_one("sleep 5").await, McpStatus::Connected);
+        assert_eq!(
+            probe.probe_one("sleep", &["5".to_string()]).await,
+            McpStatus::Connected
+        );
     }
 
     #[tokio::test]
@@ -86,7 +84,10 @@ mod tests {
         let probe = CliMcpProbe {
             timeout: Duration::from_millis(300),
         };
-        match probe.probe_one("exit 3").await {
+        match probe
+            .probe_one("sh", &["-c".to_string(), "exit 3".to_string()])
+            .await
+        {
             McpStatus::Disconnected(reason) => assert!(reason.contains("exit 3"), "{reason}"),
             other => panic!("expected disconnected, got {other:?}"),
         }
@@ -98,9 +99,31 @@ mod tests {
             timeout: Duration::from_millis(300),
         };
         // 不存在的命令 → spawn 失败或 shell 立即退出，都算未连接
-        match probe.probe_one("definitely-no-such-command-xyz").await {
+        match probe
+            .probe_one("definitely-no-such-command-xyz", &[])
+            .await
+        {
             McpStatus::Disconnected(_) => {}
             other => panic!("expected disconnected, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn probe_keeps_args_with_spaces_intact() {
+        let probe = CliMcpProbe {
+            timeout: Duration::from_millis(300),
+        };
+        // sh -c "printf ok; sleep 5"：整个字符串是单个 argv，不能被 shell 再拆
+        match probe
+            .probe_one(
+                "sh",
+                &["-c".to_string(), "printf ok; sleep 5".to_string()],
+            )
+            .await
+        {
+            McpStatus::Connected => {}
+            other => panic!("expected connected, got {other:?}"),
         }
     }
 }

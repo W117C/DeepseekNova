@@ -139,8 +139,9 @@ pub trait UndoController: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpServerInfo {
     pub name: String,
-    /// stdio 启动命令（command + args 连接），仅用于实时连接探测。
+    /// stdio 启动命令与参数（与真实 MCP 启动同 argv），仅用于实时连接探测。
     pub command: String,
+    pub args: Vec<String>,
 }
 
 /// 连接探测结果。
@@ -2559,14 +2560,16 @@ mod tests {
     #[tokio::test]
     async fn mcp_command_lists_configured_servers() {
         let mut tui = TuiRunner::new(Arc::new(StubRunner)).with_mcp_servers(vec![
-            McpServerInfo {
-                name: "github".into(),
-                command: "npx github-mcp".into(),
-            },
-            McpServerInfo {
-                name: "fs".into(),
-                command: "npx fs-mcp".into(),
-            },
+                McpServerInfo {
+                    name: "github".into(),
+                    command: "npx github-mcp".into(),
+                    args: vec![],
+                },
+                McpServerInfo {
+                    name: "fs".into(),
+                    command: "npx fs-mcp".into(),
+                    args: vec![],
+                },
         ]);
         let mut app = AppState::default();
         tui.handle_command(&mut app, "mcp").await;
@@ -2615,10 +2618,12 @@ mod tests {
                 McpServerInfo {
                     name: "ok-server".into(),
                     command: "sleep 5".into(),
+                    args: vec![],
                 },
                 McpServerInfo {
                     name: "bad-server".into(),
                     command: "exit 1".into(),
+                    args: vec![],
                 },
             ])
             .with_mcp_probe(probe);
