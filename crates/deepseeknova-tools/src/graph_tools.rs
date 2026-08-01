@@ -848,7 +848,7 @@ mod tests {
             "trait Animal {\n    fn speak(&self);\n}\n\n\
              struct Dog;\nimpl Animal for Dog {\n    fn speak(&self) {}\n}\n\n\
              struct Cat;\nimpl Animal for Cat {\n    fn speak(&self) {}\n}\n\n\
-             fn make_noise(a: &dyn Animal) {\n    a.speak();\n}\n",
+             fn make_noise(a: Box<dyn Animal>) {\n    a.speak();\n}\n",
         )
         .unwrap();
         let ctx = ctx_with_index(root);

@@ -228,7 +228,7 @@ mod tests {
             "trait Animal {\n    fn speak(&self);\n}\n\n\
              struct Dog;\nimpl Animal for Dog {\n    fn speak(&self) {}\n}\n\n\
              struct Cat;\nimpl Animal for Cat {\n    fn speak(&self) {}\n}\n\n\
-             fn make_noise(a: &dyn Animal) {\n    a.speak();\n}\n",
+             fn make_noise(a: Box<dyn Animal>) {\n    a.speak();\n}\n",
         )
         .unwrap();
         let mut idx = GraphIndex::open(root, 1_048_576).unwrap();
