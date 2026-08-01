@@ -26,6 +26,36 @@ const GRAPH_RETRIEVAL_HINT: &str = "\n\n## 代码检索策略\n\
 2. `traverse_graph` 查看调用者/被调用者关系；\n\
 3. `retrieve_entity`（view=skeleton）看骨架，确认目标后再 view=full 或 read_file 取实现。";
 
+/// A3 从用户输入提取 repo map 个性化 seeds：标识符 token（≥3 字符、
+/// 去停用词、去重、上限 8），用于对图节点做 personalized PageRank。
+fn repo_map_seeds(query: &str) -> Vec<String> {
+    const STOP: &[&str] = &[
+        "the", "and", "for", "with", "this", "that", "from", "into", "file", "code", "please",
+        "help", "need", "want", "make", "fix", "add", "new", "use", "using", "should", "could",
+        "would", "about", "your", "you", "our", "are", "not", "but", "can", "has", "have", "how",
+        "what", "why", "where", "when", "which", "there", "their", "these", "those", "also",
+        "then", "than", "will", "was", "were", "been", "being", "tell", "explain", "write",
+        "build", "check", "review", "test", "run", "show", "list",
+    ];
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for token in query
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|t| t.len() >= 3)
+    {
+        if STOP.contains(&token.to_lowercase().as_str()) {
+            continue;
+        }
+        if seen.insert(token.to_lowercase()) {
+            out.push(token.to_string());
+        }
+        if out.len() >= 8 {
+            break;
+        }
+    }
+    out
+}
+
 /// Runtime is the composition root. It wires registry, context, events,
 /// and permission together. Agent, Planner, SubAgent, Server all share
 /// one Runtime.
@@ -314,6 +344,22 @@ pub fn build_agent_with_role_providers(
     if !config.delegate.enabled {
         disabled.insert("delegate");
     }
+    // A1 检查点：写前快照共享管理器，跨进程持久化（CLI checkpoint list/rollback）。
+    let checkpoint: Option<Arc<tokio::sync::Mutex<deepseeknova_checkpoint::CheckpointManager>>> =
+        if config.checkpoint.enabled {
+            let path = workspace_root.join(&config.checkpoint.path);
+            let manager = match deepseeknova_checkpoint::CheckpointManager::load_from(&path) {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::warn!("checkpoint load failed ({e}); starting fresh");
+                    deepseeknova_checkpoint::CheckpointManager::new()
+                }
+            }
+            .with_persistence(path);
+            Some(Arc::new(tokio::sync::Mutex::new(manager)))
+        } else {
+            None
+        };
     let register = |agent: &mut deepseeknova_agent::Agent,
                     tools: Vec<Arc<dyn deepseeknova_core::Tool>>| {
         for tool in tools {
@@ -331,10 +377,19 @@ pub fn build_agent_with_role_providers(
             ));
         register(
             &mut agent,
-            deepseeknova_tools::all_builtin_tools_with_sandbox(sandbox),
+            deepseeknova_tools::all_builtin_tools_with_sandbox_and_checkpoint(
+                sandbox,
+                checkpoint.clone(),
+            ),
         );
     } else {
-        register(&mut agent, deepseeknova_tools::all_builtin_tools());
+        register(
+            &mut agent,
+            deepseeknova_tools::all_builtin_tools_with_sandbox_and_checkpoint(
+                Arc::new(deepseeknova_sandbox::NoOpSandbox),
+                checkpoint,
+            ),
+        );
     }
 
     // Dynamically-discovered tools (MCP, etc). Same disable-filter as built-ins;
@@ -375,13 +430,15 @@ pub fn build_agent_with_role_providers(
                 let budget = config.graph.repo_map_tokens;
                 if budget > 0 {
                     let map_handle = handle.clone();
-                    let provider: deepseeknova_agent::RepoMapProvider = Arc::new(move || {
-                        map_handle
-                            .lock()
-                            .ok()
-                            .and_then(|idx| idx.repo_map(budget, &[]).ok())
-                            .filter(|s| !s.is_empty())
-                    });
+                    let provider: deepseeknova_agent::RepoMapProvider =
+                        Arc::new(move |query: &str| {
+                            let seeds = repo_map_seeds(query);
+                            map_handle
+                                .lock()
+                                .ok()
+                                .and_then(|idx| idx.repo_map(budget, &seeds).ok())
+                                .filter(|s| !s.is_empty())
+                        });
                     agent = agent.with_repo_map_provider(provider);
                 }
             }
@@ -1458,5 +1515,25 @@ mod tests {
             "mid_run_recall=true must wire mid-run retrieval"
         );
         let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn repo_map_seeds_extracts_identifiers_and_skips_stopwords() {
+        let seeds =
+            repo_map_seeds("please fix CheckpointManager and add tests for repo_map wiring");
+        assert!(seeds.iter().any(|s| s == "CheckpointManager"));
+        assert!(seeds.iter().any(|s| s == "repo_map"));
+        assert!(
+            !seeds
+                .iter()
+                .any(|s| matches!(s.as_str(), "please" | "and" | "fix" | "add" | "for")),
+            "stopwords must be excluded, got {seeds:?}"
+        );
+
+        let many =
+            repo_map_seeds("alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu");
+        assert!(many.len() <= 8, "seed cap must hold, got {many:?}");
+        let deduped = repo_map_seeds("token token token again again");
+        assert!(deduped.len() <= 2, "seeds must dedupe, got {deduped:?}");
     }
 }

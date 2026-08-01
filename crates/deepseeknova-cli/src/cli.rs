@@ -104,6 +104,16 @@ pub enum Commands {
         #[command(subcommand)]
         action: MemoryAction,
     },
+    /// 检查点快照管理（写前快照 + 回滚）。
+    Checkpoint {
+        #[command(subcommand)]
+        action: CheckpointAction,
+    },
+    /// 生成项目后置产出（Wiki / 知识卡片，A2）。
+    Artifacts {
+        #[command(subcommand)]
+        action: ArtifactsAction,
+    },
     /// Init a new DeepseekNova project
     Init,
 }
@@ -123,6 +133,45 @@ pub enum MemoryAction {
     Forget { id: String },
     /// 打印统计（召回命中率、reinforce 比例）——P2 决策依据。
     Stats,
+}
+
+#[derive(Subcommand)]
+pub enum CheckpointAction {
+    /// 列出当前快照与文件状态（unchanged/modified）。
+    List,
+    /// 回滚最近一个快照；--all 回滚全部。
+    Rollback {
+        #[arg(long)]
+        all: bool,
+    },
+    /// 丢弃全部快照（不恢复文件）。
+    Clear,
+}
+
+#[derive(Subcommand)]
+pub enum ArtifactsAction {
+    /// 生成 Repo Wiki（首页/ADR/API/依赖/变更日志）。
+    Wiki {
+        #[arg(long, default_value = "wiki")]
+        out: String,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        summary: Option<String>,
+    },
+    /// 生成一张知识卡片。
+    Cards {
+        #[arg(long, default_value = "cards")]
+        out: String,
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        insight: String,
+        #[arg(long)]
+        tags: Vec<String>,
+        #[arg(long)]
+        source: Option<String>,
+    },
 }
 
 #[cfg(test)]

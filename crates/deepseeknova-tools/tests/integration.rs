@@ -329,3 +329,41 @@ async fn move_file_renames() {
     assert!(dst.exists());
     assert_eq!(std::fs::read_to_string(&dst).unwrap(), "rename me");
 }
+
+#[tokio::test]
+async fn checkpointer_snapshots_before_write_and_rollback_restores() {
+    use deepseeknova_checkpoint::CheckpointManager;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    let dir = std::env::temp_dir().join(format!(
+        "dnv-ck-tools-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let target = dir.join("out.txt");
+    std::fs::write(&target, "before").unwrap();
+
+    let ck = Arc::new(Mutex::new(CheckpointManager::new()));
+    let tool = WriteFileTool::with_checkpointer(ck.clone());
+    let ctx = test_ctx(dir.clone());
+    tool.execute(
+        &ctx,
+        &format!(r#"{{"path":"{}","content":"after"}}"#, json_path(&target)),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(ck.lock().await.len(), 1, "write must snapshot first");
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "after");
+
+    let mut guard = ck.lock().await;
+    let restored = guard.rollback().await.unwrap();
+    assert!(restored.is_some());
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "before");
+    let _ = std::fs::remove_dir_all(&dir);
+}

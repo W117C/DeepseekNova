@@ -291,6 +291,32 @@ deepseeknova scan --format json --no-ai
 deepseeknova scan --path crates/deepseeknova-cli --severity-min high
 ```
 
+### 检查点（A1）
+
+写类工具（write/edit/move）执行前自动快照，快照持久化在
+`[checkpoint] path`（默认 `.deepseeknova/checkpoints.json`）：
+
+```bash
+deepseeknova checkpoint list             # 查看快照与文件状态（unchanged/modified）
+deepseeknova checkpoint rollback         # 回滚最近一个快照
+deepseeknova checkpoint rollback --all   # 回滚全部
+deepseeknova checkpoint clear            # 丢弃快照（不恢复文件）
+```
+
+`[checkpoint] enabled = false` 可关闭。
+
+### 项目后置产出（A2）
+
+```bash
+deepseeknova artifacts wiki --project <name> --summary "<描述>"  # 生成 wiki/ 目录
+deepseeknova artifacts cards --title "..." --insight "..." --tags a --tags b  # 生成 cards/ 目录
+```
+
+### 代码图个性化（A3）
+
+启用代码图后，repo map 会按当前用户输入提取标识符作为 personalized PageRank
+seeds（去停用词、去重、上限 8），让地图优先展示任务相关模块。
+
 ## Skills
 
 Skills are reusable prompt templates that extend the agent's capabilities. They live in

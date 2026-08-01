@@ -473,6 +473,109 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
+        // ── Checkpoint（写前快照 + 回滚，A1）────────────────────────────
+        Some(Commands::Checkpoint { action }) => {
+            use deepseeknova_checkpoint::CheckpointManager;
+            let workspace_root = std::env::current_dir().unwrap_or_default();
+            let path = workspace_root.join(&config.checkpoint.path);
+            match action {
+                cli::CheckpointAction::List => {
+                    let ck = CheckpointManager::load_from(&path)?;
+                    if ck.is_empty() {
+                        println!("no checkpoints (path: {})", path.display());
+                    }
+                    for (snap, clean) in ck.verify().await? {
+                        let status = if clean { "unchanged" } else { "modified" };
+                        println!(
+                            "{} [{}] {} ({})",
+                            if clean { "✓" } else { "✗" },
+                            status,
+                            snap.path.display(),
+                            &snap.hash[..8.min(snap.hash.len())]
+                        );
+                    }
+                }
+                cli::CheckpointAction::Rollback { all } => {
+                    let mut ck = CheckpointManager::load_from(&path)?;
+                    if *all {
+                        let n = ck.rollback_all().await?;
+                        println!("rolled back {n} snapshot(s)");
+                    } else if let Some((p, h)) = ck.rollback().await? {
+                        println!(
+                            "rolled back {} (hash {})",
+                            p.display(),
+                            &h[..8.min(h.len())]
+                        );
+                    } else {
+                        println!("no checkpoints to roll back");
+                    }
+                }
+                cli::CheckpointAction::Clear => {
+                    let mut ck = CheckpointManager::load_from(&path)?;
+                    let n = ck.len();
+                    ck.clear();
+                    println!("cleared {n} snapshot(s)");
+                }
+            }
+        }
+
+        // ── Artifacts（项目后置产出，A2）────────────────────────────────
+        Some(Commands::Artifacts { action }) => {
+            use deepseeknova_core::artifacts::cards::{CardGenerator, KnowledgeCard};
+            use deepseeknova_core::artifacts::wiki::{ProjectSummary, WikiConfig, WikiGenerator};
+            match action {
+                cli::ArtifactsAction::Wiki {
+                    out,
+                    project,
+                    summary,
+                } => {
+                    let name = project.clone().unwrap_or_else(|| {
+                        std::env::current_dir()
+                            .ok()
+                            .and_then(|d| d.file_name().map(|s| s.to_string_lossy().into_owned()))
+                            .unwrap_or_else(|| "project".to_string())
+                    });
+                    let mut gen = WikiGenerator::new(WikiConfig {
+                        output_dir: std::path::PathBuf::from(out),
+                        ..Default::default()
+                    });
+                    gen.add_home_page(&ProjectSummary {
+                        name,
+                        description: summary.clone().unwrap_or_default(),
+                        modules: vec![],
+                        key_decisions: vec![],
+                        metrics: vec![],
+                    });
+                    for p in gen.generate()? {
+                        println!("{}", p.display());
+                    }
+                }
+                cli::ArtifactsAction::Cards {
+                    out,
+                    title,
+                    insight,
+                    tags,
+                    source,
+                } => {
+                    let mut gen = CardGenerator::new(out);
+                    gen.add_card(KnowledgeCard {
+                        id: format!("card-{}", chrono::Utc::now().timestamp()),
+                        title: title.clone(),
+                        tags: tags.clone(),
+                        created: chrono::Utc::now().format("%Y-%m-%d").to_string(),
+                        source: source.clone().unwrap_or_else(|| "cli".to_string()),
+                        context: String::new(),
+                        key_insight: insight.clone(),
+                        code_example: None,
+                        related: vec![],
+                    });
+                    for p in gen.generate()? {
+                        println!("{}", p.display());
+                    }
+                }
+            }
+        }
+
         Some(Commands::Init) => {
             info!("init command");
             init::run_init().await?;

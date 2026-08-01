@@ -22,6 +22,7 @@ deepseeknova-graph = { workspace = true }
 deepseeknova-permission = { workspace = true }
 deepseeknova-sandbox = { workspace = true }
 deepseeknova-context = { workspace = true }
+deepseeknova-checkpoint = { workspace = true }
 deepseeknova-event = { workspace = true }
 deepseeknova-security = { workspace = true }
 deepseeknova-mcp = { workspace = true }
