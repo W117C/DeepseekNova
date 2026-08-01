@@ -109,13 +109,15 @@ const MEMORY_SCHEMA_SQL: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts U
             CREATE TABLE IF NOT EXISTS counters(name TEXT PRIMARY KEY, value INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS distill_log(day TEXT PRIMARY KEY, count INTEGER NOT NULL DEFAULT 0);";
 
-/// 新建 trigram 表为空时从主表回填（仅首次升级时发生一次）。
+/// 主表与 trigram 表行数不一致时对账回填（首次升级、崩溃失步均自愈）。
 fn ensure_cjk_backfill(db: &rusqlite::Connection) -> Result<()> {
-    let count: i64 = db.query_row("SELECT COUNT(*) FROM memory_fts_cjk", [], |r| r.get(0))?;
-    if count == 0 {
+    let main_count: i64 = db.query_row("SELECT COUNT(*) FROM memory_fts", [], |r| r.get(0))?;
+    let cjk_count: i64 = db.query_row("SELECT COUNT(*) FROM memory_fts_cjk", [], |r| r.get(0))?;
+    if main_count != cjk_count {
         db.execute(
             "INSERT INTO memory_fts_cjk(content, tags, category, source, created_at, importance, id)
-             SELECT content, tags, category, source, created_at, importance, id FROM memory_fts",
+             SELECT content, tags, category, source, created_at, importance, id FROM memory_fts
+             WHERE id NOT IN (SELECT id FROM memory_fts_cjk)",
             [],
         )?;
     }
@@ -160,18 +162,20 @@ impl MemoryStore {
 
     /// Store a memory entry.
     pub fn store(&self, entry: &MemoryEntry) -> Result<()> {
-        let db = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        let mut db = self.db.lock().unwrap_or_else(|e| e.into_inner());
         let tags_str = entry.tags.join(" ");
+        // F2：主表 / trigram 表 / meta 三处写入必须原子，崩溃不产生永久失步。
+        let tx = db.transaction()?;
         // Delete existing entry with same id first (upsert pattern)
-        db.execute(
+        tx.execute(
             "DELETE FROM memory_fts WHERE id = ?1",
             rusqlite::params![&entry.id],
         )?;
-        db.execute(
+        tx.execute(
             "DELETE FROM memory_fts_cjk WHERE id = ?1",
             rusqlite::params![&entry.id],
         )?;
-        db.execute(
+        tx.execute(
             "INSERT INTO memory_fts (content, tags, category, source, created_at, importance, id)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             rusqlite::params![
@@ -184,7 +188,7 @@ impl MemoryStore {
                 &entry.id,
             ],
         )?;
-        db.execute(
+        tx.execute(
             "INSERT INTO memory_fts_cjk (content, tags, category, source, created_at, importance, id)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             rusqlite::params![
@@ -197,12 +201,13 @@ impl MemoryStore {
                 &entry.id,
             ],
         )?;
-        db.execute(
+        tx.execute(
             "INSERT INTO memory_meta (id, stage, recall_count, created_at, importance)
              VALUES (?1, 'candidate', 0, ?2, ?3)
              ON CONFLICT(id) DO UPDATE SET importance = excluded.importance",
             rusqlite::params![&entry.id, entry.created_at, entry.importance],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -225,20 +230,23 @@ impl MemoryStore {
 
     /// Delete a memory by ID.
     pub fn delete(&self, id: &str) -> Result<bool> {
-        let db = self.db.lock().unwrap_or_else(|e| e.into_inner());
-        let rows = db.execute(
+        let mut db = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        // F2：与 store 一致，三表删除原子化。
+        let tx = db.transaction()?;
+        let rows = tx.execute(
             "DELETE FROM memory_fts WHERE id = ?1",
             rusqlite::params![id],
         )?;
-        db.execute(
+        tx.execute(
             "DELETE FROM memory_fts_cjk WHERE id = ?1",
             rusqlite::params![id],
         )?;
         // 同步清理 lifecycle 伴行，避免孤儿 meta 积累与状态不一致。
-        db.execute(
+        tx.execute(
             "DELETE FROM memory_meta WHERE id = ?1",
             rusqlite::params![id],
         )?;
+        tx.commit()?;
         Ok(rows > 0)
     }
 
@@ -466,8 +474,8 @@ impl MemoryStore {
             db.execute(
                 "INSERT INTO memory_meta
                     (id, stage, recall_count, created_at, importance, embedding, embed_dim, embed_model)
-                 VALUES (?1, 'candidate', 0, 0, 0.5, ?2, ?3, ?4)",
-                rusqlite::params![id, blob, vec.len() as i64, model],
+                 VALUES (?1, 'candidate', 0, ?2, 0.5, ?3, ?4, ?5)",
+                rusqlite::params![id, Utc::now().timestamp(), blob, vec.len() as i64, model],
             )?;
         }
         Ok(())
@@ -1029,5 +1037,54 @@ mod tests {
         // 旧内容不得再命中
         let stale = store.search("初始中文", 10).unwrap();
         assert!(stale.is_empty(), "upsert 后旧词不应命中");
+    }
+
+    #[test]
+    fn cjk_backfill_reconciles_after_desync() {
+        // 模拟崩溃失步：cjk 表少一行；重新打开库时应自动对账回填。
+        let path = std::env::temp_dir().join(format!(
+            "dnv-mem-desync-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        {
+            let store = MemoryStore::open(&path).unwrap();
+            store
+                .store(&make_entry(
+                    "第一条中文记忆",
+                    MemoryCategory::Task,
+                    vec![],
+                    "t",
+                    0.5,
+                ))
+                .unwrap();
+            store
+                .store(&make_entry(
+                    "第二条中文记忆",
+                    MemoryCategory::Task,
+                    vec![],
+                    "t",
+                    0.5,
+                ))
+                .unwrap();
+            let db = store.db.lock().unwrap_or_else(|e| e.into_inner());
+            db.execute(
+                "DELETE FROM memory_fts_cjk WHERE id IN (SELECT id FROM memory_fts_cjk LIMIT 1)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let reopened = MemoryStore::open(&path).unwrap();
+        let hits = reopened.search("中文", 10).unwrap();
+        assert_eq!(
+            hits.len(),
+            2,
+            "reopen must reconcile the desynced trigram table"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 }

@@ -177,15 +177,15 @@ async fn main() -> anyhow::Result<()> {
                 let mcp_tools = deepseeknova_runtime::discover_mcp_tools(&config).await;
                 let (step_quick, step_high) =
                     step_effort_providers(&model_router, &config, model_args.model.as_deref())?;
+                let mut roles = deepseeknova_runtime::AgentRoleProviders::default();
+                roles.task = Some(task_provider);
+                roles.compact = Some(compact_provider_for(&model_router, &config)?);
+                roles.review = review_provider_for(&model_router, &config)?;
+                roles.step_quick = step_quick;
+                roles.step_high = step_high;
                 let agent = build_agent(
                     Arc::clone(&provider),
-                    deepseeknova_runtime::AgentRoleProviders {
-                        task: Some(task_provider),
-                        compact: Some(compact_provider_for(&model_router, &config)?),
-                        review: review_provider_for(&model_router, &config)?,
-                        step_quick,
-                        step_high,
-                    },
+                    roles,
                     model_args.model.as_deref(),
                     &config,
                     model_args.max_steps,
@@ -306,20 +306,12 @@ async fn main() -> anyhow::Result<()> {
                 )?;
                 let task_provider =
                     model_router.provider_for(ModelRole::Task, Some(baseline_effort))?;
-                let agent = build_agent(
-                    provider,
-                    deepseeknova_runtime::AgentRoleProviders {
-                        task: Some(task_provider),
-                        compact: Some(compact_provider_for(&model_router, &config)?),
-                        review: review_provider_for(&model_router, &config)?,
-                        ..Default::default()
-                    },
-                    model.as_deref(),
-                    &config,
-                    0,
-                    mcp_tools,
-                )?
-                .with_conversation_history(history);
+                let mut roles = deepseeknova_runtime::AgentRoleProviders::default();
+                roles.task = Some(task_provider);
+                roles.compact = Some(compact_provider_for(&model_router, &config)?);
+                roles.review = review_provider_for(&model_router, &config)?;
+                let agent = build_agent(provider, roles, model.as_deref(), &config, 0, mcp_tools)?
+                    .with_conversation_history(history);
                 deepseeknova_tui::TuiRunner::new(Arc::new(agent))
                     .run()
                     .await?;
@@ -362,15 +354,15 @@ async fn main() -> anyhow::Result<()> {
                         let task_provider = router.provider_for(ModelRole::Task, effort)?;
                         let (step_quick, step_high) =
                             step_effort_providers(&router, cfg, model_name.as_deref())?;
+                        let mut roles = deepseeknova_runtime::AgentRoleProviders::default();
+                        roles.task = Some(task_provider);
+                        roles.compact = Some(compact_provider_for(&router, cfg)?);
+                        roles.review = review_provider_for(&router, cfg)?;
+                        roles.step_quick = step_quick;
+                        roles.step_high = step_high;
                         let agent = build_agent(
                             provider,
-                            deepseeknova_runtime::AgentRoleProviders {
-                                task: Some(task_provider),
-                                compact: Some(compact_provider_for(&router, cfg)?),
-                                review: review_provider_for(&router, cfg)?,
-                                step_quick,
-                                step_high,
-                            },
+                            roles,
                             model_name.as_deref(),
                             cfg,
                             0, // no max_steps limit in chat mode
@@ -411,20 +403,12 @@ async fn main() -> anyhow::Result<()> {
             let responder: Arc<dyn deepseeknova_core::runner::ApprovalResponder> = Arc::new(
                 deepseeknova_serve::ServerApprovalResponder::new(pending.clone()),
             );
-            let agent = build_agent(
-                Arc::clone(&provider),
-                deepseeknova_runtime::AgentRoleProviders {
-                    task: Some(task_provider),
-                    compact: Some(compact_provider_for(&model_router, &config)?),
-                    review: review_provider_for(&model_router, &config)?,
-                    ..Default::default()
-                },
-                None,
-                &config,
-                0,
-                mcp_tools,
-            )?
-            .with_approval_responder(responder);
+            let mut roles = deepseeknova_runtime::AgentRoleProviders::default();
+            roles.task = Some(task_provider);
+            roles.compact = Some(compact_provider_for(&model_router, &config)?);
+            roles.review = review_provider_for(&model_router, &config)?;
+            let agent = build_agent(Arc::clone(&provider), roles, None, &config, 0, mcp_tools)?
+                .with_approval_responder(responder);
             let runner: Arc<dyn Runner> = Arc::new(agent);
 
             let server = deepseeknova_serve::Server::with_pending(runner, pending);
@@ -529,14 +513,13 @@ async fn main() -> anyhow::Result<()> {
                             effort,
                         )?;
                         let task_provider = router.provider_for(ModelRole::Task, effort)?;
+                        let mut roles = deepseeknova_runtime::AgentRoleProviders::default();
+                        roles.task = Some(task_provider);
+                        roles.compact = Some(compact_provider_for(&router, cfg)?);
+                        roles.review = review_provider_for(&router, cfg)?;
                         let agent = build_agent(
                             provider,
-                            deepseeknova_runtime::AgentRoleProviders {
-                                task: Some(task_provider),
-                                compact: Some(compact_provider_for(&router, cfg)?),
-                                review: review_provider_for(&router, cfg)?,
-                                ..Default::default()
-                            },
+                            roles,
                             model_name.as_deref(),
                             cfg,
                             0,

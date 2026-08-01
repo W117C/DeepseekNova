@@ -398,6 +398,11 @@ impl Agent {
         self.tools.keys().cloned().collect()
     }
 
+    /// 诊断：是否装配了中途检索提供器（P3.2，供 runtime 配置生效断言）。
+    pub fn mid_run_retrieval_enabled(&self) -> bool {
+        self.mid_run.is_some()
+    }
+
     /// Build the ToolContext for a tool call, injecting security + all
     /// build-time registered extensions. Shared by run_stream and tests.
     #[allow(dead_code)] // exercised from tests today; Task 9/10 consume it in-crate
@@ -573,6 +578,9 @@ impl Runner for Agent {
 
             // 结束沉淀需要的任务文本（input 随后被移入 run_agent_loop）。
             let task_text = input.prompt.clone();
+            // F3：记录 run 起始消息数，蒸馏的文件关联只统计本 run 新增的工具调用，
+            // 避免续聊会话把历史轮次的文件归到当前任务。
+            let run_start_len = memory.get_all().len();
 
             let result = run_agent_loop(
                 provider,
@@ -637,6 +645,7 @@ impl Runner for Agent {
                     let mut seen_files = std::collections::HashSet::new();
                     let files: Vec<String> = msgs
                         .iter()
+                        .skip(run_start_len)
                         .filter(|m| m.role == Role::Assistant)
                         .filter_map(|m| m.tool_calls.as_ref())
                         .flatten()
