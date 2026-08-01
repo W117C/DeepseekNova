@@ -943,10 +943,26 @@ pub struct VerifyConfig {
     /// Fix cycles allowed before pausing for human review (default: 1).
     #[serde(default = "default_verify_cycles")]
     pub max_cycles: usize,
+
+    /// 确定性命令通过后是否再用 LLM 验证最终产出（默认 false，成本敏感）。
+    #[serde(default)]
+    pub llm: bool,
+
+    /// LLM 验证用模型名（可选；未配置回落 main provider）。
+    #[serde(default)]
+    pub llm_model: Option<String>,
+
+    /// LLM 验证的完成文本输入上限（字符，默认 4000）。
+    #[serde(default = "default_verify_llm_max_chars")]
+    pub llm_max_chars: usize,
 }
 
 fn default_verify_cycles() -> usize {
     1
+}
+
+fn default_verify_llm_max_chars() -> usize {
+    4000
 }
 
 impl Default for VerifyConfig {
@@ -955,6 +971,9 @@ impl Default for VerifyConfig {
             enabled: false,
             commands: Vec::new(),
             max_cycles: default_verify_cycles(),
+            llm: false,
+            llm_model: None,
+            llm_max_chars: default_verify_llm_max_chars(),
         }
     }
 }
@@ -1514,16 +1533,25 @@ mod tests {
         assert!(!c.verify.enabled, "verify must default OFF per spec");
         assert!(c.verify.commands.is_empty());
         assert_eq!(c.verify.max_cycles, 1);
+        assert!(
+            !c.verify.llm,
+            "LLM verify must default OFF per cost-sensitive spec"
+        );
+        assert_eq!(c.verify.llm_model, None);
+        assert_eq!(c.verify.llm_max_chars, 4000);
     }
 
     #[test]
     fn verify_config_parses_overrides() {
-        let toml = "[verify]\nenabled = true\ncommands = [\"cargo check --quiet\", \"cargo test --quiet\"]\nmax_cycles = 2\n";
+        let toml = "[verify]\nenabled = true\ncommands = [\"cargo check --quiet\", \"cargo test --quiet\"]\nmax_cycles = 2\nllm = true\nllm_model = \"deepseek-v4-flash\"\nllm_max_chars = 2000\n";
         let c: Config = toml::from_str(toml).unwrap();
         assert!(c.verify.enabled);
         assert_eq!(c.verify.commands.len(), 2);
         assert_eq!(c.verify.commands[0], "cargo check --quiet");
         assert_eq!(c.verify.max_cycles, 2);
+        assert!(c.verify.llm);
+        assert_eq!(c.verify.llm_model.as_deref(), Some("deepseek-v4-flash"));
+        assert_eq!(c.verify.llm_max_chars, 2000);
     }
 
     #[test]

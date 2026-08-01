@@ -717,8 +717,39 @@ pub fn build_agent_with_role_providers(
 
     // ── P1 并行工具执行 + 完成前确定性验证 ──
     agent = agent.with_concurrent_tools(config.agent.concurrent_tools);
-    if config.verify.enabled && !config.verify.commands.is_empty() {
+    if config.verify.enabled && (!config.verify.commands.is_empty() || config.verify.llm) {
         agent = agent.with_verify(config.verify.commands.clone(), config.verify.max_cycles);
+        if config.verify.llm {
+            // LLM 验证 provider：`llm_model` 可选，未配置或不可用回落 main provider。
+            let verify_provider: Arc<dyn deepseeknova_provider::Provider> =
+                match config.verify.llm_model.as_deref() {
+                    Some(model) => match config.resolve_provider_for_model(model).cloned() {
+                        Some(cfg) => {
+                            match deepseeknova_provider::factory::create_provider_with_model(
+                                &cfg, model, None,
+                            ) {
+                                Ok(p) => p.into(),
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "verify llm_model '{model}' unavailable ({e}); \
+                                             using main provider"
+                                    );
+                                    provider.clone()
+                                }
+                            }
+                        }
+                        None => {
+                            tracing::warn!(
+                                "verify llm_model '{model}' has no matching provider; \
+                                     using main provider"
+                            );
+                            provider.clone()
+                        }
+                    },
+                    None => provider.clone(),
+                };
+            agent = agent.with_llm_verify(verify_provider, config.verify.llm_max_chars);
+        }
     }
 
     // ── P2 高频决策经济学 ──

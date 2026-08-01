@@ -355,7 +355,19 @@ impl Agent {
         self.verify_settings = Some(crate::verify::VerifySettings {
             commands,
             max_cycles,
+            llm_provider: None,
+            llm_max_chars: 0,
         });
+        self
+    }
+
+    /// 在确定性验证之上启用 LLM 验证（`[verify] llm = true` 时由 runtime 装配）；
+    /// 需先调用 `with_verify`。LLM 明确判定失败才回炉，调用/解析失败优雅跳过。
+    pub fn with_llm_verify(mut self, provider: Arc<dyn Provider>, max_chars: usize) -> Self {
+        if let Some(vs) = self.verify_settings.as_mut() {
+            vs.llm_provider = Some(provider);
+            vs.llm_max_chars = max_chars;
+        }
         self
     }
 
@@ -961,6 +973,46 @@ async fn run_agent_loop(
                                 return Ok(());
                             }
                             crate::verify::VerifyOutcome::Skipped => {}
+                        }
+                    }
+                    // ── P1b 完成前 LLM 验证：确定性命令通过后（或未配置命令时）
+                    // 用 LLM 判定产出是否满足任务；默认关，调用/解析失败优雅跳过 ──
+                    if wrote_files {
+                        if let Some(vp) = &vs.llm_provider {
+                            match crate::verify::run_llm_verify_pass(
+                                vp.as_ref(),
+                                &input.prompt,
+                                &output.text,
+                                vs.llm_max_chars,
+                            )
+                            .await
+                            {
+                                crate::verify::VerifyOutcome::Pass => {}
+                                crate::verify::VerifyOutcome::Fail(reason)
+                                    if verify_cycles < vs.max_cycles =>
+                                {
+                                    verify_cycles += 1;
+                                    memory.add_message(Message {
+                                        role: Role::User,
+                                        content: verify_failure_message(&reason),
+                                        name: None,
+                                        tool_calls: None,
+                                        tool_call_id: None,
+                                        reasoning_content: None,
+                                    });
+                                    continue; // 回炉修复，下一次 Complete 再验证
+                                }
+                                crate::verify::VerifyOutcome::Fail(reason) => {
+                                    tx.send(Ok(RunEvent::Paused {
+                                        reason: format!("verify_failed: {reason}"),
+                                        session_id: session_label.clone(),
+                                    }))
+                                    .await
+                                    .ok();
+                                    return Ok(());
+                                }
+                                crate::verify::VerifyOutcome::Skipped => {}
+                            }
                         }
                     }
                 }

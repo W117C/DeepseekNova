@@ -101,7 +101,7 @@ pub(crate) fn parse_verdict(raw: &str) -> Option<Verdict> {
     }
 }
 
-fn extract_json(raw: &str) -> Option<String> {
+pub(crate) fn extract_json(raw: &str) -> Option<String> {
     if let Some(start) = raw.find("```json") {
         let rest = &raw[start + 7..];
         if let Some(end) = rest.find("```") {
