@@ -73,3 +73,6 @@
 - [x] 任务 2：tools/src/lib.rs 仅加 pub mod docs_tools; 与 pub use；runtime 在工具注册区常驻 register(docs_tools())，disabled 过滤沿用 register 闭包；memory 注册测试追加 context7_docs 断言（只加不改）；schema 预算测试原样且绿。
 - [x] 任务 3：GUIDE Library Docs 节（参数/来源/禁用方式）、tools README、CHANGELOG Added；cargo fmt + make check EXIT=0；反向验证：改坏 first_result 断言 → 红（1 failed）→ 还原 → 绿（tools 54+12+7、runtime 26）。
 - 跨 crate 协议记录（AGENTS.md §1）：预扫描=不碰 security/config/既有断言（memory 测试仅追加断言）、不新增外部依赖（reqwest/url/serde_json 均在 tools 依赖内）；备选路径 A=进 all_builtin 列表（实测 schema 预算 4624+约 400 > 5000，预算测试不可改）vs B=runtime 常驻注册（任务书拍板）——选 B；自检=单 crate 测试 + make check + 反向验证红→绿。
+
+## 交付
+- 分支 feat/context7-docs @ 2ef4b01，已推送 origin；PR: https://github.com/W117C/DeepseekNova/pull/55
