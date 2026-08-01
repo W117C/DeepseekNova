@@ -20,11 +20,14 @@ use deepseeknova_security::policy::SecurityPolicy;
 
 /// Retrieval-strategy hint appended to the system prompt when the code graph
 /// is enabled, steering the model toward graph tools over brute-force grep.
-const GRAPH_RETRIEVAL_HINT: &str = "\n\n## 代码检索策略\n\
-定位代码时优先使用图检索工具，避免全片 grep 或整文件读取：\n\
-1. `search_code` 按符号名/关键词定位候选实体；\n\
-2. `traverse_graph` 查看调用者/被调用者关系；\n\
-3. `retrieve_entity`（view=skeleton）看骨架，确认目标后再 view=full 或 read_file 取实现。";
+/// English to stay consistent with the unified system-prompt family.
+const GRAPH_RETRIEVAL_HINT: &str = "\n\n## Code Retrieval Strategy\n\
+When locating code, prefer graph retrieval tools over blanket grep or \
+whole-file reads:\n\
+1. `search_code` to locate candidate symbols/entities by name or keyword;\n\
+2. `traverse_graph` to inspect callers/callees;\n\
+3. `retrieve_entity` (view=skeleton) to inspect structure, then view=full or \
+read_file once the target is confirmed.";
 
 /// A3 从用户输入提取 repo map 个性化 seeds：标识符 token（≥3 字符、
 /// 去停用词、去重、上限 8），用于对图节点做 personalized PageRank。
@@ -1535,5 +1538,16 @@ mod tests {
         assert!(many.len() <= 8, "seed cap must hold, got {many:?}");
         let deduped = repo_map_seeds("token token token again again");
         assert!(deduped.len() <= 2, "seeds must dedupe, got {deduped:?}");
+    }
+
+    #[test]
+    fn graph_retrieval_hint_stays_english_and_graph_first() {
+        for tool in ["search_code", "traverse_graph", "retrieve_entity"] {
+            assert!(GRAPH_RETRIEVAL_HINT.contains(tool), "hint missing {tool}");
+        }
+        assert!(
+            !GRAPH_RETRIEVAL_HINT.contains("检索"),
+            "hint must be English, not Chinese"
+        );
     }
 }

@@ -138,8 +138,7 @@ read_only = false                  # Allow write/edit tools
 default_policy = "ask"             # ask | allow | deny
 auto_allow_tools = ["read_file", "grep", "glob", "ls"]
 
-[mcp]
-servers = [
+mcp_servers = [
   { name = "filesystem", command = "npx", args = ["-y", "@modelcontextprotocol/server-filesystem", "."] }
 ]
 ```
@@ -452,33 +451,84 @@ while (true) {
 Launch the interactive terminal UI:
 
 ```bash
-deepseeknova chat
+deepseeknova chat --tui
 ```
 
 ### Layout
 
 ```
-┌─ 💬 ready ──────────────────────────────────────┐
-│                                                  │
-│  User: What files are in src/?                   │
-│  ⚙ ls ...                                       │
-│    → src/main.rs, src/lib.rs                     │
-│  Agent: The src/ directory contains...           │
-│                                                  │
-├──────────────────────────────────────────────────┤
-│ ↑150 ↓200 total:350 | 4 lines                    │
-├─ > prompt (Esc to quit) ────────────────────────┤
-│ your prompt here...                              │
-└──────────────────────────────────────────────────┘
+┌─ 就绪 ─────────────────────────────────────────────────┐
+│ 你: 看看 src/ 里有什么文件？                             │
+│ ⚙ ls ...                                               │
+│   → src/main.rs, src/lib.rs                             │
+│ 助手: src/ 目录包含 ...                                  │
+│                                                         │
+├────────────────────────────────────────────────────────┤
+│ model=deepseek-v4-flash  ready | turn 1 | lines 4 | ... │
+├─ > prompt ─────────────────────────────────────────────┤
+│ 你的输入...                                              │
+└────────────────────────────────────────────────────────┘
+Ctrl+U 清行 · Ctrl+W 删词 · Home/End 行首尾 · /help · Esc 退出
 ```
 
-### Key Bindings
+### 配色
+
+配色沿用 Codex CLI 的语义色规则，不写死 RGB，深浅色终端都适配：
+
+- 用户输入 / 状态指示（model、提示符 `>`、暂停提示）：cyan
+- agent 回复：magenta
+- 推理、工具调用与结果、系统信息：dim（暗色次要信息）
+- 验证通过：green；验证失败 / 错误：red（错误加粗）
+- 标题与输入框边框：默认色 + bold / dim，不用 emoji
+
+### 按键
 
 | Key | Action |
 |---|---|
-| `Enter` | Submit prompt |
-| `Esc` / `q` | Quit (when idle) |
-| `Backspace` | Delete last character |
+| `Enter` | 提交输入 |
+| `Esc` | 空闲时退出 TUI |
+| `Ctrl+C` | 取消当前运行 |
+| `↑` / `↓` | 输入历史 |
+| `←` / `→` | 输入内移动光标 |
+| `Home` / `End` | 空闲=输入光标到头/尾；运行中=滚动到顶/跟随 |
+| `Backspace` / `Delete` | 删除光标前/后字符 |
+| `Ctrl+U` / `Ctrl+W` | 清空输入 / 删前一词 |
+| `PageUp` / `PageDown` | 对话面板滚动回看 |
+
+### 斜杠命令
+
+| 命令 | 作用 |
+|---|---|
+| `/help` | 显示帮助 |
+| `/clear` | 清空对话面板 |
+| `/new` | 开始新会话（更换 session id） |
+| `/sessions` | 列出已保存会话 |
+| `/resume <id>` | 恢复指定会话并渲染历史 |
+| `/model` | 显示模型与指针；`/model effort <level>`、`/model thinking`、`/model switch <name>`、`/model use <role> <name>` |
+| `/cost` | 按模型×角色输出 token 用量与美元估算 |
+| `/skills` | 列出 `.deepseeknova/skills` 与 `.agents/skills` 中的技能 |
+| `/mcp` | 列出配置中已启用的 MCP server |
+| `/raw` | 切换显示模式 normal / lite / raw（lite 隐藏推理，raw 带类型前缀） |
+| `/undo` | 回滚最近一个检查点快照 |
+| `/undo all` | 回滚全部快照 |
+| `/undo list` | 列出快照与 ✓/✗ 状态 |
+| `/quit` | 退出 TUI |
+
+## System Prompts
+
+主 agent 内置一套英文默认系统提示词（`deepseeknova_agent::DEFAULT_SYSTEM_PROMPT`），
+核心设计：把 DeepSeek-V4-Flash 当作**低成本高频决策引擎**，而不是一次性回答机器；
+所有任务按显式循环执行：**Observe → Plan → Tool → Verify → Reflect → Next Action**；
+每轮一个动作、先工具后长文、能查不猜、完成前必须验证与反思、成本敏感。
+
+- 默认启用：`[agent]` 未配置 `system_prompt` 时自动注入内置默认提示词。
+- 覆盖：配置 `system_prompt = "..."` 即完全替换默认值。
+- 追加：运行时（如启用代码图）会在默认/自定义提示词后追加英文检索策略提示。
+- 全链路统一：规划器（plan_mode / coordinator）、子代理预设（explorer / coder /
+  tester / reviewer）、审查（review）、压缩（compaction）、安全调查（scanner）、
+  观察压缩与验证回炉文案均与六阶段循环术语一致；机器输出契约
+  （JSON 结构、章节名、工具清单）保持不变。
+- 设计文档：`PROMPT_DESIGN.md`；后端完整性报告：`BACKEND_AUDIT.md`。
 
 ## MCP Integration
 
@@ -487,8 +537,7 @@ deepseeknova can connect to MCP (Model Context Protocol) servers for additional 
 ### Configuration
 
 ```toml
-[mcp]
-servers = [
+mcp_servers = [
   { name = "filesystem", command = "npx", args = ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed/dir"] },
   { name = "github", command = "npx", args = ["-y", "@modelcontextprotocol/server-github"] },
 ]

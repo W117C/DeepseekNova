@@ -55,6 +55,12 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 - **Token 追踪** — 实时统计输入/输出/推理/缓存 token，精确成本计算
 - **预算控制** — 单会话 Token 上限，超额自动停止
 
+### 🧭 决策引擎式系统提示词
+- 内置英文默认系统提示词：把 DeepSeek-V4-Flash 当作低成本高频决策引擎，按
+  Observe → Plan → Tool → Verify → Reflect → Next Action 循环工作
+- 未配置 `system_prompt` 时自动启用，配置后完全覆盖；规划器/子代理/审查/压缩/
+  安全调查等全链路提示词使用同一套循环术语，机器契约不变
+
 ### 🔒 安全沙箱 + 权限门控
 - **沙箱执行** — macOS Seatbelt / Linux bubblewrap 隔离
 - **权限策略** — 12 条规则，每条独立开关：目录沙箱、Plan 模式、Shell 确认、网络访问等

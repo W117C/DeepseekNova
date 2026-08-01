@@ -1143,6 +1143,7 @@ name = "deepseeknova-cli"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "clap",
  "deepseeknova-agent",
@@ -1162,6 +1163,7 @@ dependencies = [
  "deepseeknova-tui",
  "dirs",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "tracing",
@@ -1501,7 +1503,10 @@ dependencies = [
  "async-trait",
  "crossterm",
  "deepseeknova-core",
+ "deepseeknova-provider",
+ "deepseeknova-skills",
  "ratatui",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "tracing",

@@ -108,7 +108,9 @@ fn render_l3_prompt(messages: &[Message]) -> String {
         convo.push('\n');
     }
     format!(
-        "You are compacting an agent conversation into a structured digest. \
+        "You are the memory stage of the Observe → Plan → Tool → Verify → \
+         Reflect → Next Action loop, compacting an agent conversation into a \
+         structured digest. \
          Produce EXACTLY these seven sections, each as a markdown heading, \
          quoting key phrases verbatim from the source to avoid drift:\n\
          ## Original intent\n## Key decisions\n## Files involved\n\
@@ -227,6 +229,13 @@ mod tests {
             assert!(p.contains(h), "missing section {h}");
         }
         assert!(p.contains("fix the bug in auth"));
+    }
+
+    #[test]
+    fn compaction_prompt_identifies_as_loop_memory_stage() {
+        let p = render_l3_prompt(&[msg(Role::User, "fix the bug in auth")]);
+        assert!(p.contains("Observe → Plan → Tool → Verify → Reflect → Next Action"));
+        assert!(p.contains("## Next step"));
     }
 
     #[test]

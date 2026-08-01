@@ -2,6 +2,7 @@ mod chat;
 mod cli;
 mod init;
 mod setup;
+mod tui_undo;
 
 use clap::Parser;
 use cli::{Cli, Commands};
@@ -299,6 +300,19 @@ async fn main() -> anyhow::Result<()> {
             if *tui {
                 use deepseeknova_provider::cost::ModelRole;
                 use deepseeknova_provider::factory::ReasoningEffort;
+                // /mcp 只列已启用 server 名（展示用，不做实时连接探测）。
+                let mcp_server_names: Vec<String> = config
+                    .mcp_servers
+                    .iter()
+                    .filter(|s| s.enabled)
+                    .map(|s| s.name.clone())
+                    .collect();
+                // /undo：与 `checkpoint` 子命令同一快照库。
+                let undo_controller = Arc::new(tui_undo::TuiUndoController {
+                    path: std::env::current_dir()
+                        .unwrap_or_default()
+                        .join(&config.checkpoint.path),
+                });
                 let history: Arc<tokio::sync::Mutex<Vec<deepseeknova_core::Message>>> =
                     Arc::new(tokio::sync::Mutex::new(Vec::new()));
                 // 会话管理：/new /sessions /resume + 回合落盘（与 REPL 同一持久化）。
@@ -341,7 +355,9 @@ async fn main() -> anyhow::Result<()> {
                     .with_agent_factory(factory)
                     .with_model_router(Arc::clone(&model_router))
                     .with_baseline_effort(baseline_effort)
-                    .with_current_model(model.clone());
+                    .with_current_model(model.clone())
+                    .with_mcp_servers(mcp_server_names)
+                    .with_undo_controller(undo_controller);
                 if let Some(ctrl) = session_controller {
                     tui = tui.with_session_controller(ctrl);
                 }
@@ -897,7 +913,7 @@ impl deepseeknova_tui::SessionController for TuiSessionController {
         Some(p.session_id.clone())
     }
 
-    async fn resume(&self, id: &str) -> anyhow::Result<usize> {
+    async fn resume(&self, id: &str) -> anyhow::Result<Vec<deepseeknova_tui::ResumedLine>> {
         let mut p = self.persist.lock().await;
         let turns = p.store.load(id)?;
         if turns.is_empty() {
@@ -905,12 +921,21 @@ impl deepseeknova_tui::SessionController for TuiSessionController {
         }
         let mut hist = p.history.lock().await;
         hist.clear();
+        let mut restored = Vec::new();
         for t in &turns {
             for m in &t.messages {
                 hist.push(m.into());
+                let role = match m.role.as_str() {
+                    "assistant" => deepseeknova_tui::ResumedRole::Assistant,
+                    "system" | "tool" => deepseeknova_tui::ResumedRole::System,
+                    _ => deepseeknova_tui::ResumedRole::User,
+                };
+                restored.push(deepseeknova_tui::ResumedLine {
+                    role,
+                    text: m.content.clone(),
+                });
             }
         }
-        let restored = hist.len();
         drop(hist);
         p.session_id = id.to_string();
         p.turn = turns.len() as u64;

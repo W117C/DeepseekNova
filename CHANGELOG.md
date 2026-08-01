@@ -14,6 +14,14 @@ All notable changes to DeepseekNova will be documented in this file.
 
 ### Added
 
+- **系统提示词体系**：主 agent 新增英文默认系统提示词（决策引擎 + Observe→Plan→
+  Tool→Verify→Reflect→Next Action 六阶段循环），未配置 `system_prompt` 时自动启用、
+  配置覆盖优先；plan_mode/planner/delegate×4/review/compaction/scanner/图检索提示词
+  统一为同一循环术语，机器输出契约不变；新增 `BACKEND_AUDIT.md`（后端 22 crate 全量
+  审计）与 `PROMPT_DESIGN.md`（全链路提示词设计文档）。
+- **TUI 视觉重做（参考 Codex CLI）**：语义配色（用户/状态=cyan、agent=magenta、
+  次要信息=dim、成功=green、失败/错误=red），状态行按段着色，底部新增快捷键
+  提示行，对话区标题去掉 emoji，深浅色终端自适应。
 - **TUI 终端界面重做**：完整渲染推理（斜体暗色）/ 工具调用与结果（截断预览）/
   确定性验证（✓/✗）/ 暂停 / 审批请求 / 错误；滚动回看（PageUp/Down、Home/End、
   自动跟随、2000 行上限）；输入历史（↑/↓）；命令 `/help` `/clear` `/quit`；
@@ -26,6 +34,12 @@ All notable changes to DeepseekNova will be documented in this file.
   实现），支持 `/new`（清空历史并更换 session id）、`/sessions`（列出并标记
   当前会话）、`/resume <id>`（恢复历史到共享缓冲）；每个完成回合自动落盘
   （用户 prompt + 助手输出），与 REPL 同一 JSONL 会话存储。
+- **TUI 完善**：命令面补齐 `/skills`（技能目录可配）、`/mcp`（列出已启用
+  server）、`/raw`（normal/lite/raw 显示模式）、`/undo`（新增 UndoController
+  trait，CLI 经 CheckpointManager 实现 `/undo` `/undo all` `/undo list`）；
+  输入升级为带可见光标的单行编辑（←/→/Home/End/Delete/Ctrl+U/Ctrl+W，
+  UTF-8 安全、超宽横向跟随）；运行事件按代际隔离，旧回合残留流不串台、
+  不触发落盘；`/resume` 恢复后把历史渲染进对话面板；GUIDE/TUI README 同步。
 
 - **检查点上线（A1）**：`[checkpoint]` 配置（默认开）把 CheckpointManager 装配进
   write/edit/move 工具（写前快照），快照持久化为 JSONL（跨进程可回滚）；新增 CLI

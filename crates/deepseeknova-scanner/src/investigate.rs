@@ -8,7 +8,9 @@ use deepseeknova_core::runner::{RunInput, Runner};
 /// grep tools so the model can inspect surrounding code before judging.
 fn build_prompt(finding: &Finding) -> String {
     format!(
-        "You are a security reviewer. A regex matcher flagged a potential issue.\n\
+        "You are a security reviewer operating in the Verify phase of the \
+         Observe → Plan → Tool → Verify → Reflect → Next Action loop. A regex \
+         matcher flagged a potential issue.\n\
          Rule: {rule}
 File: {path}:{line}
 Matched line: {excerpt}
@@ -160,5 +162,20 @@ mod tests {
             "brace inside string literal must not break parsing"
         );
         assert!(!v.unwrap().true_positive);
+    }
+
+    #[test]
+    fn build_prompt_keeps_json_verdict_contract() {
+        let p = build_prompt(&finding());
+        for token in [
+            "true_positive",
+            "note",
+            "hardcoded-secret",
+            "a.rs:2",
+            "let api_key",
+            "Verify phase",
+        ] {
+            assert!(p.contains(token), "prompt missing {token}");
+        }
     }
 }
