@@ -32,3 +32,9 @@ PROGRESS/BLOCKED），本分支已合并 main 解决冲突并重验全绿；#54�
 **顺手活（不做，待裁决）**
 - verify LLM 化（当前为确定性命令 + 固定回炉文案，agent.rs:933）
 - desktop 设置页 system_prompt 入口接新默认值（前端已搁置）
+
+## 长期记忆 LLM 蒸馏任务书（2026-08-02）
+
+执行阻塞：无。说明：main 上 review::extract_json 为私有函数，改可见性不在白名单，
+按「建议有更好的路」在 memory_distill.rs 自带等价实现（已记 PROGRESS）。顺手活
+（待裁决，不做）：语义检索 embedder、记忆清理 UI、蒸馏结果写 agentskills.io skill 文件。

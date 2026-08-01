@@ -269,6 +269,25 @@ explore_code）对执行器可用，只读工具对规划器开放；`[graph] en
 | `forget` | Remove a fact from memory | No |
 | `recall` | Search persistent memory | Yes |
 
+### 长期记忆与知识蒸馏（`[memory]`）
+
+记忆库持久化在工作区 `.deepseeknova/memory.db`（SQLite + FTS5），跨任务、跨会话
+复用：回合开始时按当前任务召回相关记忆注入上下文，运行中（压缩后/新一轮开头）
+可再次注入；回合结束自动沉淀任务摘要、失败教训与文件关联（启发式，脱敏 + 内容
+去重）。
+
+```toml
+[memory]
+auto_learn = true                  # 回合结束自动沉淀（默认 true）
+llm_distill = false                # 默认 false：启用后用 LLM 把任务观察蒸馏成
+                                   # 可复用 skill/教训（Skill 类目，去重 + 脱敏）
+llm_distill_model = "deepseek-v4-flash"  # 可选；未配置回落 main provider
+llm_distill_max_chars = 3000       # 蒸馏输入的任务描述上限（字符）
+```
+
+蒸馏契约：模型返回 `{"kind":"skill"|"lesson","title":"...","body":"...","tags":[...]}`；
+调用失败或响应不可解析时静默跳过（启发式沉淀仍照常兜底），不阻断运行。
+
 ### Task Management
 
 | Tool | Description | Read-only |

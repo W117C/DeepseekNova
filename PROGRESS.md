@@ -94,3 +94,19 @@
 
 ## 交付与验收记录
 - 分支 feat/context7-docs，PR #55 已合入 main（2026-08-02 验收后合并）；#54、#55 明卷+暗卷+CI 全绿，远端/本地分支已删。
+
+## 任务书：长期记忆 LLM 蒸馏 — 开工回执（2026-08-02）
+- 理解的目标：`[memory] llm_distill`（默认 false）：回合结束 DistillHook 先跑启发式 record_task 兜底，启用时另 spawn 异步 LLM 蒸馏（JSON 契约 skill/lesson）→ core Skill 类目落库（去重+脱敏）。
+- 顺序：任务 0 → 1 core record_llm_knowledge → 2 agent memory_distill 模块 → 3 config+runtime 装配 → 4 文档/反向验证/PR。
+- 最大风险：DistillHook 是同步签名，需 tokio Handle spawn；main 上 review::extract_json 私有（改可见性不在白名单）→ 模块内自带等价实现；stub 空文本不会 Done（跑满步数 Paused），装配测试按「流正常结束」断言。
+- 基线证据（本轮实测）：main@2c71284 干净；core 83+2+1、agent 119+1、config 20+18、runtime 26 全绿 0 ignored；make check 670。
+
+## 任务状态（长期记忆 LLM 蒸馏）
+- [x] 任务 1：core MemoryEngine::record_llm_knowledge（Skill 类目、content 哈希去重、redact、tags 追加 llm-distill）+ 2 条单测（存储去重、脱敏）。
+- [x] 任务 2：agent memory_distill.rs（render_distill_prompt / parse_distilled / run_llm_distill，自带 extract_json 等价实现）+ 5 条单测（契约、skill/lesson 解析、垃圾→None、provider 失败→None、截断）。
+- [x] 任务 3：MemoryConfig 增 llm_distill / llm_distill_model / llm_distill_max_chars（默认 false/None/3000）+ 测试；runtime DistillHook 包装（启发式兜底 + tokio Handle spawn 异步蒸馏，回落 main）；runtime 装配测试 1 条（27 绿）。
+- [x] 任务 4 前半：GUIDE 记忆节、CHANGELOG 已更新。
+- [x] 收尾：cargo fmt + make check EXIT=0（678 通过）；反向验证红（1 failed）→还原绿（core 85、agent 124、runtime 27）；分支 feat/memory-distill 已推送。
+
+## 交付
+- 分支 feat/memory-distill，已推送 origin；PR: https://github.com/W117C/DeepseekNova/pull/58

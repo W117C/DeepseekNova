@@ -204,6 +204,38 @@ impl MemoryEngine {
         })
     }
 
+    /// LLM 蒸馏知识落库：kind ∈ skill|lesson；content 哈希去重 + 脱敏，
+    /// category=Skill、source=llm-distill、tags 追加 llm-distill。
+    /// 返回是否新写入（同内容二次写入返回 false）。
+    pub fn record_llm_knowledge(
+        &self,
+        kind: &str,
+        title: &str,
+        body: &str,
+        mut tags: Vec<String>,
+    ) -> Result<bool> {
+        let raw = format!("kind: {kind}\ntitle: {title}\n{body}");
+        let content = if self.redact_secrets {
+            redact(&raw)
+        } else {
+            raw
+        };
+        if !tags.iter().any(|t| t == "llm-distill") {
+            tags.push("llm-distill".to_string());
+        }
+        let mut e = make_entry(
+            content.clone(),
+            MemoryCategory::Skill,
+            tags,
+            "llm-distill",
+            0.8,
+        );
+        e.id = content_id("distill", &content);
+        let existed = self.store.meta(&e.id)?.is_some();
+        self.store.store(&e)?;
+        Ok(!existed)
+    }
+
     /// 泛化计数器 +1（审查指标 review_triggered/issues_found/fix_succeeded 等）。
     pub fn bump_counter(&self, name: &str) -> Result<()> {
         self.store.bump_counter(name)
@@ -366,6 +398,53 @@ mod tests {
             (s.recall_hit_rate - 0.5).abs() < 1e-9,
             "got {}",
             s.recall_hit_rate
+        );
+    }
+
+    #[test]
+    fn llm_knowledge_stores_skill_and_dedupes() {
+        let eng = MemoryEngine::open_in_memory(true).unwrap();
+        assert!(eng
+            .record_llm_knowledge(
+                "skill",
+                "Use serde derive",
+                "Prefer derive over manual impls",
+                vec!["serde".into()],
+            )
+            .unwrap());
+        let skills = eng.list(MemoryCategory::Skill).unwrap();
+        assert_eq!(skills.len(), 1);
+        assert!(skills[0].content.contains("Use serde derive"));
+        assert!(skills[0].tags.contains(&"llm-distill".to_string()));
+        assert_eq!(skills[0].source, "llm-distill");
+
+        // 同内容二次写入不重复
+        assert!(!eng
+            .record_llm_knowledge(
+                "skill",
+                "Use serde derive",
+                "Prefer derive over manual impls",
+                vec!["serde".into()],
+            )
+            .unwrap());
+        assert_eq!(eng.list(MemoryCategory::Skill).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn llm_knowledge_redacts_secrets() {
+        let eng = MemoryEngine::open_in_memory(true).unwrap();
+        eng.record_llm_knowledge(
+            "lesson",
+            "api key leak",
+            "API_KEY=sk-ABCD1234efgh5678 in logs",
+            vec![],
+        )
+        .unwrap();
+        let skills = eng.list(MemoryCategory::Skill).unwrap();
+        assert!(
+            !skills[0].content.contains("sk-ABCD1234efgh5678"),
+            "秘密必须被脱敏：{}",
+            skills[0].content
         );
     }
 }

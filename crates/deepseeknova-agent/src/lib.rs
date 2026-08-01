@@ -29,6 +29,7 @@ mod compaction;
 pub mod coordinator;
 pub mod delegate;
 pub mod memory;
+pub mod memory_distill;
 pub mod plan_mode;
 pub mod prompts;
 mod review;
