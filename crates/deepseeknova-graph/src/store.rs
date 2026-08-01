@@ -144,18 +144,25 @@ CREATE VIRTUAL TABLE IF NOT EXISTS symbol_fts_cjk USING fts5(
   name, signature, doc, id UNINDEXED, path UNINDEXED, tokenize='trigram');
 CREATE TABLE IF NOT EXISTS raw_calls(path TEXT, caller TEXT, callee TEXT);
 CREATE TABLE IF NOT EXISTS raw_imports(path TEXT, text TEXT);
+CREATE TABLE IF NOT EXISTS raw_import_links(path TEXT, kind TEXT, target TEXT);
+CREATE TABLE IF NOT EXISTS raw_refs(path TEXT, from_name TEXT, ref_name TEXT);
+CREATE TABLE IF NOT EXISTS raw_external_deps(path TEXT, dep_name TEXT);
 CREATE TABLE IF NOT EXISTS raw_trait_methods(path TEXT, trait_name TEXT, method_name TEXT, start_line INTEGER);
 CREATE TABLE IF NOT EXISTS raw_impl_methods(path TEXT, trait_name TEXT, impl_type TEXT, method_name TEXT, start_line INTEGER);
 CREATE INDEX IF NOT EXISTS idx_raw_calls_path ON raw_calls(path);
 CREATE INDEX IF NOT EXISTS idx_raw_imports_path ON raw_imports(path);
+CREATE INDEX IF NOT EXISTS idx_raw_import_links_path ON raw_import_links(path);
+CREATE INDEX IF NOT EXISTS idx_raw_refs_path ON raw_refs(path);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_external_deps_unique ON raw_external_deps(path, dep_name);
 CREATE INDEX IF NOT EXISTS idx_raw_trait_methods_path ON raw_trait_methods(path);
 CREATE INDEX IF NOT EXISTS idx_raw_impl_methods_path ON raw_impl_methods(path);
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
 ";
 
 /// 当前 schema 版本：v2 引入 raw_calls/raw_imports 事实表与全局边重建；
-/// v3 引入 raw_trait_methods/raw_impl_methods 事实表（动态分发桥）。
-const SCHEMA_VERSION: &str = "3";
+/// v3 引入 raw_trait_methods/raw_impl_methods 事实表（动态分发桥）；
+/// v4 引入 raw_refs / raw_import_links / raw_external_deps（引用与依赖图）。
+const SCHEMA_VERSION: &str = "4";
 
 /// 硬排除的目录名（任何路径段命中即跳过）。
 const HARD_EXCLUDES: [&str; 4] = ["target", "node_modules", ".git", "dist"];
@@ -245,9 +252,11 @@ impl Store {
         let tx = self.conn.transaction()?;
 
         for (abs_path, rel_path) in &files {
-            let Some(lang) = Lang::from_path(rel_path) else {
+            let lang = Lang::from_path(rel_path);
+            let manifest = lang.is_none() && is_manifest(rel_path);
+            if lang.is_none() && !manifest {
                 continue;
-            };
+            }
             let Ok(meta) = std::fs::metadata(abs_path) else {
                 continue;
             };
@@ -295,6 +304,25 @@ impl Store {
                 }
             }
 
+            // 清单文件（Cargo.toml / package.json / pyproject.toml）：只写外部依赖事实。
+            if manifest {
+                let deps = parse_manifest_deps(rel_path, &src);
+                tx.execute("DELETE FROM raw_external_deps WHERE path = ?1", [rel_path])?;
+                for dep in &deps {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO raw_external_deps(path, dep_name) VALUES(?1, ?2)",
+                        (rel_path, dep),
+                    )?;
+                }
+                report.files_reparsed += 1;
+                tx.execute(
+                    "INSERT INTO files(path, mtime, hash) VALUES(?1, ?2, ?3)\n                     ON CONFLICT(path) DO UPDATE SET mtime = excluded.mtime, hash = excluded.hash",
+                    (rel_path, mtime, &hash),
+                )?;
+                continue;
+            }
+
+            let lang = lang.expect("manifest branch returned above");
             let parsed = match parse_source(lang, rel_path, &src) {
                 Ok(p) => p,
                 Err(e) => {
@@ -313,6 +341,9 @@ impl Store {
             tx.execute("DELETE FROM symbol_fts_cjk WHERE path = ?1", [rel_path])?;
             tx.execute("DELETE FROM raw_calls WHERE path = ?1", [rel_path])?;
             tx.execute("DELETE FROM raw_imports WHERE path = ?1", [rel_path])?;
+            tx.execute("DELETE FROM raw_import_links WHERE path = ?1", [rel_path])?;
+            tx.execute("DELETE FROM raw_refs WHERE path = ?1", [rel_path])?;
+            tx.execute("DELETE FROM raw_external_deps WHERE path = ?1", [rel_path])?;
             tx.execute("DELETE FROM raw_trait_methods WHERE path = ?1", [rel_path])?;
             tx.execute("DELETE FROM raw_impl_methods WHERE path = ?1", [rel_path])?;
 
@@ -347,6 +378,18 @@ impl Store {
                 tx.execute(
                     "INSERT INTO raw_imports(path, text) VALUES(?1, ?2)",
                     (rel_path, import),
+                )?;
+            }
+            for link in &parsed.import_links {
+                tx.execute(
+                    "INSERT INTO raw_import_links(path, kind, target) VALUES(?1, ?2, ?3)",
+                    (rel_path, link.kind.as_str(), &link.target),
+                )?;
+            }
+            for (from, ref_name) in &parsed.refs {
+                tx.execute(
+                    "INSERT INTO raw_refs(path, from_name, ref_name) VALUES(?1, ?2, ?3)",
+                    (rel_path, from, ref_name),
                 )?;
             }
             for (trait_name, method_name, start_line) in &parsed.trait_methods {
@@ -391,6 +434,9 @@ impl Store {
             tx.execute("DELETE FROM symbol_fts_cjk WHERE path = ?1", [path])?;
             tx.execute("DELETE FROM raw_calls WHERE path = ?1", [path])?;
             tx.execute("DELETE FROM raw_imports WHERE path = ?1", [path])?;
+            tx.execute("DELETE FROM raw_import_links WHERE path = ?1", [path])?;
+            tx.execute("DELETE FROM raw_refs WHERE path = ?1", [path])?;
+            tx.execute("DELETE FROM raw_external_deps WHERE path = ?1", [path])?;
             tx.execute("DELETE FROM raw_trait_methods WHERE path = ?1", [path])?;
             tx.execute("DELETE FROM raw_impl_methods WHERE path = ?1", [path])?;
             tx.execute("DELETE FROM files WHERE path = ?1", [path])?;
@@ -443,26 +489,46 @@ impl Store {
                 )?;
             }
         }
-        let raw_imports: Vec<(String, String)> = {
-            let mut stmt = tx.prepare("SELECT path, text FROM raw_imports")?;
-            let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
-            let mut out = Vec::new();
+        // 结构化 Imports 边重建：本地符号按名命中 by_name；本地文件按相对路径解析。
+        let mut import_seen: HashSet<(String, String)> = HashSet::new();
+        {
+            let mut stmt = tx.prepare("SELECT path, kind, target FROM raw_import_links")?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?;
+            let mut links = Vec::new();
             for row in rows {
-                out.push(row?);
+                links.push(row?);
             }
-            out
-        };
-        for (path, import) in &raw_imports {
-            let file_name = path.rsplit('/').next().unwrap_or(path);
-            let file_id = node_id(path, file_name, 0);
-            for (name, ids) in &by_name {
-                if import.contains(name.as_str()) {
-                    if let Some((dst, _)) = ids.first() {
-                        tx.execute(
-                            "INSERT INTO edges(src, dst, kind) VALUES(?1, ?2, ?3)",
-                            (&file_id, dst, EdgeKind::Imports.as_str()),
-                        )?;
+            for (path, kind, target) in links {
+                let file_name = path.rsplit('/').next().unwrap_or(&path).to_string();
+                let file_id = node_id(&path, &file_name, 0);
+                match kind.as_str() {
+                    "symbol" => {
+                        if let Some((dst, _)) = by_name.get(&target).and_then(|ids| ids.first()) {
+                            if import_seen.insert((file_id.clone(), dst.clone())) {
+                                tx.execute(
+                                    "INSERT INTO edges(src, dst, kind) VALUES(?1, ?2, ?3)",
+                                    (&file_id, dst, EdgeKind::Imports.as_str()),
+                                )?;
+                            }
+                        }
                     }
+                    "file" => {
+                        if let Some(dst) = resolve_file_node(&tx, &path, &target)? {
+                            if import_seen.insert((file_id.clone(), dst.clone())) {
+                                tx.execute(
+                                    "INSERT INTO edges(src, dst, kind) VALUES(?1, ?2, ?3)",
+                                    (&file_id, dst, EdgeKind::Imports.as_str()),
+                                )?;
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -528,6 +594,58 @@ impl Store {
                             (t_id, i_id, EdgeKind::Dispatch.as_str()),
                         )?;
                     }
+                }
+            }
+        }
+
+        // 全局重建 References 边：名称级；已有 Calls 边 (src,dst) 不重复加。
+        tx.execute(
+            "DELETE FROM edges WHERE kind = ?1",
+            [EdgeKind::References.as_str()],
+        )?;
+        let calls_set: HashSet<(String, String)> = {
+            let mut stmt = tx.prepare("SELECT src, dst FROM edges WHERE kind = 'calls'")?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            let mut out = HashSet::new();
+            for row in rows {
+                out.insert(row?);
+            }
+            out
+        };
+        let raw_refs: Vec<(String, String, String)> = {
+            let mut stmt = tx.prepare("SELECT path, from_name, ref_name FROM raw_refs")?;
+            let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            out
+        };
+        let mut refs_seen: HashSet<(String, String)> = HashSet::new();
+        for (path, from_name, ref_name) in &raw_refs {
+            let Some(src) = by_name
+                .get(from_name)
+                .and_then(|ids| ids.iter().find(|(_, p)| p == path).map(|(id, _)| id))
+            else {
+                continue;
+            };
+            let Some(targets) = by_name.get(ref_name) else {
+                continue;
+            };
+            for (dst, _) in targets {
+                if dst == src {
+                    continue;
+                }
+                if calls_set.contains(&(src.clone(), dst.clone())) {
+                    continue;
+                }
+                if refs_seen.insert((src.clone(), dst.clone())) {
+                    tx.execute(
+                        "INSERT INTO edges(src, dst, kind) VALUES(?1, ?2, ?3)",
+                        (src, dst, EdgeKind::References.as_str()),
+                    )?;
                 }
             }
         }
@@ -808,6 +926,72 @@ impl Store {
         Ok(out)
     }
 
+    /// 按相对路径取文件节点 id（依赖图文件→文件边用）。
+    pub fn file_node(&self, path: &str) -> Result<Option<String>, GraphError> {
+        let result = self.conn.query_row(
+            "SELECT id FROM nodes WHERE path = ?1 AND kind = 'file'",
+            [path],
+            |r| r.get(0),
+        );
+        match result {
+            Ok(id) => Ok(Some(id)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// 全库外部依赖事实（path=清单文件路径, dep_name）。
+    pub fn external_deps(&self) -> Result<Vec<(String, String)>, GraphError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path, dep_name FROM raw_external_deps ORDER BY dep_name, path")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// 某源码文件所属的最近清单（如 src/lib.rs → 根 Cargo.toml）的外部依赖。
+    pub fn external_deps_for_file(&self, file_path: &str) -> Result<Vec<String>, GraphError> {
+        let all = self.external_deps()?;
+        // 找最深（目录层级最多）且是 file_path 祖先的清单，收集其全部依赖。
+        let mut best_depth: Option<usize> = None;
+        let mut out: Vec<String> = Vec::new();
+        for (manifest, dep) in &all {
+            let dir = match manifest.rsplit_once('/') {
+                Some((d, _)) if !d.is_empty() => d.to_string(),
+                _ => String::new(),
+            };
+            let is_ancestor = if dir.is_empty() {
+                true
+            } else {
+                file_path.starts_with(&format!("{dir}/"))
+            };
+            if !is_ancestor {
+                continue;
+            }
+            let depth = dir.split('/').filter(|p| !p.is_empty()).count();
+            match best_depth {
+                None => {
+                    best_depth = Some(depth);
+                    out.push(dep.clone());
+                }
+                Some(d) if depth == d => out.push(dep.clone()),
+                Some(d) if depth > d => {
+                    best_depth = Some(depth);
+                    out.clear();
+                    out.push(dep.clone());
+                }
+                Some(_) => {}
+            }
+        }
+        out.sort();
+        out.dedup();
+        Ok(out)
+    }
+
     /// 全部节点。
     pub fn all_nodes(&self) -> Result<Vec<Node>, GraphError> {
         let mut stmt = self.conn.prepare(
@@ -925,6 +1109,161 @@ fn collect_files(
             out.push((path, rel));
         }
     }
+}
+
+/// 清单文件名（外部依赖来源）。
+fn is_manifest(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    matches!(name, "Cargo.toml" | "package.json" | "pyproject.toml")
+}
+
+/// 解析清单文件的外部依赖名（轻量行级/serde_json，不引入新依赖）。
+fn parse_manifest_deps(path: &str, src: &str) -> Vec<String> {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    match name {
+        "Cargo.toml" => parse_cargo_deps(src),
+        "package.json" => parse_package_json_deps(src),
+        "pyproject.toml" => parse_pyproject_deps(src),
+        _ => Vec::new(),
+    }
+}
+
+fn parse_cargo_deps(src: &str) -> Vec<String> {
+    let mut deps = Vec::new();
+    let mut in_deps = false;
+    for line in src.lines() {
+        let t = line.trim();
+        if t.starts_with('[') {
+            in_deps = matches!(
+                t,
+                "[dependencies]" | "[dev-dependencies]" | "[build-dependencies]"
+            );
+            continue;
+        }
+        if in_deps {
+            if let Some(eq) = t.find('=') {
+                let name = t[..eq].trim();
+                if !name.is_empty() && !name.starts_with('[') {
+                    deps.push(name.to_string());
+                }
+            }
+        }
+    }
+    deps
+}
+
+fn parse_package_json_deps(src: &str) -> Vec<String> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(src) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for key in [
+        "dependencies",
+        "devDependencies",
+        "peerDependencies",
+        "optionalDependencies",
+    ] {
+        if let Some(obj) = v.get(key).and_then(|x| x.as_object()) {
+            out.extend(obj.keys().cloned());
+        }
+    }
+    out
+}
+
+fn parse_pyproject_deps(src: &str) -> Vec<String> {
+    let mut deps = Vec::new();
+    let mut section = String::new();
+    let mut in_project_deps_list = false;
+    for line in src.lines() {
+        let t = line.trim();
+        if t.starts_with('[') {
+            section = t.trim_matches(['[', ']']).to_string();
+            in_project_deps_list = false;
+            continue;
+        }
+        if section == "project" {
+            if t.contains("dependencies") || in_project_deps_list {
+                in_project_deps_list = true;
+                let mut rest = t;
+                while let Some(start) = rest.find('"') {
+                    let after = &rest[start + 1..];
+                    match after.find('"') {
+                        Some(end) => {
+                            let name = &after[..end];
+                            if !name.trim().is_empty() {
+                                deps.push(name.to_string());
+                            }
+                            rest = &after[end + 1..];
+                        }
+                        None => break,
+                    }
+                }
+                if t.contains(']') {
+                    in_project_deps_list = false;
+                }
+            }
+        } else if section.starts_with("tool.poetry.dependencies") {
+            if let Some(eq) = t.find('=') {
+                let name = t[..eq].trim();
+                if name != "python" && !name.is_empty() {
+                    deps.push(name.to_string());
+                }
+            }
+        }
+    }
+    deps
+}
+
+/// 规范化相对路径：去掉 `.`/空段，`..` 回退一级。
+fn normalize_rel_path(path: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            p => parts.push(p),
+        }
+    }
+    parts.join("/")
+}
+
+/// 把 JS/TS 相对 specifier 解析为索引中的文件节点 id（补常见扩展名探测）。
+fn resolve_file_node(
+    tx: &rusqlite::Transaction<'_>,
+    path: &str,
+    spec: &str,
+) -> Result<Option<String>, GraphError> {
+    let dir = match path.rsplit_once('/') {
+        Some((d, _)) if !d.is_empty() => d.to_string(),
+        _ => ".".to_string(),
+    };
+    let base = normalize_rel_path(&format!("{dir}/{spec}"));
+    let mut candidates = vec![base.clone()];
+    let has_ext = base.rsplit('/').next().unwrap_or("").contains('.');
+    if !has_ext {
+        for ext in ["ts", "tsx", "js", "jsx", "mjs", "cjs", "py", "rs"] {
+            candidates.push(format!("{base}.{ext}"));
+        }
+    }
+    for cand in candidates {
+        let found: Option<String> = tx
+            .query_row(
+                "SELECT id FROM nodes WHERE path = ?1 AND kind = 'file'",
+                [&cand],
+                |r| r.get(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })?;
+        if let Some(id) = found {
+            return Ok(Some(id));
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(test)]

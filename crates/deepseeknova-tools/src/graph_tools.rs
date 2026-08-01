@@ -1,5 +1,5 @@
 //! 图检索工具：search_code / traverse_graph / retrieve_entity /
-//! trace_code / impact_code / explore_code。
+//! trace_code / impact_code / explore_code / deps_code。
 //! 索引句柄经 `ToolContext.extensions` 注入（`GraphHandle`），缺失时优雅降级。
 
 use async_trait::async_trait;
@@ -718,6 +718,153 @@ fn indent(text: &str, spaces: usize) -> String {
         .join("\n")
 }
 
+pub struct DepsCodeTool;
+
+#[derive(Deserialize)]
+struct DepsCodeArgs {
+    #[serde(default)]
+    entity: Option<String>,
+    #[serde(default)]
+    direction: Option<String>,
+    #[serde(default)]
+    external: Option<bool>,
+}
+
+#[async_trait]
+impl Tool for DepsCodeTool {
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "deps_code".to_string(),
+            description: "Inspects import and external dependencies of a file.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "entity": {
+                        "type": "string",
+                        "description": "Symbol/file; its file's deps are shown. Omit for workspace external-deps summary."
+                    },
+                    "direction": {
+                        "type": "string",
+                        "enum": ["deps", "dependents", "both"],
+                        "description": "deps=what it imports; dependents=who imports it (default both)."
+                    },
+                    "external": {
+                        "type": "boolean",
+                        "description": "Include external dependencies (default true)."
+                    }
+                }
+            }),
+        }
+    }
+
+    fn read_only(&self) -> bool {
+        true
+    }
+
+    async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
+        deepseeknova_security::context::enforce_capability(
+            ctx,
+            deepseeknova_security::capability::Capability::FileRead,
+        )?;
+        let parsed: DepsCodeArgs = serde_json::from_str(args)?;
+        let handle = match graph_handle(ctx) {
+            Some(h) => h,
+            None => return Ok(NO_INDEX_MSG.to_string()),
+        };
+        let idx = lock_index(&handle)?;
+        let with_external = parsed.external.unwrap_or(true);
+
+        let Some(entity) = parsed.entity.as_deref() else {
+            // 无 entity：全库外部依赖汇总
+            if !with_external {
+                return Ok("no entity provided; external summary needs external=true".to_string());
+            }
+            let deps = match idx.external_deps() {
+                Ok(d) => d,
+                Err(e) => return Ok(graph_error_message("reading external deps", &e)),
+            };
+            if deps.is_empty() {
+                return Ok("no external dependencies indexed (no Cargo.toml/package.json/pyproject.toml found)".to_string());
+            }
+            let mut by_dep: BTreeMap<String, Vec<String>> = BTreeMap::new();
+            for (path, dep) in deps {
+                by_dep.entry(dep).or_default().push(path);
+            }
+            let mut out = format!("deps_code(workspace): {} 外部依赖\n", by_dep.len());
+            for (dep, files) in by_dep {
+                out.push_str(&format!(
+                    "  {dep}: {} files ({})\n",
+                    files.len(),
+                    files.join(", ")
+                ));
+            }
+            return Ok(out);
+        };
+
+        let dir_label = match parsed.direction.as_deref() {
+            Some("deps") => "deps",
+            Some("dependents") => "dependents",
+            _ => "both",
+        };
+        let (path, _, _) = match idx.location(entity) {
+            Ok(loc) => loc,
+            Err(e) => return Ok(graph_error_message("locating the entity", &e)),
+        };
+        let file_id = match idx.file_node(&path) {
+            Ok(Some(id)) => id,
+            Ok(None) => return Ok(format!("file '{path}' not in index")),
+            Err(e) => return Ok(graph_error_message("locating the file", &e)),
+        };
+
+        let mut out = format!("deps_code({entity}, direction={dir_label}):\n文件: {path}\n");
+        if matches!(dir_label, "deps" | "both") {
+            out.push_str("依赖:\n");
+            match idx.neighbors(&file_id, &[EdgeKind::Imports], Direction::Callees, 1) {
+                Ok(nodes) => {
+                    for n in nodes {
+                        let tag = if n.kind == NodeKind::File {
+                            "file"
+                        } else {
+                            "symbol"
+                        };
+                        out.push_str(&format!(
+                            "  → {tag} {} ({}:{})\n",
+                            n.name, n.path, n.start_line
+                        ));
+                    }
+                }
+                Err(e) => out.push_str(&format!("  （查询失败: {e}）\n")),
+            }
+            if with_external {
+                match idx.external_deps_for_file(&path) {
+                    Ok(names) => {
+                        for name in names {
+                            out.push_str(&format!("  → {name} [external]\n"));
+                        }
+                    }
+                    Err(e) => out.push_str(&format!("  （外部依赖查询失败: {e}）\n")),
+                }
+            }
+        }
+        if matches!(dir_label, "dependents" | "both") {
+            out.push_str("依赖方:\n");
+            match idx.neighbors(&file_id, &[EdgeKind::Imports], Direction::Callers, 1) {
+                Ok(nodes) => {
+                    for n in nodes {
+                        out.push_str(&format!("  ← {} ({})\n", n.name, n.path));
+                    }
+                }
+                Err(e) => out.push_str(&format!("  （查询失败: {e}）\n")),
+            }
+        }
+        if out.len() > 8000 {
+            let end = out.floor_char_boundary(8000);
+            out.truncate(end);
+        }
+        Ok(out)
+    }
+}
+
 /// graph.enabled 时由 runtime 注册的三个高级图查询工具。
 /// 注册点选在 runtime（白名单内），不动 all_builtin 列表及其 schema 预算测试。
 pub fn graph_query_tools() -> Vec<Arc<dyn Tool>> {
@@ -725,6 +872,7 @@ pub fn graph_query_tools() -> Vec<Arc<dyn Tool>> {
         Arc::new(TraceCodeTool),
         Arc::new(ImpactCodeTool),
         Arc::new(ExploreCodeTool),
+        Arc::new(DepsCodeTool),
     ]
 }
 
@@ -953,5 +1101,69 @@ mod tests {
             .await;
         assert!(e.is_ok(), "explore must not bubble error");
         assert!(e.unwrap().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn deps_code_reports_external_and_local_deps() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/lib.rs"),
+            "use serde::Serialize;\npub fn build() {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = \"1\"\n",
+        )
+        .unwrap();
+        let ctx = ctx_with_index(root);
+
+        let out = DepsCodeTool
+            .execute(&ctx, r#"{"entity":"build","direction":"deps"}"#)
+            .await
+            .unwrap();
+        assert!(out.contains("文件: src/lib.rs"), "{out}");
+        assert!(out.contains("serde [external]"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn deps_code_reports_dependents_for_js_file() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/main.js"),
+            "import x from './util.js';\nexport function main_fn() { x(); }\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/util.js"), "export function util_fn() {}\n").unwrap();
+        let ctx = ctx_with_index(root);
+
+        let out = DepsCodeTool
+            .execute(&ctx, r#"{"entity":"util_fn","direction":"dependents"}"#)
+            .await
+            .unwrap();
+        assert!(out.contains("src/main.js"), "依赖方应含 main.js：{out}");
+    }
+
+    #[tokio::test]
+    async fn deps_code_workspace_summary_lists_external_deps() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub fn build() {}\n").unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = \"1\"\ntokio = \"1\"\n",
+        )
+        .unwrap();
+        let ctx = ctx_with_index(root);
+
+        let out = DepsCodeTool.execute(&ctx, r#"{}"#).await.unwrap();
+        assert!(out.contains("serde: 1 files"), "{out}");
+        assert!(out.contains("tokio: 1 files"), "{out}");
+        assert!(out.contains("Cargo.toml"), "{out}");
     }
 }

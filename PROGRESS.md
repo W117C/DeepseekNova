@@ -94,3 +94,17 @@
 
 ## 交付与验收记录
 - 分支 feat/context7-docs，PR #55 已合入 main（2026-08-02 验收后合并）；#54、#55 明卷+暗卷+CI 全绿，远端/本地分支已删。
+
+## 任务书：代码库智能（References + 依赖图 + deps_code）— 开工回执（2026-08-02）
+- 理解的目标：graph crate 真实生成 References 边（谁引用符号）、结构化依赖图（import/use/require + 清单依赖 + 文件间边）、新工具 deps_code；runtime 提示词补一行；文档同步；PR。
+- 顺序：任务 0 → 1 References（parser+store+schema v4+单测）→ 2 依赖图（import 事实+清单解析+重建）→ 3 deps_code 工具 → 4 文档/反向验证/PR。
+- 最大风险：引用采集误伤（call callee 已走 Calls，靠「已有 Calls 边不重复加 References」去重）；schema v4 迁移强制全量重解析；清单行级解析可能漏花式语法（BLOCKED 已记）。
+- 基线证据（本轮实测）：main@2c71284；make check EXIT=0、670 通过；graph 24+1；tools 59+12+7（书里 50+12+7 为 PR #55 合入前数字，≥ 硬指标）；runtime 26。
+- 工作树说明：存在无关未跟踪文件 codex_desktop_ui.html（非本书产物，白名单外，不动）。
+
+## 任务状态（代码库智能）
+- [x] 任务 1：References 边（parser 定义体引用采集：去重/上限 64/跳过 callee 与自身名；raw_refs 表；schema v4；全局重建按名匹配、Calls 已覆盖不重复）；graph 新增 3 条单测（同文件/跨文件/递归不自引用）。
+- [x] 任务 2：结构化依赖图（Rust use 段/Python import 段/JS specifier 本地 vs 外部 + require；raw_import_links + raw_external_deps；清单解析 Cargo/package.json/pyproject 行级；重建：符号按名 文件→符号、相对路径 文件→文件、外部进表）；graph 新增 3 条单测（serde 外部依赖/JS 文件边/Python 按名命中）。
+- [x] 任务 3：deps_code 工具（entity 可选 + direction + external；依赖/依赖方/外部 [external]/无 entity 全库汇总；加入 graph_query_tools()）；GRAPH_RETRIEVAL_HINT 补第 7 条；tools 新增 3 条测试。
+- [x] 任务 4 前半：GUIDE（A3.1 补 deps_code + 新增 A3.2 节）、graph README、CHANGELOG 已更新。
+- [x] 收尾：cargo fmt + make check EXIT=0（681 通过）；反向验证红（1 failed）→还原绿（graph 32+1、tools 62+12+7）；分支 feat/code-intel 已推送。
