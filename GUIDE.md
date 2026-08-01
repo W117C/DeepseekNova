@@ -515,6 +515,22 @@ Ctrl+U 清行 · Ctrl+W 删词 · Home/End 行首尾 · /help · Esc 退出
 | `/undo list` | 列出快照与 ✓/✗ 状态 |
 | `/quit` | 退出 TUI |
 
+## System Prompts
+
+主 agent 内置一套英文默认系统提示词（`deepseeknova_agent::DEFAULT_SYSTEM_PROMPT`），
+核心设计：把 DeepSeek-V4-Flash 当作**低成本高频决策引擎**，而不是一次性回答机器；
+所有任务按显式循环执行：**Observe → Plan → Tool → Verify → Reflect → Next Action**；
+每轮一个动作、先工具后长文、能查不猜、完成前必须验证与反思、成本敏感。
+
+- 默认启用：`[agent]` 未配置 `system_prompt` 时自动注入内置默认提示词。
+- 覆盖：配置 `system_prompt = "..."` 即完全替换默认值。
+- 追加：运行时（如启用代码图）会在默认/自定义提示词后追加英文检索策略提示。
+- 全链路统一：规划器（plan_mode / coordinator）、子代理预设（explorer / coder /
+  tester / reviewer）、审查（review）、压缩（compaction）、安全调查（scanner）、
+  观察压缩与验证回炉文案均与六阶段循环术语一致；机器输出契约
+  （JSON 结构、章节名、工具清单）保持不变。
+- 设计文档：`PROMPT_DESIGN.md`；后端完整性报告：`BACKEND_AUDIT.md`。
+
 ## MCP Integration
 
 deepseeknova can connect to MCP (Model Context Protocol) servers for additional tools.

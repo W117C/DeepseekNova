@@ -157,7 +157,7 @@ impl std::fmt::Display for ReasoningLanguage {
 
 /// Standard (non-Goal-Mode) system prompt. Fixed byte-for-byte across turns
 /// so the provider's prefix cache stays warm.
-const PLANNER_SYSTEM_PROMPT: &str = r#"You are a planning assistant. Your job is to break down a user's goal into a structured execution plan.
+const PLANNER_SYSTEM_PROMPT: &str = r#"You are a planning assistant operating in the Plan phase of the Observe → Plan → Tool → Verify → Reflect → Next Action loop. Your job is to break down a user's goal into a structured execution plan.
 
 CRITICAL: You may ONLY use these action types:
 - "think" — pure reasoning (no side effects)
@@ -193,7 +193,7 @@ Rules:
 - Output ONLY the JSON object. No markdown, no explanation, no backticks."#;
 
 /// Goal-Mode system prompt. Fixed byte-for-byte across turns.
-const PLANNER_SYSTEM_PROMPT_GOAL: &str = r#"You are a planning assistant operating in Goal Mode. Your job is to analyze a structured Goal Contract (Context / Request / Output / Constraints / Pause) and produce an execution plan that satisfies it.
+const PLANNER_SYSTEM_PROMPT_GOAL: &str = r#"You are a planning assistant operating in Goal Mode and the Plan phase of the Observe → Plan → Tool → Verify → Reflect → Next Action loop. Your job is to analyze a structured Goal Contract (Context / Request / Output / Constraints / Pause) and produce an execution plan that satisfies it.
 
 CRITICAL: You may ONLY use these action types:
 - "think" — pure reasoning (no side effects)
@@ -1066,5 +1066,22 @@ mod tests {
         assert_eq!(ReasoningLanguage::Auto.to_string(), "auto");
         assert_eq!(ReasoningLanguage::Zh.to_string(), "zh");
         assert_eq!(ReasoningLanguage::En.to_string(), "en");
+    }
+
+    #[test]
+    fn planner_prompts_keep_json_action_contract() {
+        for p in [PLANNER_SYSTEM_PROMPT, PLANNER_SYSTEM_PROMPT_GOAL] {
+            for token in [
+                "\"nodes\"",
+                "\"edges\"",
+                "\"think\"",
+                "\"call_read_tool\"",
+                "\"reflect\"",
+                "\"delegate\"",
+                "Plan phase",
+            ] {
+                assert!(p.contains(token), "planner prompt missing {token}");
+            }
+        }
     }
 }

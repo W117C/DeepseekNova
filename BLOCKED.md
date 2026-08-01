@@ -10,3 +10,15 @@
 ## 执行阻塞
 
 无
+
+## 后端审计分级清单（2026-08-01，详见 BACKEND_AUDIT.md）
+
+**建议（不阻塞）**
+- README tests 徽章 536 落后实际 638（README.md:44）
+- README「44 个 Tauri 命令」vs 实测 61 个 `#[tauri::command]` 标记
+- graph `self_index` 与 provider `deepseek_reasoning_protocol` 集成测试为 ignored（既有，不在白名单）
+- desktop 不在 `make check`，本机完整校验需 `make check-desktop`（需前端产物）
+
+**顺手活（不做，待裁决）**
+- verify LLM 化（当前为确定性命令 + 固定回炉文案，agent.rs:933）
+- desktop 设置页 system_prompt 入口接新默认值（前端已搁置）

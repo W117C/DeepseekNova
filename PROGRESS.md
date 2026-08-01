@@ -1,5 +1,11 @@
 # PROGRESS — TUI 设计功能完善（任务书执行）
 
+## 系统提示词体系 + 后端审计 — 开工回执（2026-08-01）
+- 理解的目标：主 agent 默认系统提示词（低成本高频决策引擎 + Observe→Plan→Tool→Verify→Reflect→Next Action，英文）默认启用且可配置覆盖；全链路子提示词统一；后端 22 crate 审计报告只报不修。
+- 顺序：任务 0 基线 → 1 BACKEND_AUDIT.md → 2 prompts.rs+接入+4 类单测 → 3 PROMPT_DESIGN.md+子提示词对齐+契约测试 → 4 文档/反向验证/提交推送。
+- 最大风险：with_appended(None) 语义改变（默认+追加）与 runtime 图检索提示词英文化；scanner/runtime 跨 crate 按 AGENTS.md §1 记录；子提示词改写不得破坏 JSON/章节/工具名机器契约。
+- 基线证据（本轮实测）：feat/tui-complete@c19898d 干净；make check EXIT=0、638 通过；agent 108 单测+1 doctest 绿。
+
 ## TUI 视觉改造（参考 Codex CLI）— 开工回执（2026-08-01）
 - 理解的目标：把 TUI 观感改成 Codex CLI 风格——语义配色（禁 Blue/Yellow/White/Black/DarkGray/Rgb）+ 干净底部面板（状态行多段着色、提示行、无 emoji 标题），全部可机判函数加单测，观感留领导亲验。
 - 顺序：任务 0 基线 → 1 style_for 语义配色+映射单测 → 2 布局纯函数+底部四段 → 3 文档/反向验证/提交推送。
@@ -12,6 +18,13 @@
 - [x] 任务 2：布局四段（对话区/状态行/输入框/提示行），layout_constraints/status_segments/hint_text 纯函数 + 3 条单测；标题去 emoji；状态行 model=Cyan 其余 Dim；输入框边框 Dim、">"=Cyan+Bold、输入默认色；底部提示行全 Dim。
 - [x] 任务 3：GUIDE/README/CHANGELOG 已更新；cargo fmt --check 过；make check EXIT=0；反向验证红（1 failed）→ 还原绿（35+1 全绿）；PTY 冒烟：新布局正常渲染、Esc 退出 code 0；BLOCKED.md 已补 diff 高亮待裁决项。
 - 证据：cargo test -p deepseeknova-tui = 35 单测 + 1 doctest 绿 0 ignored；rg 禁止色（Blue/Yellow/White/Black/DarkGray/Rgb）零命中。
+
+## 任务状态（系统提示词体系 + 后端审计）
+- [x] 任务 1：BACKEND_AUDIT.md 已交付，22 crate 全覆盖（声明 vs 实现、测试数、结论、file:line 证据）；问题分级写入 BLOCKED.md；未改任何 crate 代码。
+- [x] 任务 2：prompts.rs（DEFAULT_SYSTEM_PROMPT，英文，六阶段循环+决策引擎）+ agent.rs 接入（run_stream 默认注入、with_appended(None)=默认+追加）+ 4 类单测（阶段词/默认注入/追加/覆盖优先）；cargo test -p deepseeknova-agent = 112 单测+1 doctest 绿。
+- [x] 任务 3：PROMPT_DESIGN.md（10 处改动清单+理由）；plan_mode/planner×2/delegate×4/review/compaction/scanner/graph hint（英文化）/compress_observation/verify 回炉文案全部统一六阶段术语；机器契约未动；新增 9 条契约单测（agent 119、scanner 15、runtime 26 全绿）。
+- [x] 任务 4：GUIDE「System Prompts」节、README 提示词小节、CHANGELOG Added；cargo fmt 过；make check EXIT=0、651 通过（638+13）；反向验证红（1 failed）→ 还原绿（119+1+5 全绿）；跨 crate 记录见下。
+- 跨 crate 协议记录（AGENTS.md §1）：预扫描=只改 scanner investigate.rs 与 runtime GRAPH_RETRIEVAL_HINT 常量区；备选路径=不改 PromptBuilder 装配 vs 直接在 agent 内做默认值（选后者，改面最小）；自检=三 crate 单测 + make check 全绿 + 反向验证。
 
 ## 开工回执（2026-08-01）
 - 理解的目标：TUI 命令面与 REPL 对齐（/skills /mcp /raw /undo）、输入可编辑+可见光标、运行事件代际防串台、/resume 渲染历史、文档同步，全部带测试并过 make check。

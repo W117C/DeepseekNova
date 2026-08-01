@@ -62,7 +62,9 @@ async fn git_capture(root: &Path, args: &[&str]) -> Option<String> {
 /// 渲染审查 prompt：diff + 任务文本 + 完成声明 → 严格要求 JSON 判定。
 pub(crate) fn render_review_prompt(task: &str, completion: &str, diff: &str) -> String {
     format!(
-        "You are a strict but fair code reviewer. The agent claims the task is \
+        "You are a strict but fair reviewer operating in the Reflect phase of \
+         the Observe → Plan → Tool → Verify → Reflect → Next Action loop. The \
+         agent claims the task is \
          complete. Review the diff against the task. Respond with ONLY a JSON \
          object: {{\"verdict\": \"approve\"}} or \
          {{\"verdict\": \"issues\", \"issues\": [\"...\", \"...\"]}}. \
@@ -236,6 +238,14 @@ mod tests {
         }
         let fb = render_feedback(&["a".into(), "b".into()]);
         assert!(fb.contains("- a") && fb.contains("- b"));
+    }
+
+    #[test]
+    fn review_prompt_keeps_reflect_phase_and_verdict_contract() {
+        let p = render_review_prompt("fix auth", "done", "diff body");
+        assert!(p.contains("Reflect phase"));
+        assert!(p.contains("{\"verdict\": \"approve\"}"));
+        assert!(p.contains("# Task"));
     }
 
     #[tokio::test]

@@ -28,31 +28,72 @@ pub fn builtin_presets() -> Vec<DelegatePreset> {
     vec![
         DelegatePreset {
             name: "explorer".into(),
-            system_prompt: "You are an explorer sub-agent. Investigate and locate relevant code/facts read-only. \
-                Prefer graph tools (search_code/traverse_graph/retrieve_entity) over full-file reads. \
-                Return a concise findings summary.".into(),
-            tools: names(&["read_file", "ls", "glob", "grep", "search_code", "traverse_graph", "retrieve_entity", "recall", "web_fetch"]),
+            system_prompt: "You are an explorer sub-agent operating in the Observe phase of the \
+                Observe → Plan → Tool → Verify → Reflect → Next Action loop. Investigate and \
+                locate relevant code/facts read-only. Prefer graph tools \
+                (search_code/traverse_graph/retrieve_entity) over full-file reads. Output \
+                contract: return a concise findings summary with file:line evidence."
+                .into(),
+            tools: names(&[
+                "read_file",
+                "ls",
+                "glob",
+                "grep",
+                "search_code",
+                "traverse_graph",
+                "retrieve_entity",
+                "recall",
+                "web_fetch",
+            ]),
             max_steps: 10,
         },
         DelegatePreset {
             name: "coder".into(),
-            system_prompt: "You are a coder sub-agent. Implement the requested change: read, edit/write files, \
-                run shell as needed. Return a concise summary of what changed.".into(),
-            tools: names(&["read_file", "write_file", "edit_file", "move_file", "ls", "glob", "grep", "bash", "search_code", "traverse_graph", "retrieve_entity"]),
+            system_prompt: "You are a coder sub-agent operating in the Tool phase of the \
+                Observe → Plan → Tool → Verify → Reflect → Next Action loop. Implement the \
+                requested change: read, edit/write files, run shell as needed. Output contract: \
+                return a concise summary of what changed."
+                .into(),
+            tools: names(&[
+                "read_file",
+                "write_file",
+                "edit_file",
+                "move_file",
+                "ls",
+                "glob",
+                "grep",
+                "bash",
+                "search_code",
+                "traverse_graph",
+                "retrieve_entity",
+            ]),
             max_steps: 15,
         },
         DelegatePreset {
             name: "tester".into(),
-            system_prompt: "You are a tester sub-agent. Run tests / reproduce issues via shell and report results \
-                concisely. Do not modify source files.".into(),
+            system_prompt: "You are a tester sub-agent operating in the Verify phase of the \
+                Observe → Plan → Tool → Verify → Reflect → Next Action loop. Run tests / \
+                reproduce issues via shell and report results concisely. Do not modify source \
+                files."
+                .into(),
             tools: names(&["read_file", "ls", "glob", "grep", "bash"]),
             max_steps: 10,
         },
         DelegatePreset {
             name: "reviewer".into(),
-            system_prompt: "You are a reviewer sub-agent. Review code read-only and report issues concisely. \
-                Do not modify files.".into(),
-            tools: names(&["read_file", "ls", "glob", "grep", "search_code", "traverse_graph", "retrieve_entity"]),
+            system_prompt: "You are a reviewer sub-agent operating in the Reflect phase of the \
+                Observe → Plan → Tool → Verify → Reflect → Next Action loop. Review code \
+                read-only and report issues concisely. Do not modify files."
+                .into(),
+            tools: names(&[
+                "read_file",
+                "ls",
+                "glob",
+                "grep",
+                "search_code",
+                "traverse_graph",
+                "retrieve_entity",
+            ]),
             max_steps: 10,
         },
     ]
@@ -165,6 +206,64 @@ mod tests {
                 names.iter().any(|n| n == expected),
                 "missing preset {expected}"
             );
+        }
+    }
+
+    #[test]
+    fn presets_keep_tool_contracts() {
+        let expected: std::collections::HashMap<&str, &[&str]> = [
+            (
+                "explorer",
+                &[
+                    "read_file",
+                    "ls",
+                    "glob",
+                    "grep",
+                    "search_code",
+                    "traverse_graph",
+                    "retrieve_entity",
+                    "recall",
+                    "web_fetch",
+                ][..],
+            ),
+            (
+                "coder",
+                &[
+                    "read_file",
+                    "write_file",
+                    "edit_file",
+                    "move_file",
+                    "ls",
+                    "glob",
+                    "grep",
+                    "bash",
+                    "search_code",
+                    "traverse_graph",
+                    "retrieve_entity",
+                ][..],
+            ),
+            ("tester", &["read_file", "ls", "glob", "grep", "bash"][..]),
+            (
+                "reviewer",
+                &[
+                    "read_file",
+                    "ls",
+                    "glob",
+                    "grep",
+                    "search_code",
+                    "traverse_graph",
+                    "retrieve_entity",
+                ][..],
+            ),
+        ]
+        .into_iter()
+        .collect();
+        for p in builtin_presets() {
+            let want: Vec<String> = expected[p.name.as_str()]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            assert_eq!(p.tools, want, "preset {} tool contract changed", p.name);
         }
     }
 

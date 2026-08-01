@@ -1,4 +1,5 @@
 use crate::memory::Memory;
+use crate::prompts::DEFAULT_SYSTEM_PROMPT;
 use deepseeknova_core::chunk::{Chunk, Usage};
 use deepseeknova_core::memory::skill::{TaskObservation, TaskOutcome};
 use deepseeknova_core::tool::ToolContext;
@@ -193,7 +194,9 @@ impl Agent {
     pub fn with_appended_system_prompt(mut self, extra: impl AsRef<str>) -> Self {
         match self.system_prompt {
             Some(ref mut s) => s.push_str(extra.as_ref()),
-            None => self.system_prompt = Some(extra.as_ref().to_string()),
+            None => {
+                self.system_prompt = Some(format!("{DEFAULT_SYSTEM_PROMPT}\n\n{}", extra.as_ref()))
+            }
         }
         self
     }
@@ -449,7 +452,10 @@ impl Runner for Agent {
         let provider = Arc::clone(&self.provider);
         let tools: Vec<Arc<dyn Tool>> = self.tools.values().cloned().collect();
         let max_steps = self.max_steps;
-        let system_prompt = self.system_prompt.clone();
+        let system_prompt = self
+            .system_prompt
+            .clone()
+            .unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string());
         let compaction_threshold = self.compaction_threshold_tokens;
         let workspace_root = self.workspace_root.clone();
         let security = self.security.clone();
@@ -526,34 +532,33 @@ impl Runner for Agent {
 
             // Inject the system prompt only on a fresh conversation. When the
             // store already holds prior turns, the system prompt is part of
-            // them and re-injecting it would duplicate it.
+            // them and re-injecting it would duplicate it. The default prompt
+            // applies whenever the caller did not configure an override.
             if !seeded {
-                if let Some(ref sp) = system_prompt {
-                    // Build the system prompt content, appending the code-graph
-                    // repo map (if any) in the stable prefix region — after the
-                    // base prompt, before the volatile conversation — mirroring
-                    // context::PromptBuilder's Repo Map format so prefix-cache
-                    // semantics hold.
-                    // TODO(graph): personalized seeds from user input
-                    let mut content = sp.clone();
-                    if let Some(ref provider) = repo_map_provider {
-                        if let Some(map) = provider(&input.prompt) {
-                            if !map.is_empty() {
-                                content.push_str("\n\n---\n## Repo Map\n\n```\n");
-                                content.push_str(&map);
-                                content.push_str("\n```\n");
-                            }
+                // Build the system prompt content, appending the code-graph
+                // repo map (if any) in the stable prefix region — after the
+                // base prompt, before the volatile conversation — mirroring
+                // context::PromptBuilder's Repo Map format so prefix-cache
+                // semantics hold.
+                // TODO(graph): personalized seeds from user input
+                let mut content = system_prompt.clone();
+                if let Some(ref provider) = repo_map_provider {
+                    if let Some(map) = provider(&input.prompt) {
+                        if !map.is_empty() {
+                            content.push_str("\n\n---\n## Repo Map\n\n```\n");
+                            content.push_str(&map);
+                            content.push_str("\n```\n");
                         }
                     }
-                    memory.add_message(Message {
-                        role: Role::System,
-                        content,
-                        name: None,
-                        tool_calls: None,
-                        tool_call_id: None,
-                        reasoning_content: None,
-                    });
                 }
+                memory.add_message(Message {
+                    role: Role::System,
+                    content,
+                    name: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                });
             }
 
             // Run-start 召回注入（仅新会话）：作为稳定 system 前缀之后的 volatile
@@ -688,6 +693,14 @@ struct PendingToolCall {
     id: String,
     name: String,
     arguments: String,
+}
+
+/// Verify 失败回炉文案（契约：标记 + 原因 + 修复后重跑验证的语义）。
+fn verify_failure_message(reason: &str) -> String {
+    format!(
+        "[verification failed]\n{reason}\n\nFix the issues, then finish the task. \
+         The verification commands will run again before completion."
+    )
 }
 
 async fn run_agent_loop(
@@ -930,11 +943,7 @@ async fn run_agent_loop(
                                 verify_cycles += 1;
                                 memory.add_message(Message {
                                     role: Role::User,
-                                    content: format!(
-                                        "[verification failed]\n{reason}\n\nFix the issues, \
-                                         then finish the task. The verification commands will \
-                                         run again before completion."
-                                    ),
+                                    content: verify_failure_message(&reason),
                                     name: None,
                                     tool_calls: None,
                                     tool_call_id: None,
@@ -1701,13 +1710,19 @@ fn extract_touched_paths(name: &str, args: &str) -> Vec<String> {
     out
 }
 
+/// Observe 阶段工具输出压缩提示词（契约：保留事实/路径/退出码/数字，纯摘要输出）。
+fn render_compression_prompt(tool: &str, raw: &str) -> String {
+    format!(
+        "You are the Observe stage of the Observe → Plan → Tool → Verify → \
+         Reflect → Next Action loop. Compress the following tool output \
+         (`{tool}`) into a concise structured summary. Preserve every fact, \
+         file path, exit code and number. Output only the summary.\n\n{raw}"
+    )
+}
+
 /// P2.2 观察压缩：用廉价模型把大输出压成结构化摘要；任何失败返回 None（回退截断）。
 async fn compress_observation(obs: &ObserveSettings, tool: &str, raw: &str) -> Option<String> {
-    let prompt = format!(
-        "Compress the following tool output (`{tool}`) into a concise structured \
-         summary. Preserve every fact, file path, exit code and number. \
-         Output only the summary.\n\n{raw}"
-    );
+    let prompt = render_compression_prompt(tool, raw);
     let msgs = vec![Message {
         role: Role::User,
         content: prompt,
@@ -1993,6 +2008,90 @@ mod tests {
             result.is_ok(),
             "agent with system prompt should run without error"
         );
+    }
+
+    #[test]
+    fn default_system_prompt_defines_decision_engine_loop() {
+        assert!(
+            DEFAULT_SYSTEM_PROMPT.contains("decision engine"),
+            "default prompt must encode the decision-engine principle"
+        );
+        for phase in [
+            "Observe",
+            "Plan",
+            "Tool",
+            "Verify",
+            "Reflect",
+            "Next Action",
+        ] {
+            assert!(
+                DEFAULT_SYSTEM_PROMPT.contains(phase),
+                "default prompt must define the {phase} phase"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_injects_default_system_prompt_when_unconfigured() {
+        let history = Arc::new(tokio::sync::Mutex::new(Vec::<Message>::new()));
+        let agent = Agent::new(Arc::new(MockProvider::text("ok")), 3)
+            .with_conversation_history(history.clone());
+
+        let _ = drain(agent, "hello").await;
+
+        let store = history.lock().await;
+        let sys = store
+            .iter()
+            .find(|m| m.role == Role::System)
+            .expect("default system prompt must be injected when unconfigured");
+        assert_eq!(sys.content, DEFAULT_SYSTEM_PROMPT);
+    }
+
+    #[test]
+    fn with_appended_on_none_prepends_default_system_prompt() {
+        let agent = Agent::new(Arc::new(MockProvider::text("ok")), 3)
+            .with_appended_system_prompt("EXTRA_HINT");
+        let sp = agent
+            .system_prompt
+            .expect("appending to an unconfigured prompt must materialize one");
+        assert!(sp.starts_with(DEFAULT_SYSTEM_PROMPT));
+        assert!(sp.ends_with("EXTRA_HINT"));
+    }
+
+    #[tokio::test]
+    async fn config_system_prompt_override_wins_over_default() {
+        let history = Arc::new(tokio::sync::Mutex::new(Vec::<Message>::new()));
+        let agent = Agent::new(Arc::new(MockProvider::text("ok")), 3)
+            .with_system_prompt("CUSTOM_PROMPT")
+            .with_conversation_history(history.clone());
+
+        let _ = drain(agent, "hello").await;
+
+        let store = history.lock().await;
+        let sys = store
+            .iter()
+            .find(|m| m.role == Role::System)
+            .expect("system message must exist");
+        assert_eq!(sys.content, "CUSTOM_PROMPT");
+        assert!(!sys.content.contains(DEFAULT_SYSTEM_PROMPT));
+    }
+
+    #[test]
+    fn verify_failure_message_keeps_retry_contract() {
+        let m = verify_failure_message("tests failed");
+        assert!(m.contains("[verification failed]"));
+        assert!(m.contains("tests failed"));
+        assert!(m.contains("run again before completion"));
+    }
+
+    #[test]
+    fn compression_prompt_preserves_facts_contract() {
+        let p = render_compression_prompt("bash", "exit 1\nsecret=abc");
+        assert!(p.contains("`bash`"));
+        assert!(p.contains("exit 1\nsecret=abc"));
+        assert!(p.contains("Preserve every fact"));
+        assert!(p.contains("Output only the summary"));
+        assert!(p.contains("Observe stage"));
     }
 
     #[tokio::test]

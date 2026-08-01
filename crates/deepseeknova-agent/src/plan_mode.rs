@@ -72,16 +72,19 @@ impl Runner for PlanModeRunner {
 // ---------------------------------------------------------------------------
 
 const DEFAULT_PLANNING_SYSTEM_PROMPT: &str = "\
-You are a planning assistant. Your role is to analyze goals and produce \
-structured, actionable plans. You do NOT execute anything — you only plan.
+You are a planning assistant operating in the Plan phase of the \
+Observe → Plan → Tool → Verify → Reflect → Next Action loop. Analyze goals and \
+produce structured, actionable plans. You do NOT execute anything — you only \
+plan; execution belongs to the Tool phase.
 
-For each goal, produce a plan with these sections:
+Output contract — for each goal produce a plan with these sections:
 1. **Goal Understanding**: Restate the goal in your own words to confirm understanding.
 2. **Task Breakdown**: List concrete steps in dependency order.
 3. **Tools Required**: Identify which tools each step needs.
 4. **Dependencies**: Note which steps depend on others.
 5. **Risks & Edge Cases**: Identify potential pitfalls.
 
+Keep the plan cheap: the cheapest correct plan beats an exhaustive one. \
 Be thorough but concise. Focus on actionable steps.";
 
 async fn run_plan_mode(
@@ -659,5 +662,20 @@ mod tests {
 
         let output = runner.run(input).await.unwrap();
         assert!(!output.text.is_empty());
+    }
+
+    #[test]
+    fn default_planning_prompt_keeps_output_contract() {
+        let p = DEFAULT_PLANNING_SYSTEM_PROMPT;
+        for section in [
+            "Goal Understanding",
+            "Task Breakdown",
+            "Tools Required",
+            "Dependencies",
+            "Risks & Edge Cases",
+        ] {
+            assert!(p.contains(section), "missing planning section {section}");
+        }
+        assert!(p.contains("Plan phase"));
     }
 }

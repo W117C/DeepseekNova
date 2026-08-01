@@ -14,6 +14,11 @@ All notable changes to DeepseekNova will be documented in this file.
 
 ### Added
 
+- **系统提示词体系**：主 agent 新增英文默认系统提示词（决策引擎 + Observe→Plan→
+  Tool→Verify→Reflect→Next Action 六阶段循环），未配置 `system_prompt` 时自动启用、
+  配置覆盖优先；plan_mode/planner/delegate×4/review/compaction/scanner/图检索提示词
+  统一为同一循环术语，机器输出契约不变；新增 `BACKEND_AUDIT.md`（后端 22 crate 全量
+  审计）与 `PROMPT_DESIGN.md`（全链路提示词设计文档）。
 - **TUI 视觉重做（参考 Codex CLI）**：语义配色（用户/状态=cyan、agent=magenta、
   次要信息=dim、成功=green、失败/错误=red），状态行按段着色，底部新增快捷键
   提示行，对话区标题去掉 emoji，深浅色终端自适应。
