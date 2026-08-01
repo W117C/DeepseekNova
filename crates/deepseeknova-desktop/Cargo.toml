@@ -26,16 +26,14 @@ tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
+async-trait = { workspace = true }
 deepseeknova-core = { workspace = true }
 deepseeknova-agent = { workspace = true }
 deepseeknova-config = { workspace = true }
+deepseeknova-permission = { workspace = true }
 deepseeknova-provider = { workspace = true }
-deepseeknova-tools = { workspace = true }
 deepseeknova-runtime = { workspace = true }
-deepseeknova-store = { workspace = true }
 deepseeknova-skills = { workspace = true }
-deepseeknova-event = { workspace = true }
-deepseeknova-orch = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

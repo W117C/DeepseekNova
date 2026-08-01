@@ -2,6 +2,63 @@
 
 All notable changes to DeepseekNova will be documented in this file.
 
+## [Unreleased]
+
+### ⚠ Breaking
+
+- `agent.on_max_steps` 默认值为 `"pause"`：max_steps 耗尽不再返回错误，而是发出
+  `Paused` 事件并优雅结束（CLI 非交互以退出码 3 结束并打印 resume 提示）。
+  依赖旧行为的自动化请显式配置 `[agent] on_max_steps = "error"`。
+- `edit_file` 语义收紧：SEARCH 须在文件中**唯一**命中（旧版替换首个匹配）；0 或多处命中
+  时整次调用失败、不产生半改。多处编辑请用新的 `edits: [{search, replace}, ...]` 数组。
+
+### Added
+
+- **检查点上线（A1）**：`[checkpoint]` 配置（默认开）把 CheckpointManager 装配进
+  write/edit/move 工具（写前快照），快照持久化为 JSONL（跨进程可回滚）；新增 CLI
+  `checkpoint list / rollback [--all] / clear`。
+- **项目后置产出 CLI（A2）**：`artifacts wiki` 与 `artifacts cards` 生成 Wiki/知识卡片。
+- **repo map 个性化（A3）**：按当前用户输入提取标识符 seeds（去停用词、去重、上限 8）
+  做 personalized PageRank，地图优先展示任务相关模块。
+- 文档同步（D）：DESIGN.md 状态纠正（skills/artifacts 已落地、P5/P6 待实现）、GUIDE
+  补充新命令、GitHub 仓库描述移除过时的 GOAP/Swarm 表述。
+
+- **并行工具执行**：同批读类工具经 `JoinSet` 并发执行、写类工具保序串行；
+  `agent.concurrent_tools` 从配置占位变为生效开关（默认 true）。权限预检先行，
+  结果按原始调用顺序回写事件与历史。
+- **`[verify]` 完成前确定性验证**（默认关）：写入轮完成后按 `commands` 经 bash 工具
+  验证（沙箱/白名单/资源限制全部生效），失败以 User 消息回炉修复，超过 `max_cycles`
+  后 `Paused(verify_failed)` 交人工；新增 `verification` WireEvent（桌面端/SSE 可见）。
+- **P2 高频决策经济学**：`step_effort_routing` 每步按规则在 quick（thinking off）/
+  high 间切换 provider；`observe_compress` 用廉价模型把超阈值工具输出摘要后入历史
+  （事件流保留原始结果）；`tool_cache` 会话内只读工具结果缓存（写执行后失效）。
+- **P3 上下文与检索**：真实 token 计量（tiktoken，失败回退字符/4 启发式）；L3 压缩后
+  按最近用户意图自动召回记忆注入；记忆检索中文二元组增强（FTS5 中文命中）；任务-文件
+  关联沉淀（`record_task` 为触碰文件写入 `file:<path>` 记忆）。
+- **P4 产品化**：Coordinator 模式接入代码图索引与图检索工具，只读工具对规划器开放
+  （安全边界：规划器仅可调用只读工具）；CLI setup 模板补充 P2/verify/角色分工示例。
+
+- `[review]` 完成前自审（默认关）：文件写入后由廉价模型审查 diff，issues 回炉一轮修复，
+  仍有问题以 `Paused(review_issues)` 交人工；非 git/解析失败一律降级放行。
+- 新增 `deepseeknova-scanner` crate 与 `deepseeknova scan` 子命令：内置正则规则
+  （硬编码密钥、SQL 拼接、命令注入、rust-unwrap 等）扫描工作区，可选一次性 agent
+  AI 调查并输出 md/json 报表；支持 `--path`、`--format md|json`、`--no-ai`、
+  `--severity-min high|medium|low`。
+- `read_file` 支持 `start_line`/`end_line` 区间读，只把需要的行送入上下文（省 token）。
+- `edit_file` 支持 `edits` 多块数组，一次调用原子地替换多处（全有或全无）。
+
+### Changed
+
+- 审核修复：`[memory] mid_run_*` 配置真实生效（含 `mid_run_graph_top_k` 的代码图命中）；
+  记忆库主 FTS 表与 trigram 表写入事务化并在打开时对账回填；蒸馏文件关联仅统计本 run
+  新增消息；`AgentRoleProviders` 标记 `#[non_exhaustive]`；`upsert_embedding` 补齐
+  `created_at` 时间戳。
+
+- 删除实验性 `deepseeknova-orch` crate（GOAP + Swarm，零业务调用）；其唯一有消费者的组件 `ProgressTracker` 已解耦收编至 `deepseeknova-core::progress`。多智能体能力改由 `deepseeknova-agent` 的 delegate/子代理路径提供。CLI dev-dependency、quickstart 示例的 GOAP 段、release 脚本与 README crate 表中的 orch 引用一并清除。
+- `compaction_threshold_tokens` 留空时运行时按 `budget.max_total_tokens / 2` 推导，
+  让无损的 L1 结果截断默认生效；显式配置与 `[budget] enabled=false` 时行为不变。
+- 内置工具 schema 文案精简 41%（7819→4613 字符），降低每次缓存未命中的固定 token 开销。
+
 ## [0.4.0] — 2026-07-19
 
 ### 桌面前端完善

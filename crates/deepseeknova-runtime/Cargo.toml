@@ -11,13 +11,22 @@ documentation = "https://docs.rs/deepseeknova-runtime/0.4.0"
 [dependencies]
 anyhow = { workspace = true }
 tokio = { workspace = true }
+futures = { workspace = true }
 tracing = { workspace = true }
 deepseeknova-core = { workspace = true }
 deepseeknova-config = { workspace = true }
 deepseeknova-provider = { workspace = true }
 deepseeknova-agent = { workspace = true }
 deepseeknova-tools = { workspace = true }
+deepseeknova-graph = { workspace = true }
 deepseeknova-permission = { workspace = true }
+deepseeknova-sandbox = { workspace = true }
 deepseeknova-context = { workspace = true }
+deepseeknova-checkpoint = { workspace = true }
 deepseeknova-event = { workspace = true }
 deepseeknova-security = { workspace = true }
+deepseeknova-mcp = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+serde_json = { workspace = true }

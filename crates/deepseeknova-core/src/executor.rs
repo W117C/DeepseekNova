@@ -388,17 +388,6 @@ mod tests {
         )
     }
 
-    #[allow(dead_code)]
-    fn make_tool_node(id: &str, tool: &str) -> ExecutionNode {
-        ExecutionNode::new(
-            id,
-            Action::CallTool {
-                tool: tool.to_string(),
-                args: serde_json::json!({}),
-            },
-        )
-    }
-
     #[test]
     fn topological_sort_linear() {
         let mut g = ExecutionGraph::new("a".into());

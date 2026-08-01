@@ -6,14 +6,15 @@
 2. [Installation & Setup](#installation--setup)
 3. [Configuration](#configuration)
 4. [Tools Reference](#tools-reference)
-5. [Skills](#skills)
-6. [HTTP API](#http-api)
-7. [TUI](#tui)
-8. [MCP Integration](#mcp-integration)
-9. [Plan Mode](#plan-mode)
-10. [Sub-Agents](#sub-agents)
-11. [Sandbox](#sandbox)
-12. [Advanced Configuration](#advanced-configuration)
+5. [Security Scan (CLI)](#security-scan-cli)
+6. [Skills](#skills)
+7. [HTTP API](#http-api)
+8. [TUI](#tui)
+9. [MCP Integration](#mcp-integration)
+10. [Plan Mode](#plan-mode)
+11. [Sub-Agents](#sub-agents)
+12. [Sandbox](#sandbox)
+13. [Advanced Configuration](#advanced-configuration)
 
 ## Concepts
 
@@ -121,6 +122,12 @@ temperature = 0.7
 max_steps = 25                     # Max tool-calling iterations per turn
 system_prompt = "You are a helpful software engineer."
 compaction_threshold = 32000       # Tokens before memory compaction
+concurrent_tools = true            # 同批读类工具并发、写类保序串行（P1）
+# step_effort_routing = true       # 每步在 quick（thinking off）/ high 间切换（P2）
+# observe_compress = true          # 超阈值工具输出由廉价模型摘要后入历史（P2）
+# observe_compress_threshold_chars = 12000
+# observe_compress_max_chars = 4000
+# tool_cache = true                # 会话内只读工具结果缓存，写后失效（P2）
 
 [tools]
 sandbox = true                     # Enable sandbox for shell commands
@@ -136,6 +143,70 @@ servers = [
   { name = "filesystem", command = "npx", args = ["-y", "@modelcontextprotocol/server-filesystem", "."] }
 ]
 ```
+
+### 模型指针与成本分账
+
+按角色路由模型（均可选；未配置的角色回落 `main`，`main` 未配置则用默认 provider）：
+
+```toml
+[model_pointers]
+main = "deepseek-v4"          # 主对话
+task = "deepseek-v4-flash"    # 子代理/委派
+compact = "deepseek-v4-flash" # 历史压缩
+quick = "deepseek-v4-flash"   # 快速操作
+
+[[models]]
+name = "deepseek-v4"
+provider = "deepseek"
+input_price_per_mtok = 0.28    # $/1M tokens，可选；配齐 input+output 才输出美元估算
+output_price_per_mtok = 0.42
+cache_hit_price_per_mtok = 0.028
+```
+
+会话内：`/model` 查看指针，`/model use <role> <model>` 热切换（不写盘），`/cost` 查看
+按 模型×角色 的 token 用量与成本估算。
+
+coordinator 模式（`run --planner-model ...`）的 Delegate 子代理使用 `task` 指针，
+其历史压缩使用 `compact` 指针并按 Compact 角色计量。Agent 的 L3 压缩同样走
+`compact` 指针（`agent.compact_model` 仅在指针未设时作为覆盖，照样计量）；
+完成前自审门禁（`[review]`）走 `quick` 指针（`review.review_model` 同理作为覆盖）。
+
+### 完成前确定性验证（`[verify]`）
+
+写入类工具执行过后、模型宣布完成之前，按配置命令自动验证（默认关闭）。命令经
+`bash` 工具运行，沙箱、命令白名单与资源限制全部生效；失败结果回喂循环让模型修复，
+超过 `max_cycles` 后以 `Paused(verify_failed)` 交人工：
+
+```toml
+[verify]
+enabled = true                        # 默认 false
+commands = ["cargo check --quiet"]    # 按序执行，任一失败即回炉
+max_cycles = 1                        # 失败回炉上限
+```
+
+验证通过后继续原有流程（B3 自审 / Done）。命令需同时满足 `[security]` 的
+`allowed_commands`（启用时），未命中白名单会作为验证失败处理。
+
+验证命令的逐条结果通过 `verification` 事件推送给前端（桌面端显示为 `✓ / ✗` 系统行，
+HTTP API 为 `event: verification` 的 SSE）。
+
+### 每步 effort 路由与观察压缩（P2）
+
+`step_effort_routing = true` 时，Agent 在每步按规则选择 provider：上一步是正常工具
+结果 → `quick` 指针模型（thinking off，省 reasoning token）；首步、工具报错、验证/
+审查回炉 → `high` 推理。实现上由 CLI 为同一 main 模型构建两个 effort 实例
+（Disabled / High）；运行时未注入这两个实例时回落固定主 provider 并告警。
+
+`observe_compress = true` 时，超过 `observe_compress_threshold_chars` 的工具输出会由
+廉价模型（compact 指针优先）压缩为 `observe_compress_max_chars` 字符以内的结构化摘要
+再进入历史；前端事件流仍透出原始结果。压缩失败自动回退原有截断行为。
+
+`tool_cache = true` 时，会话内只读工具按（工具名, 参数）缓存结果，同参重复读调用直接
+复用（标记 `[cached]`）；任何写工具执行后缓存整体失效。
+
+Coordinator 模式（`run --planner-model ...`）现在同样接入代码图索引：图检索工具
+（search_code / traverse_graph / retrieve_entity）对执行器可用，只读工具对规划器开放；
+`[graph] enabled = false` 时自动排除。
 
 ### Environment Variables
 
@@ -198,6 +269,53 @@ servers = [
 | Tool | Description | Read-only |
 |---|---|---|
 | `skill__<name>` | Activate a skill (one per registered skill) | Yes |
+
+## Security Scan (CLI)
+
+`deepseeknova scan`（deepsec 式，P1）：内置正则 matcher 零 AI 定位候选点
+（硬编码密钥、SQL 拼接、命令注入面、Rust panic 面），再对每个 finding 起
+一次性 agent（`task` 指针）调查判真伪，token 计入 Task 角色；命中结果按
+severity 分组输出，`--no-ai` 跳过 AI 调查只出 matcher 结果。
+
+| 参数 | 说明 |
+|---|---|
+| `--path <dir>` | 扫描根目录（默认当前目录）；路径逃逸工作区时 fail-closed 直接报错 |
+| `--format md\|json` | 报表格式，默认 `md` |
+| `--no-ai` | 跳过 AI 调查，只输出 matcher 命中 |
+| `--severity-min high\|medium\|low` | 报告的最低严重级别，默认 `low`（全部） |
+
+示例：
+
+```bash
+deepseeknova scan --format json --no-ai
+deepseeknova scan --path crates/deepseeknova-cli --severity-min high
+```
+
+### 检查点（A1）
+
+写类工具（write/edit/move）执行前自动快照，快照持久化在
+`[checkpoint] path`（默认 `.deepseeknova/checkpoints.json`）：
+
+```bash
+deepseeknova checkpoint list             # 查看快照与文件状态（unchanged/modified）
+deepseeknova checkpoint rollback         # 回滚最近一个快照
+deepseeknova checkpoint rollback --all   # 回滚全部
+deepseeknova checkpoint clear            # 丢弃快照（不恢复文件）
+```
+
+`[checkpoint] enabled = false` 可关闭。
+
+### 项目后置产出（A2）
+
+```bash
+deepseeknova artifacts wiki --project <name> --summary "<描述>"  # 生成 wiki/ 目录
+deepseeknova artifacts cards --title "..." --insight "..." --tags a --tags b  # 生成 cards/ 目录
+```
+
+### 代码图个性化（A3）
+
+启用代码图后，repo map 会按当前用户输入提取标识符作为 personalized PageRank
+seeds（去停用词、去重、上限 8），让地图优先展示任务相关模块。
 
 ## Skills
 

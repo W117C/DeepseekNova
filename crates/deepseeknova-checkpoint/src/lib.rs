@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
@@ -22,16 +24,64 @@ pub struct Snapshot {
 
 /// `CheckpointManager` takes filesystem snapshots before mutations and
 /// supports rollback to the most recent snapshot.
-#[derive(Default)]
 pub struct CheckpointManager {
     snapshots: Vec<Snapshot>,
+    /// 可选持久化文件（JSONL）。设置后每次快照/回滚/清空都会落盘，
+    /// 使 CLI 跨进程 `checkpoint list/rollback` 可用。
+    persist_path: Option<PathBuf>,
 }
 
 impl CheckpointManager {
     pub fn new() -> Self {
         Self {
             snapshots: Vec::new(),
+            persist_path: None,
         }
+    }
+
+    /// 从 JSONL 文件恢复快照（文件不存在 → 空管理器）。
+    pub fn load_from(path: &Path) -> anyhow::Result<Self> {
+        let mut manager = Self::new();
+        manager.persist_path = Some(path.to_path_buf());
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(manager),
+            Err(e) => return Err(e.into()),
+        };
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let snap: Snapshot = serde_json::from_str(line)?;
+            manager.snapshots.push(snap);
+        }
+        Ok(manager)
+    }
+
+    /// 开启持久化（路径父目录自动创建）。
+    pub fn with_persistence(mut self, path: PathBuf) -> Self {
+        self.persist_path = Some(path);
+        self
+    }
+
+    /// 把当前快照全量写回持久化文件（JSONL）。未配置持久化时为空操作。
+    fn persist_all(&self) -> anyhow::Result<()> {
+        let Some(path) = &self.persist_path else {
+            return Ok(());
+        };
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        let mut f = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(path)?;
+        for snap in &self.snapshots {
+            writeln!(f, "{}", serde_json::to_string(snap)?)?;
+        }
+        Ok(())
     }
 
     /// Take a snapshot of the file at `path`.
@@ -52,6 +102,7 @@ impl CheckpointManager {
             created_at: chrono::Utc::now(),
         });
 
+        self.persist_all()?;
         Ok(())
     }
 
@@ -103,6 +154,7 @@ impl CheckpointManager {
                     snap.path.display(),
                     &snap.hash[..8.min(snap.hash.len())]
                 );
+                self.persist_all()?;
                 Ok(Some((snap.path, snap.hash)))
             }
             None => Ok(None),
@@ -159,6 +211,7 @@ impl CheckpointManager {
     /// Discard all snapshots without restoring.
     pub fn clear(&mut self) {
         self.snapshots.clear();
+        self.persist_all().ok();
     }
 
     /// Build a diff summary: what changed between snapshots and current state.
@@ -183,6 +236,12 @@ impl CheckpointManager {
             verify.len(),
             lines.join("\n")
         ))
+    }
+}
+
+impl Default for CheckpointManager {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -361,6 +420,47 @@ mod tests {
         assert!(summary.contains("modified"));
         assert!(summary.contains("diff.txt"));
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn persistence_roundtrip_across_instances() {
+        let dir = temp_dir();
+        let file = dir.join("persist.txt");
+        write_file(&file, "v1");
+        let ck_path = dir.join("checkpoints.jsonl");
+
+        {
+            let mut ck = CheckpointManager::new().with_persistence(ck_path.clone());
+            ck.snapshot_file(&file).await.unwrap();
+            write_file(&file, "v2");
+        }
+
+        // 新实例（模拟进程重启）从文件恢复，可回滚。
+        let mut ck2 = CheckpointManager::load_from(&ck_path).unwrap();
+        assert_eq!(ck2.len(), 1, "snapshot must survive process restart");
+        let restored = ck2.rollback().await.unwrap();
+        assert!(restored.is_some());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "v1");
+        assert!(ck2.is_empty());
+        // 回滚后持久化文件同步为空。
+        let ck3 = CheckpointManager::load_from(&ck_path).unwrap();
+        assert!(ck3.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn persistence_survives_clear() {
+        let dir = temp_dir();
+        let file = dir.join("c.txt");
+        write_file(&file, "x");
+        let ck_path = dir.join("checkpoints.jsonl");
+        let mut ck = CheckpointManager::new().with_persistence(ck_path.clone());
+        ck.snapshot_file(&file).await.unwrap();
+        ck.clear();
+        let reloaded = CheckpointManager::load_from(&ck_path).unwrap();
+        assert!(reloaded.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

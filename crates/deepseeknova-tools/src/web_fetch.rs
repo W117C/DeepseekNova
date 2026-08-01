@@ -22,16 +22,13 @@ impl Tool for WebFetchTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "web_fetch".to_string(),
-            description: "Fetches content from a URL and returns it as text. \
-                Only HTTP and HTTPS schemes are allowed. \
-                Access to private, loopback, and link-local addresses is blocked."
-                .to_string(),
+            description: "Fetches a URL; http/https only; private/link-local blocked.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "url": {
                         "type": "string",
-                        "description": "The URL to fetch content from."
+                        "description": "URL."
                     }
                 },
                 "required": ["url"]

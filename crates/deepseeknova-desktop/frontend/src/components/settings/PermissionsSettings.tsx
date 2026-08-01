@@ -80,6 +80,15 @@ export default function PermissionsSettings() {
           <div style={{ fontSize: 10, color: "var(--text-3)", marginTop: 3 }}>{r.description}</div>
         </div>
       ))}
+
+      {/* mockup 定稿新增：速率限制 */}
+      <div className="setting-row">
+        <div style={{ flexShrink: 0 }}>
+          <div className="setting-row-label">速率限制</div>
+          <div className="setting-row-desc">单会话工具调用频率上限</div>
+        </div>
+        <div className="setting-row-control"><span className="tag">60 次/分</span></div>
+      </div>
     </div>
   );
 }

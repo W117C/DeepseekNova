@@ -4,6 +4,7 @@ use deepseeknova_core::chunk::Chunk;
 use deepseeknova_core::{Message, Role, RunInput, RunOutput};
 use deepseeknova_provider::{Provider, ValidatedRequest};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -19,6 +20,8 @@ pub struct MockProvider {
     /// Queue of responses. Each element is one turn's worth of chunks.
     responses: Mutex<Vec<Vec<Chunk>>>,
     tools: HashMap<String, Arc<dyn deepseeknova_core::Tool>>,
+    /// Total number of `generate` + `stream` invocations.
+    calls: AtomicUsize,
 }
 
 impl MockProvider {
@@ -28,6 +31,7 @@ impl MockProvider {
         Self {
             responses: Mutex::new(vec![chunks]),
             tools: HashMap::new(),
+            calls: AtomicUsize::new(0),
         }
     }
 
@@ -37,6 +41,7 @@ impl MockProvider {
         Self {
             responses: Mutex::new(responses),
             tools: HashMap::new(),
+            calls: AtomicUsize::new(0),
         }
     }
 
@@ -49,6 +54,7 @@ impl MockProvider {
                 Chunk::Done,
             ]]),
             tools: HashMap::new(),
+            calls: AtomicUsize::new(0),
         }
     }
 
@@ -78,6 +84,7 @@ impl MockProvider {
                 ],
             ]),
             tools: HashMap::new(),
+            calls: AtomicUsize::new(0),
         }
     }
 
@@ -88,11 +95,17 @@ impl MockProvider {
         }
         self
     }
+
+    /// Total number of `generate` + `stream` calls made against this mock.
+    pub fn call_count(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
 }
 
 #[async_trait::async_trait]
 impl Provider for MockProvider {
     async fn generate(&self, _validated: ValidatedRequest<'_>) -> anyhow::Result<Message> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(Message {
             role: Role::Assistant,
             content: "mock response".to_string(),
@@ -107,6 +120,7 @@ impl Provider for MockProvider {
         &self,
         _validated: ValidatedRequest<'_>,
     ) -> anyhow::Result<deepseeknova_core::chunk::ChunkStream> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         let mut lock = self.responses.lock().unwrap();
         let chunks = if lock.len() > 1 {
             lock.remove(0)

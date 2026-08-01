@@ -61,10 +61,31 @@ pub enum Commands {
 
         prompt: Vec<String>,
     },
+    /// Scan the codebase for security issues (regex matchers + optional AI investigation).
+    Scan {
+        /// Root path to scan (default: current directory).
+        #[arg(long)]
+        path: Option<String>,
+        /// Output format: "md" or "json".
+        #[arg(long, default_value = "md")]
+        format: String,
+        /// Skip the AI investigation stage (matcher-only output).
+        #[arg(long)]
+        no_ai: bool,
+        /// Minimum severity to report: high|medium|low.
+        #[arg(long, default_value = "low")]
+        severity_min: String,
+    },
     /// Interactive chat session
     Chat {
         #[arg(long)]
         model: Option<String>,
+        /// Resume the most recent saved session's history.
+        #[arg(long)]
+        resume: bool,
+        /// Launch the full-screen terminal UI instead of the line REPL.
+        #[arg(long, conflicts_with = "resume")]
+        tui: bool,
     },
     /// Start the HTTP/SSE server
     Serve {
@@ -78,6 +99,104 @@ pub enum Commands {
     },
     /// Print configuration details
     Config,
+    /// 记忆库管理（查看/检索/删除/统计）。
+    Memory {
+        #[command(subcommand)]
+        action: MemoryAction,
+    },
+    /// 检查点快照管理（写前快照 + 回滚）。
+    Checkpoint {
+        #[command(subcommand)]
+        action: CheckpointAction,
+    },
+    /// 生成项目后置产出（Wiki / 知识卡片，A2）。
+    Artifacts {
+        #[command(subcommand)]
+        action: ArtifactsAction,
+    },
     /// Init a new DeepseekNova project
     Init,
+}
+
+#[derive(Subcommand)]
+pub enum MemoryAction {
+    /// 列出某类记忆（task/skill/user_profile）。
+    List {
+        #[arg(long, default_value = "task")]
+        category: String,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// 按相关度检索记忆。
+    Search { query: Vec<String> },
+    /// 按 id/key 删除一条记忆。
+    Forget { id: String },
+    /// 打印统计（召回命中率、reinforce 比例）——P2 决策依据。
+    Stats,
+}
+
+#[derive(Subcommand)]
+pub enum CheckpointAction {
+    /// 列出当前快照与文件状态（unchanged/modified）。
+    List,
+    /// 回滚最近一个快照；--all 回滚全部。
+    Rollback {
+        #[arg(long)]
+        all: bool,
+    },
+    /// 丢弃全部快照（不恢复文件）。
+    Clear,
+}
+
+#[derive(Subcommand)]
+pub enum ArtifactsAction {
+    /// 生成 Repo Wiki（首页/ADR/API/依赖/变更日志）。
+    Wiki {
+        #[arg(long, default_value = "wiki")]
+        out: String,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        summary: Option<String>,
+    },
+    /// 生成一张知识卡片。
+    Cards {
+        #[arg(long, default_value = "cards")]
+        out: String,
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        insight: String,
+        #[arg(long)]
+        tags: Vec<String>,
+        #[arg(long)]
+        source: Option<String>,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn cli_definition_is_valid() {
+        // Catches structural errors (e.g. bad conflicts_with references).
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn chat_tui_conflicts_with_resume() {
+        let err = Cli::try_parse_from(["deepseeknova", "chat", "--tui", "--resume"]);
+        assert!(
+            err.is_err(),
+            "--tui and --resume must be mutually exclusive"
+        );
+    }
+
+    #[test]
+    fn chat_tui_alone_parses() {
+        let parsed = Cli::try_parse_from(["deepseeknova", "chat", "--tui"]);
+        assert!(parsed.is_ok(), "--tui alone should parse");
+    }
 }

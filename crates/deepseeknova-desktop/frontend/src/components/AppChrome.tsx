@@ -1,26 +1,33 @@
 /**
- * AppChrome.tsx — 布局外壳
- * 顶栏(多标签) + 左侧(会话) + 中间(对话+输入+控制) + 右侧(文件/知识库/记忆) + 底部(成本仪表盘)
+ * AppChrome.tsx — 布局外壳（四列挤压式 Grid）
+ * 顶栏 + 侧栏(会话) + 对话区 + Diff 对比面板 + 任务抽屉 + 状态栏
  */
 
 import { useStore } from "../store";
 import Sidebar from "./Sidebar";
-import RightPanel from "./RightPanel";
 import Transcript from "./Transcript";
 import Composer from "./Composer";
-import ControlBar from "./ControlBar";
+import ChipRow from "./ChipRow";
 import TitleBar from "./TitleBar";
 import StatusBar from "./StatusBar";
 import SettingsModal from "./SettingsModal";
 import CommandPalette from "./CommandPalette";
+import DiffPanel from "./DiffPanel";
+import TaskDrawer from "./TaskDrawer";
 
 export default function AppChrome() {
   const sidebarCollapsed = useStore((s) => s.sidebarCollapsed);
-  const rightCollapsed = useStore((s) => s.rightCollapsed);
+  const diffOpen = useStore((s) => s.diffOpen);
+  const drawerOpen = useStore((s) => s.drawerOpen);
   const showSettings = useStore((s) => s.showSettings);
   const showCommandPalette = useStore((s) => s.showCommandPalette);
 
-  const shellClass = ["app-shell", sidebarCollapsed && "sidebar-collapsed", rightCollapsed && "right-collapsed"]
+  const shellClass = [
+    "app-shell",
+    sidebarCollapsed && "sidebar-collapsed",
+    diffOpen && "diff-open",
+    drawerOpen && "drawer-open",
+  ]
     .filter(Boolean).join(" ");
 
   return (
@@ -30,11 +37,12 @@ export default function AppChrome() {
       <main className="main-area">
         <Transcript />
         <div className="composer-zone">
+          <ChipRow />
           <Composer />
-          <ControlBar />
         </div>
       </main>
-      <RightPanel />
+      <DiffPanel />
+      <TaskDrawer />
       <StatusBar />
       {showSettings && <SettingsModal />}
       {showCommandPalette && <CommandPalette />}
