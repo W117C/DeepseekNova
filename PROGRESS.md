@@ -61,12 +61,30 @@
 ## 决策记录（建议/偏离）
 - 任务 0 的 metadata --locked 预期调整见上（补录已发生，非未做）。
 
+## 任务书：CodeGraph 增强（动态分发 + trace/impact/explore）— 开工回执（2026-08-02）
+- 理解的目标：graph crate 增加 Rust trait 动态分发桥（Dispatch 边：trait 方法 → 全部 impl 方法），新增 trace_code（多跳调用链）、impact_code（影响面聚合）、explore_code（按文件源码分组）三个只读工具并接入 runtime；文档同步；PR 提交。
+- 顺序：任务 0 基线 → 1 动态分发（model+parser+store+graph 单测）→ 2 trace → 3 impact → 4 explore → 5 runtime 注册/提示词/文档/反向验证/PR。
+- 最大风险：tree-sitter Rust 节点字段（已查 grammar.json 核实 impl_item.trait/type、trait_item.name、field_expression.field）；Dispatch 边加入后 PageRank 与邻居查询行为变化；跨 crate 改动按 AGENTS.md §1 记录。
+- 基线证据（本轮实测）：main@dd373e1 干净；make check EXIT=0；graph 19 单测绿 + 1 存量 ignored；tools 45+12+7 绿。
+- 关键决策（偏离白名单的替代路）：新工具注册点 tools/src/lib.rs 不在白名单，改为 graph_tools.rs 导出 graph_query_tools()，runtime 在 graph.enabled 时注册（关闭时不注册 = 行为等价于禁用，且不动 schema 预算测试）。
+
+## 任务状态（CodeGraph 增强）
+- [x] 任务 1：动态分发（EdgeKind::Dispatch；解析 function_signature_item（trait 方法）与 impl Trait for Type 方法；raw_trait_methods/raw_impl_methods 事实表 + schema v3 强制重解析；全局重建 Dispatch 边：trait 方法 → 全部同名 impl 方法）。graph 单测 24 绿（+5，含 dyn 调用桥接两个候选的 fixture）。
+- [x] 任务 2：trace_code（store.trace_paths：DFS 深度上限 6、路径上限 100、超限 truncated 标记；callers 归一为源→目标；tools 测试 a→b→c 带行号）。
+- [x] 任务 3：impact_code（反向路径按 文件×符号×路径 聚合 + total 统计；tools 测试 2 文件 2 路径）。
+- [x] 任务 4：explore_code（按文件分组、区间合并、行号源码 / skeleton；tools 测试跨文件分组）。
+- [x] 任务 5：runtime 注册 graph_query_tools（graph.enabled 时）+ 两个注册测试只加断言；GRAPH_RETRIEVAL_HINT 补 4-6 条；GUIDE / graph README / CHANGELOG 已更新；cargo fmt + make check 全绿；反向验证：改坏 trace_truncates 断言 → 红（1 failed）→ 还原 → 绿（graph 24+1 存量 ignored、tools 50+12+7）。
+- 跨 crate 协议记录（AGENTS.md §1）：预扫描=不碰 core/agent 公共 API、不改既有断言（runtime 两测试只加新工具断言）；备选路径 A=改 tools/src/lib.rs 的 all_builtin 注册表（路径不在白名单）vs B=graph_tools.rs 导出 graph_query_tools() 由 runtime 按 graph.enabled 注册（白名单内、行为等价、不触及 schema 预算测试）——选 B；自检=三 crate 测试 + make check + 反向验证红→绿。
+
+## 交付
+- 分支 feat/codegraph-trace，PR #54 已合入 main（2026-08-02 验收后合并）
+
 ## 任务书：Context7 文档检索（context7_docs）— 开工回执（2026-08-02）
 - 理解的目标：新增只读工具 context7_docs（库名+主题 → Context7 文档片段），域名固定 context7.com、NetworkAccess 把关、错误全转友好提示；runtime 常驻注册；文档同步；PR 提交。
 - 顺序：任务 0 基线 → 1 docs_tools.rs（URL 构造/解析/截断/域名校验纯函数 + 本地 TcpListener 端到端）→ 2 lib.rs 两行 + runtime 注册 + 断言 → 3 文档/反向验证/分支 PR。
 - 最大风险：本地 HTTP 端到端测试首次引入（tokio net 已在依赖内）；schema 预算测试不可碰 → 工具不进 all_builtin；PR #54 未合入导致基线数字与书不一致（见 BLOCKED.md）。
 - 基线证据（本轮实测）：main@dd373e1 工作树干净；make check EXIT=0；tools 45+12+7 绿 0 ignored；runtime 26 绿；schema 预算 4624/5000。
-- 决策：注册走 runtime（与 graph 工具同款），tools/src/lib.rs 只加模块声明与 pub use；不在 main 上叠加 PR #54。
+- 决策：注册走 runtime（与 graph 工具同款），tools/src/lib.rs 只加模块声明与 pub use；验收后与已合入 #54 的 main 合并，解决重叠文件（runtime/GUIDE/CHANGELOG/PROGRESS/BLOCKED）冲突。
 
 ## 任务状态（Context7 文档检索）
 - [x] 任务 1：docs_tools.rs（Context7DocsTool + search/context URL 构造、first_result 解析、UTF-8 安全截断、域名固定纯函数 + 本地 TcpListener 端到端 3 条：成功/空结果/HTTP 500）；共 9 条新测试，全绿。
@@ -74,5 +92,5 @@
 - [x] 任务 3：GUIDE Library Docs 节（参数/来源/禁用方式）、tools README、CHANGELOG Added；cargo fmt + make check EXIT=0；反向验证：改坏 first_result 断言 → 红（1 failed）→ 还原 → 绿（tools 54+12+7、runtime 26）。
 - 跨 crate 协议记录（AGENTS.md §1）：预扫描=不碰 security/config/既有断言（memory 测试仅追加断言）、不新增外部依赖（reqwest/url/serde_json 均在 tools 依赖内）；备选路径 A=进 all_builtin 列表（实测 schema 预算 4624+约 400 > 5000，预算测试不可改）vs B=runtime 常驻注册（任务书拍板）——选 B；自检=单 crate 测试 + make check + 反向验证红→绿。
 
-## 交付
-- 分支 feat/context7-docs @ 2ef4b01，已推送 origin；PR: https://github.com/W117C/DeepseekNova/pull/55
+## 交付与验收记录
+- 分支 feat/context7-docs，PR #55 已合入 main（2026-08-02 验收后合并）；#54、#55 明卷+暗卷+CI 全绿，远端/本地分支已删。

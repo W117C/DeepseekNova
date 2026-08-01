@@ -49,6 +49,10 @@ pub struct FileParse {
     pub nodes: Vec<Node>,
     pub calls: Vec<(String, String)>,
     pub imports: Vec<String>,
+    /// Rust：trait 声明的方法 (trait 名, 方法名, 起始行)，用于构建动态分发桥。
+    pub trait_methods: Vec<(String, String, u32)>,
+    /// Rust：`impl Trait for Type` 内的方法 (trait 名, 实现类型名, 方法名, 起始行)。
+    pub impl_trait_methods: Vec<(String, String, String, u32)>,
 }
 
 fn parse_err(path: &str, lang: Lang) -> GraphError {
@@ -65,11 +69,13 @@ fn entity_kind(lang: Lang, kind: &str, ancestors: &[&str]) -> Option<NodeKind> {
             "struct_item" => Some(NodeKind::Struct),
             "enum_item" => Some(NodeKind::Enum),
             "trait_item" => Some(NodeKind::Trait),
-            "function_item" => Some(if ancestors.contains(&"impl_item") {
-                NodeKind::Method
-            } else {
-                NodeKind::Function
-            }),
+            "function_item" | "function_signature_item" => {
+                Some(if ancestors.contains(&"impl_item") {
+                    NodeKind::Method
+                } else {
+                    NodeKind::Function
+                })
+            }
             _ => None,
         },
         Lang::Python => match kind {
@@ -187,7 +193,11 @@ fn callee_name(call: TsNode, src: &str) -> Option<String> {
 
 enum Step<'t> {
     Enter(TsNode<'t>),
-    Exit { pop_def: bool },
+    Exit {
+        pop_def: bool,
+        pop_trait: bool,
+        pop_impl: bool,
+    },
 }
 
 /// 解析单个源文件，提取定义实体、名称级调用对与 import 语句。
@@ -203,21 +213,59 @@ pub fn parse_source(lang: Lang, path: &str, src: &str) -> Result<FileParse, Grap
     let mut nodes: Vec<Node> = Vec::new();
     let mut calls: Vec<(String, String)> = Vec::new();
     let mut imports: Vec<String> = Vec::new();
+    let mut trait_methods: Vec<(String, String, u32)> = Vec::new();
+    let mut impl_trait_methods: Vec<(String, String, String, u32)> = Vec::new();
     // 最近的命名定义栈（caller 归属）与祖先 kind 栈（Method 判定）。
     let mut def_stack: Vec<String> = Vec::new();
     let mut ancestor_kinds: Vec<&str> = Vec::new();
+    // Rust trait / impl 上下文栈（名称级动态分发事实）。
+    let mut trait_stack: Vec<String> = Vec::new();
+    let mut impl_trait_stack: Vec<Option<(String, String)>> = Vec::new();
     let mut work: Vec<Step> = vec![Step::Enter(tree.root_node())];
 
     while let Some(step) = work.pop() {
         match step {
-            Step::Exit { pop_def } => {
+            Step::Exit {
+                pop_def,
+                pop_trait,
+                pop_impl,
+            } => {
                 ancestor_kinds.pop();
+                if pop_trait {
+                    trait_stack.pop();
+                }
+                if pop_impl {
+                    impl_trait_stack.pop();
+                }
                 if pop_def {
                     def_stack.pop();
                 }
             }
             Step::Enter(node) => {
                 let kind = node.kind();
+                let mut pop_trait = false;
+                let mut pop_impl = false;
+                if lang == Lang::Rust {
+                    if kind == "trait_item" {
+                        if let Some(name) = entity_name(node, src) {
+                            trait_stack.push(name);
+                            pop_trait = true;
+                        }
+                    } else if kind == "impl_item" {
+                        let trait_name = node
+                            .child_by_field_name("trait")
+                            .and_then(|n| n.utf8_text(src.as_bytes()).ok())
+                            .map(str::trim)
+                            .map(str::to_string);
+                        let impl_type = node
+                            .child_by_field_name("type")
+                            .and_then(|n| n.utf8_text(src.as_bytes()).ok())
+                            .map(str::trim)
+                            .map(str::to_string);
+                        impl_trait_stack.push(trait_name.zip(impl_type));
+                        pop_impl = true;
+                    }
+                }
                 if is_import(lang, kind) {
                     if let Ok(text) = node.utf8_text(src.as_bytes()) {
                         imports.push(text.trim().to_string());
@@ -244,6 +292,24 @@ pub fn parse_source(lang: Lang, path: &str, src: &str) -> Result<FileParse, Grap
                             doc: extract_doc(node, src),
                             score: 0.0,
                         });
+                        if lang == Lang::Rust && nk == NodeKind::Method {
+                            if let Some(tname) = trait_stack.last() {
+                                trait_methods.push((tname.clone(), name.clone(), start_line));
+                            }
+                            if let Some(Some((tname, itype))) = impl_trait_stack.last() {
+                                impl_trait_methods.push((
+                                    tname.clone(),
+                                    itype.clone(),
+                                    name.clone(),
+                                    start_line,
+                                ));
+                            }
+                        }
+                        if lang == Lang::Rust && nk == NodeKind::Function {
+                            if let Some(tname) = trait_stack.last() {
+                                trait_methods.push((tname.clone(), name.clone(), start_line));
+                            }
+                        }
                         def_stack.push(name);
                         pushed_def = true;
                     }
@@ -251,6 +317,8 @@ pub fn parse_source(lang: Lang, path: &str, src: &str) -> Result<FileParse, Grap
                 ancestor_kinds.push(kind);
                 work.push(Step::Exit {
                     pop_def: pushed_def,
+                    pop_trait,
+                    pop_impl,
                 });
                 for i in (0..node.child_count()).rev() {
                     if let Some(child) = node.child(i) {
@@ -265,6 +333,8 @@ pub fn parse_source(lang: Lang, path: &str, src: &str) -> Result<FileParse, Grap
         nodes,
         calls,
         imports,
+        trait_methods,
+        impl_trait_methods,
     })
 }
 
@@ -338,5 +408,53 @@ fn helper(w: Widget) -> Widget { w }\n";
         .unwrap();
         assert!(js.nodes.iter().any(|n| n.name == "greet"));
         assert!(js.calls.iter().any(|(c, e)| c == "greet" && e == "hi"));
+    }
+
+    #[test]
+    fn extracts_rust_trait_dispatch_facts() {
+        let fp = parse_source(
+            Lang::Rust,
+            "src/animals.rs",
+            "trait Animal {\n    fn speak(&self);\n}\n\n\
+             struct Dog;\nimpl Animal for Dog {\n    fn speak(&self) {}\n}\n\n\
+             struct Cat;\nimpl Animal for Cat {\n    fn speak(&self) {}\n}\n\n\
+             fn make_noise(a: &dyn Animal) {\n    a.speak();\n}\n",
+        )
+        .unwrap();
+        // 两条 trait 方法事实（trait 声明 + impl 内同名方法不重复计入 trait 声明表）
+        let tm: Vec<_> = fp
+            .trait_methods
+            .iter()
+            .filter(|(t, m, _)| t == "Animal" && m == "speak")
+            .collect();
+        assert_eq!(tm.len(), 1, "trait 声明的方法应恰好一条");
+        // impl Animal for Dog/Cat 两条事实
+        let im: Vec<_> = fp
+            .impl_trait_methods
+            .iter()
+            .filter(|(t, _, m, _)| t == "Animal" && m == "speak")
+            .collect();
+        assert_eq!(im.len(), 2, "两个 impl 的方法应各记一条");
+        let types: Vec<_> = im.iter().map(|(_, ty, _, _)| ty.as_str()).collect();
+        assert!(types.contains(&"Dog") && types.contains(&"Cat"));
+        // 普通 impl（无 trait）不产生 impl_trait_methods
+        let fp2 = parse_source(
+            Lang::Rust,
+            "src/plain.rs",
+            "struct S;\nimpl S {\n    fn run(&self) {}\n}\n",
+        )
+        .unwrap();
+        assert!(fp2.impl_trait_methods.is_empty());
+    }
+
+    #[test]
+    fn records_dyn_call_site_as_regular_call() {
+        let fp = parse_source(
+            Lang::Rust,
+            "src/call.rs",
+            "trait T { fn go(&self); }\nfn driver(x: &dyn T) { x.go(); }\n",
+        )
+        .unwrap();
+        assert!(fp.calls.iter().any(|(c, m)| c == "driver" && m == "go"));
     }
 }

@@ -16,16 +16,34 @@ sees only what matters.
 - **Nodes** (`NodeKind`): `Directory`, `File`, `Struct`, `Enum`, `Trait`, `Class`,
   `Function`, `Method` — each carries `path`, line range, single-line `signature`, first
   doc line, and a PageRank `score`.
-- **Edges** (`EdgeKind`): `Contains`, `Imports`, `Calls`, `Implements`, `References`.
-  Call/reference edges use name-level matching (like aider / LocAgent); same-name
-  collisions are diluted by PageRank rather than resolved via full type analysis.
+- **Edges** (`EdgeKind`): `Contains`, `Imports`, `Calls`, `Implements`, `References`,
+  `Dispatch` (trait method → same-name impl method, Rust only). Call/reference edges use
+  name-level matching (like aider / LocAgent); same-name collisions are diluted by
+  PageRank rather than resolved via full type analysis.
+
+## Multi-hop reasoning
+
+Beyond single-hop neighbors, the store can trace bounded call paths and expose them as
+three read-only tools:
+
+- `trace_code` — DFS over Calls / References / Dispatch (depth cap 6, truncation marked),
+  normalized to call order for the `callers` direction.
+- `impact_code` — reverse-reachability aggregated by file (symbols + paths), i.e. the
+  blast radius of a refactor.
+- `explore_code` — line-numbered source (or skeleton) for several entities, grouped by
+  file with overlapping ranges merged.
+
+Rust trait polymorphism is bridged by `Dispatch` edges: `impl Trait for Type` methods are
+linked to the trait declaration, so a `dyn Trait` / generic call site can list every
+same-name impl candidate without type inference.
 
 ## Storage
 
 Persisted to `.deepseeknova/graph.db` (SQLite). Incremental refresh keys off file
 `mtime` then content `hash`: only changed files are re-parsed, and unchanged node ids stay
 stable. A `symbol_fts` FTS5 table provides built-in BM25 search. The db is derived data —
-delete it to force a full rebuild; no schema migrations.
+delete it to force a full rebuild; a `schema_version` bump also clears the file table once
+to force re-parsing (raw dispatch facts need it).
 
 ## API
 
@@ -42,6 +60,14 @@ let hits = index.search("PermissionGate", Some(NodeKind::Struct), 10)?;
 // Multi-hop relationships (callers/callees), siblings ranked by PageRank.
 let callers = index.neighbors("permission_gate_for", &[EdgeKind::Calls], Direction::Callers, 2)?;
 
+// Bounded multi-hop paths, call-order normalized (callers direction).
+let tr = index.trace(
+    "permission_gate_for",
+    &[EdgeKind::Calls, EdgeKind::Dispatch],
+    Direction::Callers,
+    6,
+)?;
+
 // Skeleton (signature + doc + child signatures) vs. exact line range.
 let sk = index.skeleton("build_agent")?;
 let (path, start, end) = index.location("build_agent")?;
@@ -53,10 +79,11 @@ let map = index.repo_map(1024, &[])?;
 
 ## Integration
 
-- `deepseeknova-tools` exposes three read-only tools backed by a shared
+- `deepseeknova-tools` exposes six read-only tools backed by a shared
   `GraphHandle` (`Arc<Mutex<GraphIndex>>`) injected via `ToolContext.extensions`:
-  `search_code`, `traverse_graph`, `retrieve_entity`. When the index is absent they
-  degrade to a "use grep" hint instead of erroring.
+  `search_code`, `traverse_graph`, `retrieve_entity` (built-ins), plus `trace_code`,
+  `impact_code`, `explore_code` (registered by the runtime when the graph is enabled).
+  When the index is absent they degrade to a "use grep" hint instead of erroring.
 - `deepseeknova-runtime::build_agent` opens the index, refreshes it in the background
   (non-blocking), injects the handle, and appends a retrieval-strategy hint to the system
   prompt. All gated by `[graph] enabled` in config; disabled = behavior identical to before.

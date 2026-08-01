@@ -14,6 +14,11 @@ All notable changes to DeepseekNova will be documented in this file.
 
 ### Added
 
+- **代码图多跳推理（CodeGraph 式增强）**：新增 `Dispatch` 边把 Rust trait 方法桥接到
+  全部同名 impl 方法（`dyn Trait` / 泛型调用点可列出候选实现，名称级匹配）；新增三个
+  只读工具 `trace_code`（多跳调用链，深度上限 6 并标注截断）、`impact_code`（按文件
+  聚合的影响面/重构爆炸半径）、`explore_code`（按文件分组的行号源码）；运行时在
+  `[graph] enabled` 时注册并更新检索策略提示词。
 - **Context7 库文档检索**：新增只读工具 `context7_docs`（库名 + 主题 → 最新第三方库
   文档片段），无需 API key；端点固定 context7.com，执行受 NetworkAccess 能力把关，
   错误全部转友好提示；由 runtime 常驻注册，可用 `[tools] overrides` 禁用。

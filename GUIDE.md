@@ -204,8 +204,8 @@ HTTP API 为 `event: verification` 的 SSE）。
 复用（标记 `[cached]`）；任何写工具执行后缓存整体失效。
 
 Coordinator 模式（`run --planner-model ...`）现在同样接入代码图索引：图检索工具
-（search_code / traverse_graph / retrieve_entity）对执行器可用，只读工具对规划器开放；
-`[graph] enabled = false` 时自动排除。
+（search_code / traverse_graph / retrieve_entity / trace_code / impact_code /
+explore_code）对执行器可用，只读工具对规划器开放；`[graph] enabled = false` 时自动排除。
 
 ### Environment Variables
 
@@ -327,6 +327,21 @@ deepseeknova artifacts cards --title "..." --insight "..." --tags a --tags b  # 
 
 启用代码图后，repo map 会按当前用户输入提取标识符作为 personalized PageRank
 seeds（去停用词、去重、上限 8），让地图优先展示任务相关模块。
+
+### 代码图多跳查询（A3.1）
+
+启用代码图后额外提供三个只读工具：
+
+- `trace_code`：从任意符号出发沿 Calls/References/Dispatch 画多跳调用链
+  （callers / callees / both，默认深度 6，超限输出标注 truncated）。
+- `impact_code`：反向追踪谁会到达该符号，按文件聚合受影响符号与路径，
+  用于重构爆炸半径估算。
+- `explore_code`：一次传入多个符号，按文件分组输出带行号的源码片段
+  （或 skeleton 签名视图）。
+
+Rust trait 多态由「Dispatch 边」桥接：`impl Trait for Type` 中的同名方法会连到
+trait 声明方法上，`dyn Trait` / 泛型调用点因此能列出全部候选实现（名称级匹配，
+不做类型推断，同名方法可能多报候选）。
 
 ## Skills
 
