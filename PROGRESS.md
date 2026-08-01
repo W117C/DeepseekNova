@@ -14,7 +14,11 @@
 - [x] 任务 3：/skills /mcp /raw /undo（TUI 31 单测绿；CLI 侧 tui_undo.rs 2 测试绿，tempdir 回滚验证 modified→unchanged）
 - [x] 任务 4：/resume 渲染历史（SessionController::resume 返回 ResumedLine 列表，CLI 按 role 映射）
 - [x] 任务 5 前半：GUIDE/TUI README/CHANGELOG 已同步；make check 全绿；cargo metadata --locked 通过（LOCKED_OK）；反向验证：改坏 skills 测试断言 → 红（0 passed; 1 failed）→ 还原 → 31 绿 + FMT_OK
-- [ ] 任务 5 后半：feature 分支 + commit + push + PR
+- [x] 任务 5 后半：分支 feat/tui-complete，commit cbca2ef，push 成功，PR #53 已开（body 已修正）；CI/Desktop Build/Security 已在跑
+
+## 交付物
+- PR: https://github.com/W117C/DeepseekNova/pull/53
+- 本地：feat/tui-complete @ cbca2ef，工作树干净；main 未动
 
 ## 任务 3/4 备注
 - /undo 采用 trait 接法（备选 A）：TUI 定义 UndoController，CLI 在 crates/deepseeknova-cli/src/tui_undo.rs 用 CheckpointManager 实现，每次调用重新 load_from 磁盘，天然支持 &self 与多进程共享。
