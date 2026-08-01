@@ -14,6 +14,11 @@ All notable changes to DeepseekNova will be documented in this file.
 
 ### Added
 
+- **TUI 终端界面重做**：完整渲染推理（斜体暗色）/ 工具调用与结果（截断预览）/
+  确定性验证（✓/✗）/ 暂停 / 审批请求 / 错误；滚动回看（PageUp/Down、Home/End、
+  自动跟随、2000 行上限）；输入历史（↑/↓）；命令 `/help` `/clear` `/quit`；
+  Ctrl+C 取消当前运行；状态栏显示模型、阶段、turn、token 用量与滚动位置。
+
 - **检查点上线（A1）**：`[checkpoint]` 配置（默认开）把 CheckpointManager 装配进
   write/edit/move 工具（写前快照），快照持久化为 JSONL（跨进程可回滚）；新增 CLI
   `checkpoint list / rollback [--all] / clear`。

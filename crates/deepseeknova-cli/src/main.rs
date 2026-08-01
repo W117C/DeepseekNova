@@ -313,6 +313,7 @@ async fn main() -> anyhow::Result<()> {
                 let agent = build_agent(provider, roles, model.as_deref(), &config, 0, mcp_tools)?
                     .with_conversation_history(history);
                 deepseeknova_tui::TuiRunner::new(Arc::new(agent))
+                    .with_model_label(model.as_deref().unwrap_or("default"))
                     .run()
                     .await?;
                 return Ok(());
