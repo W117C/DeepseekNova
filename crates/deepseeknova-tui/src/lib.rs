@@ -2560,16 +2560,16 @@ mod tests {
     #[tokio::test]
     async fn mcp_command_lists_configured_servers() {
         let mut tui = TuiRunner::new(Arc::new(StubRunner)).with_mcp_servers(vec![
-                McpServerInfo {
-                    name: "github".into(),
-                    command: "npx github-mcp".into(),
-                    args: vec![],
-                },
-                McpServerInfo {
-                    name: "fs".into(),
-                    command: "npx fs-mcp".into(),
-                    args: vec![],
-                },
+            McpServerInfo {
+                name: "github".into(),
+                command: "npx github-mcp".into(),
+                args: vec![],
+            },
+            McpServerInfo {
+                name: "fs".into(),
+                command: "npx fs-mcp".into(),
+                args: vec![],
+            },
         ]);
         let mut app = AppState::default();
         tui.handle_command(&mut app, "mcp").await;
