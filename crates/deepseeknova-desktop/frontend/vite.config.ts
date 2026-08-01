@@ -10,7 +10,9 @@ export default defineConfig({
   },
   envPrefix: ["VITE_", "TAURI_"],
   build: {
-    target: ["es2021", "chrome100", "safari13"],
+    // Vite 8（rolldown + esbuild 转译）不再支持向 es2021/safari13 这类老目标
+    // 降级解构语法；桌面端走系统 WebView，提升到现代目标。
+    target: ["es2022", "chrome110", "safari16"],
     minify: !process.env.TAURI_DEBUG ? "esbuild" : false,
     sourcemap: !!process.env.TAURI_DEBUG,
   },
