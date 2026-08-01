@@ -138,8 +138,7 @@ read_only = false                  # Allow write/edit tools
 default_policy = "ask"             # ask | allow | deny
 auto_allow_tools = ["read_file", "grep", "glob", "ls"]
 
-[mcp]
-servers = [
+mcp_servers = [
   { name = "filesystem", command = "npx", args = ["-y", "@modelcontextprotocol/server-filesystem", "."] }
 ]
 ```
@@ -538,8 +537,7 @@ deepseeknova can connect to MCP (Model Context Protocol) servers for additional 
 ### Configuration
 
 ```toml
-[mcp]
-servers = [
+mcp_servers = [
   { name = "filesystem", command = "npx", args = ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed/dir"] },
   { name = "github", command = "npx", args = ["-y", "@modelcontextprotocol/server-github"] },
 ]

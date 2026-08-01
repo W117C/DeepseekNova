@@ -697,7 +697,7 @@ impl TuiRunner {
             app.push_line(LineKind::System, "未配置 MCP 服务器");
             app.push_line(
                 LineKind::System,
-                "在 deepseeknova.toml 的 [mcp] servers 中配置后重启生效",
+                "在 deepseeknova.toml 顶层 mcp_servers 数组配置后重启生效",
             );
             return;
         }
