@@ -114,8 +114,9 @@ pub struct Agent {
     tool_cache: bool,
 }
 
-/// Type-erased provider that yields the current repo-map text (or `None`).
-pub type RepoMapProvider = Arc<dyn Fn() -> Option<String> + Send + Sync>;
+/// Type-erased provider that yields the current repo-map text (or `None`)
+/// for a given user prompt (personalized seeds, A3).
+pub type RepoMapProvider = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
 /// Run-start 召回提供器：给定首条用户 prompt，返回可选的"召回上下文"块。
 pub type RecallProvider = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
@@ -398,6 +399,11 @@ impl Agent {
         self.tools.keys().cloned().collect()
     }
 
+    /// 诊断：是否装配了中途检索提供器（P3.2，供 runtime 配置生效断言）。
+    pub fn mid_run_retrieval_enabled(&self) -> bool {
+        self.mid_run.is_some()
+    }
+
     /// Build the ToolContext for a tool call, injecting security + all
     /// build-time registered extensions. Shared by run_stream and tests.
     #[allow(dead_code)] // exercised from tests today; Task 9/10 consume it in-crate
@@ -531,7 +537,7 @@ impl Runner for Agent {
                     // TODO(graph): personalized seeds from user input
                     let mut content = sp.clone();
                     if let Some(ref provider) = repo_map_provider {
-                        if let Some(map) = provider() {
+                        if let Some(map) = provider(&input.prompt) {
                             if !map.is_empty() {
                                 content.push_str("\n\n---\n## Repo Map\n\n```\n");
                                 content.push_str(&map);
@@ -573,6 +579,9 @@ impl Runner for Agent {
 
             // 结束沉淀需要的任务文本（input 随后被移入 run_agent_loop）。
             let task_text = input.prompt.clone();
+            // F3：记录 run 起始消息数，蒸馏的文件关联只统计本 run 新增的工具调用，
+            // 避免续聊会话把历史轮次的文件归到当前任务。
+            let run_start_len = memory.get_all().len();
 
             let result = run_agent_loop(
                 provider,
@@ -637,6 +646,7 @@ impl Runner for Agent {
                     let mut seen_files = std::collections::HashSet::new();
                     let files: Vec<String> = msgs
                         .iter()
+                        .skip(run_start_len)
                         .filter(|m| m.role == Role::Assistant)
                         .filter_map(|m| m.tool_calls.as_ref())
                         .flatten()
@@ -1992,7 +2002,7 @@ mod tests {
         let history = Arc::new(tokio::sync::Mutex::new(Vec::<Message>::new()));
         let provider = Arc::new(MockProvider::text("ok"));
         let repo_map: RepoMapProvider =
-            Arc::new(|| Some("crates/x/src/a.rs:\n│ pub fn foo()\n⋮".to_string()));
+            Arc::new(|_q| Some("crates/x/src/a.rs:\n│ pub fn foo()\n⋮".to_string()));
         let agent = Agent::new(provider, 3)
             .with_system_prompt("you are a test bot")
             .with_repo_map_provider(repo_map)
@@ -2016,6 +2026,29 @@ mod tests {
         assert!(sys.content.contains("you are a test bot"));
         assert!(sys.content.contains("Repo Map"));
         assert!(sys.content.contains("pub fn foo()"));
+    }
+
+    #[tokio::test]
+    async fn agent_repo_map_provider_receives_user_prompt() {
+        // A3：repo map 提供器必须收到当前用户输入（个性化 seeds 的基础）。
+        let history = Arc::new(tokio::sync::Mutex::new(Vec::<Message>::new()));
+        let seen = Arc::new(std::sync::Mutex::new(String::new()));
+        let seen_clone = seen.clone();
+        let repo_map: RepoMapProvider = Arc::new(move |q: &str| {
+            *seen_clone.lock().unwrap() = q.to_string();
+            Some("map".to_string())
+        });
+        let agent = Agent::new(Arc::new(MockProvider::text("ok")), 3)
+            .with_system_prompt("sys")
+            .with_repo_map_provider(repo_map)
+            .with_conversation_history(history.clone());
+
+        let _ = drain(agent, "personalize around CheckpointManager").await;
+        let q = seen.lock().unwrap().clone();
+        assert!(
+            q.contains("CheckpointManager"),
+            "repo map provider must receive the user prompt, got: {q}"
+        );
     }
 
     #[tokio::test]

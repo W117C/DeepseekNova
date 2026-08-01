@@ -27,23 +27,46 @@ pub use shell::*;
 pub use todo::*;
 pub use web_fetch::*;
 
+use deepseeknova_checkpoint::CheckpointManager;
 use deepseeknova_core::Tool;
 use deepseeknova_sandbox::{NoOpSandbox, Sandbox};
 use std::sync::Arc;
+use tokio::sync::Mutex;
 
 /// Returns all built-in tools ready for registration (shell uses `NoOpSandbox`).
 pub fn all_builtin_tools() -> Vec<Arc<dyn Tool>> {
-    all_builtin_tools_with_sandbox(Arc::new(NoOpSandbox))
+    all_builtin_tools_with_sandbox_and_checkpoint(Arc::new(NoOpSandbox), None)
 }
 
 /// Returns all built-in tools with the shell tool wired to the given sandbox
 /// (macOS Seatbelt / Linux bubblewrap in production, or `NoOpSandbox`).
 pub fn all_builtin_tools_with_sandbox(sandbox: Arc<dyn Sandbox>) -> Vec<Arc<dyn Tool>> {
+    all_builtin_tools_with_sandbox_and_checkpoint(sandbox, None)
+}
+
+/// Returns all built-in tools with the shell tool wired to the given sandbox
+/// and (optionally) a shared checkpoint manager for write/edit/move tools.
+pub fn all_builtin_tools_with_sandbox_and_checkpoint(
+    sandbox: Arc<dyn Sandbox>,
+    checkpointer: Option<Arc<Mutex<CheckpointManager>>>,
+) -> Vec<Arc<dyn Tool>> {
+    let write = match &checkpointer {
+        Some(ck) => WriteFileTool::with_checkpointer(Arc::clone(ck)),
+        None => WriteFileTool::new(),
+    };
+    let edit = match &checkpointer {
+        Some(ck) => EditFileTool::with_checkpointer(Arc::clone(ck)),
+        None => EditFileTool::new(),
+    };
+    let mv = match &checkpointer {
+        Some(ck) => MoveFileTool::with_checkpointer(Arc::clone(ck)),
+        None => MoveFileTool::new(),
+    };
     vec![
         Arc::new(ReadFileTool),
-        Arc::new(WriteFileTool::new()),
-        Arc::new(EditFileTool::new()),
-        Arc::new(MoveFileTool::new()),
+        Arc::new(write),
+        Arc::new(edit),
+        Arc::new(mv),
         Arc::new(LsTool),
         Arc::new(GlobTool),
         Arc::new(GrepTool),

@@ -362,23 +362,26 @@ tools_allowed:
 具体的工作流程和红旗清单...
 ```
 
-### 计划中的 Skill（DESIGN.md 记录）[规划中/未实现]
+### 计划中的 Skill（DESIGN.md 记录）[已落地]
 
-以下 Skill 均为**规划中/未实现**，`.deepseeknova/skills/` 中不存在对应文件，不得在工作流程中引用：
+以下 Skill 已落地为 `crates/deepseeknova-skills/builtin/*.md`，可直接在工作流程中引用：
 
 | Skill | 状态 | 能力 |
 |-------|------|------|
-| `frontend-developer` | 规划中/未实现 | UI/UX 设计和代码生成 |
-| `coding-copilot` | 规划中/未实现 | 多语言编码助手 |
-| `loop-engineering` | 规划中/未实现 | 生成→评估→改进循环 |
-| `first-principles` | 规划中/未实现 | 第一性原理推理 |
-| `adversarial-review` | 规划中/未实现 | 对抗式审查 |
+| `frontend-developer` | ✅ 已落地 | UI/UX 设计和代码生成 |
+| `coding-copilot` | ✅ 已落地 | 多语言编码助手 |
+| `loop-engineering` | ✅ 已落地 | 生成→评估→改进循环 |
+| `first-principles` | ✅ 已落地 | 第一性原理推理 |
+| `adversarial-review` | ✅ 已落地 | 对抗式审查 |
+| `dna-spec` | ✅ 已落地 | Agent 工作规范（DNA Spec） |
 
 ---
 
-## 七、项目后置产出 (Post-Project Artifacts) [规划中/未实现]
+## 七、项目后置产出 (Post-Project Artifacts) [已实现]
 
-> **状态**：[规划中/未实现]（见 §十 P3）。本节为设计构想，Wiki/知识卡片/记忆沉淀的生成能力均尚未实现。
+> **状态**：[已实现]（见 §十 P3）。生成能力位于 `deepseeknova-core::artifacts`
+> （wiki/cards/distill，含测试），CLI 入口为 `deepseeknova artifacts wiki|cards`；
+> 记忆沉淀由 runtime 的蒸馏钩子（启发式）与 `DistillationEngine`（库级）提供。
 
 ### 流程
 
@@ -500,9 +503,9 @@ Phase 5: 沉淀 (Distill) ← 这是大多数 Agent 缺失的
 | 优先级 | 任务 | 预计工作量 |
 |--------|------|-----------|
 | P0 | ~~重命名 DPronix → DeepseekNova~~ ✅ | ~~机械替换~~ 已完成 |
-| P1 | 实现自动记忆系统 | 新模块，2-3个文件 |
-| P2 | 内置 5 个 Skill | Skill 定义文件 |
-| P3 | 项目后置产出 | Wiki/卡片/记忆生成 |
-| P4 | Agent 工作规范 | 设计文档 + system prompt |
-| P5 | Agent Federation 协议 | 跨实例通信实现 |
-| P6 | Windows 沙箱隔离 | Job Object / AppContainer |
+| P1 | 实现自动记忆系统 | ✅ 已完成（记忆引擎 + 召回 + 蒸馏 + 任务-文件关联） |
+| P2 | 内置 5 个 Skill | ✅ 已完成（6 个 builtin skill md） |
+| P3 | 项目后置产出 | ✅ 已完成（artifacts 库 + `artifacts wiki/cards` CLI） |
+| P4 | Agent 工作规范 | ✅ 部分完成（dna-spec skill 已落地；system prompt 接入待定） |
+| P5 | Agent Federation 协议 | ⏳ 待实现（跨实例通信，需先出协议设计） |
+| P6 | Windows 沙箱隔离 | ⏳ 待实现（Job Object / AppContainer） |

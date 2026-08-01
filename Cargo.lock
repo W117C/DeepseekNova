@@ -1143,8 +1143,10 @@ name = "deepseeknova-cli"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "deepseeknova-agent",
+ "deepseeknova-checkpoint",
  "deepseeknova-config",
  "deepseeknova-core",
  "deepseeknova-graph",
@@ -1344,6 +1346,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "deepseeknova-agent",
+ "deepseeknova-checkpoint",
  "deepseeknova-config",
  "deepseeknova-context",
  "deepseeknova-core",

@@ -14,6 +14,15 @@ All notable changes to DeepseekNova will be documented in this file.
 
 ### Added
 
+- **检查点上线（A1）**：`[checkpoint]` 配置（默认开）把 CheckpointManager 装配进
+  write/edit/move 工具（写前快照），快照持久化为 JSONL（跨进程可回滚）；新增 CLI
+  `checkpoint list / rollback [--all] / clear`。
+- **项目后置产出 CLI（A2）**：`artifacts wiki` 与 `artifacts cards` 生成 Wiki/知识卡片。
+- **repo map 个性化（A3）**：按当前用户输入提取标识符 seeds（去停用词、去重、上限 8）
+  做 personalized PageRank，地图优先展示任务相关模块。
+- 文档同步（D）：DESIGN.md 状态纠正（skills/artifacts 已落地、P5/P6 待实现）、GUIDE
+  补充新命令、GitHub 仓库描述移除过时的 GOAP/Swarm 表述。
+
 - **并行工具执行**：同批读类工具经 `JoinSet` 并发执行、写类工具保序串行；
   `agent.concurrent_tools` 从配置占位变为生效开关（默认 true）。权限预检先行，
   结果按原始调用顺序回写事件与历史。
@@ -39,6 +48,11 @@ All notable changes to DeepseekNova will be documented in this file.
 - `edit_file` 支持 `edits` 多块数组，一次调用原子地替换多处（全有或全无）。
 
 ### Changed
+
+- 审核修复：`[memory] mid_run_*` 配置真实生效（含 `mid_run_graph_top_k` 的代码图命中）；
+  记忆库主 FTS 表与 trigram 表写入事务化并在打开时对账回填；蒸馏文件关联仅统计本 run
+  新增消息；`AgentRoleProviders` 标记 `#[non_exhaustive]`；`upsert_embedding` 补齐
+  `created_at` 时间戳。
 
 - 删除实验性 `deepseeknova-orch` crate（GOAP + Swarm，零业务调用）；其唯一有消费者的组件 `ProgressTracker` 已解耦收编至 `deepseeknova-core::progress`。多智能体能力改由 `deepseeknova-agent` 的 delegate/子代理路径提供。CLI dev-dependency、quickstart 示例的 GOAP 段、release 脚本与 README crate 表中的 orch 引用一并清除。
 - `compaction_threshold_tokens` 留空时运行时按 `budget.max_total_tokens / 2` 推导，

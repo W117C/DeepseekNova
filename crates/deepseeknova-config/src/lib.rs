@@ -95,6 +95,10 @@ pub struct Config {
     /// Deterministic post-write verification (default off).
     #[serde(default)]
     pub verify: VerifyConfig,
+
+    /// 写前快照检查点（A1）。
+    #[serde(default)]
+    pub checkpoint: CheckpointConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -956,6 +960,33 @@ impl Default for VerifyConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Checkpoint（写前快照 + 回滚，A1）
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckpointConfig {
+    /// 写类工具执行前是否快照（默认 true）。
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// 快照持久化路径（相对工作区根，JSONL）。
+    #[serde(default = "default_checkpoint_path")]
+    pub path: String,
+}
+
+fn default_checkpoint_path() -> String {
+    ".deepseeknova/checkpoints.json".to_string()
+}
+
+impl Default for CheckpointConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            path: default_checkpoint_path(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Loading & merging
 // ---------------------------------------------------------------------------
 
@@ -1028,6 +1059,7 @@ impl Config {
         self.budget = other.budget;
         self.review = other.review;
         self.verify = other.verify;
+        self.checkpoint = other.checkpoint;
     }
 
     /// Apply DEEPSEEKNOVA_* environment variable overrides.
@@ -1492,5 +1524,17 @@ mod tests {
         assert_eq!(c.verify.commands.len(), 2);
         assert_eq!(c.verify.commands[0], "cargo check --quiet");
         assert_eq!(c.verify.max_cycles, 2);
+    }
+
+    #[test]
+    fn checkpoint_config_defaults_and_overrides() {
+        let d = Config::default();
+        assert!(d.checkpoint.enabled);
+        assert_eq!(d.checkpoint.path, ".deepseeknova/checkpoints.json");
+
+        let toml = "[checkpoint]\nenabled = false\npath = \"custom/ck.jsonl\"\n";
+        let c: Config = toml::from_str(toml).unwrap();
+        assert!(!c.checkpoint.enabled);
+        assert_eq!(c.checkpoint.path, "custom/ck.jsonl");
     }
 }
