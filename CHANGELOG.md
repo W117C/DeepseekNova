@@ -18,6 +18,10 @@ All notable changes to DeepseekNova will be documented in this file.
   确定性验证（✓/✗）/ 暂停 / 审批请求 / 错误；滚动回看（PageUp/Down、Home/End、
   自动跟随、2000 行上限）；输入历史（↑/↓）；命令 `/help` `/clear` `/quit`；
   Ctrl+C 取消当前运行；状态栏显示模型、阶段、turn、token 用量与滚动位置。
+- **TUI /model 热切换与 /cost**：接入 agent 重建工厂与 ModelRouter，支持
+  `/model effort <level>`、`/model thinking`、`/model switch <name>`、
+  `/model use <role> <name>`（角色指针热切）、`/cost`（按模型×角色输出
+  token 用量与美元估算）。
 
 - **检查点上线（A1）**：`[checkpoint]` 配置（默认开）把 CheckpointManager 装配进
   write/edit/move 工具（写前快照），快照持久化为 JSONL（跨进程可回滚）；新增 CLI

@@ -16,6 +16,7 @@ tracing = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
 deepseeknova-core = { workspace = true }
+deepseeknova-provider = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }

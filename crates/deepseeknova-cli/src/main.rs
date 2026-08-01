@@ -295,27 +295,44 @@ async fn main() -> anyhow::Result<()> {
 
             // Full-screen TUI: build one agent (with a fresh shared history so
             // multi-turn context works) and hand it to the TUI runner.
+            // `/model` 热切换通过 agent 工厂重建，`/cost` 走 model router。
             if *tui {
+                use deepseeknova_provider::cost::ModelRole;
+                use deepseeknova_provider::factory::ReasoningEffort;
                 let history: Arc<tokio::sync::Mutex<Vec<deepseeknova_core::Message>>> =
                     Arc::new(tokio::sync::Mutex::new(Vec::new()));
-                use deepseeknova_provider::cost::ModelRole;
-                let provider = model_router.provider_for_maybe_model(
-                    ModelRole::Main,
-                    model.as_deref(),
-                    Some(baseline_effort),
-                )?;
-                let task_provider =
-                    model_router.provider_for(ModelRole::Task, Some(baseline_effort))?;
-                let mut roles = deepseeknova_runtime::AgentRoleProviders::default();
-                roles.task = Some(task_provider);
-                roles.compact = Some(compact_provider_for(&model_router, &config)?);
-                roles.review = review_provider_for(&model_router, &config)?;
-                let agent = build_agent(provider, roles, model.as_deref(), &config, 0, mcp_tools)?
-                    .with_conversation_history(history);
-                deepseeknova_tui::TuiRunner::new(Arc::new(agent))
+                let factory_router = Arc::clone(&model_router);
+                let cfg = config.clone();
+                let hist = history.clone();
+                let mcp = mcp_tools;
+                let factory = move |effort: Option<ReasoningEffort>,
+                                    model: Option<String>|
+                      -> anyhow::Result<
+                    Arc<dyn deepseeknova_core::runner::Runner>,
+                > {
+                    let provider = factory_router.provider_for_maybe_model(
+                        ModelRole::Main,
+                        model.as_deref(),
+                        effort,
+                    )?;
+                    let task_provider = factory_router.provider_for(ModelRole::Task, effort)?;
+                    let mut roles = deepseeknova_runtime::AgentRoleProviders::default();
+                    roles.task = Some(task_provider);
+                    roles.compact = Some(compact_provider_for(&factory_router, &cfg)?);
+                    roles.review = review_provider_for(&factory_router, &cfg)?;
+                    let agent =
+                        build_agent(provider, roles, model.as_deref(), &cfg, 0, mcp.clone())?
+                            .with_conversation_history(hist.clone());
+                    Ok(Arc::new(agent))
+                };
+                let initial = factory(Some(baseline_effort), model.clone())?;
+                let mut tui = deepseeknova_tui::TuiRunner::new(initial)
                     .with_model_label(model.as_deref().unwrap_or("default"))
-                    .run()
-                    .await?;
+                    .with_agent_factory(factory)
+                    .with_model_router(Arc::clone(&model_router))
+                    .with_baseline_effort(baseline_effort)
+                    .with_current_model(model.clone());
+                tui.run().await?;
                 return Ok(());
             }
 
