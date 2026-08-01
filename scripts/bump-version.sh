@@ -44,7 +44,11 @@ if ! git diff --quiet; then
 fi
 
 # ── 更新 Cargo.toml ─────────────────────────────────────────────
-sed -i '' "s/^version = \"$CURRENT_VERSION\"/version = \"$NEW_VERSION\"/" Cargo.toml
+if [[ "$(uname -s)" == "Darwin" ]]; then
+    sed -i '' "s/^version = \"$CURRENT_VERSION\"/version = \"$NEW_VERSION\"/" Cargo.toml
+else
+    sed -i "s/^version = \"$CURRENT_VERSION\"/version = \"$NEW_VERSION\"/" Cargo.toml
+fi
 
 echo "✅ Cargo.toml 已更新: $CURRENT_VERSION → $NEW_VERSION"
 echo ""

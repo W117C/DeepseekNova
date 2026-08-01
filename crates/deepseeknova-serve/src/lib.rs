@@ -23,22 +23,68 @@ use axum::extract::State;
 use axum::response::sse::{Event, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use deepseeknova_core::runner::{RunEvent, RunInput, Runner};
+use deepseeknova_core::runner::{ApprovalResponder, RunEvent, RunInput, Runner};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
+use tokio::sync::{oneshot, Mutex};
 use tower_http::cors::{Any, CorsLayer};
 
 // ── Public API ──────────────────────────────────────────────────
 
+/// Shared map of pending approval requests keyed by request id. The agent's
+/// [`ServerApprovalResponder`] inserts a `oneshot` sender per `Ask`; the
+/// `POST /v1/approval` route resolves it when the client answers.
+pub type PendingApprovals = Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>;
+
+/// Create an empty pending-approvals map to share between a [`Server`] and the
+/// [`ServerApprovalResponder`] attached to its runner.
+pub fn new_pending_approvals() -> PendingApprovals {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
+/// Approval responder bridging the agent's permission-gate `Ask` decisions to
+/// HTTP clients: registers a `oneshot` in the shared map and awaits the
+/// `POST /v1/approval` answer. A dropped stream resolves to deny (no hang).
+pub struct ServerApprovalResponder {
+    pending: PendingApprovals,
+}
+
+impl ServerApprovalResponder {
+    pub fn new(pending: PendingApprovals) -> Self {
+        Self { pending }
+    }
+}
+
+#[async_trait::async_trait]
+impl ApprovalResponder for ServerApprovalResponder {
+    async fn request(&self, id: &str, _title: &str, _description: Option<&str>) -> bool {
+        let (tx, rx) = oneshot::channel::<bool>();
+        self.pending.lock().await.insert(id.to_string(), tx);
+        rx.await.unwrap_or(false)
+    }
+}
+
 /// An HTTP server that wraps a [`Runner`] and exposes it via REST + SSE.
 pub struct Server {
     pub runner: Arc<dyn Runner>,
+    pending: PendingApprovals,
 }
 
 impl Server {
     pub fn new(runner: Arc<dyn Runner>) -> Self {
-        Self { runner }
+        Self {
+            runner,
+            pending: new_pending_approvals(),
+        }
+    }
+
+    /// Create a server sharing an existing pending-approvals map, so the
+    /// runner's [`ServerApprovalResponder`] and the `/v1/approval` route
+    /// resolve against the same map.
+    pub fn with_pending(runner: Arc<dyn Runner>, pending: PendingApprovals) -> Self {
+        Self { runner, pending }
     }
 
     /// Start the server and block until it shuts down.
@@ -51,6 +97,7 @@ impl Server {
         let app = Router::new()
             .route("/health", get(health))
             .route("/v1/chat", post(chat))
+            .route("/v1/approval", post(approval))
             .layer(cors)
             .with_state(Arc::new(self));
 
@@ -65,6 +112,27 @@ impl Server {
 
 async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "status": "ok" }))
+}
+
+/// Resolve a pending approval request (paired with the `approval_request` SSE
+/// event emitted during a `/v1/chat` stream).
+async fn approval(
+    State(state): State<Arc<Server>>,
+    Json(req): Json<ApprovalRequestBody>,
+) -> Json<serde_json::Value> {
+    let mut pending = state.pending.lock().await;
+    if let Some(tx) = pending.remove(&req.id) {
+        let _ = tx.send(req.approved);
+        Json(serde_json::json!({ "status": "ok" }))
+    } else {
+        Json(serde_json::json!({ "status": "not_found" }))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ApprovalRequestBody {
+    id: String,
+    approved: bool,
 }
 
 async fn chat(
@@ -160,6 +228,27 @@ async fn chat(
                             });
                             Ok(Event::default()
                                 .event("approval_request")
+                                .data(json.to_string()))
+                        }
+                        Ok(RunEvent::Paused { reason, session_id }) => {
+                            let json = serde_json::json!({
+                                "reason": reason,
+                                "session_id": session_id,
+                            });
+                            Ok(Event::default().event("paused").data(json.to_string()))
+                        }
+                        Ok(RunEvent::Verification {
+                            command,
+                            passed,
+                            summary,
+                        }) => {
+                            let json = serde_json::json!({
+                                "command": command,
+                                "passed": passed,
+                                "summary": summary,
+                            });
+                            Ok(Event::default()
+                                .event("verification")
                                 .data(json.to_string()))
                         }
                         Err(e) => Ok(Event::default().event("error").data(e.to_string())),

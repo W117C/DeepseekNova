@@ -4,9 +4,40 @@
 
 ### DeepSeek 原生 AI 编程 Agent 框架
 
-**21 个 Rust crate · 47 个 Tauri 命令 · 三端覆盖（CLI / TUI / Desktop）**
+**22 个 Rust crate · 44 个 Tauri 命令 · 三端覆盖（CLI / TUI / Desktop）**
 
 Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型量身打造的原生编程助手。
+
+[English](README_EN.md) | [中文](README.md)
+
+</div>
+
+---
+
+<!-- CI Badges (auto-updated from GitHub Actions) -->
+
+<div align="center">
+
+[![CI](https://github.com/W117C/DeepseekNova/actions/workflows/ci.yml/badge.svg)](https://github.com/W117C/DeepseekNova/actions/workflows/ci.yml)
+[![Security](https://github.com/W117C/DeepseekNova/actions/workflows/security.yml/badge.svg)](https://github.com/W117C/DeepseekNova/actions/workflows/security.yml)
+[![Desktop Build](https://github.com/W117C/DeepseekNova/actions/workflows/desktop.yml/badge.svg)](https://github.com/W117C/DeepseekNova/actions/workflows/desktop.yml)
+[![Release](https://github.com/W117C/DeepseekNova/actions/workflows/release.yml/badge.svg)](https://github.com/W117C/DeepseekNova/actions/workflows/release.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
+[![Rust](https://img.shields.io/badge/rust-stable%201.97-orange.svg)](https://www.rust-lang.org)
+[![Crates](https://img.shields.io/badge/crates-22-green.svg)](#-22-个-crate)
+[![Tests](https://img.shields.io/badge/tests-536-brightgreen.svg)](#-技术栈)
+
+</div>
+
+---
+
+## 📸 截图
+
+<div align="center">
+
+| 亮色主题 | 暗色主题 |
+|----------|----------|
+| ![Light](docs/screenshots/desktop-light.png) | ![Dark](docs/screenshots/desktop-dark.png) |
 
 </div>
 
@@ -29,10 +60,13 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 - **权限策略** — 12 条规则，每条独立开关：目录沙箱、Plan 模式、Shell 确认、网络访问等
 - **安全层** — 路径白名单/黑名单、环境变量隔离、CSP 策略、敏感文件保护
 
-### 🎪 多 Agent 编排
-- GOAP 规划器 — 目标导向行动规划
-- Swarm 协调 — 多 Agent 集群协作
-- Agent Federation — 跨实例联邦调度
+> ⚠️ **Windows 安全边界**：当前沙箱隔离仅支持 macOS (Seatbelt) 和 Linux (bubblewrap)。Windows 平台执行 Shell 工具时使用 `NoOpSandbox`（无隔离），后续计划通过 Job Object / AppContainer 补齐。在 Windows 平台上，请谨慎配置 `allowed_commands` 和路径策略。
+
+### 🎪 多 Agent 委派
+- **delegate 子代理** — explorer / coder / tester / reviewer 四类预设，受限工具集 + 信号量并发控制 + 结果封顶回传
+- 独立上下文隔离，禁递归（子代理不能再委派）
+
+> 🔬 历史 GOAP / Swarm / Federation 实验已于 B0 裁撤（见 DESIGN.md）；多智能体能力现由 delegate 路径提供。
 
 ### 🧩 MCP 协议原生支持
 - stdio + HTTP 双传输
@@ -53,10 +87,10 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 │  Desktop (Tauri 2.0 + React 18 + TypeScript + Vite)  │
 │  TUI (ratatui)  ·  CLI (clap)                        │
 └──────────────────────┬──────────────────────────────┘
-                       │ 47 Tauri Commands / IPC
+                       │ 44 Tauri Commands / IPC
 ┌──────────────────────┴──────────────────────────────┐
 │                  桌面运行时 (Desktop Runtime)          │
-│  Tauri 2.0 · 47 Commands · Channel<WireEvent>        │
+│  Tauri 2.0 · 44 Commands · Channel<WireEvent>        │
 └──────────────────────┬──────────────────────────────┘
                        │
 ┌──────────────────────┴──────────────────────────────┐
@@ -79,7 +113,7 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 └─────────────────────┘ └──────────────────────────────┘
 ```
 
-## 📦 21 个 Crate
+## 📦 22 个 Crate
 
 | Crate | 职责 |
 |-------|------|
@@ -88,14 +122,15 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 | `deepseeknova-provider` | DeepSeek / OpenAI 兼容 / Anthropic 流式 Provider |
 | `deepseeknova-tools` | 13+ 内置工具实现 |
 | `deepseeknova-mcp` | MCP 协议客户端（stdio / HTTP） |
+| `deepseeknova-graph` | 代码图检索引擎（tree-sitter + SQLite FTS5 + PageRank + repo map） |
 | `deepseeknova-sandbox` | 沙箱 trait + macOS Seatbelt / Linux bubblewrap |
 | `deepseeknova-permission` | Allow / Ask / Deny 权限门控 |
 | `deepseeknova-security` | 路径限制、资源限额、审计日志 |
+| `deepseeknova-scanner` | deepsec 式安全扫描：规则匹配 + 可选 AI 调查（`scan` 子命令） |
 | `deepseeknova-checkpoint` | 文件系统快照 + 事务性回滚 |
 | `deepseeknova-context` | 工作区索引、项目记忆、会话状态 |
 | `deepseeknova-skills` | Markdown 技能系统，兼容 .claude/skills 格式 |
 | `deepseeknova-store` | JSONL 会话持久化 + 轮转 + 压缩 |
-| `deepseeknova-orch` | GOAP 规划、Swarm 协调、Agent 联邦 |
 | `deepseeknova-telemetry` | OpenTelemetry 分布式追踪 (OTLP) |
 | `deepseeknova-event` | Agent 生命周期事件总线 |
 | `deepseeknova-runtime` | 组合根：注册表 + 上下文 + 事件 + 权限 + 安全 |
@@ -109,9 +144,9 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 
 | 端 | 技术 | 特点 |
 |----|------|------|
-| **CLI** | clap | 轻量，单二进制，chat / plan / serve / setup |
+| **CLI** | clap | 轻量，单二进制，chat / plan / scan / serve / setup |
 | **TUI** | ratatui | 全屏终端 UI，快捷键驱动 |
-| **Desktop** | Tauri 2.0 + React 18 | 原生桌面体验，47 个 IPC 命令 |
+| **Desktop** | Tauri 2.0 + React 18 | 原生桌面体验，44 个 IPC 命令 |
 
 ### 桌面前端亮点
 
@@ -137,6 +172,13 @@ cargo build -p deepseeknova-desktop
 
 ### 配置
 
+推荐使用环境变量注入密钥，避免将 API key 写入配置文件：
+
+```bash
+# 推荐方式：通过环境变量
+export DEEPSEEKNOVA_API_KEY="your-api-key"
+```
+
 ```toml
 # ~/.deepseeknova/config.toml
 default_model = "deepseek-chat"
@@ -145,9 +187,12 @@ default_model = "deepseek-chat"
 name = "deepseek"
 kind = "openai-compatible"
 base_url = "https://api.deepseek.com/v1"
-api_key = "your-api-key"
+# 从环境变量读取，不硬编码到配置文件
+api_key_env = "DEEPSEEKNOVA_API_KEY"
 model = "deepseek-chat"
 ```
+
+> 💡 也支持 `api_key` 字段直接写入，但 **不推荐**——容易误提交到版本控制。优先使用 `api_key_env`。
 
 ### 使用
 
@@ -164,21 +209,23 @@ deepseeknova chat --tui
 deepseeknova desktop
 ```
 
-## 📊 CI 状态
+## 📊 CI 检查项
 
-| 检查项 | 状态 |
-|--------|------|
-| cargo check (全 workspace) | ✅ |
-| cargo check (desktop + Tauri) | ✅ |
-| cargo clippy (-D warnings) | ✅ |
-| cargo fmt | ✅ |
-| cargo test (Ubuntu / macOS / Windows) | ✅ |
-| cargo doc | ✅ |
-| cargo llvm-cov (覆盖率) | ✅ |
-| cargo bench (基准测试) | ✅ |
-| cargo audit + cargo deny (安全审计) | ✅ |
-| frontend build (TypeScript + Vite) | ✅ |
-| release build (Linux / macOS / Windows) | ✅ |
+以下检查在每次 push / PR 时自动运行，点击徽章查看详情：
+
+| 检查项 | 工作流 |
+|--------|--------|
+| cargo check (全 workspace) | CI |
+| cargo check (desktop + Tauri) | CI |
+| cargo clippy (-D warnings) | CI |
+| cargo fmt | CI |
+| cargo test (Ubuntu / macOS / Windows) | CI |
+| cargo doc | CI |
+| cargo llvm-cov (覆盖率) | CI |
+| cargo bench (基准测试) | CI |
+| frontend build (TypeScript + Vite) | CI |
+| release build (Linux / macOS / Windows) | Release |
+| cargo audit + cargo deny (安全审计) | Security |
 
 ## 🛠️ 技术栈
 
@@ -189,8 +236,8 @@ deepseeknova desktop
 | 前端 | React 18 + Vite 5 + Zustand |
 | 桌面 | Tauri 2.0 |
 | 追踪 | OpenTelemetry (OTLP) |
-| 测试 | 382+ tests · cargo-llvm-cov · CI 三平台 |
+| 测试 | 511 tests · cargo-llvm-cov · CI 三平台 |
 
 ## 📄 License
 
-MIT OR Apache-2.0
+MIT OR Apache-2.0 — 见 [LICENSE-MIT](LICENSE-MIT) 和 [LICENSE-APACHE](LICENSE-APACHE)。

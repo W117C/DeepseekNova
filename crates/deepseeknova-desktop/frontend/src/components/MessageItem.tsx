@@ -1,5 +1,5 @@
 /**
- * MessageItem.tsx — 用户/助手消息渲染
+ * MessageItem.tsx — 用户/助手消息渲染（mockup 定稿：用户右 / AI 左 + 圆形渐变头像）
  */
 
 import type { Message } from "../types";
@@ -9,21 +9,16 @@ export default function MessageItem({ message }: { message: Message }) {
   const isUser = message.role === "user";
 
   return (
-    <div className="message">
-      <div className="message-header">
-        <div className={`message-avatar ${isUser ? "user" : "assistant"}`}>
-          {isUser ? "U" : "AI"}
-        </div>
-        <span className="message-role">{isUser ? "你" : "DeepseekNova"}</span>
-        <span className="message-time">
-          {new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}
-        </span>
-      </div>
-      <div className="message-content">
+    <div className={`msg ${isUser ? "user" : "assistant"}`}>
+      <div className="msg-av">{isUser ? "U" : "N"}</div>
+      <div className="msg-body">
+        <div className="msg-who">{isUser ? "你" : "DeepseekNova"}</div>
         {isUser ? (
-          <p>{message.content}</p>
+          <div className="msg-bubble">{message.content}</div>
         ) : (
-          <MarkdownRenderer content={message.content} />
+          <div className="message-content" style={{ paddingLeft: 0 }}>
+            <MarkdownRenderer content={message.content} />
+          </div>
         )}
       </div>
     </div>

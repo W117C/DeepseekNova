@@ -1,6 +1,6 @@
 .PHONY: all build check test clean run release \
         release-patch release-minor release-major \
-        check-all test-all clippy-fix example \
+        check-all check-desktop test-all clippy-fix example \
         frontend desktop install dist audit
 
 # ── Default ─────────────────────────────────────────────────────
@@ -13,14 +13,26 @@ build:
 # ── Comprehensive check (CI equivalent) ────────────────────────
 check:
 	cargo fmt --all -- --check
-	cargo clippy --workspace --exclude dpronix-desktop --all-targets -- -D warnings
-	cargo test --workspace --exclude dpronix-desktop
-	cargo doc --workspace --exclude dpronix-desktop --no-deps --document-private-items
+	cargo clippy --workspace --exclude deepseeknova-desktop --all-targets -- -D warnings
+	cargo test --workspace --exclude deepseeknova-desktop
+	cargo doc --workspace --exclude deepseeknova-desktop --no-deps --document-private-items
 
 check-all:
 	cargo fmt --all -- --check
 	cargo clippy --workspace --all-targets -- -D warnings || true
 	cargo test --workspace
+
+# ── Desktop local verification (CI check-desktop + frontend equivalent) ──
+# Rust 侧需要前端产物 dist/，缺失时先运行 make frontend
+# nvm 装的 node 在非交互 shell 的 PATH 中不可见（npm: command not found / exit 127），
+# 故为本 target 显式注入 nvm node 路径；CI 由 setup-node 提供 node，该目录在 CI 上
+# 不存在，前置一个不存在的目录无副作用。
+check-desktop: export PATH := /Users/ze/.nvm/versions/node/v20.20.2/bin:$(PATH)
+check-desktop:
+	cd crates/deepseeknova-desktop/frontend && npm run lint && npm test
+	cargo check -p deepseeknova-desktop
+	cargo clippy -p deepseeknova-desktop --all-targets -- -D warnings
+	cargo test -p deepseeknova-desktop
 
 # ── Format ──────────────────────────────────────────────────────
 fmt:
@@ -35,15 +47,15 @@ test-all:
 
 # ── Clippy auto-fix ─────────────────────────────────────────────
 clippy-fix:
-	cargo clippy --workspace --exclude dpronix-desktop --all-targets --fix --allow-dirty
+	cargo clippy --workspace --exclude deepseeknova-desktop --all-targets --fix --allow-dirty
 
 # ── Run ─────────────────────────────────────────────────────────
 run:
-	cargo run --bin dpronix-cli
+	cargo run --bin deepseeknova-cli
 
 # ── Example ─────────────────────────────────────────────────────
 example:
-	cargo run --example quickstart -p dpronix-cli
+	cargo run --example quickstart -p deepseeknova-cli
 
 # ── Release build ───────────────────────────────────────────────
 release:
@@ -69,19 +81,19 @@ cross-linux:
 
 # ── Frontend (Desktop) ─────────────────────────────────────────
 frontend:
-	cd crates/dpronix-desktop/frontend && npm ci && npm run build
+	cd crates/deepseeknova-desktop/frontend && npm ci && npm run build
 
 # ── Desktop app ────────────────────────────────────────────────
 desktop: frontend
-	cargo build -p dpronix-desktop --release
+	cargo build -p deepseeknova-desktop --release
 
 # ── Install CLI binary ─────────────────────────────────────────
 install:
-	cargo install --path crates/dpronix-cli --force
+	cargo install --path crates/deepseeknova-cli --force
 
 # ── Distribution package ───────────────────────────────────────
 dist: release
-	@echo "Release binary at target/release/dpronix-cli"
+	@echo "Release binary at target/release/deepseeknova-cli"
 	@echo "Run 'make desktop' for desktop app build"
 
 # ── Security audit ─────────────────────────────────────────────

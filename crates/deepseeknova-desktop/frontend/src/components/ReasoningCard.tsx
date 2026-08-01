@@ -1,40 +1,26 @@
 /**
- * ReasoningCard.tsx — 推理/思考卡片（金色主题，可折叠）
+ * ReasoningCard.tsx — 推理过程（mockup 定稿：无边框灰字折叠行，默认折叠）
  */
 
 import { useState } from "react";
 import type { Message } from "../types";
 
 export default function ReasoningCard({ message }: { message: Message }) {
-  const [expanded, setExpanded] = useState(true);
+  const [expanded, setExpanded] = useState(false);
 
   return (
-    <div className="reasoning-card">
-      <div
-        className="reasoning-card-header"
-        onClick={() => setExpanded(!expanded)}
-      >
-        <svg
-          width="12"
-          height="12"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          style={{
-            transform: expanded ? "rotate(90deg)" : "none",
-            transition: "transform 0.15s",
-          }}
-        >
-          <polyline points="9 18 15 12 9 6"/>
-        </svg>
-        <span className="reasoning-card-title">
-          💭 推理过程 {message.reasoningDone ? "" : "（进行中…）"}
+    <div className={`row-fold reason thread-inset ${expanded ? "open" : ""}`}>
+      <div className="row-fold-h" onClick={() => setExpanded(!expanded)}>
+        <span className="tri">▶</span>
+        <span className="lbl">推理过程</span>
+        <span className="meta">
+          {message.reasoningDone ? `${message.content.length} 字` : "进行中…"}
+        </span>
+        <span className="right">
+          <span className="meta">{expanded ? "收起" : "点击展开"}</span>
         </span>
       </div>
-      {expanded && (
-        <div className="reasoning-card-body">{message.content}</div>
-      )}
+      <div className="row-fold-b">{message.content}</div>
     </div>
   );
 }

@@ -2,7 +2,7 @@ use anyhow::Context;
 use std::path::Path;
 
 /// Initialize a new deepseeknova project in the current directory.
-/// Creates: DPRONIX.md, deepseeknova.toml (if not exists),
+/// Creates: DEEPSEEKNOVA.md, deepseeknova.toml (if not exists),
 /// .deepseeknova/commands/ (empty dir), .deepseeknova/memory/ (empty dir).
 pub async fn run_init() -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("cannot determine current directory")?;
@@ -17,8 +17,8 @@ pub async fn run_init() -> anyhow::Result<()> {
     std::fs::create_dir_all(&memory_dir)
         .with_context(|| format!("failed to create {}", memory_dir.display()))?;
 
-    // Create DPRONIX.md if it doesn't exist
-    let deepseeknova_md_path = cwd.join("DPRONIX.md");
+    // Create DEEPSEEKNOVA.md if it doesn't exist
+    let deepseeknova_md_path = cwd.join("DEEPSEEKNOVA.md");
     if !deepseeknova_md_path.exists() {
         let project_name = cwd
             .file_name()
@@ -49,9 +49,9 @@ Custom slash commands go in .deepseeknova/commands/ as .md files.
         );
         std::fs::write(&deepseeknova_md_path, template)
             .with_context(|| format!("failed to write {}", deepseeknova_md_path.display()))?;
-        println!("✓ Created DPRONIX.md");
+        println!("✓ Created DEEPSEEKNOVA.md");
     } else {
-        println!("  DPRONIX.md already exists — skipping");
+        println!("  DEEPSEEKNOVA.md already exists — skipping");
     }
 
     // Create deepseeknova.toml if it doesn't exist
@@ -87,7 +87,7 @@ Run the project build command and report any errors.
     println!("deepseeknova project initialized at {}", cwd.display());
     println!();
     println!("Next steps:");
-    println!("  1. Edit DPRONIX.md with your project context");
+    println!("  1. Edit DEEPSEEKNOVA.md with your project context");
     println!("  2. Add custom commands to .deepseeknova/commands/");
     println!("  3. Run `deepseeknova chat` to start a session");
 

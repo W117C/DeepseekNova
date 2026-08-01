@@ -1,14 +1,14 @@
-# DPronix Code Owners
+# DeepseekNova Code Owners
 # https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
 
 # Default owner for everything
 *                          @W117C
 
 # Security-critical crates require owner review
-crates/dpronix-security/   @W117C
-crates/dpronix-agent/      @W117C
-crates/dpronix-permission/ @W117C
-crates/dpronix-sandbox/    @W117C
+crates/deepseeknova-security/   @W117C
+crates/deepseeknova-agent/      @W117C
+crates/deepseeknova-permission/ @W117C
+crates/deepseeknova-sandbox/    @W117C
 
 # CI/CD changes should be reviewed by maintainer
 .github/                   @W117C

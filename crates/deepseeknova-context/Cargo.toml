@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Workspace indexing and working memory: file trees, project memory (DPRONIX.md), and session state."
+description = "Workspace indexing and working memory: file trees, project memory (DEEPSEEKNOVA.md), and session state."
 readme = "README.md"
 documentation = "https://docs.rs/deepseeknova-context/0.4.0"
 

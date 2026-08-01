@@ -78,6 +78,22 @@ export default function SubAgentsSettings() {
           </div>
         </div>
       ))}
+
+      {/* mockup 定稿新增：协作模式与失败处理 */}
+      <div className="setting-row">
+        <div style={{ flexShrink: 0 }}>
+          <div className="setting-row-label">协作模式</div>
+          <div className="setting-row-desc">串行流水线 / 并行投票 / 辩论仲裁</div>
+        </div>
+        <div className="setting-row-control"><span className="tag">串行流水线</span></div>
+      </div>
+      <div className="setting-row">
+        <div style={{ flexShrink: 0 }}>
+          <div className="setting-row-label">失败处理</div>
+          <div className="setting-row-desc">子代理失败时的策略</div>
+        </div>
+        <div className="setting-row-control"><span className="tag">重试 2 次 · 降级跳过</span></div>
+      </div>
     </div>
   );
 }

@@ -25,14 +25,14 @@ for crate in sorted(os.listdir(ROOT)):
     with open(toml_path) as f:
         content = f.read()
 
-    # Fix: dpronix-XXX = { path = "../name" } -> dpronix-XXX = { version = "x.y.z", path = "../name" }
+    # Fix: deepseeknova-XXX = { path = "../name" } -> deepseeknova-XXX = { version = "x.y.z", path = "../name" }
     def add_version(m):
         dep_name = m.group(1)
         dep_path = m.group(2)
         return f'{dep_name} = {{ version = "{VERSION}", path = "{dep_path}" }}'
 
     content = re.sub(
-        r'(dpronix-[\w-]+)\s*=\s*\{\s*path\s*=\s*"((?:\.\./)[^"]+)"\s*\}',
+        r'(deepseeknova-[\w-]+)\s*=\s*\{\s*path\s*=\s*"((?:\.\./)[^"]+)"\s*\}',
         add_version,
         content,
     )

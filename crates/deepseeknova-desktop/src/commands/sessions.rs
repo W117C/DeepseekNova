@@ -32,3 +32,19 @@ pub async fn delete_session(id: String) -> Result<(), String> {
     info!("deleted session {id}");
     Ok(())
 }
+
+#[tauri::command]
+pub async fn rename_session(id: String, title: String) -> Result<(), String> {
+    let title = title.trim().to_string();
+    if title.is_empty() {
+        return Err("title must not be empty".into());
+    }
+    let mut sessions = load_sessions();
+    let Some(session) = sessions.iter_mut().find(|s| s.id == id) else {
+        return Err(format!("session not found: {id}"));
+    };
+    session.title = title;
+    save_sessions(&sessions);
+    info!("renamed session {id}");
+    Ok(())
+}

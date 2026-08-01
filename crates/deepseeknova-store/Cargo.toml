@@ -16,3 +16,6 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
 deepseeknova-core = { workspace = true }
+
+[dev-dependencies]
+deepseeknova-context = { workspace = true }

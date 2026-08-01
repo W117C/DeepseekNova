@@ -185,21 +185,195 @@ impl Default for PolicyBuilder {
 // ---------------------------------------------------------------------------
 
 /// PermissionGate is called by Runtime before every tool execution.
+/// Supports session-level caching of user decisions.
 pub struct PermissionGate {
     policy: Policy,
+    /// Session-level cache: (tool_name, subject_hash) → Decision.
+    /// Once a user approves/denies a specific tool+args combo, we remember
+    /// for the rest of the session to avoid repeated prompts.
+    session_cache: std::sync::Mutex<std::collections::HashMap<u64, Decision>>,
+    /// Workspace root for path-based rules.
+    workspace_root: Option<std::path::PathBuf>,
+    /// Optional rate limit: max gated tool calls per rolling 60s window.
+    /// Exceeding the limit denies further calls until the window drains.
+    rate_limit_per_minute: Option<u32>,
+    /// Timestamps of recent gated calls (rolling 60s window).
+    call_times: std::sync::Mutex<std::collections::VecDeque<std::time::Instant>>,
 }
 
 impl PermissionGate {
     pub fn new(policy: Policy) -> Self {
-        Self { policy }
+        Self {
+            policy,
+            session_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+            workspace_root: None,
+            rate_limit_per_minute: None,
+            call_times: std::sync::Mutex::new(std::collections::VecDeque::new()),
+        }
+    }
+
+    /// Set the workspace root for path-based permission checks.
+    pub fn with_workspace_root(mut self, root: impl Into<std::path::PathBuf>) -> Self {
+        self.workspace_root = Some(root.into());
+        self
+    }
+
+    /// Enable rate limiting: at most `limit` gated tool calls per rolling minute.
+    pub fn with_rate_limit(mut self, limit: u32) -> Self {
+        self.rate_limit_per_minute = Some(limit.max(1));
+        self
+    }
+
+    /// Record the current call and return true when the rolling-minute
+    /// window already holds `limit` calls (i.e. this call must be denied).
+    fn rate_limited(&self) -> bool {
+        let Some(limit) = self.rate_limit_per_minute else {
+            return false;
+        };
+        let now = std::time::Instant::now();
+        let Ok(mut times) = self.call_times.lock() else {
+            return false;
+        };
+        while times
+            .front()
+            .is_some_and(|t| now.duration_since(*t).as_secs() >= 60)
+        {
+            times.pop_front();
+        }
+        if times.len() >= limit as usize {
+            return true;
+        }
+        times.push_back(now);
+        false
     }
 
     /// Check whether a tool call should be allowed.
+    /// Uses session cache to avoid repeated prompts for the same operation.
     pub fn check(&self, tool: &dyn Tool, args: &str) -> Decision {
+        // Rate limit first: a hard cap independent of per-tool decisions.
+        if self.rate_limited() {
+            return Decision::Deny;
+        }
+
         let args_value: Value = serde_json::from_str(args).unwrap_or(Value::Null);
-        self.policy
-            .decide(&tool.schema().name, tool.read_only(), &args_value)
+        let tool_name = &tool.schema().name;
+
+        // Path-based guard: deny writes outside workspace
+        if !tool.read_only() {
+            if let Some(ref root) = self.workspace_root {
+                if let Some(path) = extract_path(&args_value) {
+                    if !is_within_workspace(root, &path) {
+                        return Decision::Deny;
+                    }
+                }
+            }
+        }
+
+        // Dangerous command detection for shell tools
+        if tool_name == "Bash" || tool_name == "bash" || tool_name == "shell" {
+            if let Some(cmd) = extract_command(&args_value) {
+                if is_dangerous_command(&cmd) {
+                    return Decision::Deny;
+                }
+            }
+        }
+
+        // Check session cache
+        let cache_key = compute_cache_key(tool_name, args);
+        if let Ok(cache) = self.session_cache.lock() {
+            if let Some(cached) = cache.get(&cache_key) {
+                return *cached;
+            }
+        }
+
+        // Evaluate policy
+        self.policy.decide(tool_name, tool.read_only(), &args_value)
     }
+
+    /// Cache a user's decision for this session (called after user responds to Ask).
+    pub fn cache_decision(&self, tool_name: &str, args: &str, decision: Decision) {
+        let key = compute_cache_key(tool_name, args);
+        if let Ok(mut cache) = self.session_cache.lock() {
+            cache.insert(key, decision);
+        }
+    }
+
+    /// Clear the session cache (e.g., on new session).
+    pub fn clear_cache(&self) {
+        if let Ok(mut cache) = self.session_cache.lock() {
+            cache.clear();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Path-based helpers
+// ---------------------------------------------------------------------------
+
+/// Extract a file path from tool arguments.
+fn extract_path(args: &Value) -> Option<String> {
+    if let Value::Object(map) = args {
+        for key in &["path", "file", "file_path", "target", "directory"] {
+            if let Some(val) = map.get(*key) {
+                if let Some(s) = val.as_str() {
+                    return Some(s.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Check if a path is within the workspace root.
+fn is_within_workspace(root: &std::path::Path, path: &str) -> bool {
+    let path_buf = std::path::Path::new(path);
+    // Absolute path: must start with workspace root
+    if path_buf.is_absolute() {
+        path_buf.starts_with(root)
+    } else {
+        // Relative paths are always within workspace
+        !path.contains("..")
+    }
+}
+
+/// Extract a command string from shell tool arguments.
+fn extract_command(args: &Value) -> Option<String> {
+    if let Value::Object(map) = args {
+        if let Some(cmd) = map.get("command") {
+            return cmd.as_str().map(|s| s.to_string());
+        }
+    }
+    if let Value::String(s) = args {
+        return Some(s.clone());
+    }
+    None
+}
+
+/// Detect dangerous shell commands that should always be denied.
+fn is_dangerous_command(cmd: &str) -> bool {
+    let cmd_lower = cmd.to_lowercase();
+    const DANGEROUS_PATTERNS: &[&str] = &[
+        "rm -rf /",
+        "rm -rf /*",
+        "mkfs",
+        "dd if=",
+        ":(){ :|:& };:", // fork bomb
+        "chmod -r 777 /",
+        "> /dev/sda",
+        "shutdown",
+        "reboot",
+        "format c:",
+    ];
+    DANGEROUS_PATTERNS.iter().any(|p| cmd_lower.contains(p))
+}
+
+/// Compute a cache key for session-level permission caching.
+fn compute_cache_key(tool_name: &str, args: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    tool_name.hash(&mut hasher);
+    args.hash(&mut hasher);
+    hasher.finish()
 }
 
 // ---------------------------------------------------------------------------
@@ -382,6 +556,101 @@ mod tests {
     }
 
     // --- Policy ---
+
+    // --- Rate limit ---
+
+    fn allow_all_gate() -> PermissionGate {
+        PermissionGate::new(Policy {
+            mode: Decision::Allow,
+            allow: vec![],
+            ask: vec![],
+            deny: vec![],
+        })
+    }
+
+    #[test]
+    fn rate_limit_denies_after_threshold() {
+        let gate = allow_all_gate().with_rate_limit(3);
+        // 前 3 次在窗口内，不触发限流
+        for _ in 0..3 {
+            assert!(!gate.rate_limited());
+        }
+        // 第 4 次起滚动窗口已满 → 限流
+        assert!(gate.rate_limited());
+        assert!(gate.rate_limited());
+    }
+
+    #[test]
+    fn no_rate_limit_never_denies() {
+        let gate = allow_all_gate();
+        for _ in 0..100 {
+            assert!(!gate.rate_limited());
+        }
+    }
+
+    #[test]
+    fn rate_limit_floor_is_one() {
+        // with_rate_limit(0) 被抬升到 1，避免永久拒绝首次调用
+        let gate = allow_all_gate().with_rate_limit(0);
+        assert!(!gate.rate_limited());
+        assert!(gate.rate_limited());
+    }
+
+    // --- Rate limit through the public check() path ---
+
+    /// Minimal writer tool for exercising `PermissionGate::check`.
+    struct StubTool;
+
+    #[async_trait::async_trait]
+    impl Tool for StubTool {
+        fn schema(&self) -> deepseeknova_core::ToolSchema {
+            deepseeknova_core::ToolSchema {
+                name: "stub".to_string(),
+                description: "stub tool for tests".to_string(),
+                parameters: Value::Null,
+            }
+        }
+
+        async fn execute(
+            &self,
+            _ctx: &deepseeknova_core::ToolContext,
+            _args: &str,
+        ) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+    }
+
+    #[test]
+    fn check_denies_once_rate_limit_exhausted() {
+        // 策略本身全部 Allow，但限流优先于策略判定
+        let gate = allow_all_gate().with_rate_limit(2);
+        let tool = StubTool;
+        assert_eq!(gate.check(&tool, "{}"), Decision::Allow);
+        assert_eq!(gate.check(&tool, "{}"), Decision::Allow);
+        // 第三次起窗口已满 → 硬性 Deny，不再进入策略/缓存判定
+        assert_eq!(gate.check(&tool, "{}"), Decision::Deny);
+        assert_eq!(gate.check(&tool, "{}"), Decision::Deny);
+    }
+
+    #[test]
+    fn check_without_rate_limit_is_unaffected() {
+        // 负例：未启用限流时，连续调用始终走策略判定（Allow）
+        let gate = allow_all_gate();
+        let tool = StubTool;
+        for _ in 0..20 {
+            assert_eq!(gate.check(&tool, "{}"), Decision::Allow);
+        }
+    }
+
+    #[test]
+    fn check_rate_limit_denies_even_cached_allow() {
+        // 会话缓存中已有 Allow 决策，限流耗尽后仍须 Deny
+        let gate = allow_all_gate().with_rate_limit(1);
+        let tool = StubTool;
+        gate.cache_decision("stub", "{}", Decision::Allow);
+        assert_eq!(gate.check(&tool, "{}"), Decision::Allow);
+        assert_eq!(gate.check(&tool, "{}"), Decision::Deny);
+    }
 
     #[test]
     fn deny_overrides_allow() {

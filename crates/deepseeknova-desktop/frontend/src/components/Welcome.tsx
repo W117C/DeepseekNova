@@ -3,16 +3,18 @@
  */
 
 import { useStore } from "../store";
+import { useI18n } from "../i18n";
 
 export default function Welcome() {
+  const { t } = useI18n();
   const mode = useStore((s) => s.mode);
   const model = useStore((s) => s.model);
 
   const features = [
-    { icon: "🧠", title: "自动记忆", desc: "跨会话保持上下文，自动提取技能" },
-    { icon: "⚡", title: "6 个内置技能", desc: "前端开发、代码审查、第一性原理等" },
-    { icon: "🔒", title: "沙箱执行", desc: "安全隔离，审批模式可控" },
-    { icon: "📊", title: "Token 追踪", desc: "缓存命中率、成本实时显示" },
+    { icon: "🧠", title: t("welcome.feat.memory"), desc: t("welcome.feat.memoryDesc") },
+    { icon: "⚡", title: t("welcome.feat.skills"), desc: t("welcome.feat.skillsDesc") },
+    { icon: "🔒", title: t("welcome.feat.sandbox"), desc: t("welcome.feat.sandboxDesc") },
+    { icon: "📊", title: t("welcome.feat.token"), desc: t("welcome.feat.tokenDesc") },
   ];
 
   return (
@@ -28,7 +30,7 @@ export default function Welcome() {
         DeepseekNova
       </h1>
       <p style={{ color: "var(--text-2)", fontSize: "14px", marginBottom: "24px" }}>
-        DeepSeek 原生 AI 编程 Agent · 模型: {model} · 模式: {mode}
+        {t("welcome.subtitle")} · {model} · {mode}
       </p>
 
       <div style={{
@@ -56,9 +58,9 @@ export default function Welcome() {
         border: "1px solid var(--border-1)",
         borderRadius: "var(--radius-md)",
       }}>
-        <div style={{ fontSize: "12px", color: "var(--text-3)", marginBottom: "4px" }}>快速开始</div>
+        <div style={{ fontSize: "12px", color: "var(--text-3)", marginBottom: "4px" }}>{t("welcome.quickStart")}</div>
         <div style={{ fontSize: "13px", color: "var(--text-2)" }}>
-          输入消息开始对话，或使用 <code style={{ color: "var(--cyan)" }}>/</code> 触发 Slash 命令
+          {t("welcome.quickStartHint")}
         </div>
       </div>
     </div>

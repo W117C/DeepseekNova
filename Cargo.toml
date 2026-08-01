@@ -8,6 +8,7 @@ members = [
     "crates/deepseeknova-core",
     "crates/deepseeknova-mcp",
     "crates/deepseeknova-event",
+    "crates/deepseeknova-graph",
     "crates/deepseeknova-permission",
     "crates/deepseeknova-context",
     "crates/deepseeknova-runtime",
@@ -19,8 +20,8 @@ members = [
     "crates/deepseeknova-skills",
     "crates/deepseeknova-telemetry",
     "crates/deepseeknova-desktop",
-    "crates/deepseeknova-orch",
     "crates/deepseeknova-security",
+    "crates/deepseeknova-scanner",
 ]
 resolver = "2"
 default-members = [
@@ -32,6 +33,7 @@ default-members = [
     "crates/deepseeknova-core",
     "crates/deepseeknova-mcp",
     "crates/deepseeknova-event",
+    "crates/deepseeknova-graph",
     "crates/deepseeknova-permission",
     "crates/deepseeknova-context",
     "crates/deepseeknova-runtime",
@@ -42,8 +44,8 @@ default-members = [
     "crates/deepseeknova-serve",
     "crates/deepseeknova-skills",
     "crates/deepseeknova-telemetry",
-    "crates/deepseeknova-orch",
     "crates/deepseeknova-security",
+    "crates/deepseeknova-scanner",
 ]
 
 [workspace.lints.rust]
@@ -99,28 +101,29 @@ opentelemetry-stdout = "0.27"
 tracing-opentelemetry = "0.28"
 tempfile = "3.14"
 
-# Internal crates (path-based, version inherited from workspace)
-deepseeknova-agent = { path = "crates/deepseeknova-agent" }
-deepseeknova-checkpoint = { path = "crates/deepseeknova-checkpoint" }
-deepseeknova-cli = { path = "crates/deepseeknova-cli" }
-deepseeknova-config = { path = "crates/deepseeknova-config" }
-deepseeknova-context = { path = "crates/deepseeknova-context" }
-deepseeknova-core = { path = "crates/deepseeknova-core" }
+# Internal crates
+deepseeknova-agent = { version = "0.4.0", path = "crates/deepseeknova-agent" }
+deepseeknova-checkpoint = { version = "0.4.0", path = "crates/deepseeknova-checkpoint" }
+deepseeknova-cli = { version = "0.4.0", path = "crates/deepseeknova-cli" }
+deepseeknova-config = { version = "0.4.0", path = "crates/deepseeknova-config" }
+deepseeknova-context = { version = "0.4.0", path = "crates/deepseeknova-context" }
+deepseeknova-core = { version = "0.4.0", path = "crates/deepseeknova-core" }
 deepseeknova-desktop = { path = "crates/deepseeknova-desktop" }
-deepseeknova-event = { path = "crates/deepseeknova-event" }
-deepseeknova-mcp = { path = "crates/deepseeknova-mcp" }
-deepseeknova-orch = { path = "crates/deepseeknova-orch" }
-deepseeknova-permission = { path = "crates/deepseeknova-permission" }
-deepseeknova-provider = { path = "crates/deepseeknova-provider" }
-deepseeknova-runtime = { path = "crates/deepseeknova-runtime" }
-deepseeknova-sandbox = { path = "crates/deepseeknova-sandbox" }
-deepseeknova-security = { path = "crates/deepseeknova-security" }
-deepseeknova-serve = { path = "crates/deepseeknova-serve" }
-deepseeknova-skills = { path = "crates/deepseeknova-skills" }
-deepseeknova-store = { path = "crates/deepseeknova-store" }
-deepseeknova-telemetry = { path = "crates/deepseeknova-telemetry" }
-deepseeknova-tools = { path = "crates/deepseeknova-tools" }
-deepseeknova-tui = { path = "crates/deepseeknova-tui" }
+deepseeknova-event = { version = "0.4.0", path = "crates/deepseeknova-event" }
+deepseeknova-graph = { version = "0.4.0", path = "crates/deepseeknova-graph" }
+deepseeknova-mcp = { version = "0.4.0", path = "crates/deepseeknova-mcp" }
+deepseeknova-permission = { version = "0.4.0", path = "crates/deepseeknova-permission" }
+deepseeknova-provider = { version = "0.4.0", path = "crates/deepseeknova-provider" }
+deepseeknova-runtime = { version = "0.4.0", path = "crates/deepseeknova-runtime" }
+deepseeknova-sandbox = { version = "0.4.0", path = "crates/deepseeknova-sandbox" }
+deepseeknova-scanner = { version = "0.4.0", path = "crates/deepseeknova-scanner" }
+deepseeknova-security = { version = "0.4.0", path = "crates/deepseeknova-security" }
+deepseeknova-serve = { version = "0.4.0", path = "crates/deepseeknova-serve" }
+deepseeknova-skills = { version = "0.4.0", path = "crates/deepseeknova-skills" }
+deepseeknova-store = { version = "0.4.0", path = "crates/deepseeknova-store" }
+deepseeknova-telemetry = { version = "0.4.0", path = "crates/deepseeknova-telemetry" }
+deepseeknova-tools = { version = "0.4.0", path = "crates/deepseeknova-tools" }
+deepseeknova-tui = { version = "0.4.0", path = "crates/deepseeknova-tui" }
 
 [profile.release]
 opt-level = "s"

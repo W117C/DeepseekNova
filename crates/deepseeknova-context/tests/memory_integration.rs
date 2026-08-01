@@ -85,7 +85,7 @@ fn working_memory_pin_is_stored() {
 #[test]
 fn project_memory_loads_deepseeknova_md() {
     let dir = TempDir::new().unwrap();
-    std::fs::write(dir.path().join("DPRONIX.md"), "# Project Context").unwrap();
+    std::fs::write(dir.path().join("DEEPSEEKNOVA.md"), "# Project Context").unwrap();
 
     let mut pm = ProjectMemory::new();
     pm.load_deepseeknova_md(dir.path());
@@ -116,7 +116,7 @@ fn prompt_builder_basic_output() {
 
     let wm = WorkingMemory::new();
     let pm = ProjectMemory::new();
-    let messages = PromptBuilder::build("you are a helpful bot", &schemas, &wm, &pm);
+    let messages = PromptBuilder::build("you are a helpful bot", &schemas, &wm, &pm, None);
 
     assert!(!messages.is_empty());
     let system = &messages[0];
@@ -128,12 +128,16 @@ fn prompt_builder_basic_output() {
 #[test]
 fn prompt_builder_injects_project_memory() {
     let dir = TempDir::new().unwrap();
-    std::fs::write(dir.path().join("DPRONIX.md"), "# My Project\nVersion 2.0").unwrap();
+    std::fs::write(
+        dir.path().join("DEEPSEEKNOVA.md"),
+        "# My Project\nVersion 2.0",
+    )
+    .unwrap();
     let mut pm = ProjectMemory::new();
     pm.load_deepseeknova_md(dir.path());
 
     let wm = WorkingMemory::new();
-    let messages = PromptBuilder::build("you are a bot", &[], &wm, &pm);
+    let messages = PromptBuilder::build("you are a bot", &[], &wm, &pm, None);
 
     let system = &messages[0];
     assert!(system.content.contains("My Project"));
@@ -160,7 +164,7 @@ fn prompt_builder_includes_conversation_history() {
     });
 
     let pm = ProjectMemory::new();
-    let messages = PromptBuilder::build("system prompt", &[], &wm, &pm);
+    let messages = PromptBuilder::build("system prompt", &[], &wm, &pm, None);
 
     assert!(messages.iter().any(|m| m.content == "user question"));
     assert!(messages.iter().any(|m| m.content == "assistant answer"));

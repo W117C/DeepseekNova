@@ -6,8 +6,11 @@ node_modules/
 
 # IDE / assistant caches
 .qoder/
+.reasonix/
+.codegraph/
+.serena/
 
-# Project-local runtime state (topic titles, autoresearch, etc.) is ignored,
-# but the bundled default skills under .dpronix/skills/ ship with the repo.
-.dpronix/*
-!.dpronix/skills/
+# Project-local runtime state is ignored,
+# but the bundled default skills ship with the repo.
+.deepseeknova/*
+!.deepseeknova/skills/

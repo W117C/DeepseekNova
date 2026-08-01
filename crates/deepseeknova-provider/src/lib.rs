@@ -11,7 +11,9 @@ use deepseeknova_core::chunk::ChunkStream;
 use deepseeknova_core::Message;
 
 pub mod anthropic;
+pub mod cost;
 pub mod openai;
+pub mod router;
 pub mod scavenge;
 pub mod telemetry;
 pub mod types;
@@ -233,6 +235,19 @@ pub mod factory {
         }
     }
 
+    /// Create a Provider for a specific model name, overriding the provider
+    /// config's default `model`. Used by the ModelRouter so one provider
+    /// entry can serve multiple named models.
+    pub fn create_provider_with_model(
+        cfg: &ProviderConfig,
+        model_name: &str,
+        task_classification: Option<ReasoningEffort>,
+    ) -> anyhow::Result<Box<dyn Provider>> {
+        let mut cfg = cfg.clone();
+        cfg.model = Some(model_name.to_string());
+        create_provider_for_task(&cfg, task_classification)
+    }
+
     // -----------------------------------------------------------------------
     // ReasoningEffortResolver — 三层层优先级解析
     // -----------------------------------------------------------------------
@@ -426,5 +441,30 @@ pub mod factory {
             assert!(err.to_string().contains("unknown provider kind"));
             assert!(err.to_string().contains("nonexistent"));
         }
+    }
+}
+
+#[cfg(test)]
+mod factory_tests {
+    use deepseeknova_config::ProviderConfig;
+
+    fn provider_cfg() -> ProviderConfig {
+        toml::from_str(
+            r#"
+            name = "deepseek"
+            kind = "openai"
+            api_key_env = "DPNOVA_TEST_KEY"
+        "#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn create_provider_with_model_overrides_model() {
+        std::env::set_var("DPNOVA_TEST_KEY", "test");
+        let cfg = provider_cfg();
+        // 构建成功即可 —— 模型名注入路径由 router 缓存键测试进一步覆盖
+        let p = crate::factory::create_provider_with_model(&cfg, "my-model", None);
+        assert!(p.is_ok(), "{:?}", p.err());
     }
 }
