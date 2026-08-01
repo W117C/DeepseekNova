@@ -14,6 +14,9 @@ All notable changes to DeepseekNova will be documented in this file.
 
 ### Added
 
+- **TUI 视觉重做（参考 Codex CLI）**：语义配色（用户/状态=cyan、agent=magenta、
+  次要信息=dim、成功=green、失败/错误=red），状态行按段着色，底部新增快捷键
+  提示行，对话区标题去掉 emoji，深浅色终端自适应。
 - **TUI 终端界面重做**：完整渲染推理（斜体暗色）/ 工具调用与结果（截断预览）/
   确定性验证（✓/✗）/ 暂停 / 审批请求 / 错误；滚动回看（PageUp/Down、Home/End、
   自动跟随、2000 行上限）；输入历史（↑/↓）；命令 `/help` `/clear` `/quit`；

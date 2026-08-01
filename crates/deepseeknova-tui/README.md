@@ -9,6 +9,15 @@ Wraps a `Runner` and displays streaming output in a split-pane TUI:
 - **Status bar** — current model, phase, turn, token usage, scroll position.
 - **Input pane** (bottom) — single-line editing with a visible cursor,
   horizontal follow for long prompts, and input history.
+- **Hint line** — edit keys (`Ctrl+U` / `Ctrl+W` / `Home` / `End`) and `/help`.
+
+### Design
+
+Follows Codex CLI's semantic color rules: user input and status indicators are
+cyan, agent output is magenta, secondary information (reasoning, tool calls,
+system messages) is dim, verification success is green, and failures/errors
+are red. No hardcoded colors are used, so the UI reads correctly in both light
+and dark terminals.
 
 ### Keys
 

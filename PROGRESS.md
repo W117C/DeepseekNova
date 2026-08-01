@@ -1,5 +1,18 @@
 # PROGRESS — TUI 设计功能完善（任务书执行）
 
+## TUI 视觉改造（参考 Codex CLI）— 开工回执（2026-08-01）
+- 理解的目标：把 TUI 观感改成 Codex CLI 风格——语义配色（禁 Blue/Yellow/White/Black/DarkGray/Rgb）+ 干净底部面板（状态行多段着色、提示行、无 emoji 标题），全部可机判函数加单测，观感留领导亲验。
+- 顺序：任务 0 基线 → 1 style_for 语义配色+映射单测 → 2 布局纯函数+底部四段 → 3 文档/反向验证/提交推送。
+- 最大风险：改 style_for 影响全部渲染路径；输入框样式与光标位置在 draw() 内、不可单测，只靠布局/状态/提示纯函数锁行为；rg 禁止色检查是全量源码，任何残留都算失败。
+- 基线证据（本轮实测）：feat/tui-complete @ 0b23765 工作树干净；cargo test -p deepseeknova-tui = 31+1 绿 0 ignored；make check EXIT=0。
+- 决策：不改输入组件/不加依赖/不动既有测试断言（确认现有测试无断言旧颜色）；在 feat/tui-complete 上继续，PR #53 自动带上提交。
+
+## 任务状态（TUI 视觉改造）
+- [x] 任务 1：style_for 语义配色（User=Cyan+Bold、Agent=Magenta、Reasoning/Tool/ToolResult/System=Dim、Verification=Green/Red、Error=Red+Bold、Paused=Cyan），映射单测覆盖 9 种 LineKind。
+- [x] 任务 2：布局四段（对话区/状态行/输入框/提示行），layout_constraints/status_segments/hint_text 纯函数 + 3 条单测；标题去 emoji；状态行 model=Cyan 其余 Dim；输入框边框 Dim、">"=Cyan+Bold、输入默认色；底部提示行全 Dim。
+- [x] 任务 3：GUIDE/README/CHANGELOG 已更新；cargo fmt --check 过；make check EXIT=0；反向验证红（1 failed）→ 还原绿（35+1 全绿）；PTY 冒烟：新布局正常渲染、Esc 退出 code 0；BLOCKED.md 已补 diff 高亮待裁决项。
+- 证据：cargo test -p deepseeknova-tui = 35 单测 + 1 doctest 绿 0 ignored；rg 禁止色（Blue/Yellow/White/Black/DarkGray/Rgb）零命中。
+
 ## 开工回执（2026-08-01）
 - 理解的目标：TUI 命令面与 REPL 对齐（/skills /mcp /raw /undo）、输入可编辑+可见光标、运行事件代际防串台、/resume 渲染历史、文档同步，全部带测试并过 make check。
 - 顺序：任务 0 基线 → 1 输入编辑（纯单 crate）→ 2 代际 → 3 命令补齐（大头，跨 crate）→ 4 resume 渲染（跨 crate）→ 5 文档/反向验证/PR。

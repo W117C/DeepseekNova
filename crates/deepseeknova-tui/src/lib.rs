@@ -7,7 +7,8 @@
 //! - tool calls and truncated results
 //! - deterministic verification (`✓` / `✗`)
 //! - pauses, errors, approval requests
-//! - status bar with model, phase, token usage and scrollback position
+//! - status bar with model, phase, token usage and scrollback position,
+//!   bottom hint line, Codex-style semantic colors (cyan/magenta/green/red/dim)
 //! - single-line input editing with a visible cursor (←/→/Home/End/Delete/
 //!   Ctrl+U/Ctrl+W), input history, scrollback, Ctrl+C cancel
 //! - slash commands: `/help` `/clear` `/quit` `/new` `/sessions` `/resume`
@@ -1361,11 +1362,7 @@ impl AppState {
         let area = f.area();
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(0),
-                Constraint::Length(1),
-                Constraint::Length(3),
-            ])
+            .constraints(layout_constraints())
             .split(area);
 
         let conv_area = chunks[0];
@@ -1373,11 +1370,17 @@ impl AppState {
         self.clamp_scroll(viewport.max(1));
 
         let title = if self.running {
-            "🧠 运行中…"
+            "运行中…"
         } else {
-            "💬 就绪"
+            "就绪"
         };
-        let conv_block = Block::default().borders(Borders::ALL).title(title);
+        let conv_block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().add_modifier(Modifier::DIM))
+            .title(Line::from(Span::styled(
+                title,
+                Style::default().add_modifier(Modifier::BOLD),
+            )));
 
         let mut text_lines: Vec<Line> = Vec::new();
         for line in self.visible_lines() {
@@ -1414,48 +1417,43 @@ impl AppState {
 
         // ── Status bar ───────────────────────────────────────
         let phase = if self.running { "running" } else { "ready" };
-        let status_text = match &self.usage {
-            Some(u) => format!(
-                " model={} {} | turn {} | ↑{} ↓{} Σ{} 推理{} 缓存hit{} | lines {} | 滚动 {}%",
-                self.model_label,
+        let scroll_pct = if self.lines.is_empty() {
+            0
+        } else {
+            self.scroll_offset * 100 / self.lines.len()
+        };
+        let segments = match &self.usage {
+            Some(u) => status_segments(
+                &self.model_label,
                 phase,
                 self.turn,
-                u.prompt_tokens,
-                u.completion_tokens,
-                u.total_tokens,
-                u.reasoning_tokens,
-                u.cache_hit_tokens,
+                Some((
+                    u.prompt_tokens,
+                    u.completion_tokens,
+                    u.total_tokens,
+                    u.reasoning_tokens,
+                    u.cache_hit_tokens,
+                )),
                 self.lines.len(),
-                if self.lines.is_empty() {
-                    0
-                } else {
-                    self.scroll_offset * 100 / self.lines.len()
-                },
+                scroll_pct,
             ),
-            None => format!(
-                " model={} {} | turn {} | lines {} | 滚动 {}%",
-                self.model_label,
+            None => status_segments(
+                &self.model_label,
                 phase,
                 self.turn,
+                None,
                 self.lines.len(),
-                if self.lines.is_empty() {
-                    0
-                } else {
-                    self.scroll_offset * 100 / self.lines.len()
-                },
+                scroll_pct,
             ),
         };
-        let status = Paragraph::new(Span::styled(
-            status_text,
-            Style::default().fg(Color::DarkGray),
-        ));
+        let status = Paragraph::new(Line::from(segments));
         f.render_widget(status, chunks[1]);
 
         // ── Input pane ───────────────────────────────────────
         let input_style = if self.running {
-            Style::default().fg(Color::DarkGray)
+            Style::default().add_modifier(Modifier::DIM)
         } else {
-            Style::default().fg(Color::Green)
+            Style::default()
         };
         let pane = chunks[2];
         let pane_width = pane.width.saturating_sub(2) as usize;
@@ -1467,7 +1465,16 @@ impl AppState {
         };
         let input_block = Block::default()
             .borders(Borders::ALL)
-            .title("> prompt  (/help, Esc 退出)");
+            .border_style(Style::default().add_modifier(Modifier::DIM))
+            .title(Line::from(vec![
+                Span::styled(
+                    ">",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" prompt", Style::default().add_modifier(Modifier::BOLD)),
+            ]));
         let input_widget = Paragraph::new(Span::styled(input_text, input_style)).block(input_block);
         f.render_widget(input_widget, pane);
 
@@ -1476,6 +1483,13 @@ impl AppState {
             let col = self.input.cursor_column(input_start).min(pane_width as u16);
             f.set_cursor_position((pane.x + 1 + col, pane.y + 1));
         }
+
+        // ── Bottom hint line ─────────────────────────────────
+        let hint = Paragraph::new(Span::styled(
+            hint_text(),
+            Style::default().add_modifier(Modifier::DIM),
+        ));
+        f.render_widget(hint, chunks[3]);
     }
 }
 
@@ -1485,23 +1499,73 @@ enum CommandResult {
     Handled,
 }
 
+/// 底部面板布局：对话区 + 状态行 + 输入框 + 快捷键提示行。
+fn layout_constraints() -> [Constraint; 4] {
+    [
+        Constraint::Min(0),
+        Constraint::Length(1),
+        Constraint::Length(3),
+        Constraint::Length(1),
+    ]
+}
+
+/// 状态行分段：model 用状态色（cyan），其余次要信息用 dim。
+fn status_segments(
+    model_label: &str,
+    phase: &str,
+    turn: usize,
+    usage: Option<(u32, u32, u32, u32, u32)>,
+    line_count: usize,
+    scroll_pct: usize,
+) -> Vec<Span<'static>> {
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    let mut segments = vec![
+        Span::styled(
+            format!(" model={model_label}"),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!(" {phase}"), dim),
+        Span::styled(format!(" | turn {turn}"), dim),
+    ];
+    if let Some((prompt, completion, total, reasoning, cache_hit)) = usage {
+        segments.push(Span::styled(
+            format!(" | ↑{prompt} ↓{completion} Σ{total} 推理{reasoning} 缓存hit{cache_hit}"),
+            dim,
+        ));
+    }
+    segments.push(Span::styled(
+        format!(" | lines {line_count} | 滚动 {scroll_pct}%"),
+        dim,
+    ));
+    segments
+}
+
+/// 底部提示行：编辑键与帮助入口。
+fn hint_text() -> &'static str {
+    "Ctrl+U 清行 · Ctrl+W 删词 · Home/End 行首尾 · /help · Esc 退出"
+}
+
+/// Codex 风格语义配色：用户/状态=cyan，agent=magenta，次要=dim，
+/// 成功=green，失败/错误=red；不用自定义颜色与 blue/yellow/white/black 前景。
 fn style_for(kind: LineKind) -> Style {
     match kind {
         LineKind::User => Style::default()
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD),
-        LineKind::Agent => Style::default().fg(Color::White),
+        LineKind::Agent => Style::default().fg(Color::Magenta),
         LineKind::Reasoning => Style::default()
-            .fg(Color::DarkGray)
+            .add_modifier(Modifier::DIM)
             .add_modifier(Modifier::ITALIC),
-        LineKind::Tool => Style::default().fg(Color::Yellow),
-        LineKind::ToolResult => Style::default().fg(Color::DarkGray),
+        LineKind::Tool => Style::default().add_modifier(Modifier::DIM),
+        LineKind::ToolResult => Style::default().add_modifier(Modifier::DIM),
         LineKind::Verification { passed } => {
             Style::default().fg(if passed { Color::Green } else { Color::Red })
         }
-        LineKind::System => Style::default().fg(Color::Blue),
+        LineKind::System => Style::default().add_modifier(Modifier::DIM),
         LineKind::Error => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        LineKind::Paused => Style::default().fg(Color::Yellow),
+        LineKind::Paused => Style::default().fg(Color::Cyan),
     }
 }
 
@@ -2237,6 +2301,81 @@ mod tests {
         let mut app = AppState::default();
         tui.handle_command(&mut app, "undo").await;
         assert!(app.lines.iter().any(|l| l.text.contains("撤销不可用")));
+    }
+
+    #[test]
+    fn style_for_matches_codex_semantic_palette() {
+        let user = style_for(LineKind::User);
+        assert_eq!(user.fg, Some(Color::Cyan));
+        assert!(user.add_modifier.contains(Modifier::BOLD));
+
+        let agent = style_for(LineKind::Agent);
+        assert_eq!(agent.fg, Some(Color::Magenta));
+
+        let reasoning = style_for(LineKind::Reasoning);
+        assert_eq!(reasoning.fg, None);
+        assert!(reasoning.add_modifier.contains(Modifier::DIM));
+        assert!(reasoning.add_modifier.contains(Modifier::ITALIC));
+
+        for kind in [LineKind::Tool, LineKind::ToolResult, LineKind::System] {
+            let s = style_for(kind);
+            assert_eq!(s.fg, None, "{kind:?} 应为 dim 次要样式");
+            assert!(s.add_modifier.contains(Modifier::DIM));
+        }
+
+        let passed = style_for(LineKind::Verification { passed: true });
+        assert_eq!(passed.fg, Some(Color::Green));
+        let failed = style_for(LineKind::Verification { passed: false });
+        assert_eq!(failed.fg, Some(Color::Red));
+
+        let err = style_for(LineKind::Error);
+        assert_eq!(err.fg, Some(Color::Red));
+        assert!(err.add_modifier.contains(Modifier::BOLD));
+
+        let paused = style_for(LineKind::Paused);
+        assert_eq!(paused.fg, Some(Color::Cyan));
+    }
+
+    #[test]
+    fn layout_constraints_keep_bottom_panel_structure() {
+        assert_eq!(
+            layout_constraints(),
+            [
+                Constraint::Min(0),
+                Constraint::Length(1),
+                Constraint::Length(3),
+                Constraint::Length(1),
+            ]
+        );
+    }
+
+    #[test]
+    fn status_segments_style_model_and_secondary_info() {
+        let segments = status_segments("deepseek-v4-flash", "ready", 3, None, 12, 50);
+        assert_eq!(segments[0].content, " model=deepseek-v4-flash");
+        assert_eq!(segments[0].style.fg, Some(Color::Cyan));
+        assert!(segments[0].style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(segments[1].content, " ready");
+        assert!(segments[1].style.add_modifier.contains(Modifier::DIM));
+        assert!(segments[2].content.contains("| turn 3"));
+        assert!(segments
+            .last()
+            .unwrap()
+            .content
+            .contains("| lines 12 | 滚动 50%"));
+
+        let with_usage = status_segments("m", "running", 7, Some((10, 20, 30, 5, 2)), 99, 0);
+        assert_eq!(with_usage.len(), 5);
+        assert!(with_usage[3].content.contains("↑10 ↓20 Σ30"));
+        assert!(with_usage[4].content.contains("| lines 99 | 滚动 0%"));
+    }
+
+    #[test]
+    fn hint_text_lists_edit_keys_and_help() {
+        let hint = hint_text();
+        for key in ["Ctrl+U", "Ctrl+W", "Home/End", "/help", "Esc"] {
+            assert!(hint.contains(key), "提示行缺少 {key}: {hint}");
+        }
     }
 
     // RunOutput 构造辅助（避免暴露内部类型）。
