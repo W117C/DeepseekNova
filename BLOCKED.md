@@ -32,3 +32,10 @@ PROGRESS/BLOCKED），本分支已合并 main 解决冲突并重验全绿；#54�
 **顺手活（不做，待裁决）**
 - verify LLM 化（当前为确定性命令 + 固定回炉文案，agent.rs:933）
 - desktop 设置页 system_prompt 入口接新默认值（前端已搁置）
+
+## 反思→修复闭环任务书（2026-08-02）
+
+执行阻塞：无。说明：main 上 review::extract_json 私有，reflection.rs 自带等价实现
+（同第二本先例，已记 PROGRESS）；record_reflection_lesson 与 PR #58 的
+record_llm_knowledge 并存，合入后可统一（待裁决）。顺手活（待裁决，不做）：反思 UI
+展示、教训分级衰减、多模型反思对比。

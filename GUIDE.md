@@ -189,6 +189,22 @@ max_cycles = 1                        # 失败回炉上限
 验证命令的逐条结果通过 `verification` 事件推送给前端（桌面端显示为 `✓ / ✗` 系统行，
 HTTP API 为 `event: verification` 的 SSE）。
 
+### 失败回炉反思（`[agent]`）
+
+P1 验证或 B3 审查失败需要回炉修复时，Agent 会先用 LLM 做一次显式反思——分析根因与
+修复计划——再把反思前置到回炉消息里让模型带着计划去修；反思提炼的教训（lesson）会
+沉淀进记忆库（Skill 类目，去重 + 脱敏），下次任务可被召回复用。反思只发生在失败回炉
+路径，调用失败或响应不可解析时静默回落原文案，不阻断循环：
+
+```toml
+[agent]
+reflect_on_failure = true            # 默认 true（失败路径本就昂贵；可关）
+reflect_model = "deepseek-v4-flash"  # 可选；未配置回落 main provider
+reflect_max_chars = 4000             # 反思输入的最后完成文本上限（字符）
+```
+
+反思契约：模型返回 `{"root_cause":"...","fix_plan":"...","lesson":"..."}`。
+
 ### 每步 effort 路由与观察压缩（P2）
 
 `step_effort_routing = true` 时，Agent 在每步按规则选择 provider：上一步是正常工具

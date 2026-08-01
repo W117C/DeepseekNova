@@ -31,6 +31,7 @@ pub mod delegate;
 pub mod memory;
 pub mod plan_mode;
 pub mod prompts;
+pub mod reflection;
 mod review;
 pub mod sub_agent;
 pub mod test_utils;

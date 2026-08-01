@@ -589,6 +589,16 @@ pub fn build_agent_with_role_providers(
                 });
                 agent = agent.with_distill_hook(distill);
 
+                // 反思教训沉淀：memory 启用且反思开时挂 LessonHook（失败仅 warn）。
+                if config.agent.reflect_on_failure {
+                    let lh = handle.clone();
+                    agent = agent.with_lesson_hook(std::sync::Arc::new(move |lesson: String| {
+                        if let Err(e) = lh.record_reflection_lesson(&lesson) {
+                            tracing::warn!("reflection lesson store failed: {e}");
+                        }
+                    }));
+                }
+
                 // B3 审查计数：memory 启用时落 counters 表；关闭时 agent 内 tracing 兜底。
                 if config.review.enabled {
                     let ch = handle.clone();
@@ -719,6 +729,36 @@ pub fn build_agent_with_role_providers(
     agent = agent.with_concurrent_tools(config.agent.concurrent_tools);
     if config.verify.enabled && !config.verify.commands.is_empty() {
         agent = agent.with_verify(config.verify.commands.clone(), config.verify.max_cycles);
+    }
+
+    // ── 反思闭环：P1 验证 / B3 审查失败回炉前显式反思（默认开；模型回落 main）──
+    if config.agent.reflect_on_failure {
+        let reflect_provider: Arc<dyn deepseeknova_provider::Provider> =
+            match config.agent.reflect_model.as_deref() {
+                Some(model) => match config.resolve_provider_for_model(model).cloned() {
+                    Some(cfg) => {
+                        match deepseeknova_provider::factory::create_provider_with_model(
+                            &cfg, model, None,
+                        ) {
+                            Ok(p) => p.into(),
+                            Err(e) => {
+                                tracing::warn!(
+                                    "reflect_model '{model}' unavailable ({e}); using main provider"
+                                );
+                                provider.clone()
+                            }
+                        }
+                    }
+                    None => {
+                        tracing::warn!(
+                            "reflect_model '{model}' has no matching provider; using main provider"
+                        );
+                        provider.clone()
+                    }
+                },
+                None => provider.clone(),
+            };
+        agent = agent.with_reflection(reflect_provider, config.agent.reflect_max_chars);
     }
 
     // ── P2 高频决策经济学 ──
@@ -1182,6 +1222,41 @@ mod tests {
         let provider = std::sync::Arc::new(stub_provider());
         let agent = build_agent(&config, std::env::temp_dir(), provider, 5, None, vec![]).unwrap();
         assert!(!agent.tool_names().iter().any(|n| n == "recall"));
+    }
+
+    #[tokio::test]
+    async fn build_agent_wires_reflection_and_runs_without_panic() {
+        use futures::StreamExt;
+        let mut config = Config::default(); // reflect_on_failure 默认 true
+        config.graph.enabled = false;
+        config.verify.enabled = false;
+        config.review.enabled = false;
+        let root = std::env::temp_dir().join(format!("dnv-reflect-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let provider = std::sync::Arc::new(stub_provider());
+        let agent = build_agent(&config, root.clone(), provider, 5, None, vec![]).unwrap();
+
+        // 一轮 run 正常结束（无失败回炉则反思不触发，但装配路径必须不 panic）。
+        let mut stream = agent
+            .run_stream(RunInput {
+                prompt: "hi".into(),
+                images: vec![],
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+
+        // 反思教训钩子挂在记忆引擎上，库仍可打开。
+        let engine = deepseeknova_core::memory::engine::MemoryEngine::open(
+            root.join(".deepseeknova/memory.db"),
+            true,
+        )
+        .unwrap();
+        let _ = engine
+            .list(deepseeknova_core::memory::store::MemoryCategory::Skill)
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]
