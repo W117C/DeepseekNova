@@ -109,3 +109,6 @@
 - [x] TUI 多行输入：Shift+Enter / Ctrl+J 换行；行内 Home/End；↑/↓ 多行移光标（单行仍走历史）；input_view 纵向跟随 + 横向窗口；输入框 3→5 行；提示行/帮助/文档同步。
 - [x] verify LLM 化：VerifyConfig 增 llm/llm_model/llm_max_chars（默认关）；Agent::with_llm_verify；verify.rs 增 render/parse/run_llm_verify_pass（JSON 契约 {"passed": bool, "reason": ...}，失败才回炉，调用/解析失败 Skipped）；runtime 装配 provider（回落 main）。
 - [x] 收尾：cargo fmt + make check EXIT=0（全 workspace 684 通过）；反向验证三连红→绿（diff 色、多行光标、LLM 判定）；README 徽章 684。
+
+## 交付
+- 分支 feat/side-tasks @ 2f79b72，已推送 origin；PR: https://github.com/W117C/DeepseekNova/pull/56
