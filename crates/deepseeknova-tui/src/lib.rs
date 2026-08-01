@@ -9,8 +9,9 @@
 //! - pauses, errors, approval requests
 //! - status bar with model, phase, token usage and scrollback position,
 //!   bottom hint line, Codex-style semantic colors (cyan/magenta/green/red/dim)
-//! - single-line input editing with a visible cursor (←/→/Home/End/Delete/
-//!   Ctrl+U/Ctrl+W), input history, scrollback, Ctrl+C cancel
+//! - multi-line input editing with a visible cursor (←/→/Home/End per line,
+//!   Shift+Enter / Ctrl+J newline, Delete/Backspace, Ctrl+U/Ctrl+W), input
+//!   history, scrollback, Ctrl+C cancel
 //! - slash commands: `/help` `/clear` `/quit` `/new` `/sessions` `/resume`
 //!   `/model` `/cost` `/skills` `/mcp` `/raw` `/undo`
 //!
@@ -74,8 +75,10 @@ pub struct TuiRunner {
     session: Option<Arc<dyn SessionController>>,
     /// `/skills` 扫描的技能目录（默认 `.deepseeknova/skills`、`.agents/skills`）。
     skills_paths: Vec<PathBuf>,
-    /// `/mcp` 展示的已启用 MCP server 名（由 CLI 从配置传入）。
-    mcp_servers: Vec<String>,
+    /// `/mcp` 展示的已启用 MCP server（由 CLI 从配置传入，含探测用启动命令）。
+    mcp_servers: Vec<McpServerInfo>,
+    /// `/mcp` 实时连接探测（CLI 实现；缺失时仅列名）。
+    mcp_probe: Option<Arc<dyn McpProbe>>,
     /// 可选撤销控制器：启用 `/undo` `/undo all` `/undo list`。
     undo: Option<Arc<dyn UndoController>>,
 }
@@ -132,6 +135,28 @@ pub trait UndoController: Send + Sync {
     async fn rollback_all(&self) -> anyhow::Result<usize>;
 }
 
+/// `/mcp` 展示的一个已启用 MCP server。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpServerInfo {
+    pub name: String,
+    /// stdio 启动命令（command + args 连接），仅用于实时连接探测。
+    pub command: String,
+}
+
+/// 连接探测结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpStatus {
+    Connected,
+    Disconnected(String),
+}
+
+/// `/mcp` 实时连接探测器（CLI 实现：短超时 spawn 检查进程存活）。
+#[async_trait]
+pub trait McpProbe: Send + Sync {
+    /// 与 `servers` 同序返回探测状态。
+    async fn probe(&self, servers: &[McpServerInfo]) -> Vec<McpStatus>;
+}
+
 impl TuiRunner {
     /// Wrap `runner` for display in the TUI.
     pub fn new(runner: Arc<dyn Runner>) -> Self {
@@ -149,6 +174,7 @@ impl TuiRunner {
                 PathBuf::from(".agents/skills"),
             ],
             mcp_servers: Vec::new(),
+            mcp_probe: None,
             undo: None,
         }
     }
@@ -202,9 +228,15 @@ impl TuiRunner {
         self
     }
 
-    /// 指定 `/mcp` 展示的已启用 MCP server 名。
-    pub fn with_mcp_servers(mut self, servers: Vec<String>) -> Self {
+    /// 指定 `/mcp` 展示的已启用 MCP server（含探测用启动命令）。
+    pub fn with_mcp_servers(mut self, servers: Vec<McpServerInfo>) -> Self {
         self.mcp_servers = servers;
+        self
+    }
+
+    /// 指定 `/mcp` 实时连接探测器。
+    pub fn with_mcp_probe(mut self, probe: Arc<dyn McpProbe>) -> Self {
+        self.mcp_probe = Some(probe);
         self
     }
 
@@ -255,6 +287,10 @@ impl TuiRunner {
         let mut session = RunSession::default();
 
         loop {
+            // 状态栏常驻成本：每帧从 router ledger 取会话累计成本（无 router 保持 None）。
+            if let Some(r) = &self.router {
+                app.total_cost_usd = r.ledger().report(&r.price_table()).total_usd;
+            }
             terminal.draw(|f| app.draw(f))?;
 
             tokio::select! {
@@ -399,7 +435,7 @@ impl TuiRunner {
                 false
             }
             "mcp" => {
-                self.handle_mcp(app);
+                self.handle_mcp(app).await;
                 false
             }
             "undo" => {
@@ -692,7 +728,7 @@ impl TuiRunner {
         }
     }
 
-    fn handle_mcp(&self, app: &mut AppState) {
+    async fn handle_mcp(&self, app: &mut AppState) {
         if self.mcp_servers.is_empty() {
             app.push_line(LineKind::System, "未配置 MCP 服务器");
             app.push_line(
@@ -701,9 +737,20 @@ impl TuiRunner {
             );
             return;
         }
-        app.push_line(LineKind::System, "已配置 MCP 服务器:");
-        for name in &self.mcp_servers {
-            app.push_line(LineKind::System, &format!("  • {name}"));
+        let statuses = match &self.mcp_probe {
+            Some(probe) => probe.probe(&self.mcp_servers).await,
+            None => Vec::new(),
+        };
+        app.push_line(LineKind::System, "已配置 MCP 服务器（实时状态）:");
+        for (i, server) in self.mcp_servers.iter().enumerate() {
+            let line = match statuses.get(i) {
+                Some(McpStatus::Connected) => format!("  • {} — ✓ 已连接", server.name),
+                Some(McpStatus::Disconnected(reason)) => {
+                    format!("  • {} — ✗ 未连接（{reason}）", server.name)
+                }
+                None => format!("  • {}", server.name),
+            };
+            app.push_line(LineKind::System, &line);
         }
     }
 
@@ -918,26 +965,182 @@ impl InputState {
         self.cursor = start;
     }
 
-    /// 可见窗口：让光标始终落在 `width` 内；返回（文本起点, 可见片段）。
-    fn visible_window(&self, width: usize) -> (usize, &str) {
-        let width = width.max(1);
-        if self.text.len() <= width {
-            return (0, self.text.as_str());
+    /// 光标所在行的起止字节区间（不含换行符）。
+    fn current_line_bounds(&self) -> (usize, usize) {
+        let before = &self.text[..self.cursor];
+        let start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let after = &self.text[self.cursor..];
+        let end = self.cursor + after.find('\n').unwrap_or(after.len());
+        (start, end)
+    }
+
+    /// 光标在当前行的列（字符数）。
+    fn current_line_col(&self) -> usize {
+        let (start, _) = self.current_line_bounds();
+        self.text[start..self.cursor].chars().count()
+    }
+
+    /// 上一行同列；上一行更短则落在行尾；已在首行不动。
+    fn move_line_up(&mut self) {
+        let (start, _) = self.current_line_bounds();
+        if start == 0 {
+            return;
         }
-        let raw_start = if self.cursor < width {
-            0
-        } else {
-            self.cursor - width + 1
-        };
-        let start = floor_char_boundary(&self.text, raw_start);
-        let raw_end = (start + width).min(self.text.len());
-        let end = floor_char_boundary(&self.text, raw_end).max(start);
-        (start, &self.text[start..end])
+        let col = self.current_line_col();
+        let prev_start = self.text[..start - 1]
+            .rfind('\n')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let prev_end = start - 1;
+        let mut target = prev_start;
+        let mut found = false;
+        for (idx, (i, _)) in self.text[prev_start..prev_end].char_indices().enumerate() {
+            if idx == col {
+                target = prev_start + i;
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            target = prev_end;
+        }
+        self.cursor = target;
+    }
+
+    /// 下一行同列；下一行更短则落在行尾；已在末行不动。
+    fn move_line_down(&mut self) {
+        let (_, end) = self.current_line_bounds();
+        if end >= self.text.len() {
+            return;
+        }
+        let col = self.current_line_col();
+        let next_start = end + 1;
+        let next_end = self.text[next_start..]
+            .find('\n')
+            .map(|i| next_start + i)
+            .unwrap_or(self.text.len());
+        let mut target = next_start;
+        let mut found = false;
+        for (idx, (i, _)) in self.text[next_start..next_end].char_indices().enumerate() {
+            if idx == col {
+                target = next_start + i;
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            target = next_end;
+        }
+        self.cursor = target;
+    }
+
+    /// 光标移到当前行行首（Home）。
+    fn home_line(&mut self) {
+        let (start, _) = self.current_line_bounds();
+        self.cursor = start;
+    }
+
+    /// 光标移到当前行行尾（End）。
+    fn end_line(&mut self) {
+        let (_, end) = self.current_line_bounds();
+        self.cursor = end;
+    }
+
+    /// 可见窗口：让光标始终落在 `width` 内；返回（文本起点, 可见片段）。
+    /// 仅测试使用（生产渲染走 `input_view` + `window_slice`）。
+    #[cfg(test)]
+    fn visible_window(&self, width: usize) -> (usize, &str) {
+        window_slice(&self.text, self.cursor, width)
     }
 
     /// 光标相对 `start` 的显示列（按 Unicode 宽度计，中文算 2 列）。
+    #[cfg(test)]
     fn cursor_column(&self, start: usize) -> u16 {
         Line::from(self.text[start..self.cursor].to_string()).width() as u16
+    }
+}
+
+/// 单行水平窗口：让 `cursor`（行内字节下标）落在 `width` 内，UTF-8 边界安全。
+fn window_slice(text: &str, cursor: usize, width: usize) -> (usize, &str) {
+    let width = width.max(1);
+    let cursor = cursor.min(text.len());
+    if text.len() <= width {
+        return (0, text);
+    }
+    let raw_start = if cursor < width {
+        0
+    } else {
+        cursor - width + 1
+    };
+    let start = floor_char_boundary(text, raw_start);
+    let raw_end = (start + width).min(text.len());
+    let end = floor_char_boundary(text, raw_end).max(start);
+    (start, &text[start..end])
+}
+
+/// 多行输入视图：每行水平窗口 + 纵向跟随光标行。
+#[derive(Debug, PartialEq, Eq)]
+struct InputView {
+    /// 每行的可见片段（UTF-8 安全），渲染时按 `scroll_row` 起显示。
+    rows: Vec<String>,
+    /// 光标所在行（绝对行号）。
+    cursor_row: usize,
+    /// 光标在该行的显示列（Unicode 宽度）。
+    cursor_col: u16,
+    /// 首行显示偏移（让光标行始终可见）。
+    scroll_row: usize,
+}
+
+/// 计算多行输入的显示视图；`width` 为每行宽度，`max_rows` 为可见行数。
+fn input_view(text: &str, cursor: usize, width: usize, max_rows: usize) -> InputView {
+    let width = width.max(1);
+    let max_rows = max_rows.max(1);
+    let lines: Vec<&str> = text.split('\n').collect();
+    let cursor = cursor.min(text.len());
+    let cursor_row = text[..cursor]
+        .matches('\n')
+        .count()
+        .min(lines.len().saturating_sub(1));
+    let line_start: usize = {
+        let mut offset = 0;
+        for _ in 0..cursor_row {
+            offset = text[offset..]
+                .find('\n')
+                .map(|i| offset + i + 1)
+                .unwrap_or(text.len());
+        }
+        offset
+    };
+    let cursor_line = &text[line_start..];
+    let line_end = cursor_line
+        .find('\n')
+        .map(|i| line_start + i)
+        .unwrap_or(text.len());
+    let cursor_in_line = cursor.saturating_sub(line_start).min(line_end - line_start);
+    let (win_start, _) = window_slice(cursor_line, cursor_in_line, width);
+    let cursor_col = Line::from(&cursor_line[win_start..cursor_in_line]).width() as u16;
+    let rows = lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            if i == cursor_row {
+                window_slice(l, cursor_in_line, width).1.to_string()
+            } else {
+                let end = floor_char_boundary(l, width);
+                l[..end].to_string()
+            }
+        })
+        .collect();
+    let scroll_row = if cursor_row < max_rows {
+        0
+    } else {
+        cursor_row - max_rows + 1
+    };
+    InputView {
+        rows,
+        cursor_row,
+        cursor_col,
+        scroll_row,
     }
 }
 
@@ -977,6 +1180,7 @@ impl RunSession {
 }
 
 /// 回车后的处理结果。
+#[derive(Debug, PartialEq)]
 enum KeyAction {
     Quit,
     Submit(String),
@@ -995,6 +1199,8 @@ struct AppState {
     pending_text: String,
     pending_reasoning: String,
     usage: Option<Usage>,
+    /// 会话累计成本（美元），由 router ledger 每帧刷新；无 router 时为 None。
+    total_cost_usd: Option<f64>,
     scroll_offset: usize,
     auto_scroll: bool,
     model_label: String,
@@ -1167,6 +1373,13 @@ impl AppState {
                 if self.running {
                     return KeyAction::None;
                 }
+                // Shift+Enter / Ctrl+J：插入换行；裸 Enter 提交。
+                if key.modifiers.contains(KeyModifiers::SHIFT)
+                    || key.modifiers.contains(KeyModifiers::CONTROL)
+                {
+                    self.input.insert_char('\n');
+                    return KeyAction::None;
+                }
                 let prompt = std::mem::take(&mut self.input);
                 let prompt = prompt.text.trim().to_string();
                 if prompt.is_empty() {
@@ -1215,13 +1428,21 @@ impl AppState {
             }
             KeyCode::Up => {
                 if !self.running {
-                    self.history_prev();
+                    if self.input.text.contains('\n') {
+                        self.input.move_line_up();
+                    } else {
+                        self.history_prev();
+                    }
                 }
                 KeyAction::None
             }
             KeyCode::Down => {
                 if !self.running {
-                    self.history_next();
+                    if self.input.text.contains('\n') {
+                        self.input.move_line_down();
+                    } else {
+                        self.history_next();
+                    }
                 }
                 KeyAction::None
             }
@@ -1239,7 +1460,7 @@ impl AppState {
                     self.scroll_offset = 0;
                     self.auto_scroll = false;
                 } else {
-                    self.input.home();
+                    self.input.home_line();
                 }
                 KeyAction::None
             }
@@ -1247,7 +1468,7 @@ impl AppState {
                 if self.running {
                     self.auto_scroll = true;
                 } else {
-                    self.input.end();
+                    self.input.end_line();
                 }
                 KeyAction::None
             }
@@ -1320,7 +1541,8 @@ impl AppState {
                     "  /undo list     列出快照与状态",
                     "  /quit          退出 TUI（Esc）",
                     "  PageUp/Down    滚动回看",
-                    "  ↑/↓            输入历史",
+                    "  ↑/↓            输入历史（多行时移动光标）",
+                    "  Shift+Enter    换行（Ctrl+J 同）",
                     "  ←/→/Home/End  输入内移动光标（空闲时）",
                     "  Delete/Backspace 编辑输入",
                     "  Ctrl+U/W       清空输入 / 删前一词",
@@ -1384,10 +1606,13 @@ impl AppState {
 
         let mut text_lines: Vec<Line> = Vec::new();
         for line in self.visible_lines() {
-            text_lines.push(Line::from(Span::styled(
-                line_display_text(line, self.display_mode),
-                style_for(line.kind),
-            )));
+            let text = line_display_text(line, self.display_mode);
+            // diff 输出（工具结果/模型正文）做行级高亮：+ 绿、- 红、@@ 青。
+            if matches!(line.kind, LineKind::ToolResult | LineKind::Agent) {
+                text_lines.push(Line::from(diff_spans(&text, style_for(line.kind))));
+            } else {
+                text_lines.push(Line::from(Span::styled(text, style_for(line.kind))));
+            }
         }
         if !self.pending_reasoning.is_empty() && self.display_mode != DisplayMode::Lite {
             let text = if self.display_mode == DisplayMode::Raw {
@@ -1434,6 +1659,7 @@ impl AppState {
                     u.reasoning_tokens,
                     u.cache_hit_tokens,
                 )),
+                self.total_cost_usd,
                 self.lines.len(),
                 scroll_pct,
             ),
@@ -1442,6 +1668,7 @@ impl AppState {
                 phase,
                 self.turn,
                 None,
+                self.total_cost_usd,
                 self.lines.len(),
                 scroll_pct,
             ),
@@ -1457,11 +1684,20 @@ impl AppState {
         };
         let pane = chunks[2];
         let pane_width = pane.width.saturating_sub(2) as usize;
-        let (input_start, visible) = self.input.visible_window(pane_width.max(1));
-        let input_text = if self.running {
-            " (等待响应… Ctrl+C 取消) ".to_string()
+        let pane_rows = pane.height.saturating_sub(2) as usize;
+        let view = input_view(
+            &self.input.text,
+            self.input.cursor,
+            pane_width.max(1),
+            pane_rows.max(1),
+        );
+        let input_lines: Vec<Line> = if self.running {
+            vec![Line::from(" (等待响应… Ctrl+C 取消) ")]
         } else {
-            visible.to_string()
+            view.rows
+                .iter()
+                .map(|row| Line::from(row.as_str()))
+                .collect()
         };
         let input_block = Block::default()
             .borders(Borders::ALL)
@@ -1475,13 +1711,17 @@ impl AppState {
                 ),
                 Span::styled(" prompt", Style::default().add_modifier(Modifier::BOLD)),
             ]));
-        let input_widget = Paragraph::new(Span::styled(input_text, input_style)).block(input_block);
+        let input_widget = Paragraph::new(input_lines)
+            .style(input_style)
+            .block(input_block)
+            .scroll((view.scroll_row as u16, 0));
         f.render_widget(input_widget, pane);
 
-        // 可见光标：仅空闲时显示，宽输入横向跟随。
+        // 可见光标：仅空闲时显示；横向窗口与纵向滚动都跟随光标。
         if !self.running {
-            let col = self.input.cursor_column(input_start).min(pane_width as u16);
-            f.set_cursor_position((pane.x + 1 + col, pane.y + 1));
+            let col = view.cursor_col.min(pane_width as u16);
+            let row = (view.cursor_row - view.scroll_row) as u16;
+            f.set_cursor_position((pane.x + 1 + col, pane.y + 1 + row));
         }
 
         // ── Bottom hint line ─────────────────────────────────
@@ -1504,7 +1744,7 @@ fn layout_constraints() -> [Constraint; 4] {
     [
         Constraint::Min(0),
         Constraint::Length(1),
-        Constraint::Length(3),
+        Constraint::Length(5),
         Constraint::Length(1),
     ]
 }
@@ -1515,6 +1755,7 @@ fn status_segments(
     phase: &str,
     turn: usize,
     usage: Option<(u32, u32, u32, u32, u32)>,
+    total_cost_usd: Option<f64>,
     line_count: usize,
     scroll_pct: usize,
 ) -> Vec<Span<'static>> {
@@ -1535,6 +1776,9 @@ fn status_segments(
             dim,
         ));
     }
+    if let Some(cost) = total_cost_usd {
+        segments.push(Span::styled(format!(" | ${cost:.6}"), dim));
+    }
     segments.push(Span::styled(
         format!(" | lines {line_count} | 滚动 {scroll_pct}%"),
         dim,
@@ -1542,9 +1786,33 @@ fn status_segments(
     segments
 }
 
+/// diff 行级高亮：`+` 新增=green、`-` 删除=red、`@@` 块头=cyan，
+/// 其余行沿用 `base` 样式；`+++`/`---` 文件头不改色。
+fn diff_spans(text: &str, base: Style) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("\n", base));
+        }
+        let style = if line.starts_with("+++") || line.starts_with("---") {
+            base
+        } else if line.starts_with("@@") {
+            Style::default().fg(Color::Cyan)
+        } else if line.starts_with('+') {
+            Style::default().fg(Color::Green)
+        } else if line.starts_with('-') {
+            Style::default().fg(Color::Red)
+        } else {
+            base
+        };
+        spans.push(Span::styled(line.to_string(), style));
+    }
+    spans
+}
+
 /// 底部提示行：编辑键与帮助入口。
 fn hint_text() -> &'static str {
-    "Ctrl+U 清行 · Ctrl+W 删词 · Home/End 行首尾 · /help · Esc 退出"
+    "Ctrl+U 清行 · Ctrl+W 删词 · Shift+Enter 换行 · Home/End 行首尾 · /help · Esc 退出"
 }
 
 /// Codex 风格语义配色：用户/状态=cyan，agent=magenta，次要=dim，
@@ -1882,6 +2150,134 @@ mod tests {
     }
 
     #[test]
+    fn input_state_multiline_line_moves() {
+        let mut input = InputState {
+            text: "ab\ncdef\ngh".into(),
+            cursor: "ab\ncdef\ngh".len(),
+        };
+        input.move_line_up();
+        assert_eq!(input.cursor, 5, "从 gh 列2 上移到 cdef 列2");
+        assert_eq!(&input.text[input.cursor..input.cursor + 2], "ef");
+        input.move_line_up();
+        assert_eq!(input.cursor, 2, "从 cdef 列2 上移到 ab 列2");
+        input.move_line_up();
+        assert_eq!(input.cursor, 2, "首行不再上移");
+        input.move_line_down();
+        assert_eq!(input.cursor, 5, "回到 cdef 列2");
+        input.move_line_down();
+        assert_eq!(input.cursor, 10, "回到 gh 列2");
+        input.move_line_down();
+        assert_eq!(input.cursor, 10, "末行不再下移");
+
+        // 上一行更短：同列越界落在行尾
+        let mut short = InputState {
+            text: "a\nbc".into(),
+            cursor: 4,
+        };
+        short.move_line_up();
+        assert_eq!(short.cursor, 1, "上一行只有 1 字符 → 行尾");
+
+        // 下一行更短
+        let mut short2 = InputState {
+            text: "abc\nd".into(),
+            cursor: 3,
+        };
+        short2.move_line_down();
+        assert_eq!(short2.cursor, 5, "下一行只有 1 字符 → 行尾");
+    }
+
+    #[test]
+    fn home_end_move_within_current_line() {
+        let mut input = InputState {
+            text: "ab\ncd".into(),
+            cursor: 4,
+        };
+        input.home_line();
+        assert_eq!(input.cursor, 3, "Home 到第二行行首");
+        input.end_line();
+        assert_eq!(input.cursor, 5, "End 到第二行行尾");
+
+        // 单行时 Home/End 与全文一致
+        input.set_text("abc".into());
+        input.home_line();
+        assert_eq!(input.cursor, 0);
+        input.end_line();
+        assert_eq!(input.cursor, 3);
+    }
+
+    #[test]
+    fn shift_enter_inserts_newline_and_enter_submits_multiline() {
+        let mut app = AppState::default();
+        let key = |code: KeyCode, modifiers: KeyModifiers| KeyEvent {
+            code,
+            modifiers,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        };
+        assert_eq!(
+            app.handle_key(&key(KeyCode::Enter, KeyModifiers::SHIFT)),
+            KeyAction::None
+        );
+        assert_eq!(app.input.text, "\n");
+        app.handle_key(&key(KeyCode::Enter, KeyModifiers::CONTROL));
+        assert_eq!(app.input.text, "\n\n");
+
+        app.input.set_text("a\nb".into());
+        match app.handle_key(&key(KeyCode::Enter, KeyModifiers::NONE)) {
+            KeyAction::Submit(p) => assert_eq!(p, "a\nb"),
+            other => panic!("多行输入应整体提交，got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn up_down_move_lines_when_multiline_else_history() {
+        let mut app = AppState::default();
+        let key = |code: KeyCode| KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        };
+        app.input.set_text("aa\nbb".into());
+        app.handle_key(&key(KeyCode::Up));
+        assert_eq!(app.input.cursor, 2, "多行时 Up 上移一行");
+        app.handle_key(&key(KeyCode::Down));
+        assert_eq!(app.input.cursor, 5, "多行时 Down 下移一行");
+
+        // 单行仍走输入历史
+        let mut hist = AppState::default();
+        hist.history.push("h1".into());
+        hist.handle_key(&key(KeyCode::Up));
+        assert_eq!(hist.input.text, "h1");
+    }
+
+    #[test]
+    fn input_view_follows_cursor_row_col_and_windows() {
+        let view = input_view("ab\ncdef", 2, 10, 3);
+        assert_eq!(view.cursor_row, 0);
+        assert_eq!(view.cursor_col, 2);
+        assert_eq!(view.scroll_row, 0);
+        assert_eq!(view.rows, vec!["ab".to_string(), "cdef".to_string()]);
+
+        // 纵向跟随：光标在末行、窗口 2 行时滚动到可见区
+        let view2 = input_view("a\nb\nc\nd", 7, 10, 2);
+        assert_eq!(view2.cursor_row, 3);
+        assert_eq!(view2.scroll_row, 2);
+        assert_eq!(view2.cursor_col, 1);
+
+        // 横向跟随：宽行窗口让光标可见
+        let view3 = input_view("abcdef", 5, 3, 2);
+        assert_eq!(view3.rows[0], "def");
+        assert_eq!(view3.cursor_col, 2);
+        assert_eq!(view3.scroll_row, 0);
+
+        // 非光标行从行首截断
+        let view4 = input_view("abcdef\nxy", 8, 3, 2);
+        assert_eq!(view4.rows[0], "abc", "非光标行只显示行首窗口");
+        assert_eq!(view4.cursor_row, 1);
+    }
+
+    #[test]
     fn input_keys_edit_and_scroll_modes() {
         let mut app = AppState::default();
         let key = |code: KeyCode| KeyEvent {
@@ -2162,13 +2558,25 @@ mod tests {
 
     #[tokio::test]
     async fn mcp_command_lists_configured_servers() {
-        let mut tui = TuiRunner::new(Arc::new(StubRunner))
-            .with_mcp_servers(vec!["github".into(), "fs".into()]);
+        let mut tui = TuiRunner::new(Arc::new(StubRunner)).with_mcp_servers(vec![
+            McpServerInfo {
+                name: "github".into(),
+                command: "npx github-mcp".into(),
+            },
+            McpServerInfo {
+                name: "fs".into(),
+                command: "npx fs-mcp".into(),
+            },
+        ]);
         let mut app = AppState::default();
         tui.handle_command(&mut app, "mcp").await;
         let texts: Vec<&str> = app.lines.iter().map(|l| l.text.as_str()).collect();
         assert!(texts.iter().any(|t| t.contains("github")));
         assert!(texts.iter().any(|t| t.contains("fs")));
+        assert!(
+            !texts.iter().any(|t| t.contains("已连接")),
+            "无探测器时只列名"
+        );
     }
 
     #[tokio::test]
@@ -2180,6 +2588,47 @@ mod tests {
             .lines
             .iter()
             .any(|l| l.text.contains("未配置 MCP 服务器")));
+    }
+
+    struct MockProbe {
+        statuses: std::sync::Mutex<Vec<McpStatus>>,
+    }
+
+    #[async_trait]
+    impl McpProbe for MockProbe {
+        async fn probe(&self, servers: &[McpServerInfo]) -> Vec<McpStatus> {
+            assert!(!servers.is_empty());
+            self.statuses.lock().unwrap().clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_command_shows_live_probe_status() {
+        let probe = Arc::new(MockProbe {
+            statuses: std::sync::Mutex::new(vec![
+                McpStatus::Connected,
+                McpStatus::Disconnected("exit 1".into()),
+            ]),
+        });
+        let mut tui = TuiRunner::new(Arc::new(StubRunner))
+            .with_mcp_servers(vec![
+                McpServerInfo {
+                    name: "ok-server".into(),
+                    command: "sleep 5".into(),
+                },
+                McpServerInfo {
+                    name: "bad-server".into(),
+                    command: "exit 1".into(),
+                },
+            ])
+            .with_mcp_probe(probe);
+        let mut app = AppState::default();
+        tui.handle_command(&mut app, "mcp").await;
+        let texts: Vec<&str> = app.lines.iter().map(|l| l.text.as_str()).collect();
+        assert!(texts.iter().any(|t| t.contains("ok-server — ✓ 已连接")));
+        assert!(texts
+            .iter()
+            .any(|t| t.contains("bad-server — ✗ 未连接（exit 1）")));
     }
 
     #[test]
@@ -2343,7 +2792,7 @@ mod tests {
             [
                 Constraint::Min(0),
                 Constraint::Length(1),
-                Constraint::Length(3),
+                Constraint::Length(5),
                 Constraint::Length(1),
             ]
         );
@@ -2351,7 +2800,7 @@ mod tests {
 
     #[test]
     fn status_segments_style_model_and_secondary_info() {
-        let segments = status_segments("deepseek-v4-flash", "ready", 3, None, 12, 50);
+        let segments = status_segments("deepseek-v4-flash", "ready", 3, None, None, 12, 50);
         assert_eq!(segments[0].content, " model=deepseek-v4-flash");
         assert_eq!(segments[0].style.fg, Some(Color::Cyan));
         assert!(segments[0].style.add_modifier.contains(Modifier::BOLD));
@@ -2364,16 +2813,52 @@ mod tests {
             .content
             .contains("| lines 12 | 滚动 50%"));
 
-        let with_usage = status_segments("m", "running", 7, Some((10, 20, 30, 5, 2)), 99, 0);
-        assert_eq!(with_usage.len(), 5);
+        let with_usage = status_segments(
+            "m",
+            "running",
+            7,
+            Some((10, 20, 30, 5, 2)),
+            Some(0.001234),
+            99,
+            0,
+        );
+        assert_eq!(with_usage.len(), 6);
         assert!(with_usage[3].content.contains("↑10 ↓20 Σ30"));
-        assert!(with_usage[4].content.contains("| lines 99 | 滚动 0%"));
+        assert!(with_usage[4].content.contains("| $0.001234"));
+        assert!(with_usage[5].content.contains("| lines 99 | 滚动 0%"));
+    }
+
+    #[test]
+    fn diff_spans_highlight_add_del_and_hunk_header() {
+        let base = Style::default().add_modifier(Modifier::DIM);
+        let spans = diff_spans("a\n+b\n-c\n@@ -1,2 +1,2 @@\n context", base);
+        assert_eq!(spans[0].content, "a");
+        assert_eq!(spans[0].style, base, "普通行沿用基础样式");
+        assert_eq!(spans[2].content, "+b");
+        assert_eq!(spans[2].style.fg, Some(Color::Green));
+        assert_eq!(spans[4].content, "-c");
+        assert_eq!(spans[4].style.fg, Some(Color::Red));
+        assert_eq!(spans[6].content, "@@ -1,2 +1,2 @@");
+        assert_eq!(spans[6].style.fg, Some(Color::Cyan));
+        assert_eq!(spans[8].content, " context");
+        assert_eq!(spans[8].style, base);
+        // +++/--- 文件头不改色
+        let head = diff_spans("+++ b/a.rs\n--- a/a.rs", base);
+        assert_eq!(head[0].style, base);
+        assert_eq!(head[2].style, base);
     }
 
     #[test]
     fn hint_text_lists_edit_keys_and_help() {
         let hint = hint_text();
-        for key in ["Ctrl+U", "Ctrl+W", "Home/End", "/help", "Esc"] {
+        for key in [
+            "Ctrl+U",
+            "Ctrl+W",
+            "Shift+Enter",
+            "Home/End",
+            "/help",
+            "Esc",
+        ] {
             assert!(hint.contains(key), "提示行缺少 {key}: {hint}");
         }
     }

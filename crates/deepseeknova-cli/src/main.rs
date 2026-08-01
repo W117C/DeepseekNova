@@ -1,6 +1,7 @@
 mod chat;
 mod cli;
 mod init;
+mod mcp_probe;
 mod setup;
 mod tui_undo;
 
@@ -300,12 +301,19 @@ async fn main() -> anyhow::Result<()> {
             if *tui {
                 use deepseeknova_provider::cost::ModelRole;
                 use deepseeknova_provider::factory::ReasoningEffort;
-                // /mcp 只列已启用 server 名（展示用，不做实时连接探测）。
-                let mcp_server_names: Vec<String> = config
+                // /mcp：列出已启用 server 并做实时连接探测（短超时 spawn 检查存活）。
+                let mcp_server_infos: Vec<deepseeknova_tui::McpServerInfo> = config
                     .mcp_servers
                     .iter()
                     .filter(|s| s.enabled)
-                    .map(|s| s.name.clone())
+                    .map(|s| deepseeknova_tui::McpServerInfo {
+                        name: s.name.clone(),
+                        command: if s.args.is_empty() {
+                            s.command.clone()
+                        } else {
+                            format!("{} {}", s.command, s.args.join(" "))
+                        },
+                    })
                     .collect();
                 // /undo：与 `checkpoint` 子命令同一快照库。
                 let undo_controller = Arc::new(tui_undo::TuiUndoController {
@@ -356,7 +364,8 @@ async fn main() -> anyhow::Result<()> {
                     .with_model_router(Arc::clone(&model_router))
                     .with_baseline_effort(baseline_effort)
                     .with_current_model(model.clone())
-                    .with_mcp_servers(mcp_server_names)
+                    .with_mcp_servers(mcp_server_infos)
+                    .with_mcp_probe(Arc::new(mcp_probe::CliMcpProbe::default()))
                     .with_undo_controller(undo_controller);
                 if let Some(ctrl) = session_controller {
                     tui = tui.with_session_controller(ctrl);
