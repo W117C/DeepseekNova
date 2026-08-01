@@ -16,6 +16,111 @@ pub enum Direction {
     Both,
 }
 
+/// 追踪路径的默认最大边数（跳数）。
+pub const DEFAULT_MAX_HOPS: usize = 6;
+
+/// 单次追踪最多返回的路径数；超出时置 `truncated`。
+const MAX_PATHS: usize = 100;
+
+/// 追踪结果：路径按调用方向排列（callers 为「源 → … → 目标」）。
+#[derive(Debug, Default)]
+pub struct TraceResult {
+    pub paths: Vec<Vec<Node>>,
+    pub truncated: bool,
+}
+
+/// 路径追踪的展开状态：邻接表 + 方向/边类型过滤 + 结果与截断标记。
+struct TraceExpander<'a> {
+    fwd: HashMap<&'a str, Vec<(&'a str, EdgeKind)>>,
+    rev: HashMap<&'a str, Vec<(&'a str, EdgeKind)>>,
+    edge_kinds: Vec<EdgeKind>,
+    dir: Direction,
+    max_hops: usize,
+    paths: Vec<Vec<String>>,
+    truncated: bool,
+}
+
+impl<'a> TraceExpander<'a> {
+    fn new(edges: &'a [EdgeRec], edge_kinds: &[EdgeKind], dir: Direction, max_hops: usize) -> Self {
+        let mut fwd: HashMap<&str, Vec<(&str, EdgeKind)>> = HashMap::new();
+        let mut rev: HashMap<&str, Vec<(&str, EdgeKind)>> = HashMap::new();
+        for e in edges {
+            fwd.entry(e.src.as_str())
+                .or_default()
+                .push((e.dst.as_str(), e.kind));
+            rev.entry(e.dst.as_str())
+                .or_default()
+                .push((e.src.as_str(), e.kind));
+        }
+        for v in fwd.values_mut() {
+            v.sort_by(|a, b| (a.1.as_str(), a.0).cmp(&(b.1.as_str(), b.0)));
+        }
+        for v in rev.values_mut() {
+            v.sort_by(|a, b| (a.1.as_str(), a.0).cmp(&(b.1.as_str(), b.0)));
+        }
+        Self {
+            fwd,
+            rev,
+            edge_kinds: edge_kinds.to_vec(),
+            dir,
+            max_hops,
+            paths: Vec::new(),
+            truncated: false,
+        }
+    }
+
+    /// 按方向取邻居：Callers=入边，Callees=出边，Both=两者。
+    fn adjacent(&self, cur: &str) -> Vec<(&'a str, EdgeKind)> {
+        let mut out = Vec::new();
+        if matches!(self.dir, Direction::Callers | Direction::Both) {
+            out.extend(self.rev.get(cur).cloned().unwrap_or_default());
+        }
+        if matches!(self.dir, Direction::Callees | Direction::Both) {
+            out.extend(self.fwd.get(cur).cloned().unwrap_or_default());
+        }
+        out
+    }
+
+    /// 深度受限的路径 DFS：每条路径去重防环；到深度上限后仍能延伸即置截断标记。
+    fn dfs(&mut self, cur: &str, path: &mut Vec<String>, visited: &mut HashSet<String>) {
+        let hops = path.len().saturating_sub(1);
+        if hops >= self.max_hops {
+            let has_more = self.adjacent(cur).iter().any(|(next, kind)| {
+                (self.edge_kinds.is_empty() || self.edge_kinds.contains(kind))
+                    && !visited.contains(*next)
+            });
+            if has_more {
+                self.truncated = true;
+            }
+            if self.paths.len() < MAX_PATHS {
+                self.paths.push(path.clone());
+            }
+            return;
+        }
+        let mut found = false;
+        for (next, kind) in self.adjacent(cur) {
+            if !(self.edge_kinds.is_empty() || self.edge_kinds.contains(&kind))
+                || visited.contains(next)
+            {
+                continue;
+            }
+            found = true;
+            if self.paths.len() >= MAX_PATHS {
+                self.truncated = true;
+                return;
+            }
+            visited.insert(next.to_string());
+            path.push(next.to_string());
+            self.dfs(next, path, visited);
+            path.pop();
+            visited.remove(next);
+        }
+        if !found && self.paths.len() < MAX_PATHS {
+            self.paths.push(path.clone());
+        }
+    }
+}
+
 /// refresh 统计报告。
 #[derive(Debug, Clone, Default)]
 pub struct RefreshReport {
@@ -39,13 +144,18 @@ CREATE VIRTUAL TABLE IF NOT EXISTS symbol_fts_cjk USING fts5(
   name, signature, doc, id UNINDEXED, path UNINDEXED, tokenize='trigram');
 CREATE TABLE IF NOT EXISTS raw_calls(path TEXT, caller TEXT, callee TEXT);
 CREATE TABLE IF NOT EXISTS raw_imports(path TEXT, text TEXT);
+CREATE TABLE IF NOT EXISTS raw_trait_methods(path TEXT, trait_name TEXT, method_name TEXT, start_line INTEGER);
+CREATE TABLE IF NOT EXISTS raw_impl_methods(path TEXT, trait_name TEXT, impl_type TEXT, method_name TEXT, start_line INTEGER);
 CREATE INDEX IF NOT EXISTS idx_raw_calls_path ON raw_calls(path);
 CREATE INDEX IF NOT EXISTS idx_raw_imports_path ON raw_imports(path);
+CREATE INDEX IF NOT EXISTS idx_raw_trait_methods_path ON raw_trait_methods(path);
+CREATE INDEX IF NOT EXISTS idx_raw_impl_methods_path ON raw_impl_methods(path);
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
 ";
 
-/// 当前 schema 版本：v2 引入 raw_calls/raw_imports 事实表与全局边重建。
-const SCHEMA_VERSION: &str = "2";
+/// 当前 schema 版本：v2 引入 raw_calls/raw_imports 事实表与全局边重建；
+/// v3 引入 raw_trait_methods/raw_impl_methods 事实表（动态分发桥）。
+const SCHEMA_VERSION: &str = "3";
 
 /// 硬排除的目录名（任何路径段命中即跳过）。
 const HARD_EXCLUDES: [&str; 4] = ["target", "node_modules", ".git", "dist"];
@@ -203,6 +313,8 @@ impl Store {
             tx.execute("DELETE FROM symbol_fts_cjk WHERE path = ?1", [rel_path])?;
             tx.execute("DELETE FROM raw_calls WHERE path = ?1", [rel_path])?;
             tx.execute("DELETE FROM raw_imports WHERE path = ?1", [rel_path])?;
+            tx.execute("DELETE FROM raw_trait_methods WHERE path = ?1", [rel_path])?;
+            tx.execute("DELETE FROM raw_impl_methods WHERE path = ?1", [rel_path])?;
 
             let file_name = rel_path.rsplit('/').next().unwrap_or(rel_path).to_string();
             let file_node = Node {
@@ -237,6 +349,18 @@ impl Store {
                     (rel_path, import),
                 )?;
             }
+            for (trait_name, method_name, start_line) in &parsed.trait_methods {
+                tx.execute(
+                    "INSERT INTO raw_trait_methods(path, trait_name, method_name, start_line)\n                     VALUES(?1, ?2, ?3, ?4)",
+                    (rel_path, trait_name, method_name, start_line),
+                )?;
+            }
+            for (trait_name, impl_type, method_name, start_line) in &parsed.impl_trait_methods {
+                tx.execute(
+                    "INSERT INTO raw_impl_methods(path, trait_name, impl_type, method_name, start_line)\n                     VALUES(?1, ?2, ?3, ?4, ?5)",
+                    (rel_path, trait_name, impl_type, method_name, start_line),
+                )?;
+            }
             report.files_reparsed += 1;
             tx.execute(
                 "INSERT INTO files(path, mtime, hash) VALUES(?1, ?2, ?3)\n                 ON CONFLICT(path) DO UPDATE SET mtime = excluded.mtime, hash = excluded.hash",
@@ -267,6 +391,8 @@ impl Store {
             tx.execute("DELETE FROM symbol_fts_cjk WHERE path = ?1", [path])?;
             tx.execute("DELETE FROM raw_calls WHERE path = ?1", [path])?;
             tx.execute("DELETE FROM raw_imports WHERE path = ?1", [path])?;
+            tx.execute("DELETE FROM raw_trait_methods WHERE path = ?1", [path])?;
+            tx.execute("DELETE FROM raw_impl_methods WHERE path = ?1", [path])?;
             tx.execute("DELETE FROM files WHERE path = ?1", [path])?;
         }
 
@@ -335,6 +461,71 @@ impl Store {
                         tx.execute(
                             "INSERT INTO edges(src, dst, kind) VALUES(?1, ?2, ?3)",
                             (&file_id, dst, EdgeKind::Imports.as_str()),
+                        )?;
+                    }
+                }
+            }
+        }
+
+        // 全局重建 Dispatch 边：trait 方法 → 同名 impl 方法（名称级动态分发桥）。
+        // 老库无此边不影响既有查询；本库升级后由 raw_* 事实表重建。
+        tx.execute(
+            "DELETE FROM edges WHERE kind = ?1",
+            [EdgeKind::Dispatch.as_str()],
+        )?;
+        let mut trait_method_ids: HashMap<(String, String), Vec<String>> = HashMap::new();
+        {
+            let mut stmt = tx.prepare(
+                "SELECT tm.trait_name, tm.method_name, n.id\n                 FROM raw_trait_methods tm\n                 JOIN nodes n\n                   ON n.path = tm.path\n                  AND n.start_line = tm.start_line\n                  AND n.name = tm.method_name",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (trait_name, method_name, id) = row?;
+                trait_method_ids
+                    .entry((trait_name, method_name))
+                    .or_default()
+                    .push(id);
+            }
+        }
+        let mut impl_method_ids: HashMap<(String, String), Vec<String>> = HashMap::new();
+        {
+            let mut stmt = tx.prepare(
+                "SELECT im.trait_name, im.method_name, n.id\n                 FROM raw_impl_methods im\n                 JOIN nodes n\n                   ON n.path = im.path\n                  AND n.start_line = im.start_line\n                  AND n.name = im.method_name",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (trait_name, method_name, id) = row?;
+                impl_method_ids
+                    .entry((trait_name, method_name))
+                    .or_default()
+                    .push(id);
+            }
+        }
+        let keys: Vec<(String, String)> = trait_method_ids.keys().cloned().collect();
+        let mut inserted: HashSet<(String, String)> = HashSet::new();
+        for key in keys {
+            let Some(impl_ids) = impl_method_ids.get(&key) else {
+                continue;
+            };
+            let trait_ids = &trait_method_ids[&key];
+            for t_id in trait_ids {
+                for i_id in impl_ids {
+                    if inserted.insert((t_id.clone(), i_id.clone())) {
+                        tx.execute(
+                            "INSERT INTO edges(src, dst, kind) VALUES(?1, ?2, ?3)",
+                            (t_id, i_id, EdgeKind::Dispatch.as_str()),
                         )?;
                     }
                 }
@@ -536,6 +727,45 @@ impl Store {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         Ok(nodes)
+    }
+
+    /// 深度受限的路径追踪：从 `id` 出发沿 `edge_kinds` 按方向 DFS，
+    /// 返回完整链（callers 方向归一为「源 → … → 目标」）。深度/路径数超限置截断标记。
+    pub fn trace_paths(
+        &self,
+        id: &str,
+        edge_kinds: &[EdgeKind],
+        dir: Direction,
+        max_hops: usize,
+    ) -> Result<TraceResult, GraphError> {
+        let edges = self.all_edges()?;
+        let mut expander = TraceExpander::new(&edges, edge_kinds, dir, max_hops);
+        let mut visited: HashSet<String> = HashSet::new();
+        visited.insert(id.to_string());
+        expander.dfs(id, &mut vec![id.to_string()], &mut visited);
+        let TraceExpander {
+            paths, truncated, ..
+        } = expander;
+
+        let mut out_paths = Vec::new();
+        for mut p in paths {
+            if dir == Direction::Callers {
+                p.reverse();
+            }
+            let mut nodes = Vec::new();
+            for nid in &p {
+                if let Some(node) = self.get(nid)? {
+                    nodes.push(node);
+                }
+            }
+            if !nodes.is_empty() {
+                out_paths.push(nodes);
+            }
+        }
+        Ok(TraceResult {
+            paths: out_paths,
+            truncated,
+        })
     }
 
     /// 按名称精确查找节点。

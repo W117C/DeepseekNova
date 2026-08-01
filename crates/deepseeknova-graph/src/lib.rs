@@ -10,7 +10,7 @@ pub mod repomap;
 pub mod store;
 
 pub use model::{EdgeKind, GraphError, Node, NodeKind};
-pub use store::Direction;
+pub use store::{Direction, TraceResult};
 
 use std::path::{Path, PathBuf};
 
@@ -68,6 +68,18 @@ impl GraphIndex {
     ) -> Result<Vec<Node>, GraphError> {
         let id = self.resolve(entity)?;
         self.store.neighbors(&id, kinds, dir, hops)
+    }
+
+    /// 多跳路径追踪：沿 `kinds` 按方向搜索（callers 归一为「源 → … → 目标」）。
+    pub fn trace(
+        &self,
+        entity: &str,
+        kinds: &[EdgeKind],
+        dir: Direction,
+        max_hops: usize,
+    ) -> Result<TraceResult, GraphError> {
+        let id = self.resolve(entity)?;
+        self.store.trace_paths(&id, kinds, dir, max_hops)
     }
 
     /// 骨架视图：doc + 签名 + 直接子实体签名。
@@ -204,5 +216,95 @@ mod tests {
 
         // 不存在实体报错
         assert!(idx.skeleton("no_such_symbol").is_err());
+    }
+
+    #[test]
+    fn trace_follows_dynamic_dispatch_to_all_impl_candidates() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/animals.rs"),
+            "trait Animal {\n    fn speak(&self);\n}\n\n\
+             struct Dog;\nimpl Animal for Dog {\n    fn speak(&self) {}\n}\n\n\
+             struct Cat;\nimpl Animal for Cat {\n    fn speak(&self) {}\n}\n\n\
+             fn make_noise(a: &dyn Animal) {\n    a.speak();\n}\n",
+        )
+        .unwrap();
+        let mut idx = GraphIndex::open(root, 1_048_576).unwrap();
+        idx.refresh().unwrap();
+
+        let tr = idx
+            .trace(
+                "make_noise",
+                &[EdgeKind::Calls, EdgeKind::Dispatch],
+                Direction::Callees,
+                6,
+            )
+            .unwrap();
+        let impl_paths: Vec<_> = tr
+            .paths
+            .iter()
+            .filter(|p| p.len() >= 3 && p[2].kind == NodeKind::Method)
+            .collect();
+        assert_eq!(
+            impl_paths.len(),
+            2,
+            "dyn 调用应桥接到两个 impl 候选：{:?}",
+            tr.paths
+                .iter()
+                .map(|p| p.iter().map(|n| n.id.as_str()).collect::<Vec<_>>())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            impl_paths[0][2].id != impl_paths[1][2].id,
+            "两个候选必须是不同 impl 方法节点"
+        );
+        assert!(!tr.truncated);
+    }
+
+    #[test]
+    fn trace_callers_returns_reversed_call_chain() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/chain.rs"),
+            "pub fn a() { b(); }\npub fn b() { c(); }\npub fn c() {}\n",
+        )
+        .unwrap();
+        let mut idx = GraphIndex::open(root, 1_048_576).unwrap();
+        idx.refresh().unwrap();
+
+        let tr = idx
+            .trace("c", &[EdgeKind::Calls], Direction::Callers, 6)
+            .unwrap();
+        assert_eq!(tr.paths.len(), 1, "应只有 a→b→c 一条链");
+        let names: Vec<&str> = tr.paths[0].iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(names, vec!["a", "b", "c"]);
+        assert!(!tr.truncated);
+    }
+
+    #[test]
+    fn trace_truncates_at_max_hops() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/deep.rs"),
+            "pub fn a() { b(); }\npub fn b() { c(); }\npub fn c() { d(); }\n\
+             pub fn d() { e(); }\npub fn e() { f(); }\npub fn f() { g(); }\npub fn g() {}\n",
+        )
+        .unwrap();
+        let mut idx = GraphIndex::open(root, 1_048_576).unwrap();
+        idx.refresh().unwrap();
+
+        let tr = idx
+            .trace("g", &[EdgeKind::Calls], Direction::Callers, 3)
+            .unwrap();
+        assert!(tr.truncated, "深度超限必须显式标注");
+        assert_eq!(tr.paths.len(), 1);
+        let names: Vec<&str> = tr.paths[0].iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(names, vec!["d", "e", "f", "g"], "截断在 3 跳处");
     }
 }

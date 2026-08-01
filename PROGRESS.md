@@ -60,3 +60,18 @@
 
 ## 决策记录（建议/偏离）
 - 任务 0 的 metadata --locked 预期调整见上（补录已发生，非未做）。
+
+## 任务书：CodeGraph 增强（动态分发 + trace/impact/explore）— 开工回执（2026-08-02）
+- 理解的目标：graph crate 增加 Rust trait 动态分发桥（Dispatch 边：trait 方法 → 全部 impl 方法），新增 trace_code（多跳调用链）、impact_code（影响面聚合）、explore_code（按文件源码分组）三个只读工具并接入 runtime；文档同步；PR 提交。
+- 顺序：任务 0 基线 → 1 动态分发（model+parser+store+graph 单测）→ 2 trace → 3 impact → 4 explore → 5 runtime 注册/提示词/文档/反向验证/PR。
+- 最大风险：tree-sitter Rust 节点字段（已查 grammar.json 核实 impl_item.trait/type、trait_item.name、field_expression.field）；Dispatch 边加入后 PageRank 与邻居查询行为变化；跨 crate 改动按 AGENTS.md §1 记录。
+- 基线证据（本轮实测）：main@dd373e1 干净；make check EXIT=0；graph 19 单测绿 + 1 存量 ignored；tools 45+12+7 绿。
+- 关键决策（偏离白名单的替代路）：新工具注册点 tools/src/lib.rs 不在白名单，改为 graph_tools.rs 导出 graph_query_tools()，runtime 在 graph.enabled 时注册（关闭时不注册 = 行为等价于禁用，且不动 schema 预算测试）。
+
+## 任务状态（CodeGraph 增强）
+- [x] 任务 1：动态分发（EdgeKind::Dispatch；解析 function_signature_item（trait 方法）与 impl Trait for Type 方法；raw_trait_methods/raw_impl_methods 事实表 + schema v3 强制重解析；全局重建 Dispatch 边：trait 方法 → 全部同名 impl 方法）。graph 单测 24 绿（+5，含 dyn 调用桥接两个候选的 fixture）。
+- [x] 任务 2：trace_code（store.trace_paths：DFS 深度上限 6、路径上限 100、超限 truncated 标记；callers 归一为源→目标；tools 测试 a→b→c 带行号）。
+- [x] 任务 3：impact_code（反向路径按 文件×符号×路径 聚合 + total 统计；tools 测试 2 文件 2 路径）。
+- [x] 任务 4：explore_code（按文件分组、区间合并、行号源码 / skeleton；tools 测试跨文件分组）。
+- [x] 任务 5：runtime 注册 graph_query_tools（graph.enabled 时）+ 两个注册测试只加断言；GRAPH_RETRIEVAL_HINT 补 4-6 条；GUIDE / graph README / CHANGELOG 已更新；cargo fmt + make check 全绿；反向验证：改坏 trace_truncates 断言 → 红（1 failed）→ 还原 → 绿（graph 24+1 存量 ignored、tools 50+12+7）。
+- 跨 crate 协议记录（AGENTS.md §1）：预扫描=不碰 core/agent 公共 API、不改既有断言（runtime 两测试只加新工具断言）；备选路径 A=改 tools/src/lib.rs 的 all_builtin 注册表（路径不在白名单）vs B=graph_tools.rs 导出 graph_query_tools() 由 runtime 按 graph.enabled 注册（白名单内、行为等价、不触及 schema 预算测试）——选 B；自检=三 crate 测试 + make check + 反向验证红→绿。

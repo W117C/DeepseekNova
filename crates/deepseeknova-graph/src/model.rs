@@ -51,6 +51,8 @@ pub enum EdgeKind {
     Calls,
     Implements,
     References,
+    /// 动态分发桥：trait 方法 → 同名 impl 方法（Rust trait 多态，名称级匹配）。
+    Dispatch,
 }
 
 impl EdgeKind {
@@ -61,6 +63,7 @@ impl EdgeKind {
             Self::Calls => "calls",
             Self::Implements => "implements",
             Self::References => "references",
+            Self::Dispatch => "dispatch",
         }
     }
     pub fn parse(s: &str) -> Option<Self> {
@@ -70,6 +73,7 @@ impl EdgeKind {
             "calls" => Self::Calls,
             "implements" => Self::Implements,
             "references" => Self::References,
+            "dispatch" => Self::Dispatch,
             _ => return None,
         })
     }
