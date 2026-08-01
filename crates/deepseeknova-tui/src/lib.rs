@@ -31,6 +31,9 @@
 use crossterm::event::{self, Event as CEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use deepseeknova_core::chunk::Usage;
 use deepseeknova_core::runner::{RunEvent, RunInput, Runner};
+use deepseeknova_provider::cost::ModelRole;
+use deepseeknova_provider::factory::ReasoningEffort;
+use deepseeknova_provider::router::ModelRouter;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -54,7 +57,21 @@ const RESULT_PREVIEW: usize = 400;
 pub struct TuiRunner {
     runner: Arc<dyn Runner>,
     model_label: String,
+    /// agent 重建工厂：`(effort, model)` → 新 runner（用于 `/model` 热切换）。
+    factory: Option<AgentFactory>,
+    /// 可选 ModelRouter：启用 `/model use` 角色指针与 `/cost`。
+    router: Option<Arc<ModelRouter>>,
+    baseline_effort: ReasoningEffort,
+    current_effort: ReasoningEffort,
+    current_model: Option<String>,
 }
+
+/// agent 重建工厂类型。
+type AgentFactory = Arc<
+    dyn Fn(Option<ReasoningEffort>, Option<String>) -> anyhow::Result<Arc<dyn Runner>>
+        + Send
+        + Sync,
+>;
 
 impl TuiRunner {
     /// Wrap `runner` for display in the TUI.
@@ -62,6 +79,11 @@ impl TuiRunner {
         Self {
             runner,
             model_label: "default".to_string(),
+            factory: None,
+            router: None,
+            baseline_effort: ReasoningEffort::High,
+            current_effort: ReasoningEffort::High,
+            current_model: None,
         }
     }
 
@@ -71,15 +93,46 @@ impl TuiRunner {
         self
     }
 
+    /// 提供 agent 重建工厂（与 chat REPL 相同的签名），启用 `/model` 热切换。
+    pub fn with_agent_factory<F>(mut self, factory: F) -> Self
+    where
+        F: Fn(Option<ReasoningEffort>, Option<String>) -> anyhow::Result<Arc<dyn Runner>>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.factory = Some(Arc::new(factory));
+        self
+    }
+
+    /// 提供 ModelRouter，启用 `/model use` 与 `/cost`。
+    pub fn with_model_router(mut self, router: Arc<ModelRouter>) -> Self {
+        self.router = Some(router);
+        self
+    }
+
+    /// 配置基线 reasoning effort（`/model thinking` 恢复目标）。
+    pub fn with_baseline_effort(mut self, effort: ReasoningEffort) -> Self {
+        self.baseline_effort = effort;
+        self.current_effort = effort;
+        self
+    }
+
+    /// 当前模型名（`/model switch` 后自动更新）。
+    pub fn with_current_model(mut self, model: Option<String>) -> Self {
+        self.current_model = model;
+        self
+    }
+
     /// Enter the TUI and block until the user quits.
-    pub async fn run(&self) -> anyhow::Result<()> {
+    pub async fn run(&mut self) -> anyhow::Result<()> {
         let mut terminal = ratatui::init();
         let result = self.run_inner(&mut terminal).await;
         ratatui::restore();
         result
     }
 
-    async fn run_inner(&self, terminal: &mut DefaultTerminal) -> anyhow::Result<()> {
+    async fn run_inner(&mut self, terminal: &mut DefaultTerminal) -> anyhow::Result<()> {
         let (tx, mut rx) = mpsc::channel::<AppEvent>(256);
 
         // Spawn input reader（阻塞线程，crossterm 事件源）。
@@ -114,6 +167,13 @@ impl TuiRunner {
                                 match app.handle_key(&key) {
                                     KeyAction::Quit => return Ok(()),
                                     KeyAction::Submit(prompt) => {
+                                        // 命令交给 TUI 层处理（/model /cost 需要工厂与 router）。
+                                        if let Some(cmd) = prompt.strip_prefix('/') {
+                                            if self.handle_command(&mut app, cmd) {
+                                                return Ok(());
+                                            }
+                                            continue;
+                                        }
                                         app.running = true;
                                         app.turn += 1;
                                         app.push_line(LineKind::User, &prompt);
@@ -171,6 +231,248 @@ impl TuiRunner {
                 }
             }
         }
+    }
+}
+
+impl TuiRunner {
+    /// 处理以 `/` 开头的命令。返回 `true` 表示退出。
+    fn handle_command(&mut self, app: &mut AppState, cmd: &str) -> bool {
+        let (name, rest) = cmd.split_once(char::is_whitespace).unwrap_or((cmd, ""));
+        match name {
+            "model" => {
+                self.handle_model(app, rest);
+                false
+            }
+            "cost" => {
+                self.handle_cost(app);
+                false
+            }
+            _ => matches!(app.execute_command(cmd), CommandResult::Quit),
+        }
+    }
+
+    fn handle_model(&mut self, app: &mut AppState, args: &str) {
+        let (sub, sub_args) = args.split_once(' ').unwrap_or((args, ""));
+        match sub {
+            "" | "help" => {
+                app.push_line(LineKind::System, "Model commands:");
+                for line in [
+                    "  /model                  显示当前模型与帮助",
+                    "  /model effort <level>   设置 reasoning effort: disabled|high|max",
+                    "  /model thinking         切换 thinking 开/关",
+                    "  /model switch <name>    切换到指定模型",
+                    "  /model use <role> <name> 设置角色指针: main|task|compact|quick",
+                ] {
+                    app.push_line(LineKind::System, line);
+                }
+                app.push_line(
+                    LineKind::System,
+                    &format!(
+                        "当前: effort={} model={}",
+                        effort_label(self.current_effort),
+                        self.current_model.as_deref().unwrap_or("(default)")
+                    ),
+                );
+                if let Some(r) = &self.router {
+                    for role in [
+                        ModelRole::Main,
+                        ModelRole::Task,
+                        ModelRole::Compact,
+                        ModelRole::Quick,
+                    ] {
+                        app.push_line(
+                            LineKind::System,
+                            &format!(
+                                "  {:<8} → {}",
+                                role.label(),
+                                r.pointer(role).unwrap_or_else(|| "(default)".to_string())
+                            ),
+                        );
+                    }
+                }
+            }
+            "effort" => {
+                if sub_args.is_empty() {
+                    app.push_line(
+                        LineKind::System,
+                        &format!(
+                            "当前 reasoning effort: {} (基线: {})",
+                            effort_label(self.current_effort),
+                            effort_label(self.baseline_effort)
+                        ),
+                    );
+                    app.push_line(LineKind::System, "用法: /model effort disabled|high|max");
+                } else {
+                    match parse_effort_command(sub_args) {
+                        Ok(effort) => self.rebuild_runner(app, Some(effort), None),
+                        Err(msg) => app.push_line(LineKind::Error, &msg),
+                    }
+                }
+            }
+            "thinking" => {
+                let new_effort = toggle_thinking(self.current_effort, self.baseline_effort);
+                if new_effort != self.current_effort {
+                    app.push_line(
+                        LineKind::System,
+                        &format!(
+                            "thinking {} → {}",
+                            if self.current_effort.thinking() {
+                                "on"
+                            } else {
+                                "off"
+                            },
+                            if new_effort.thinking() { "on" } else { "off" }
+                        ),
+                    );
+                    self.rebuild_runner(app, Some(new_effort), None);
+                } else {
+                    app.push_line(LineKind::System, "thinking 状态未变");
+                }
+            }
+            "switch" => {
+                if sub_args.is_empty() {
+                    app.push_line(LineKind::Error, "用法: /model switch <provider-model-name>");
+                } else {
+                    self.rebuild_runner(app, None, Some(sub_args.to_string()));
+                }
+            }
+            "use" => {
+                let mut parts = sub_args.split_whitespace();
+                match (parts.next(), parts.next(), &self.router) {
+                    (Some(role_s), Some(model), Some(r)) => match ModelRole::parse(role_s) {
+                        Some(role) => match r.set_pointer(role, model) {
+                            Ok(()) => {
+                                app.push_line(
+                                    LineKind::System,
+                                    &format!("pointer {} → {model}", role.label()),
+                                );
+                                self.rebuild_runner(app, None, None);
+                            }
+                            Err(e) => app.push_line(LineKind::Error, &e.to_string()),
+                        },
+                        None => {
+                            app.push_line(LineKind::Error, "未知角色（main|task|compact|quick）")
+                        }
+                    },
+                    (_, _, None) => {
+                        app.push_line(LineKind::Error, "model pointers 不可用（未提供 router）")
+                    }
+                    _ => app.push_line(
+                        LineKind::Error,
+                        "用法: /model use <main|task|compact|quick> <model-name>",
+                    ),
+                }
+            }
+            other => {
+                app.push_line(
+                    LineKind::Error,
+                    &format!("未知 /model 子命令: {other}（/model help 查看）"),
+                );
+            }
+        }
+    }
+
+    fn handle_cost(&mut self, app: &mut AppState) {
+        let Some(r) = &self.router else {
+            app.push_line(LineKind::System, "router 不可用（/cost 需要 ModelRouter）");
+            return;
+        };
+        let report = r.ledger().report(&r.price_table());
+        if report.rows.is_empty() {
+            app.push_line(LineKind::System, "还没有用量记录");
+            return;
+        }
+        app.push_line(
+            LineKind::System,
+            &format!(
+                "{:<22} {:<8} {:>10} {:>12} {:>10} {:>10}",
+                "model", "role", "prompt", "completion", "cache-hit", "cost($)"
+            ),
+        );
+        for row in report.rows.iter().take(20) {
+            let cost = row
+                .cost_usd
+                .map(|c| format!("{c:.6}"))
+                .unwrap_or_else(|| "-".to_string());
+            app.push_line(
+                LineKind::System,
+                &format!(
+                    "{:<22} {:<8} {:>10} {:>12} {:>10} {:>10}",
+                    row.model,
+                    row.role.label(),
+                    row.bucket.prompt_tokens,
+                    row.bucket.completion_tokens,
+                    row.bucket.cache_hit_tokens,
+                    cost
+                ),
+            );
+        }
+        if let Some(total) = report.total_usd {
+            app.push_line(LineKind::System, &format!("总计: ${total:.6}"));
+        }
+        if report.unmetered_calls > 0 {
+            app.push_line(
+                LineKind::System,
+                &format!("（未计量调用: {}）", report.unmetered_calls),
+            );
+        }
+    }
+
+    /// 用工厂重建 runner（/model 系列命令）。失败只提示，不破坏当前会话。
+    fn rebuild_runner(
+        &mut self,
+        app: &mut AppState,
+        effort: Option<ReasoningEffort>,
+        model: Option<String>,
+    ) {
+        let Some(f) = &self.factory else {
+            app.push_line(LineKind::Error, "模型切换不可用（未提供 agent 工厂）");
+            return;
+        };
+        let eff = effort.unwrap_or(self.current_effort);
+        let mdl = model.or_else(|| self.current_model.clone());
+        match f(Some(eff), mdl.clone()) {
+            Ok(runner) => {
+                self.runner = runner;
+                self.current_effort = eff;
+                self.current_model = mdl.clone();
+                self.model_label = mdl.unwrap_or_else(|| "default".to_string());
+                app.push_line(
+                    LineKind::System,
+                    &format!(
+                        "模型已切换: effort={} model={}",
+                        effort_label(eff),
+                        self.model_label
+                    ),
+                );
+            }
+            Err(e) => app.push_line(LineKind::Error, &format!("模型切换失败: {e}")),
+        }
+    }
+}
+
+fn parse_effort_command(args: &str) -> Result<ReasoningEffort, String> {
+    let trimmed = args.trim();
+    if trimmed.is_empty() {
+        return Err("未提供 effort 级别".into());
+    }
+    ReasoningEffort::from_config_str(trimmed)
+        .ok_or_else(|| format!("未知 effort 级别: '{trimmed}'"))
+}
+
+fn toggle_thinking(current: ReasoningEffort, baseline: ReasoningEffort) -> ReasoningEffort {
+    if current.thinking() {
+        ReasoningEffort::Disabled
+    } else {
+        baseline
+    }
+}
+
+fn effort_label(effort: ReasoningEffort) -> &'static str {
+    match effort {
+        ReasoningEffort::Disabled => "disabled",
+        ReasoningEffort::High => "high",
+        ReasoningEffort::Max => "max",
     }
 }
 
@@ -352,11 +654,9 @@ impl AppState {
                 if prompt.is_empty() {
                     return KeyAction::None;
                 }
-                if let Some(rest) = prompt.strip_prefix('/') {
-                    return match self.execute_command(rest) {
-                        CommandResult::Quit => KeyAction::Quit,
-                        _ => KeyAction::None,
-                    };
+                if prompt.starts_with('/') {
+                    // 命令不入输入历史，由 run loop 分派。
+                    return KeyAction::Submit(prompt);
                 }
                 self.history.push(prompt.clone());
                 self.history_idx = None;
@@ -624,6 +924,16 @@ fn truncate_str(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use deepseeknova_core::runner::{RunEventStream, RunInput};
+
+    struct StubRunner;
+
+    #[async_trait::async_trait]
+    impl Runner for StubRunner {
+        async fn run_stream(&self, _input: RunInput) -> anyhow::Result<RunEventStream> {
+            Ok(Box::pin(tokio_stream::empty()))
+        }
+    }
 
     #[test]
     fn truncate_keeps_utf8_boundary() {
@@ -743,6 +1053,77 @@ mod tests {
             app.push_line(LineKind::System, &format!("x{i}"));
         }
         assert_eq!(app.lines.len(), MAX_LINES);
+    }
+
+    #[test]
+    fn effort_helpers_parse_and_toggle() {
+        assert!(matches!(
+            parse_effort_command("high"),
+            Ok(ReasoningEffort::High)
+        ));
+        assert!(matches!(
+            parse_effort_command("disabled"),
+            Ok(ReasoningEffort::Disabled)
+        ));
+        assert!(parse_effort_command("bogus").is_err());
+        assert!(matches!(
+            toggle_thinking(ReasoningEffort::High, ReasoningEffort::Max),
+            ReasoningEffort::Disabled
+        ));
+        assert!(matches!(
+            toggle_thinking(ReasoningEffort::Disabled, ReasoningEffort::Max),
+            ReasoningEffort::Max
+        ));
+        assert_eq!(effort_label(ReasoningEffort::Max), "max");
+    }
+
+    #[test]
+    fn model_effort_rebuilds_via_factory() {
+        let calls = Arc::new(std::sync::Mutex::new(0usize));
+        let c2 = calls.clone();
+        let factory = move |effort: Option<ReasoningEffort>,
+                            _model: Option<String>|
+              -> anyhow::Result<Arc<dyn Runner>> {
+            *c2.lock().unwrap() += 1;
+            assert!(matches!(effort, Some(ReasoningEffort::Max)));
+            Ok(Arc::new(StubRunner))
+        };
+        let mut tui = TuiRunner::new(Arc::new(StubRunner)).with_agent_factory(factory);
+        let mut app = AppState::default();
+        assert!(!tui.handle_command(&mut app, "model effort max"));
+        assert_eq!(*calls.lock().unwrap(), 1);
+        assert!(matches!(tui.current_effort, ReasoningEffort::Max));
+        assert!(app.lines.iter().any(|l| l.text.contains("模型已切换")));
+    }
+
+    #[test]
+    fn model_switch_updates_label_and_model() {
+        let factory = |_effort: Option<ReasoningEffort>,
+                       model: Option<String>|
+         -> anyhow::Result<Arc<dyn Runner>> {
+            assert_eq!(model.as_deref(), Some("deepseek-v4-pro"));
+            Ok(Arc::new(StubRunner))
+        };
+        let mut tui = TuiRunner::new(Arc::new(StubRunner)).with_agent_factory(factory);
+        let mut app = AppState::default();
+        tui.handle_command(&mut app, "model switch deepseek-v4-pro");
+        assert_eq!(tui.current_model.as_deref(), Some("deepseek-v4-pro"));
+        assert_eq!(tui.model_label, "deepseek-v4-pro");
+    }
+
+    #[test]
+    fn cost_without_router_reports_unavailable() {
+        let mut tui = TuiRunner::new(Arc::new(StubRunner));
+        let mut app = AppState::default();
+        tui.handle_command(&mut app, "cost");
+        assert!(app.lines.iter().any(|l| l.text.contains("router 不可用")));
+    }
+
+    #[test]
+    fn quit_command_returns_true() {
+        let mut tui = TuiRunner::new(Arc::new(StubRunner));
+        let mut app = AppState::default();
+        assert!(tui.handle_command(&mut app, "quit"));
     }
 
     // RunOutput 构造辅助（避免暴露内部类型）。
