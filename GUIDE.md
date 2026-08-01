@@ -181,10 +181,17 @@ coordinator 模式（`run --planner-model ...`）的 Delegate 子代理使用 `t
 enabled = true                        # 默认 false
 commands = ["cargo check --quiet"]    # 按序执行，任一失败即回炉
 max_cycles = 1                        # 失败回炉上限
+llm = false                           # 默认 false：命令通过后再用 LLM 判定产出是否满足任务
+llm_model = "deepseek-v4-flash"       # 可选；未配置回落 main provider
+llm_max_chars = 4000                  # 送入验证的完成文本上限（字符）
 ```
 
 验证通过后继续原有流程（B3 自审 / Done）。命令需同时满足 `[security]` 的
 `allowed_commands`（启用时），未命中白名单会作为验证失败处理。
+
+`llm = true` 时，确定性命令全部通过后（或未配置命令时）会用 `llm_model` 再判定一次
+完成文本是否真正满足任务：模型明确判定失败才回炉，调用/解析失败优雅跳过（不阻断
+Done）。成本敏感场景保持默认关闭，用确定性命令即可。
 
 验证命令的逐条结果通过 `verification` 事件推送给前端（桌面端显示为 `✓ / ✗` 系统行，
 HTTP API 为 `event: verification` 的 SSE）。
@@ -491,11 +498,13 @@ deepseeknova chat --tui
 │ 助手: src/ 目录包含 ...                                  │
 │                                                         │
 ├────────────────────────────────────────────────────────┤
-│ model=deepseek-v4-flash  ready | turn 1 | lines 4 | ... │
+│ model=deepseek-v4-flash  ready | turn 1 | $0.001234 | ...│
 ├─ > prompt ─────────────────────────────────────────────┤
-│ 你的输入...                                              │
+│ 第一行输入                                                │
+│ 第二行输入（Shift+Enter 换行）                            │
+│                                                         │
 └────────────────────────────────────────────────────────┘
-Ctrl+U 清行 · Ctrl+W 删词 · Home/End 行首尾 · /help · Esc 退出
+Ctrl+U 清行 · Ctrl+W 删词 · Shift+Enter 换行 · Home/End 行首尾 · /help · Esc 退出
 ```
 
 ### 配色
@@ -506,6 +515,7 @@ Ctrl+U 清行 · Ctrl+W 删词 · Home/End 行首尾 · /help · Esc 退出
 - agent 回复：magenta
 - 推理、工具调用与结果、系统信息：dim（暗色次要信息）
 - 验证通过：green；验证失败 / 错误：red（错误加粗）
+- diff 输出行级高亮：`+` 新增=green、`-` 删除=red、`@@` 块头=cyan
 - 标题与输入框边框：默认色 + bold / dim，不用 emoji
 
 ### 按键
@@ -513,11 +523,12 @@ Ctrl+U 清行 · Ctrl+W 删词 · Home/End 行首尾 · /help · Esc 退出
 | Key | Action |
 |---|---|
 | `Enter` | 提交输入 |
+| `Shift+Enter` / `Ctrl+J` | 输入内换行（多行输入） |
 | `Esc` | 空闲时退出 TUI |
 | `Ctrl+C` | 取消当前运行 |
-| `↑` / `↓` | 输入历史 |
+| `↑` / `↓` | 输入历史（多行输入时移动光标行） |
 | `←` / `→` | 输入内移动光标 |
-| `Home` / `End` | 空闲=输入光标到头/尾；运行中=滚动到顶/跟随 |
+| `Home` / `End` | 空闲=输入光标到行首/行尾；运行中=滚动到顶/跟随 |
 | `Backspace` / `Delete` | 删除光标前/后字符 |
 | `Ctrl+U` / `Ctrl+W` | 清空输入 / 删前一词 |
 | `PageUp` / `PageDown` | 对话面板滚动回看 |
@@ -534,7 +545,7 @@ Ctrl+U 清行 · Ctrl+W 删词 · Home/End 行首尾 · /help · Esc 退出
 | `/model` | 显示模型与指针；`/model effort <level>`、`/model thinking`、`/model switch <name>`、`/model use <role> <name>` |
 | `/cost` | 按模型×角色输出 token 用量与美元估算 |
 | `/skills` | 列出 `.deepseeknova/skills` 与 `.agents/skills` 中的技能 |
-| `/mcp` | 列出配置中已启用的 MCP server |
+| `/mcp` | 列出已启用 MCP server 并实时探测连接状态（✓ 已连接 / ✗ 未连接） |
 | `/raw` | 切换显示模式 normal / lite / raw（lite 隐藏推理，raw 带类型前缀） |
 | `/undo` | 回滚最近一个检查点快照 |
 | `/undo all` | 回滚全部快照 |

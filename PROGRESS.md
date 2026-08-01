@@ -94,3 +94,18 @@
 
 ## 交付与验收记录
 - 分支 feat/context7-docs，PR #55 已合入 main（2026-08-02 验收后合并）；#54、#55 明卷+暗卷+CI 全绿，远端/本地分支已删。
+
+## 顺手活清仓（除前端）— 开工回执（2026-08-02）
+- 目标：BLOCKED 里除前端外的顺手活全部落地：README 数字、TUI 成本/diff 高亮/MCP 探测/多行输入、verify LLM 化。
+- 顺序：README → TUI 成本+diff → TUI MCP 探测 → TUI 多行输入 → verify LLM → 文档/反向验证/PR。
+- 最大风险：多行输入改动 draw/布局/键位，既有 TUI 测试必须保绿；verify LLM 跨 config+agent+runtime，按 AGENTS.md §1 记录（预扫描=不动机器契约/既有断言，备选=LLM 失败优雅跳过 vs 硬阻断，选跳过与 review 一致；自检=单 crate 测试+make check+反向验证）。
+- 基线证据（本轮实测）：main@2c71284；make check EXIT=0；tui 35+1 绿 0 ignored；agent 119 绿；runtime 26 绿。
+
+## 任务状态（顺手活清仓）
+- [x] README：徽章 536→670（全 workspace 实测）、Tauri 命令 44→63（rg 实测计数）三处。
+- [x] TUI 状态栏常驻成本：AppState.total_cost_usd 每帧从 router ledger 刷新；status_segments 增 cost 段（$0.000000 精度）；/cost 明细保留。
+- [x] TUI diff 高亮：diff_spans 纯函数（+ 绿 / - 红 / @@ 青 / +++--- 不改色），应用于 ToolResult/Agent 行。
+- [x] TUI /mcp 实时探测：McpServerInfo + McpStatus + McpProbe trait；CLI 实现 CliMcpProbe（短超时 spawn，stdin 保持打开防假阴性，存活=已连接）；/mcp 显示 ✓/✗。
+- [x] TUI 多行输入：Shift+Enter / Ctrl+J 换行；行内 Home/End；↑/↓ 多行移光标（单行仍走历史）；input_view 纵向跟随 + 横向窗口；输入框 3→5 行；提示行/帮助/文档同步。
+- [x] verify LLM 化：VerifyConfig 增 llm/llm_model/llm_max_chars（默认关）；Agent::with_llm_verify；verify.rs 增 render/parse/run_llm_verify_pass（JSON 契约 {"passed": bool, "reason": ...}，失败才回炉，调用/解析失败 Skipped）；runtime 装配 provider（回落 main）。
+- [x] 收尾：cargo fmt + make check EXIT=0（全 workspace 684 通过）；反向验证三连红→绿（diff 色、多行光标、LLM 判定）；README 徽章 684。

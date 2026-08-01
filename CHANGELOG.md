@@ -14,6 +14,12 @@ All notable changes to DeepseekNova will be documented in this file.
 
 ### Added
 
+- **顺手活清仓（除前端）**：TUI 状态栏常驻成本显示（router ledger 每帧刷新）；
+  TUI diff 输出行级高亮（`+` 绿 / `-` 红 / `@@` 青）；`/mcp` 实时连接状态探测
+  （短超时 spawn 检查 stdio server 存活）；多行输入框（Shift+Enter / Ctrl+J
+  换行、行内 Home/End、纵向跟随）；`[verify] llm = true` LLM 验证（默认关，
+  明确判定失败才回炉，调用/解析失败优雅跳过）；README 测试徽章与 Tauri 命令数
+  同步实测值。
 - **代码图多跳推理（CodeGraph 式增强）**：新增 `Dispatch` 边把 Rust trait 方法桥接到
   全部同名 impl 方法（`dyn Trait` / 泛型调用点可列出候选实现，名称级匹配）；新增三个
   只读工具 `trace_code`（多跳调用链，深度上限 6 并标注截断）、`impact_code`（按文件

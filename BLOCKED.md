@@ -1,11 +1,11 @@
 # BLOCKED — 待裁决清单
 
 ## 本轮明确不做、留给领导裁决的顺手活
-- 状态栏常驻成本显示（当前只有 /cost 命令）
-- 多行输入框（当前单行 + 横向跟随）
-- MCP 实时连接状态探测（当前只列已启用 server 名）
+- ~~状态栏常驻成本显示~~（2026-08-02 已做：router ledger 每帧刷新）
+- ~~多行输入框~~（2026-08-02 已做：Shift+Enter/Ctrl+J 换行）
+- ~~MCP 实时连接状态探测~~（2026-08-02 已做：/mcp 短超时 spawn 探测）
 - 桌面端样式（领导已搁置前端）
-- diff 高亮（Codex CLI 用 syntect，按任务书不加外部依赖，留待裁决）
+- ~~diff 高亮~~（2026-08-02 已做：行级 + 绿 / - 红 / @@ 青，未加 syntect 外部依赖）
 
 ## 执行阻塞
 
@@ -30,5 +30,5 @@ PROGRESS/BLOCKED），本分支已合并 main 解决冲突并重验全绿；#54�
 - desktop 不在 `make check`，本机完整校验需 `make check-desktop`（需前端产物）
 
 **顺手活（不做，待裁决）**
-- verify LLM 化（当前为确定性命令 + 固定回炉文案，agent.rs:933）
+- ~~verify LLM 化~~（2026-08-02 已做：`[verify] llm = true`，默认关）
 - desktop 设置页 system_prompt 入口接新默认值（前端已搁置）
