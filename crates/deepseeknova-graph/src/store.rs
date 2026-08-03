@@ -650,8 +650,10 @@ impl Store {
             }
         }
 
-        report.nodes = tx.query_row("SELECT COUNT(*) FROM nodes", [], |r| r.get::<_, i64>(0))? as usize;
-        report.edges = tx.query_row("SELECT COUNT(*) FROM edges", [], |r| r.get::<_, i64>(0))? as usize;
+        report.nodes =
+            tx.query_row("SELECT COUNT(*) FROM nodes", [], |r| r.get::<_, i64>(0))? as usize;
+        report.edges =
+            tx.query_row("SELECT COUNT(*) FROM edges", [], |r| r.get::<_, i64>(0))? as usize;
         tx.commit()?;
         Ok(report)
     }
