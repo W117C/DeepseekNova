@@ -1,8 +1,8 @@
 {
   "compilerOptions": {
-    "target": "ES2021",
+    "target": "ES2022",
     "useDefineForClassFields": true,
-    "lib": ["ES2021", "DOM", "DOM.Iterable"],
+    "lib": ["ES2023", "DOM", "DOM.Iterable", "WebWorker"],
     "module": "ESNext",
     "skipLibCheck": true,
     "moduleResolution": "bundler",
@@ -10,12 +10,35 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
     "noEmit": true,
-    "jsx": "react-jsx",
+    "jsx": "preserve",
+    "jsxImportSource": "solid-js",
+    "types": ["node"],
     "strict": true,
-    "noUnusedLocals": true,
-    "noUnusedParameters": true,
-    "noFallthroughCasesInSwitch": true
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "noFallthroughCasesInSwitch": true,
+    "baseUrl": ".",
+    "paths": {
+      "@opencode-ai/ui": ["vendor/ui"],
+      "@opencode-ai/ui/components/*": ["vendor/ui/components/*"],
+      "@opencode-ai/ui/v2/*": ["vendor/ui/v2/components/*"],
+      "@opencode-ai/ui/context/*": ["vendor/ui/context/*"],
+      "@opencode-ai/ui/context": ["vendor/ui/context"],
+      "@opencode-ai/ui/theme/*": ["vendor/ui/theme/*"],
+      "@opencode-ai/ui/theme": ["vendor/ui/theme"],
+      "@opencode-ai/ui/hooks": ["vendor/ui/hooks"],
+      "@opencode-ai/ui/i18n/*": ["vendor/ui/i18n/*"],
+      "@opencode-ai/ui/styles*": ["vendor/ui/styles/*"],
+      "@opencode-ai/ui/*": ["vendor/ui/components/*"],
+      "@opencode-ai/session-ui/*": ["vendor/session-ui/*"],
+      "@opencode-ai/session-ui": ["vendor/session-ui"],
+      "@opencode-ai/app/*": ["vendor/app/*"],
+      "@opencode-ai/sdk/*": ["shims/sdk/*"],
+      "@opencode-ai/core/*": ["shims/core/*"],
+      "@opencode-ai/client/*": ["shims/client/*"],
+      "@/*": ["src/*"]
+    }
   },
-  "include": ["src"],
+  "include": ["src", "vendor/ui", "vendor/session-ui", "shims"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }
