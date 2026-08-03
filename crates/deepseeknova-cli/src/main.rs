@@ -332,6 +332,11 @@ async fn main() -> anyhow::Result<()> {
                         });
                 let factory_router = Arc::clone(&model_router);
                 let cfg = config.clone();
+                // 上下文占用率分母：主模型 context_window（未配置则 TUI 不显示）。
+                let context_window = model
+                    .as_deref()
+                    .and_then(|m| cfg.find_model(m))
+                    .and_then(|mc| mc.context_window);
                 let hist = history.clone();
                 let mcp = mcp_tools;
                 let factory = move |effort: Option<ReasoningEffort>,
@@ -367,6 +372,7 @@ async fn main() -> anyhow::Result<()> {
                 if let Some(ctrl) = session_controller {
                     tui = tui.with_session_controller(ctrl);
                 }
+                tui = tui.with_context_window(context_window);
                 tui.run().await?;
                 return Ok(());
             }

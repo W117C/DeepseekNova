@@ -197,7 +197,9 @@ impl OpenAIProvider {
 
         match result {
             HttpAttempt::Success(response) => Ok(response),
-            HttpAttempt::Retryable(msg) => Err(anyhow::anyhow!("request failed after retries: {msg}")),
+            HttpAttempt::Retryable(msg) => {
+                Err(anyhow::anyhow!("request failed after retries: {msg}"))
+            }
             HttpAttempt::Fatal(msg) => Err(anyhow::anyhow!("{msg}")),
         }
     }

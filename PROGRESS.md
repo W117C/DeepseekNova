@@ -1,5 +1,13 @@
 # PROGRESS — TUI 设计功能完善（任务书执行）
 
+## TUI v2 全面重设计 — 状态（2026-08-04 补记）
+- 状态：实现完成、未提交（`feat/side-tasks` 工作树）；spec 与 plan 见
+  `docs/superpowers/specs/2026-08-03-tui-v2-design.md`、
+  `docs/superpowers/plans/2026-08-03-tui-v2.md`；待用户评审后提交推送。
+- 证据：`cargo test -p deepseeknova-tui` = 89 通过；`make check` EXIT=0
+  （739 通过 / 0 失败 / 2 既有 ignored）；desktop Rust 侧 check/clippy/test
+  全绿；前端 lint/test 本机未跑（本机无 Node；Makefile 已改为动态探测 node）。
+
 ## 系统提示词体系 + 后端审计 — 开工回执（2026-08-01）
 - 理解的目标：主 agent 默认系统提示词（低成本高频决策引擎 + Observe→Plan→Tool→Verify→Reflect→Next Action，英文）默认启用且可配置覆盖；全链路子提示词统一；后端 22 crate 审计报告只报不修。
 - 顺序：任务 0 基线 → 1 BACKEND_AUDIT.md → 2 prompts.rs+接入+4 类单测 → 3 PROMPT_DESIGN.md+子提示词对齐+契约测试 → 4 文档/反向验证/提交推送。

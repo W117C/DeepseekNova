@@ -99,7 +99,9 @@ mod tests {
     #[test]
     fn backoff_is_capped() {
         let d = backoff_duration(10);
-        assert!(d <= Duration::from_millis(MAX_DELAY_MS + (MAX_DELAY_MS as f64 * JITTER_FACTOR) as u64));
+        assert!(
+            d <= Duration::from_millis(MAX_DELAY_MS + (MAX_DELAY_MS as f64 * JITTER_FACTOR) as u64)
+        );
     }
 
     #[test]
@@ -129,9 +131,7 @@ mod tests {
 
     #[tokio::test]
     async fn retry_success_first_try() {
-        let result = retry_with_backoff(3, || {
-            Box::pin(async { HttpAttempt::Success(42) })
-        }).await;
+        let result = retry_with_backoff(3, || Box::pin(async { HttpAttempt::Success(42) })).await;
         match result {
             HttpAttempt::Success(v) => assert_eq!(v, 42),
             _ => panic!("expected success"),
@@ -142,11 +142,16 @@ mod tests {
     async fn retry_fatal_stops_immediately() {
         let count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
         let c = count.clone();
-        let result = retry_with_backoff(3, move || {
+        let result: HttpAttempt<String> = retry_with_backoff(3, move || {
             c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            Box::pin(async move { HttpAttempt::Fatal("bad request".into()) })
-        }).await;
-        assert_eq!(count.load(std::sync::atomic::Ordering::Relaxed), 1, "fatal errors should not retry");
+            Box::pin(async move { HttpAttempt::Fatal("bad request".to_string()) })
+        })
+        .await;
+        assert_eq!(
+            count.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "fatal errors should not retry"
+        );
         match result {
             HttpAttempt::Fatal(msg) => assert_eq!(msg, "bad request"),
             _ => panic!("expected fatal"),
@@ -166,7 +171,8 @@ mod tests {
                     HttpAttempt::Success("ok")
                 }
             })
-        }).await;
+        })
+        .await;
         assert_eq!(attempts.load(std::sync::atomic::Ordering::Relaxed), 3);
         match result {
             HttpAttempt::Success(v) => assert_eq!(v, "ok"),

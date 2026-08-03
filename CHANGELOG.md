@@ -14,6 +14,14 @@ All notable changes to DeepseekNova will be documented in this file.
 
 ### Added
 
+- **TUI v2 全面重设计**：`deepseeknova-tui` 从单文件拆分为
+  `app/commands/input/model/render/theme` 模块，会话内容改为实时增量构建的消息树
+  （Turn → Segment，推理不再被工具调用从中间拆断）；新增消息导航焦点
+  （`j`/`k` 选中、`Enter` 折叠、`y` 复制）、5 标签侧边栏（`Ctrl+\`）、命令面板
+  （`Ctrl+K`，与斜杠命令共用注册表）、`@` 文件补全、markdown 输入着色、
+  `/fold` 与 `/copy` 命令、`DEEPSEEKNOVA_THEME` 主题（codex/dark/light）、
+  状态栏上下文占用率（`ctx N%`）。`TuiRunner` 公共 builder API 保持兼容，
+  新增 `with_theme` / `with_at_files` / `with_context_window`。
 - **顺手活清仓（除前端）**：TUI 状态栏常驻成本显示（router ledger 每帧刷新）；
   TUI diff 输出行级高亮（`+` 绿 / `-` 红 / `@@` 青）；`/mcp` 实时连接状态探测
   （短超时 spawn 检查 stdio server 存活）；多行输入框（Shift+Enter / Ctrl+J

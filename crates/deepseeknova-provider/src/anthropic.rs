@@ -157,7 +157,11 @@ impl AnthropicProvider {
     }
 
     /// Send an HTTP request to the Anthropic API with retry logic.
-    async fn send_request(&self, body: &AnthropicRequest, stream: bool) -> anyhow::Result<reqwest::Response> {
+    async fn send_request(
+        &self,
+        body: &AnthropicRequest,
+        stream: bool,
+    ) -> anyhow::Result<reqwest::Response> {
         let url = format!("{}/v1/messages", self.base_url);
         info!("POST {} (stream={})", url, stream);
 
@@ -209,7 +213,9 @@ impl AnthropicProvider {
 
         match result {
             HttpAttempt::Success(response) => Ok(response),
-            HttpAttempt::Retryable(msg) => Err(anyhow::anyhow!("request failed after retries: {msg}")),
+            HttpAttempt::Retryable(msg) => {
+                Err(anyhow::anyhow!("request failed after retries: {msg}"))
+            }
             HttpAttempt::Fatal(msg) => Err(anyhow::anyhow!("{msg}")),
         }
     }
@@ -266,7 +272,12 @@ impl Provider for AnthropicProvider {
             .iter()
             .filter_map(|c| match c {
                 AnthropicContent::ToolUse { name, input } => Some(ToolCall {
-                    id: format!("toolu_{}", hex::encode(&sha2::Sha256::digest(format!("{name}:{input}").as_bytes())[..8])),
+                    id: format!(
+                        "toolu_{}",
+                        hex::encode(
+                            &sha2::Sha256::digest(format!("{name}:{input}").as_bytes())[..8]
+                        )
+                    ),
                     ty: "function".to_string(),
                     function: FunctionCall {
                         name: name.clone(),
@@ -281,7 +292,11 @@ impl Provider for AnthropicProvider {
             role: Role::Assistant,
             content,
             name: None,
-            tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+            tool_calls: if tool_calls.is_empty() {
+                None
+            } else {
+                Some(tool_calls)
+            },
             tool_call_id: None,
             reasoning_content: if reasoning.is_empty() {
                 None
