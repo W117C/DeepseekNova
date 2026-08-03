@@ -1,3 +1,4 @@
+use crate::retry::{retry_with_backoff, HttpAttempt};
 use crate::types::{ChatCompletionResponse, OpenAIFunction, OpenAIRequestTool, StreamResponse};
 use crate::{Provider, ProviderError, ValidatedRequest};
 use anyhow::Context;
@@ -16,6 +17,8 @@ pub struct OpenAIProvider {
     base_url: String,
     model: String,
     api_key: String,
+    /// Max retries for transient HTTP failures.
+    max_retries: u32,
     /// Reasoning effort for DeepSeek models: "low" | "medium" | "high"
     reasoning_effort: Option<String>,
     /// Enable DeepSeek thinking mode (extra_body: {"thinking": {"type": "enabled"}})
@@ -30,7 +33,7 @@ impl OpenAIProvider {
         model: &str,
         api_key_env: &str,
         timeout_secs: u64,
-        _max_retries: u32,
+        max_retries: u32,
     ) -> anyhow::Result<Self> {
         let api_key = env::var(api_key_env)
             .with_context(|| format!("environment variable {api_key_env} is not set"))?;
@@ -45,6 +48,7 @@ impl OpenAIProvider {
             base_url: base_url.trim_end_matches('/').to_string(),
             model: model.to_string(),
             api_key,
+            max_retries,
             reasoning_effort: None,
             thinking_enabled: false,
             extra_body: None,
@@ -142,34 +146,60 @@ impl OpenAIProvider {
     async fn send_request(&self, body: &serde_json::Value) -> anyhow::Result<reqwest::Response> {
         let url = format!("{}/chat/completions", self.base_url);
 
-        info!(
-            "POST {} (stream={})",
-            url,
-            body.get("stream")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-        );
+        let stream = body
+            .get("stream")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        info!("POST {} (stream={})", url, stream);
 
-        let response = self
-            .client
-            .post(&url)
-            .bearer_auth(&self.api_key)
-            .json(body)
-            .send()
-            .await
-            .context("failed to send request to provider")?;
+        let max_retries = self.max_retries;
+        let client = self.client.clone();
+        let api_key = self.api_key.clone();
+        let body = body.clone();
 
-        let status = response.status();
-        if !status.is_success() {
-            let error_text = response.text().await.unwrap_or_default();
-            return Err(ProviderError::Http {
-                status: status.as_u16(),
-                body: error_text,
-            }
-            .into());
+        let result = retry_with_backoff(max_retries, || {
+            let client = client.clone();
+            let api_key = api_key.clone();
+            let body = body.clone();
+            let url = url.clone();
+            Box::pin(async move {
+                match client
+                    .post(&url)
+                    .bearer_auth(&api_key)
+                    .json(&body)
+                    .send()
+                    .await
+                {
+                    Ok(response) => {
+                        let status = response.status();
+                        if status.is_success() {
+                            HttpAttempt::Success(response)
+                        } else if crate::retry::is_retryable_status(status.as_u16()) {
+                            let error_text = response.text().await.unwrap_or_default();
+                            HttpAttempt::Retryable(format!("HTTP {status}: {error_text}"))
+                        } else {
+                            let error_text = response.text().await.unwrap_or_default();
+                            HttpAttempt::Fatal(format!("HTTP {status}: {error_text}"))
+                        }
+                    }
+                    Err(e) => {
+                        let err_str = e.to_string();
+                        if crate::retry::is_retryable_error(&err_str) {
+                            HttpAttempt::Retryable(err_str)
+                        } else {
+                            HttpAttempt::Fatal(err_str)
+                        }
+                    }
+                }
+            })
+        })
+        .await;
+
+        match result {
+            HttpAttempt::Success(response) => Ok(response),
+            HttpAttempt::Retryable(msg) => Err(anyhow::anyhow!("request failed after retries: {msg}")),
+            HttpAttempt::Fatal(msg) => Err(anyhow::anyhow!("{msg}")),
         }
-
-        Ok(response)
     }
 }
 

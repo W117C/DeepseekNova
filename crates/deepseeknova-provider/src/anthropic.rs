@@ -1,10 +1,13 @@
-use crate::{Provider, ProviderError, ValidatedRequest};
+use crate::retry::{retry_with_backoff, HttpAttempt};
+use crate::{Provider, ValidatedRequest};
 use anyhow::Context;
 use async_trait::async_trait;
 use deepseeknova_core::chunk::{Chunk, ChunkStream, Usage};
+use deepseeknova_core::types::{FunctionCall, ToolCall};
 use deepseeknova_core::{Message, Role, Tool};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 use std::env;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -21,6 +24,8 @@ pub struct AnthropicProvider {
     model: String,
     api_key: String,
     api_version: String,
+    /// Max retries for transient HTTP failures.
+    max_retries: u32,
     /// Enable DeepSeek/Anthropic extended-thinking mode.
     /// Sends `thinking: {"type": "enabled"}` on every request.
     thinking_enabled: bool,
@@ -38,7 +43,7 @@ impl AnthropicProvider {
         model: &str,
         api_key_env: &str,
         timeout_secs: u64,
-        _max_retries: u32,
+        max_retries: u32,
     ) -> anyhow::Result<Self> {
         let api_key = env::var(api_key_env)
             .with_context(|| format!("environment variable {api_key_env} is not set"))?;
@@ -54,6 +59,7 @@ impl AnthropicProvider {
             model: model.to_string(),
             api_key,
             api_version: "2023-06-01".to_string(),
+            max_retries,
             thinking_enabled: false,
             reasoning_effort: None,
             max_tokens: 4096,
@@ -149,6 +155,64 @@ impl AnthropicProvider {
             .collect();
         Some(at)
     }
+
+    /// Send an HTTP request to the Anthropic API with retry logic.
+    async fn send_request(&self, body: &AnthropicRequest, stream: bool) -> anyhow::Result<reqwest::Response> {
+        let url = format!("{}/v1/messages", self.base_url);
+        info!("POST {} (stream={})", url, stream);
+
+        let max_retries = self.max_retries;
+        let client = self.client.clone();
+        let api_key = self.api_key.clone();
+        let api_version = self.api_version.clone();
+        let body = body.clone();
+
+        let result = retry_with_backoff(max_retries, || {
+            let client = client.clone();
+            let api_key = api_key.clone();
+            let api_version = api_version.clone();
+            let body = body.clone();
+            let url = url.clone();
+            Box::pin(async move {
+                match client
+                    .post(&url)
+                    .header("x-api-key", &api_key)
+                    .header("anthropic-version", &api_version)
+                    .json(&body)
+                    .send()
+                    .await
+                {
+                    Ok(response) => {
+                        let status = response.status();
+                        if status.is_success() {
+                            HttpAttempt::Success(response)
+                        } else if crate::retry::is_retryable_status(status.as_u16()) {
+                            let error_text = response.text().await.unwrap_or_default();
+                            HttpAttempt::Retryable(format!("HTTP {status}: {error_text}"))
+                        } else {
+                            let error_text = response.text().await.unwrap_or_default();
+                            HttpAttempt::Fatal(format!("HTTP {status}: {error_text}"))
+                        }
+                    }
+                    Err(e) => {
+                        let err_str = e.to_string();
+                        if crate::retry::is_retryable_error(&err_str) {
+                            HttpAttempt::Retryable(err_str)
+                        } else {
+                            HttpAttempt::Fatal(err_str)
+                        }
+                    }
+                }
+            })
+        })
+        .await;
+
+        match result {
+            HttpAttempt::Success(response) => Ok(response),
+            HttpAttempt::Retryable(msg) => Err(anyhow::anyhow!("request failed after retries: {msg}")),
+            HttpAttempt::Fatal(msg) => Err(anyhow::anyhow!("{msg}")),
+        }
+    }
 }
 
 #[async_trait]
@@ -156,31 +220,8 @@ impl Provider for AnthropicProvider {
     async fn generate(&self, validated: ValidatedRequest<'_>) -> anyhow::Result<Message> {
         let messages = validated.messages;
         let tools = validated.tools;
-        let url = format!("{}/v1/messages", self.base_url);
-
         let body = self.build_request(messages, tools, false);
-
-        info!("POST {}", url);
-
-        let response = self
-            .client
-            .post(&url)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", &self.api_version)
-            .json(&body)
-            .send()
-            .await
-            .context("failed to send request to Anthropic")?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let error_text = response.text().await.unwrap_or_default();
-            return Err(ProviderError::Http {
-                status: status.as_u16(),
-                body: error_text,
-            }
-            .into());
-        }
+        let response = self.send_request(&body, false).await?;
 
         let resp: AnthropicResponse = response
             .json()
@@ -199,6 +240,7 @@ impl Provider for AnthropicProvider {
             );
         }
 
+        // --- Extract text content ---
         let content: String = resp
             .content
             .iter()
@@ -208,9 +250,7 @@ impl Provider for AnthropicProvider {
             })
             .collect();
 
-        // DeepSeek returns its chain-of-thought as `thinking` content blocks.
-        // Preserve them as reasoning_content so the replay invariant and any
-        // downstream reasoning consumers behave the same as the OpenAI path.
+        // --- Extract reasoning (thinking blocks) ---
         let reasoning: String = resp
             .content
             .iter()
@@ -220,11 +260,28 @@ impl Provider for AnthropicProvider {
             })
             .collect();
 
+        // --- Extract tool_use blocks (non-streaming path) ---
+        let tool_calls: Vec<ToolCall> = resp
+            .content
+            .iter()
+            .filter_map(|c| match c {
+                AnthropicContent::ToolUse { name, input } => Some(ToolCall {
+                    id: format!("toolu_{}", hex::encode(&sha2::Sha256::digest(format!("{name}:{input}").as_bytes())[..8])),
+                    ty: "function".to_string(),
+                    function: FunctionCall {
+                        name: name.clone(),
+                        arguments: input.to_string(),
+                    },
+                }),
+                _ => None,
+            })
+            .collect();
+
         Ok(Message {
             role: Role::Assistant,
             content,
             name: None,
-            tool_calls: None,
+            tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
             tool_call_id: None,
             reasoning_content: if reasoning.is_empty() {
                 None
@@ -237,31 +294,8 @@ impl Provider for AnthropicProvider {
     async fn stream(&self, validated: ValidatedRequest<'_>) -> anyhow::Result<ChunkStream> {
         let messages = validated.messages;
         let tools = validated.tools;
-        let url = format!("{}/v1/messages", self.base_url);
-
         let body = self.build_request(messages, tools, true);
-
-        info!("POST {} (stream)", url);
-
-        let response = self
-            .client
-            .post(&url)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", &self.api_version)
-            .json(&body)
-            .send()
-            .await
-            .context("failed to send streaming request to Anthropic")?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let error_text = response.text().await.unwrap_or_default();
-            return Err(ProviderError::Http {
-                status: status.as_u16(),
-                body: error_text,
-            }
-            .into());
-        }
+        let response = self.send_request(&body, true).await?;
 
         // True streaming via bytes_stream — same pattern as OpenAI provider
         let (tx, rx) = mpsc::channel::<anyhow::Result<Chunk>>(64);
@@ -280,7 +314,7 @@ impl Provider for AnthropicProvider {
 // Anthropic API types
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct AnthropicRequest {
     model: String,
     max_tokens: u32,
@@ -298,13 +332,13 @@ struct AnthropicRequest {
     output_config: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct AnthropicMessage {
     role: String,
     content: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct AnthropicTool {
     name: String,
     description: String,
@@ -329,7 +363,6 @@ enum AnthropicContent {
     #[serde(rename = "thinking")]
     Thinking { thinking: String },
     #[serde(rename = "tool_use")]
-    #[allow(dead_code)]
     ToolUse {
         name: String,
         input: serde_json::Value,

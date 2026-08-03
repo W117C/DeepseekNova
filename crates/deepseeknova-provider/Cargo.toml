@@ -19,6 +19,9 @@ futures = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
+rand = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
 deepseeknova-core = { workspace = true }
 deepseeknova-config = { workspace = true }
 deepseeknova-context = { workspace = true }

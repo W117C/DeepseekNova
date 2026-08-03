@@ -13,6 +13,7 @@ use deepseeknova_core::Message;
 pub mod anthropic;
 pub mod cost;
 pub mod openai;
+pub mod retry;
 pub mod router;
 pub mod scavenge;
 pub mod telemetry;
