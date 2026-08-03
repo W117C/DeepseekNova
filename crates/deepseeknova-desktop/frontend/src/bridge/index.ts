@@ -88,4 +88,4 @@ export {
   type TriggerConfig,
   type TabInfo,
   type EventHandlers,
-} from "../bridge";
+} from "../bridge.ts";

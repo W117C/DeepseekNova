@@ -6,7 +6,16 @@
  */
 
 import { createSignal, createResource, createMemo, onCleanup } from "solid-js";
-import { submitPrompt as invokeSubmit, cancelRun as invokeCancel, respondApproval, listSessions, createSession, deleteSession, renameSession, type SessionInfo } from "../bridge";
+import {
+  submitPrompt as invokeSubmit,
+  cancelRun as invokeCancel,
+  respondApproval,
+  listSessions,
+  createSession,
+  deleteSession,
+  renameSession,
+  type SessionInfo,
+} from "../bridge.ts";
 import { pushEvent, resetBus, clearPendingApproval, useBus, onEvent } from "./bus";
 import type { Message, WireEvent, SubmitRequest } from "../types";
 
