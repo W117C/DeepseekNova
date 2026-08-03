@@ -33,6 +33,10 @@ All notable changes to DeepseekNova will be documented in this file.
   import/use/require 依赖图（本地符号 文件→符号、JS 相对路径 文件→文件），
   Cargo.toml/package.json/pyproject.toml 清单依赖解析进外部依赖表；新增只读
   工具 `deps_code`（文件依赖/依赖方 + 全库外部依赖汇总），检索提示词同步。
+- **长期记忆 LLM 知识蒸馏**：`[memory] llm_distill`（默认 false，成本敏感）——
+  回合结束在启发式沉淀之外，用可选模型把任务观察提炼成可复用 skill/教训
+  （JSON 契约 `{"kind":"skill"|"lesson",...}`，Skill 类目落库、内容去重 + 脱敏、
+  失败静默跳过）；`llm_distill_model` / `llm_distill_max_chars` 可配。
 - **代码图多跳推理（CodeGraph 式增强）**：新增 `Dispatch` 边把 Rust trait 方法桥接到
   全部同名 impl 方法（`dyn Trait` / 泛型调用点可列出候选实现，名称级匹配）；新增三个
   只读工具 `trace_code`（多跳调用链，深度上限 6 并标注截断）、`impact_code`（按文件

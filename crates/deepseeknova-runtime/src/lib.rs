@@ -574,7 +574,8 @@ pub fn build_agent_with_role_providers(
                     }
                 }
 
-                // 结束沉淀钩子（启发式，无 LLM）。
+                // 结束沉淀钩子：启发式 record_task 兜底；`[memory] llm_distill`
+                // 启用时另 spawn 异步 LLM 蒸馏（失败仅 warn，不阻断 run）。
                 let dh = handle.clone();
                 let guards = deepseeknova_core::memory::engine::DistillGuards {
                     auto_learn: config.memory.auto_learn,
@@ -583,9 +584,69 @@ pub fn build_agent_with_role_providers(
                     max_per_day: config.memory.max_distillations_per_day,
                     max_per_session: config.memory.max_distillations_per_session,
                 };
+                let llm_distill_on = config.memory.llm_distill;
+                let llm_distill_max_chars = config.memory.llm_distill_max_chars;
+                let llm_distill_provider: Arc<dyn deepseeknova_provider::Provider> =
+                    if llm_distill_on {
+                        match config.memory.llm_distill_model.as_deref() {
+                            Some(model) => match config.resolve_provider_for_model(model).cloned() {
+                                Some(cfg) => {
+                                    match deepseeknova_provider::factory::create_provider_with_model(
+                                        &cfg, model, None,
+                                    ) {
+                                        Ok(p) => p.into(),
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                "llm_distill_model '{model}' unavailable ({e}); \
+                                                     using main provider"
+                                            );
+                                            provider.clone()
+                                        }
+                                    }
+                                }
+                                None => {
+                                    tracing::warn!(
+                                        "llm_distill_model '{model}' has no matching provider; \
+                                             using main provider"
+                                    );
+                                    provider.clone()
+                                }
+                            },
+                            None => provider.clone(),
+                        }
+                    } else {
+                        provider.clone()
+                    };
+                // 仅启用时取 Handle（同步测试无 tokio runtime，默认关闭不受影响）。
+                let tokio_handle = if llm_distill_on {
+                    Some(tokio::runtime::Handle::current())
+                } else {
+                    None
+                };
                 let distill: deepseeknova_agent::DistillHook = Arc::new(move |obs| {
                     if let Err(e) = dh.record_task(&obs, &guards) {
                         tracing::warn!("memory distill failed: {e}");
+                    }
+                    if let (true, Some(handle)) = (llm_distill_on, tokio_handle.as_ref()) {
+                        let engine = dh.clone();
+                        let llm = llm_distill_provider.clone();
+                        let max_chars = llm_distill_max_chars;
+                        let obs = obs.clone();
+                        handle.spawn(async move {
+                            if let Some(k) = deepseeknova_agent::memory_distill::run_llm_distill(
+                                llm.as_ref(),
+                                &obs,
+                                max_chars,
+                            )
+                            .await
+                            {
+                                if let Err(e) =
+                                    engine.record_llm_knowledge(&k.kind, &k.title, &k.body, k.tags)
+                                {
+                                    tracing::warn!("llm distill store failed: {e}");
+                                }
+                            }
+                        });
                     }
                 });
                 agent = agent.with_distill_hook(distill);
@@ -1214,6 +1275,44 @@ mod tests {
         let provider = std::sync::Arc::new(stub_provider());
         let agent = build_agent(&config, std::env::temp_dir(), provider, 5, None, vec![]).unwrap();
         assert!(!agent.tool_names().iter().any(|n| n == "recall"));
+    }
+
+    #[tokio::test]
+    async fn build_agent_wires_llm_distill_and_runs_without_panic() {
+        use futures::StreamExt;
+        let mut config = Config::default();
+        config.memory.enabled = true;
+        config.memory.llm_distill = true;
+        config.graph.enabled = false;
+        config.verify.enabled = false;
+        config.review.enabled = false;
+        let root = std::env::temp_dir().join(format!("dnv-llm-distill-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let provider = std::sync::Arc::new(stub_provider());
+        let agent = build_agent(&config, root.clone(), provider, 5, None, vec![]).unwrap();
+
+        // 跑一轮：stub 返回空文本，事件流正常结束（Done 或跑满步数 Paused）；
+        // LLM 蒸馏不可解析 → 静默跳过，不 panic。
+        let mut stream = agent
+            .run_stream(RunInput {
+                prompt: "hi".into(),
+                images: vec![],
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+
+        // 记忆引擎仍可打开并列出（蒸馏失败不影响记忆库可用性）。
+        let engine = deepseeknova_core::memory::engine::MemoryEngine::open(
+            root.join(".deepseeknova/memory.db"),
+            true,
+        )
+        .unwrap();
+        let _ = engine
+            .list(deepseeknova_core::memory::store::MemoryCategory::Skill)
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]

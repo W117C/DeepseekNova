@@ -395,6 +395,18 @@ pub struct MemoryConfig {
     /// 每会话沉淀硬上限。
     #[serde(default = "default_max_distill_session")]
     pub max_distillations_per_session: u32,
+
+    /// 是否在回合结束用 LLM 把任务观察蒸馏成可复用 skill/教训（默认 false，成本敏感）。
+    #[serde(default)]
+    pub llm_distill: bool,
+
+    /// 蒸馏用模型名（可选；未配置回落 main provider）。
+    #[serde(default)]
+    pub llm_distill_model: Option<String>,
+
+    /// 蒸馏输入的任务描述上限（字符，默认 3000）。
+    #[serde(default = "default_llm_distill_max_chars")]
+    pub llm_distill_max_chars: usize,
 }
 
 fn default_memory_db_path() -> String {
@@ -430,6 +442,9 @@ fn default_max_distill_day() -> u32 {
 fn default_max_distill_session() -> u32 {
     10
 }
+fn default_llm_distill_max_chars() -> usize {
+    3000
+}
 
 impl Default for MemoryConfig {
     fn default() -> Self {
@@ -451,6 +466,9 @@ impl Default for MemoryConfig {
             min_steps: 3,
             max_distillations_per_day: 50,
             max_distillations_per_session: 10,
+            llm_distill: false,
+            llm_distill_model: None,
+            llm_distill_max_chars: default_llm_distill_max_chars(),
         }
     }
 }
@@ -1409,16 +1427,25 @@ mod tests {
         assert_eq!(c.memory.min_steps, 3);
         assert_eq!(c.memory.max_distillations_per_day, 50);
         assert_eq!(c.memory.max_distillations_per_session, 10);
+        assert!(!c.memory.llm_distill, "LLM 蒸馏必须默认关闭（成本敏感）");
+        assert_eq!(c.memory.llm_distill_model, None);
+        assert_eq!(c.memory.llm_distill_max_chars, 3000);
         assert_eq!(c.memory.db_path, ".deepseeknova/memory.db");
     }
 
     #[test]
     fn memory_config_parses_from_toml() {
-        let toml = "[memory]\nenabled = false\nauto_learn = false\nrecall_top_k = 7\n";
+        let toml = "[memory]\nenabled = false\nauto_learn = false\nrecall_top_k = 7\nllm_distill = true\nllm_distill_model = \"deepseek-v4-flash\"\nllm_distill_max_chars = 1500\n";
         let c: Config = toml::from_str(toml).unwrap();
         assert!(!c.memory.enabled);
         assert!(!c.memory.auto_learn);
         assert_eq!(c.memory.recall_top_k, 7);
+        assert!(c.memory.llm_distill);
+        assert_eq!(
+            c.memory.llm_distill_model.as_deref(),
+            Some("deepseek-v4-flash")
+        );
+        assert_eq!(c.memory.llm_distill_max_chars, 1500);
         // 未覆盖字段仍取默认
         assert!(c.memory.redact_secrets);
         assert_eq!(c.memory.recall_inject_tokens, 200);
