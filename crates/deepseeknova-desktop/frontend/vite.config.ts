@@ -21,6 +21,7 @@ export default defineConfig({
       "@opencode-ai/ui/styles": fileURLToPath(new URL("./vendor/ui/styles", import.meta.url)),
       "@opencode-ai/ui/hooks": fileURLToPath(new URL("./vendor/ui/hooks", import.meta.url)),
       "@opencode-ai/ui/i18n": fileURLToPath(new URL("./vendor/ui/i18n", import.meta.url)),
+      "@opencode-ai/ui/v2/styles": fileURLToPath(new URL("./vendor/ui/v2/styles", import.meta.url)),
       "@opencode-ai/ui/v2": fileURLToPath(new URL("./vendor/ui/v2/components", import.meta.url)),
       "@opencode-ai/ui": fileURLToPath(new URL("./vendor/ui/components", import.meta.url)),
       "@opencode-ai/session-ui": fileURLToPath(new URL("./vendor/session-ui", import.meta.url)),
