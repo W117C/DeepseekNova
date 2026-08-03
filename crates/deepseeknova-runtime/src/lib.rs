@@ -30,7 +30,8 @@ whole-file reads:\n\
 read_file once the target is confirmed;\n\
 4. `trace_code` to follow multi-hop call chains, including dynamic dispatch;\n\
 5. `impact_code` to estimate the blast radius of a refactor;\n\
-6. `explore_code` to read several entities' source grouped by file.";
+6. `explore_code` to read several entities' source grouped by file;\n\
+7. `deps_code` to inspect imports and external dependencies.";
 
 /// A3 从用户输入提取 repo map 个性化 seeds：标识符 token（≥3 字符、
 /// 去停用词、去重、上限 8），用于对图节点做 personalized PageRank。

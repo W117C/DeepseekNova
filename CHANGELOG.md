@@ -28,6 +28,11 @@ All notable changes to DeepseekNova will be documented in this file.
   换行、行内 Home/End、纵向跟随）；`[verify] llm = true` LLM 验证（默认关，
   明确判定失败才回炉，调用/解析失败优雅跳过）；README 测试徽章与 Tauri 命令数
   同步实测值。
+- **代码库智能：符号引用与依赖图**：`References` 边真实生成（定义体标识符按
+  名称级解析到索引符号，跳过 callee/自身，已有 Calls 边不重复）；结构化
+  import/use/require 依赖图（本地符号 文件→符号、JS 相对路径 文件→文件），
+  Cargo.toml/package.json/pyproject.toml 清单依赖解析进外部依赖表；新增只读
+  工具 `deps_code`（文件依赖/依赖方 + 全库外部依赖汇总），检索提示词同步。
 - **代码图多跳推理（CodeGraph 式增强）**：新增 `Dispatch` 边把 Rust trait 方法桥接到
   全部同名 impl 方法（`dyn Trait` / 泛型调用点可列出候选实现，名称级匹配）；新增三个
   只读工具 `trace_code`（多跳调用链，深度上限 6 并标注截断）、`impact_code`（按文件

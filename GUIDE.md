@@ -337,7 +337,7 @@ seeds（去停用词、去重、上限 8），让地图优先展示任务相关�
 
 ### 代码图多跳查询（A3.1）
 
-启用代码图后额外提供三个只读工具：
+启用代码图后额外提供四个只读工具：
 
 - `trace_code`：从任意符号出发沿 Calls/References/Dispatch 画多跳调用链
   （callers / callees / both，默认深度 6，超限输出标注 truncated）。
@@ -345,6 +345,21 @@ seeds（去停用词、去重、上限 8），让地图优先展示任务相关�
   用于重构爆炸半径估算。
 - `explore_code`：一次传入多个符号，按文件分组输出带行号的源码片段
   （或 skeleton 签名视图）。
+- `deps_code`：查询文件/符号的 import 依赖与依赖方（本地符号、文件间边、
+  外部依赖标 `[external]`）；不带 entity 时输出全库外部依赖汇总。
+
+### 符号引用与依赖图（A3.2）
+
+- **References 边**：每个定义体引用的标识符按名称级解析到索引符号，回答
+  「谁引用了 X」（`traverse_graph` 传 `edge_kinds=["references"]`）；同一对
+  实体已有 Calls 边时不重复计，递归等 callee 不产生自引用。
+- **结构化依赖图**：Rust `use`、Python `import/from`、JS/TS `import/require`
+  按语言解析——本地符号按名匹配成 文件→符号 Imports 边，JS 相对路径解析成
+  文件→文件边，裸包名记入外部依赖。
+- **清单依赖**：`Cargo.toml`（dependencies/dev-dependencies/build-dependencies）、
+  `package.json`（dependencies/devDependencies/peerDependencies/optionalDependencies）、
+  `pyproject.toml`（[project] dependencies / [tool.poetry.dependencies]）在
+  refresh 时解析进外部依赖表；`deps_code` 按文件归属最近清单展示。
 
 Rust trait 多态由「Dispatch 边」桥接：`impl Trait for Type` 中的同名方法会连到
 trait 声明方法上，`dyn Trait` / 泛型调用点因此能列出全部候选实现（名称级匹配，

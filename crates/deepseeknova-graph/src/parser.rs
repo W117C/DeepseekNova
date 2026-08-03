@@ -44,16 +44,48 @@ impl Lang {
     }
 }
 
-/// 单文件解析结果：实体节点 + 名称级调用对 + import 原文本。
+/// 结构化 import 链接类型：本地符号（按名匹配）/ 本地文件（相对路径）/ 外部依赖。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportKind {
+    Symbol,
+    File,
+    External,
+}
+
+impl ImportKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Symbol => "symbol",
+            Self::File => "file",
+            Self::External => "external",
+        }
+    }
+}
+
+/// 一条结构化 import 事实。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportLink {
+    pub kind: ImportKind,
+    pub target: String,
+}
+
+/// 单文件解析结果：实体节点 + 名称级调用对 + import 事实 + 符号引用。
 pub struct FileParse {
     pub nodes: Vec<Node>,
     pub calls: Vec<(String, String)>,
     pub imports: Vec<String>,
+    /// 结构化 import 事实（Rust/Python 路径段、JS/TS specifier）。
+    pub import_links: Vec<ImportLink>,
     /// Rust：trait 声明的方法 (trait 名, 方法名, 起始行)，用于构建动态分发桥。
     pub trait_methods: Vec<(String, String, u32)>,
     /// Rust：`impl Trait for Type` 内的方法 (trait 名, 实现类型名, 方法名, 起始行)。
     pub impl_trait_methods: Vec<(String, String, String, u32)>,
+    /// 定义体引用的标识符（from, ref_name），名称级；call callee 不在内。
+    pub refs: Vec<(String, String)>,
 }
+
+/// 每个定义体最多采集的引用名数量（防 raw_refs 膨胀）。
+const MAX_REFS_PER_DEF: usize = 64;
 
 fn parse_err(path: &str, lang: Lang) -> GraphError {
     GraphError::Parse {
@@ -109,6 +141,22 @@ fn is_call(lang: Lang, kind: &str) -> bool {
         Lang::Python => kind == "call",
         _ => kind == "call_expression",
     }
+}
+
+/// 从 import 文本提取标识符 token（过滤语言关键字）。
+fn identifier_tokens(text: &str) -> Vec<String> {
+    const KEYWORDS: &[&str] = &[
+        "use", "as", "import", "from", "pub", "crate", "self", "super", "mod", "extern",
+    ];
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|t| !t.is_empty())
+        .filter(|t| !KEYWORDS.contains(t))
+        .map(str::to_string)
+        .collect()
+}
+
+fn strip_quotes(text: &str) -> &str {
+    text.trim_matches(|c| c == '"' || c == '\'')
 }
 
 /// 取定义实体的名称：优先 `name` 字段，退回扫描 identifier 类子节点。
@@ -213,10 +261,14 @@ pub fn parse_source(lang: Lang, path: &str, src: &str) -> Result<FileParse, Grap
     let mut nodes: Vec<Node> = Vec::new();
     let mut calls: Vec<(String, String)> = Vec::new();
     let mut imports: Vec<String> = Vec::new();
+    let mut import_links: Vec<ImportLink> = Vec::new();
     let mut trait_methods: Vec<(String, String, u32)> = Vec::new();
     let mut impl_trait_methods: Vec<(String, String, String, u32)> = Vec::new();
+    let mut refs: Vec<(String, String)> = Vec::new();
     // 最近的命名定义栈（caller 归属）与祖先 kind 栈（Method 判定）。
     let mut def_stack: Vec<String> = Vec::new();
+    // 与 def_stack 对齐的引用名集合栈（每个定义体一个，去重 + 上限）。
+    let mut refs_stack: Vec<std::collections::HashSet<String>> = Vec::new();
     let mut ancestor_kinds: Vec<&str> = Vec::new();
     // Rust trait / impl 上下文栈（名称级动态分发事实）。
     let mut trait_stack: Vec<String> = Vec::new();
@@ -238,6 +290,13 @@ pub fn parse_source(lang: Lang, path: &str, src: &str) -> Result<FileParse, Grap
                     impl_trait_stack.pop();
                 }
                 if pop_def {
+                    if let (Some(name), Some(set)) = (def_stack.last(), refs_stack.pop()) {
+                        for ref_name in set {
+                            if ref_name != *name {
+                                refs.push((name.clone(), ref_name));
+                            }
+                        }
+                    }
                     def_stack.pop();
                 }
             }
@@ -269,12 +328,77 @@ pub fn parse_source(lang: Lang, path: &str, src: &str) -> Result<FileParse, Grap
                 if is_import(lang, kind) {
                     if let Ok(text) = node.utf8_text(src.as_bytes()) {
                         imports.push(text.trim().to_string());
+                        if matches!(lang, Lang::JavaScript | Lang::TypeScript) {
+                            if let Some(source) = node
+                                .child_by_field_name("source")
+                                .and_then(|n| n.utf8_text(src.as_bytes()).ok())
+                            {
+                                let spec = strip_quotes(source).to_string();
+                                let kind = if spec.starts_with("./")
+                                    || spec.starts_with("../")
+                                    || spec.starts_with('/')
+                                {
+                                    ImportKind::File
+                                } else {
+                                    ImportKind::External
+                                };
+                                import_links.push(ImportLink { kind, target: spec });
+                            }
+                        } else {
+                            let mut seen = std::collections::HashSet::new();
+                            for tok in identifier_tokens(text) {
+                                if seen.insert(tok.clone()) {
+                                    import_links.push(ImportLink {
+                                        kind: ImportKind::Symbol,
+                                        target: tok,
+                                    });
+                                }
+                            }
+                        }
                     }
                 }
                 if is_call(lang, kind) {
+                    // JS/TS require('pkg') 也是依赖事实（相对路径=本地文件，裸名=外部）。
+                    if matches!(lang, Lang::JavaScript | Lang::TypeScript)
+                        && callee_name(node, src).as_deref() == Some("require")
+                    {
+                        if let Some(arg) = node
+                            .child_by_field_name("arguments")
+                            .and_then(|a| a.named_child(0))
+                            .and_then(|a| a.utf8_text(src.as_bytes()).ok())
+                        {
+                            let spec = strip_quotes(arg).to_string();
+                            let kind = if spec.starts_with("./")
+                                || spec.starts_with("../")
+                                || spec.starts_with('/')
+                            {
+                                ImportKind::File
+                            } else {
+                                ImportKind::External
+                            };
+                            import_links.push(ImportLink { kind, target: spec });
+                        }
+                    }
                     if let (Some(caller), Some(callee)) = (def_stack.last(), callee_name(node, src))
                     {
                         calls.push((caller.clone(), callee));
+                    }
+                }
+                // 定义体内的标识符引用采集：跳过 call 的 callee（已走 Calls 边）。
+                if matches!(kind, "identifier" | "type_identifier") {
+                    if let Some(set) = refs_stack.last_mut() {
+                        let is_callee = node.parent().is_some_and(|p| {
+                            p.kind().contains("call")
+                                && p.child_by_field_name("function")
+                                    .is_some_and(|f| f.id() == node.id())
+                        });
+                        if !is_callee {
+                            if let Ok(name) = node.utf8_text(src.as_bytes()) {
+                                if set.len() < MAX_REFS_PER_DEF {
+                                    set.insert(name.to_string());
+                                }
+                            }
+                        }
                     }
                 }
                 let mut pushed_def = false;
@@ -292,6 +416,7 @@ pub fn parse_source(lang: Lang, path: &str, src: &str) -> Result<FileParse, Grap
                             doc: extract_doc(node, src),
                             score: 0.0,
                         });
+                        refs_stack.push(std::collections::HashSet::new());
                         if lang == Lang::Rust && nk == NodeKind::Method {
                             if let Some(tname) = trait_stack.last() {
                                 trait_methods.push((tname.clone(), name.clone(), start_line));
@@ -333,8 +458,10 @@ pub fn parse_source(lang: Lang, path: &str, src: &str) -> Result<FileParse, Grap
         nodes,
         calls,
         imports,
+        import_links,
         trait_methods,
         impl_trait_methods,
+        refs,
     })
 }
 
@@ -456,5 +583,103 @@ fn helper(w: Widget) -> Widget { w }\n";
         )
         .unwrap();
         assert!(fp.calls.iter().any(|(c, m)| c == "driver" && m == "go"));
+    }
+
+    #[test]
+    fn extracts_structured_import_links_per_language() {
+        // Rust：use 路径段 → Symbol 链接
+        let rust =
+            parse_source(Lang::Rust, "src/a.rs", "use std::collections::HashMap;\n").unwrap();
+        let targets: Vec<&str> = rust
+            .import_links
+            .iter()
+            .map(|l| l.target.as_str())
+            .collect();
+        assert!(targets.contains(&"HashMap"), "{targets:?}");
+        assert!(targets.contains(&"std"), "{targets:?}");
+        assert!(
+            rust.import_links
+                .iter()
+                .all(|l| l.kind == ImportKind::Symbol),
+            "Rust use 全部记 Symbol"
+        );
+
+        // Python：from a.b import c → Symbol
+        let py = parse_source(Lang::Python, "src/m.py", "from pkg import Thing\n").unwrap();
+        let py_targets: Vec<&str> = py.import_links.iter().map(|l| l.target.as_str()).collect();
+        assert!(py_targets.contains(&"Thing"), "{py_targets:?}");
+
+        // JS：相对路径 → File；裸包名 → External
+        let js = parse_source(
+            Lang::JavaScript,
+            "src/main.js",
+            "import x from './util.js';\nimport y from 'react';\n",
+        )
+        .unwrap();
+        assert!(js.import_links.contains(&ImportLink {
+            kind: ImportKind::File,
+            target: "./util.js".into()
+        }));
+        assert!(js.import_links.contains(&ImportLink {
+            kind: ImportKind::External,
+            target: "react".into()
+        }));
+
+        // require() 也产生依赖事实
+        let req = parse_source(
+            Lang::JavaScript,
+            "src/r.js",
+            "const x = require('./mod');\n",
+        )
+        .unwrap();
+        assert!(req.import_links.contains(&ImportLink {
+            kind: ImportKind::File,
+            target: "./mod".into()
+        }));
+    }
+
+    #[test]
+    fn collects_definition_references_without_self_or_callees() {
+        let fp = parse_source(
+            Lang::Rust,
+            "src/refs.rs",
+            "struct Foo {}\n\
+             pub fn use_foo() -> Foo { Foo {} }\n\
+             pub fn recur(n: u32) -> u32 {\n    if n == 0 { 0 } else { recur(n - 1) }\n}\n",
+        )
+        .unwrap();
+        assert!(
+            fp.refs.iter().any(|(f, r)| f == "use_foo" && r == "Foo"),
+            "use_foo 应引用 Foo：{:?}",
+            fp.refs
+        );
+        assert!(
+            !fp.refs
+                .iter()
+                .any(|(f, r)| f == "use_foo" && r == "use_foo"),
+            "自身名不进引用"
+        );
+        assert!(
+            !fp.refs.iter().any(|(f, r)| f == "recur" && r == "recur"),
+            "递归调用（callee）不进引用"
+        );
+        // 上限防膨胀
+        let big = parse_source(
+            Lang::Rust,
+            "src/big.rs",
+            &format!(
+                "pub fn huge() {{\n{}\n}}\n",
+                (0..200)
+                    .map(|i| format!("    let v{i} = {i};"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ),
+        )
+        .unwrap();
+        let huge_refs = big.refs.iter().filter(|(f, _)| f == "huge").count();
+        assert!(
+            huge_refs <= MAX_REFS_PER_DEF,
+            "引用采集必须受限：{huge_refs}"
+        );
     }
 }

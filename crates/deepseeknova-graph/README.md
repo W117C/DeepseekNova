@@ -37,6 +37,22 @@ Rust trait polymorphism is bridged by `Dispatch` edges: `impl Trait for Type` me
 linked to the trait declaration, so a `dyn Trait` / generic call site can list every
 same-name impl candidate without type inference.
 
+## Symbol references & dependency graph
+
+- `References` edges are built from identifiers inside each definition body
+  (name-level, capped per definition, skipping call callees and self-references;
+  a `(src, dst)` pair already covered by `Calls` is not duplicated). Ask "who
+  references X" via `traverse_graph` with `edge_kinds=["references"]`.
+- Structured imports: Rust `use` path segments, Python `import/from` segments,
+  and JS/TS `import/require` specifiers. Local symbols become 文件→符号
+  `Imports` edges; JS relative specifiers resolve to 文件→文件 edges (with common
+  extension fallbacks); bare package names and manifest dependencies
+  (`Cargo.toml`, `package.json`, `pyproject.toml`, parsed with no new deps) are
+  recorded as external dependencies.
+- `deps_code` (registered with the other graph query tools) lists a file's
+  imports / importers plus its nearest manifest's external deps, or a workspace
+  external-dependency summary when no entity is given.
+
 ## Storage
 
 Persisted to `.deepseeknova/graph.db` (SQLite). Incremental refresh keys off file

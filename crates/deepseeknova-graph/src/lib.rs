@@ -82,6 +82,17 @@ impl GraphIndex {
         self.store.trace_paths(&id, kinds, dir, max_hops)
     }
 
+    /// 指定类型的全部边（测试与依赖查询用）。
+    pub fn edges(&self, kind: EdgeKind) -> Result<Vec<(String, String)>, GraphError> {
+        Ok(self
+            .store
+            .all_edges()?
+            .into_iter()
+            .filter(|e| e.kind == kind)
+            .map(|e| (e.src, e.dst))
+            .collect())
+    }
+
     /// 骨架视图：doc + 签名 + 直接子实体签名。
     pub fn skeleton(&self, entity: &str) -> Result<String, GraphError> {
         let id = self.resolve(entity)?;
@@ -109,6 +120,21 @@ impl GraphIndex {
             .get(&id)?
             .ok_or_else(|| GraphError::EntityNotFound(entity.into()))?;
         Ok((n.path, n.start_line, n.end_line))
+    }
+
+    /// 按相对路径取文件节点 id（依赖图文件→文件边查询用）。
+    pub fn file_node(&self, path: &str) -> Result<Option<String>, GraphError> {
+        self.store.file_node(path)
+    }
+
+    /// 全库外部依赖事实（path=清单文件路径, dep_name）。
+    pub fn external_deps(&self) -> Result<Vec<(String, String)>, GraphError> {
+        self.store.external_deps()
+    }
+
+    /// 某源码文件所属最近清单的外部依赖名。
+    pub fn external_deps_for_file(&self, file_path: &str) -> Result<Vec<String>, GraphError> {
+        self.store.external_deps_for_file(file_path)
     }
 
     /// token 预算内的 repo map；personalization 为种子符号名/路径。
@@ -306,5 +332,156 @@ mod tests {
         assert_eq!(tr.paths.len(), 1);
         let names: Vec<&str> = tr.paths[0].iter().map(|n| n.name.as_str()).collect();
         assert_eq!(names, vec!["d", "e", "f", "g"], "截断在 3 跳处");
+    }
+
+    #[test]
+    fn references_edge_links_symbol_usage_in_same_file() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/lib.rs"),
+            "pub struct Foo {}\npub fn use_foo() -> Foo { Foo {} }\n",
+        )
+        .unwrap();
+        let mut idx = GraphIndex::open(root, 1_048_576).unwrap();
+        idx.refresh().unwrap();
+
+        let refs = idx.edges(EdgeKind::References).unwrap();
+        assert_eq!(refs.len(), 1, "应恰好一条引用边：{refs:?}");
+        let (src, dst) = &refs[0];
+        assert!(src.contains("use_foo"), "{src}");
+        assert!(dst.contains("Foo"), "{dst}");
+        // 引用边可通过 neighbors 查到
+        let callers = idx
+            .neighbors("Foo", &[EdgeKind::References], Direction::Callers, 1)
+            .unwrap();
+        assert!(callers.iter().any(|n| n.name == "use_foo"));
+    }
+
+    #[test]
+    fn references_edge_links_cross_file_symbol() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/a.rs"),
+            "pub fn use_bar() -> Bar { Bar {} }\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/b.rs"), "pub struct Bar {}\n").unwrap();
+        let mut idx = GraphIndex::open(root, 1_048_576).unwrap();
+        idx.refresh().unwrap();
+
+        let refs = idx.edges(EdgeKind::References).unwrap();
+        assert_eq!(refs.len(), 1, "跨文件引用边：{refs:?}");
+        let (src, dst) = &refs[0];
+        assert!(src.contains("a.rs#use_bar"), "{src}");
+        assert!(dst.contains("b.rs#Bar"), "{dst}");
+    }
+
+    #[test]
+    fn recursive_function_has_no_self_reference_edge() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/r.rs"),
+            "pub fn recur(n: u32) -> u32 {\n    if n == 0 { 0 } else { recur(n - 1) }\n}\n",
+        )
+        .unwrap();
+        let mut idx = GraphIndex::open(root, 1_048_576).unwrap();
+        idx.refresh().unwrap();
+
+        assert!(
+            idx.edges(EdgeKind::References).unwrap().is_empty(),
+            "递归调用走 Calls，不应产生自引用 References 边"
+        );
+        // 调用边仍在（递归本身）
+        assert!(
+            idx.edges(EdgeKind::Calls)
+                .unwrap()
+                .iter()
+                .any(|(s, d)| s.contains("recur") && d.contains("recur")),
+            "递归 Calls 边应保留"
+        );
+    }
+
+    #[test]
+    fn manifest_and_use_declaration_produce_external_deps() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/lib.rs"),
+            "use serde::Serialize;\npub fn main_fn() {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = \"1\"\n",
+        )
+        .unwrap();
+        let mut idx = GraphIndex::open(root, 1_048_576).unwrap();
+        idx.refresh().unwrap();
+
+        let deps = idx.external_deps().unwrap();
+        assert!(
+            deps.iter().any(|(p, d)| p == "Cargo.toml" && d == "serde"),
+            "外部依赖表应有 serde：{deps:?}"
+        );
+        let file_deps = idx.external_deps_for_file("src/lib.rs").unwrap();
+        assert!(file_deps.contains(&"serde".to_string()), "{file_deps:?}");
+    }
+
+    #[test]
+    fn js_relative_import_creates_file_to_file_edge() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/main.js"),
+            "import x from './util.js';\nexport function main_fn() { x(); }\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/util.js"), "export const x = 1;\n").unwrap();
+        let mut idx = GraphIndex::open(root, 1_048_576).unwrap();
+        idx.refresh().unwrap();
+
+        let imports = idx.edges(EdgeKind::Imports).unwrap();
+        assert!(
+            imports
+                .iter()
+                .any(|(s, d)| s.contains("main.js") && d.contains("util.js")),
+            "main.js → util.js 文件间 Imports 边：{imports:?}"
+        );
+        // 反向：util.js 的依赖方
+        let dependents = idx
+            .neighbors("util.js", &[EdgeKind::Imports], Direction::Callers, 1)
+            .unwrap();
+        assert!(dependents.iter().any(|n| n.name == "main.js"));
+    }
+
+    #[test]
+    fn python_from_import_matches_symbol_by_name() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/m.py"), "from pkg import Thing\n").unwrap();
+        std::fs::write(root.join("src/pkg.py"), "class Thing:\n    pass\n").unwrap();
+        let mut idx = GraphIndex::open(root, 1_048_576).unwrap();
+        idx.refresh().unwrap();
+
+        let importers = idx
+            .neighbors("Thing", &[EdgeKind::Imports], Direction::Callers, 1)
+            .unwrap();
+        assert!(
+            importers.iter().any(|n| n.path == "src/m.py"),
+            "m.py 应 import Thing：{:?}",
+            importers
+                .iter()
+                .map(|n| (&n.path, &n.name))
+                .collect::<Vec<_>>()
+        );
     }
 }
