@@ -105,6 +105,12 @@ pub struct Agent {
     /// P1 确定性验证设置；None = 关闭（默认）。
     verify_settings: Option<crate::verify::VerifySettings>,
 
+    /// P1/B3 失败回炉前的显式 LLM 反思设置；None = 关闭（默认）。
+    reflect_settings: Option<crate::reflection::ReflectSettings>,
+
+    /// 反思教训沉淀钩子（runtime 注入落记忆库；None = 仅对话内）。
+    lesson_hook: Option<crate::reflection::LessonHook>,
+
     /// P2 每步 effort 路由（quick=thinking off / high=高推理）；None = 固定主 provider。
     effort_routing: Option<EffortRouting>,
 
@@ -179,6 +185,8 @@ impl Agent {
             review_counter: None,
             concurrent_tools: true,
             verify_settings: None,
+            reflect_settings: None,
+            lesson_hook: None,
             effort_routing: None,
             observe: None,
             tool_cache: false,
@@ -371,6 +379,21 @@ impl Agent {
         self
     }
 
+    /// 启用失败回炉前的显式 LLM 反思（provider 回落 main 由 runtime 决定）。
+    pub fn with_reflection(mut self, provider: Arc<dyn Provider>, max_chars: usize) -> Self {
+        self.reflect_settings = Some(crate::reflection::ReflectSettings {
+            provider,
+            max_chars,
+        });
+        self
+    }
+
+    /// 反思教训沉淀钩子（runtime 注入，落 core 记忆库；None = 仅对话内）。
+    pub fn with_lesson_hook(mut self, hook: crate::reflection::LessonHook) -> Self {
+        self.lesson_hook = Some(hook);
+        self
+    }
+
     /// P2.1：启用每步 effort 路由。`quick` 用于机械续步（thinking off），
     /// `high` 用于首步 / 出错 / 回炉反馈。
     pub fn with_effort_routing(
@@ -503,6 +526,8 @@ impl Runner for Agent {
         let review_counter = self.review_counter.clone();
         let concurrent_tools = self.concurrent_tools;
         let verify_settings = self.verify_settings.clone();
+        let reflect_settings = self.reflect_settings.clone();
+        let lesson_hook = self.lesson_hook.clone();
         let effort_routing = self.effort_routing.clone();
         let observe = self.observe.clone();
         let tool_cache = self.tool_cache;
@@ -624,6 +649,8 @@ impl Runner for Agent {
                 review_counter,
                 concurrent_tools,
                 verify_settings,
+                reflect_settings,
+                lesson_hook,
                 effort_routing,
                 observe,
                 tool_cache,
@@ -715,6 +742,38 @@ fn verify_failure_message(reason: &str) -> String {
     )
 }
 
+/// 失败回炉前可选反思：无设置/反思失败 → 原文案；成功 → lesson 走钩子、
+/// 回炉消息前置反思（根因 + 修复计划）。
+async fn reflect_retry(
+    reflect_settings: &Option<crate::reflection::ReflectSettings>,
+    lesson_hook: &Option<crate::reflection::LessonHook>,
+    task: &str,
+    failure: &str,
+    completion: &str,
+    original: String,
+) -> String {
+    let Some(settings) = reflect_settings else {
+        return original;
+    };
+    match crate::reflection::run_reflection(
+        settings.provider.as_ref(),
+        task,
+        failure,
+        completion,
+        settings.max_chars,
+    )
+    .await
+    {
+        Some(r) => {
+            if let Some(hook) = lesson_hook {
+                hook(r.lesson.clone());
+            }
+            crate::reflection::compose_retry_message(&original, &r)
+        }
+        None => original,
+    }
+}
+
 async fn run_agent_loop(
     provider: Arc<dyn Provider>,
     tools: Vec<Arc<dyn Tool>>,
@@ -739,6 +798,8 @@ async fn run_agent_loop(
     review_counter: Option<ReviewCounterHook>,
     concurrent_tools: bool,
     verify_settings: Option<crate::verify::VerifySettings>,
+    reflect_settings: Option<crate::reflection::ReflectSettings>,
+    lesson_hook: Option<crate::reflection::LessonHook>,
     effort_routing: Option<EffortRouting>,
     observe: Option<ObserveSettings>,
     tool_cache: bool,
@@ -953,9 +1014,19 @@ async fn run_agent_loop(
                                 if verify_cycles < vs.max_cycles =>
                             {
                                 verify_cycles += 1;
+                                let original = verify_failure_message(&reason);
+                                let content = reflect_retry(
+                                    &reflect_settings,
+                                    &lesson_hook,
+                                    &input.prompt,
+                                    &reason,
+                                    &output.text,
+                                    original,
+                                )
+                                .await;
                                 memory.add_message(Message {
                                     role: Role::User,
-                                    content: verify_failure_message(&reason),
+                                    content,
                                     name: None,
                                     tool_calls: None,
                                     tool_call_id: None,
@@ -1043,9 +1114,19 @@ async fn run_agent_loop(
                             }
                             ReviewOutcome::Issues(issues) if review_cycles < rs.max_cycles => {
                                 review_cycles += 1;
+                                let original = crate::review::render_feedback(&issues);
+                                let content = reflect_retry(
+                                    &reflect_settings,
+                                    &lesson_hook,
+                                    &input.prompt,
+                                    &issues.join("; "),
+                                    &output.text,
+                                    original,
+                                )
+                                .await;
                                 memory.add_message(Message {
                                     role: Role::User,
-                                    content: crate::review::render_feedback(&issues),
+                                    content,
                                     name: None,
                                     tool_calls: None,
                                     tool_call_id: None,

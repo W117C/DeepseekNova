@@ -93,6 +93,29 @@ impl MemoryEngine {
         Ok(existed)
     }
 
+    /// 反思闭环的教训落库：content="kind: lesson\n{lesson}"，redact 后哈希去重，
+    /// category=Skill、source=reflect-loop、tags=[reflect, lesson]。
+    /// 返回是否新写入。
+    pub fn record_reflection_lesson(&self, lesson: &str) -> Result<bool> {
+        let raw = format!("kind: lesson\n{lesson}");
+        let content = if self.redact_secrets {
+            redact(&raw)
+        } else {
+            raw
+        };
+        let mut e = make_entry(
+            content.clone(),
+            MemoryCategory::Skill,
+            vec!["reflect".to_string(), "lesson".to_string()],
+            "reflect-loop",
+            0.8,
+        );
+        e.id = content_id("reflect", &content);
+        let existed = self.store.meta(&e.id)?.is_some();
+        self.store.store(&e)?;
+        Ok(!existed)
+    }
+
     /// 删除一条记忆。
     pub fn forget(&self, key: &str) -> Result<bool> {
         self.store.delete(key)
@@ -431,6 +454,25 @@ mod tests {
     }
 
     #[test]
+    fn reflection_lesson_stores_and_dedupes() {
+        let eng = MemoryEngine::open_in_memory(true).unwrap();
+        assert!(eng
+            .record_reflection_lesson("always escape user input")
+            .unwrap());
+        let skills = eng.list(MemoryCategory::Skill).unwrap();
+        assert_eq!(skills.len(), 1);
+        assert!(skills[0].content.contains("always escape user input"));
+        assert!(skills[0].tags.contains(&"reflect".to_string()));
+        assert!(skills[0].tags.contains(&"lesson".to_string()));
+        assert_eq!(skills[0].source, "reflect-loop");
+
+        assert!(!eng
+            .record_reflection_lesson("always escape user input")
+            .unwrap());
+        assert_eq!(eng.list(MemoryCategory::Skill).unwrap().len(), 1);
+    }
+
+    #[test]
     fn llm_knowledge_redacts_secrets() {
         let eng = MemoryEngine::open_in_memory(true).unwrap();
         eng.record_llm_knowledge(
@@ -440,6 +482,19 @@ mod tests {
             vec![],
         )
         .unwrap();
+        let skills = eng.list(MemoryCategory::Skill).unwrap();
+        assert!(
+            !skills[0].content.contains("sk-ABCD1234efgh5678"),
+            "秘密必须被脱敏：{}",
+            skills[0].content
+        );
+    }
+
+    #[test]
+    fn reflection_lesson_redacts_secrets() {
+        let eng = MemoryEngine::open_in_memory(true).unwrap();
+        eng.record_reflection_lesson("never log API_KEY=sk-ABCD1234efgh5678")
+            .unwrap();
         let skills = eng.list(MemoryCategory::Skill).unwrap();
         assert!(
             !skills[0].content.contains("sk-ABCD1234efgh5678"),

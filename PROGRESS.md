@@ -151,3 +151,18 @@
 
 ## 交付
 - 分支 feat/memory-distill，已推送 origin；PR: https://github.com/W117C/DeepseekNova/pull/58
+## 任务书：反思→修复闭环 — 开工回执（2026-08-02）
+- 理解的目标：P1 验证与 B3 审查失败回炉前插入显式 LLM 反思（JSON root_cause/fix_plan/lesson），回炉消息前置反思，lesson 经 LessonHook 落 core 记忆；`[agent] reflect_on_failure` 默认 true 可关。
+- 顺序：任务 0 → 1 core record_reflection_lesson → 2 agent reflection.rs + 两分支接入 → 3 config+runtime 装配 → 4 文档/反向验证/PR。
+- 最大风险：agent.rs 回炉分支是循环热路径，改动只许「插入反思+换消息」，不许动循环语义；main 上 review::extract_json 私有 → reflection.rs 自带等价实现；stub 空文本不会 Done，装配测试按流结束断言。
+- 基线证据（本轮实测）：main@2c71284 干净；core 83+2+1、agent 119+1、config 20+18、runtime 26 全绿 0 ignored；make check 670。
+
+## 任务状态（反思→修复闭环）
+- [x] 任务 1：core record_reflection_lesson（Skill、tags=[reflect,lesson]、source=reflect-loop、哈希去重+脱敏）+ 2 条单测。
+- [x] 任务 2：agent reflection.rs（prompt/parse/run_reflection/compose_retry_message，自带 extract_json 等价实现）+ Agent reflect_settings/lesson_hook 字段与构造器 + P1/P3 两个回炉分支接入 reflect_retry + 5 条单测。
+- [x] 任务 3：AgentConfig reflect_on_failure（默认 true）/reflect_model/reflect_max_chars（4000）+ merge + 测试；runtime 装配（provider 回落 main + memory 启用时挂 LessonHook）+ 装配测试 1 条。
+- [x] 任务 4 前半：GUIDE 反思节、CHANGELOG 已更新。
+- [x] 收尾：cargo fmt + make check EXIT=0（679 通过）；反向验证红（1 failed）→还原绿（core 85、agent 124、config 21+18、runtime 27）；分支 feat/reflect-loop 已推送。
+
+## 交付
+- 分支 feat/reflect-loop，已推送 origin；PR: https://github.com/W117C/DeepseekNova/pull/59

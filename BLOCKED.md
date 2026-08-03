@@ -45,3 +45,9 @@ PROGRESS/BLOCKED），本分支已合并 main 解决冲突并重验全绿；#54�
 执行阻塞：无。说明：main 上 review::extract_json 为私有函数，改可见性不在白名单，
 按「建议有更好的路」在 memory_distill.rs 自带等价实现（已记 PROGRESS）。顺手活
 （待裁决，不做）：语义检索 embedder、记忆清理 UI、蒸馏结果写 agentskills.io skill 文件。
+## 反思→修复闭环任务书（2026-08-02）
+
+执行阻塞：无。说明：main 上 review::extract_json 私有，reflection.rs 自带等价实现
+（同第二本先例，已记 PROGRESS）；record_reflection_lesson 与 PR #58 的
+record_llm_knowledge 并存，合入后可统一（待裁决）。顺手活（待裁决，不做）：反思 UI
+展示、教训分级衰减、多模型反思对比。

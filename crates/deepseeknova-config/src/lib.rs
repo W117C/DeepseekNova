@@ -583,6 +583,19 @@ pub struct AgentConfig {
     /// 会话内只读工具结果缓存（P2）：同参读调用直接复用，写执行后失效。默认关。
     #[serde(default)]
     pub tool_cache: bool,
+
+    /// 失败回炉前显式 LLM 反思（P1 验证 / B3 审查失败时触发）。默认 true：
+    /// 只失败循环触发，失败路径本就昂贵；可关。
+    #[serde(default = "default_true")]
+    pub reflect_on_failure: bool,
+
+    /// 反思用模型名（可选；未配置回落 main provider）。
+    #[serde(default)]
+    pub reflect_model: Option<String>,
+
+    /// 反思输入的最后完成文本上限（字符，默认 4000）。
+    #[serde(default = "default_reflect_max_chars")]
+    pub reflect_max_chars: usize,
 }
 
 fn default_max_steps() -> usize {
@@ -596,6 +609,9 @@ fn default_observe_threshold() -> usize {
 }
 fn default_observe_max_chars() -> usize {
     4_000
+}
+fn default_reflect_max_chars() -> usize {
+    4000
 }
 
 impl Default for AgentConfig {
@@ -614,6 +630,9 @@ impl Default for AgentConfig {
             observe_compress_threshold_chars: default_observe_threshold(),
             observe_compress_max_chars: default_observe_max_chars(),
             tool_cache: false,
+            reflect_on_failure: true,
+            reflect_model: None,
+            reflect_max_chars: default_reflect_max_chars(),
         }
     }
 }
@@ -1201,6 +1220,11 @@ impl AgentConfig {
         self.observe_compress_threshold_chars = other.observe_compress_threshold_chars;
         self.observe_compress_max_chars = other.observe_compress_max_chars;
         self.tool_cache = other.tool_cache;
+        self.reflect_on_failure = other.reflect_on_failure;
+        if other.reflect_model.is_some() {
+            self.reflect_model = other.reflect_model;
+        }
+        self.reflect_max_chars = other.reflect_max_chars;
     }
 }
 
@@ -1483,6 +1507,18 @@ mod tests {
         assert_eq!(c.agent.on_max_steps, "pause");
         assert!(c.agent.l3_compaction);
         assert_eq!(c.agent.compact_model, "");
+        assert!(c.agent.reflect_on_failure, "反思闭环默认开");
+        assert_eq!(c.agent.reflect_model, None);
+        assert_eq!(c.agent.reflect_max_chars, 4000);
+    }
+
+    #[test]
+    fn agent_reflect_fields_parse_overrides() {
+        let toml = "[agent]\nreflect_on_failure = false\nreflect_model = \"deepseek-v4-flash\"\nreflect_max_chars = 2000\n";
+        let c: Config = toml::from_str(toml).unwrap();
+        assert!(!c.agent.reflect_on_failure);
+        assert_eq!(c.agent.reflect_model.as_deref(), Some("deepseek-v4-flash"));
+        assert_eq!(c.agent.reflect_max_chars, 2000);
     }
 
     #[test]

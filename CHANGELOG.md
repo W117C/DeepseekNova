@@ -37,6 +37,10 @@ All notable changes to DeepseekNova will be documented in this file.
   回合结束在启发式沉淀之外，用可选模型把任务观察提炼成可复用 skill/教训
   （JSON 契约 `{"kind":"skill"|"lesson",...}`，Skill 类目落库、内容去重 + 脱敏、
   失败静默跳过）；`llm_distill_model` / `llm_distill_max_chars` 可配。
+- **反思→修复闭环**：P1 验证 / B3 审查失败回炉前插入显式 LLM 反思（JSON 契约
+  root_cause/fix_plan/lesson），回炉消息前置反思，lesson 经 LessonHook 沉淀进记忆
+  （Skill 类目、去重 + 脱敏）；`[agent] reflect_on_failure` 默认 true，
+  `reflect_model` / `reflect_max_chars` 可配；反思失败静默回落原文案。
 - **代码图多跳推理（CodeGraph 式增强）**：新增 `Dispatch` 边把 Rust trait 方法桥接到
   全部同名 impl 方法（`dyn Trait` / 泛型调用点可列出候选实现，名称级匹配）；新增三个
   只读工具 `trace_code`（多跳调用链，深度上限 6 并标注截断）、`impact_code`（按文件
