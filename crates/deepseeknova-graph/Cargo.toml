@@ -16,7 +16,7 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 tracing = { workspace = true }
 rusqlite = { version = "0.40", features = ["bundled"] }
-tree-sitter = "0.24"
+tree-sitter = "0.25"
 tree-sitter-rust = "0.23"
 tree-sitter-python = "0.25"
 tree-sitter-javascript = "0.23"
