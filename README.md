@@ -4,7 +4,7 @@
 
 ### DeepSeek 原生 AI 编程 Agent 框架
 
-**22 个 Rust crate · 63 个 Tauri 命令 · 三端覆盖（CLI / TUI / Desktop）**
+**22 个 Rust crate · 61 个 Tauri 命令 · 三端覆盖（CLI / TUI / Desktop）**
 
 Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型量身打造的原生编程助手。
 
@@ -25,7 +25,7 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 [![Rust](https://img.shields.io/badge/rust-stable%201.97-orange.svg)](https://www.rust-lang.org)
 [![Crates](https://img.shields.io/badge/crates-22-green.svg)](#-22-个-crate)
-[![Tests](https://img.shields.io/badge/tests-684-brightgreen.svg)](#-技术栈)
+[![Tests](https://img.shields.io/badge/tests-739-brightgreen.svg)](#-技术栈)
 
 </div>
 
@@ -47,7 +47,7 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 
 ### 🧠 深度推理 + 工具调用
 - 流式推理输出，支持 Reasoning Effort 四级调节（low / medium / high / max）
-- 13+ 内置工具：文件 I/O、glob、grep、shell、web fetch、任务管理、MCP 桥接
+- 21 个内置工具实现：文件 I/O、glob、grep、shell、web fetch、任务管理、MCP 桥接、代码图、Context7 文档检索
 - 工具调用全链路流式：start → delta → end → result，前端实时渲染
 
 ### ⚡ Prefix-Cache 三层架构
@@ -93,10 +93,10 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 │  Desktop (Tauri 2.0 + React 18 + TypeScript + Vite)  │
 │  TUI (ratatui)  ·  CLI (clap)                        │
 └──────────────────────┬──────────────────────────────┘
-                       │ 44 Tauri Commands / IPC
+                       │ 61 Tauri Commands / IPC
 ┌──────────────────────┴──────────────────────────────┐
 │                  桌面运行时 (Desktop Runtime)          │
-│  Tauri 2.0 · 44 Commands · Channel<WireEvent>        │
+│  Tauri 2.0 · 61 Commands · Channel<WireEvent>        │
 └──────────────────────┬──────────────────────────────┘
                        │
 ┌──────────────────────┴──────────────────────────────┐
@@ -115,7 +115,7 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 │    Provider 层       │ │      工具层 (Tools)           │
 │  DeepSeek V4 Pro    │ │  File · Glob · Grep · Shell   │
 │  DeepSeek V4 Flash  │ │  WebFetch · Task · MCP Bridge │
-│  Streaming + Tools  │ │  13+ Built-in Tools          │
+│  Streaming + Tools  │ │  21 Built-in Tools           │
 └─────────────────────┘ └──────────────────────────────┘
 ```
 
@@ -126,7 +126,7 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 | `deepseeknova-core` | 核心类型：Runner / Tool trait、Registry、WireEvent |
 | `deepseeknova-agent` | Agent 主循环、Coordinator、Plan-Mode Runner |
 | `deepseeknova-provider` | DeepSeek / OpenAI 兼容 / Anthropic 流式 Provider |
-| `deepseeknova-tools` | 13+ 内置工具实现 |
+| `deepseeknova-tools` | 21 个内置工具实现 |
 | `deepseeknova-mcp` | MCP 协议客户端（stdio / HTTP） |
 | `deepseeknova-graph` | 代码图检索引擎（tree-sitter + SQLite FTS5 + PageRank + repo map） |
 | `deepseeknova-sandbox` | 沙箱 trait + macOS Seatbelt / Linux bubblewrap |
@@ -152,7 +152,7 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 |----|------|------|
 | **CLI** | clap | 轻量，单二进制，chat / plan / scan / serve / setup |
 | **TUI** | ratatui | 全屏终端 UI，快捷键驱动 |
-| **Desktop** | Tauri 2.0 + React 18 | 原生桌面体验，63 个 IPC 命令 |
+| **Desktop** | Tauri 2.0 + React 18 | 原生桌面体验，61 个 IPC 命令 |
 
 ### 桌面前端亮点
 
@@ -242,7 +242,7 @@ deepseeknova desktop
 | 前端 | React 18 + Vite 5 + Zustand |
 | 桌面 | Tauri 2.0 |
 | 追踪 | OpenTelemetry (OTLP) |
-| 测试 | 511 tests · cargo-llvm-cov · CI 三平台 |
+| 测试 | 739 tests · cargo-llvm-cov · CI 三平台 |
 
 ## 📄 License
 

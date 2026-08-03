@@ -4,7 +4,7 @@
 
 ### A DeepSeek-Native AI Coding Agent Framework
 
-**22 Rust crates · 44 Tauri commands · 3 frontends (CLI / TUI / Desktop)**
+**22 Rust crates · 61 Tauri commands · 3 frontends (CLI / TUI / Desktop)**
 
 A Rust-from-scratch AI agent framework — not a wrapper. Built specifically for DeepSeek models.
 
@@ -31,7 +31,7 @@ A Rust-from-scratch AI agent framework — not a wrapper. Built specifically for
 
 ## 🎯 Key Features
 
-- **Deep reasoning + tool calling** — streaming reasoning output, 4-level reasoning effort, 13+ built-in tools
+- **Deep reasoning + tool calling** — streaming reasoning output, 4-level reasoning effort, 21 built-in tools
 - **Prefix-cache architecture** — cross-turn prompt prefix hits, real-time token tracking, budget control
 - **Sandboxed execution** — macOS Seatbelt / Linux bubblewrap isolation, 12 permission rules
 - **Multi-agent delegation** — delegate-based sub-agents (explorer / coder / tester / reviewer) with constrained tool sets, semaphore concurrency, and capped result summaries; isolated context, no recursion. Historical GOAP/Swarm/Federation experiments were removed in B0 (see DESIGN.md).
@@ -43,7 +43,7 @@ A Rust-from-scratch AI agent framework — not a wrapper. Built specifically for
 ```
 Frontend    Tauri 2.0 + React 18 + TypeScript (Desktop)
             ratatui (TUI) · clap (CLI)
-               │ 44 Tauri Commands / IPC
+               │ 61 Tauri Commands / IPC
 Desktop RT  Tauri 2.0 · Channel<WireEvent>
                │
 Runtime     Agent Loop · Coordinator · Plan-Mode Runner
@@ -52,7 +52,7 @@ Runtime     Agent Loop · Coordinator · Plan-Mode Runner
 Core        Runner Trait · Tool Trait · Registry · WireEvent
                │                    │
 Provider    DeepSeek V4 Pro/Flash   Tools: File · Glob · Grep · Shell
-            Streaming + Tools       WebFetch · Task · MCP Bridge · 13+
+            Streaming + Tools       WebFetch · Task · MCP Bridge · 21
 ```
 
 ## 📦 Crates
@@ -62,7 +62,7 @@ Provider    DeepSeek V4 Pro/Flash   Tools: File · Glob · Grep · Shell
 | `deepseeknova-core` | Core types: Runner / Tool trait, Registry, WireEvent |
 | `deepseeknova-agent` | Agent loop, Coordinator, Plan-Mode Runner |
 | `deepseeknova-provider` | DeepSeek / OpenAI-compatible / Anthropic streaming |
-| `deepseeknova-tools` | 13+ built-in tools |
+| `deepseeknova-tools` | 21 built-in tools |
 | `deepseeknova-mcp` | MCP protocol client (stdio / HTTP) |
 | `deepseeknova-graph` | Code graph engine (tree-sitter + SQLite FTS5 + PageRank + repo map) |
 | `deepseeknova-sandbox` | Sandbox trait + macOS Seatbelt / Linux bubblewrap |
@@ -137,7 +137,7 @@ model = "deepseek-chat"
 | Frontend | React 18 + Vite 5 + Zustand |
 | Desktop | Tauri 2.0 |
 | Tracing | OpenTelemetry (OTLP) |
-| Tests | 511 tests · cargo-llvm-cov · 3-platform CI |
+| Tests | 739 tests · cargo-llvm-cov · 3-platform CI |
 
 ## 📄 License
 

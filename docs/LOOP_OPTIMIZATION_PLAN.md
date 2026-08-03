@@ -1,5 +1,8 @@
 # DeepseekNova 循环完善与低成本优化计划
 
+> 历史计划文档：阶段 P1–P4.3 已于 2026-07 完成交付（PR #44–#45 已合并），
+> 现役能力说明见 `GUIDE.md` / `DESIGN.md` / `PROMPT_DESIGN.md`，本文件仅作追溯。
+
 > 唯一设计原则：把 DeepSeek-V4-Flash 当作一个"低成本、高频决策引擎"，而不是一个
 > "一次性回答机器"。核心循环：**Observe → Plan → Tool → Verify → Reflect → Next Action**，
 > 配合长上下文、动态上下文检索与工具编排。
@@ -11,7 +14,7 @@
 
 | 阶段 | 状态 | 落地位置 |
 |---|---|---|
-| P1 并行工具 + Verify 回喂 | ✅ 已实现（PR #44，待合并） | `agent.rs` 分段调度、`verify.rs`、`[verify]` 配置 |
+| P1 并行工具 + Verify 回喂 | ✅ 已实现（PR #44 已合并，2026-07-31） | `agent.rs` 分段调度、`verify.rs`、`[verify]` 配置 |
 | P2 每步 effort / 观察压缩 / 工具缓存 | ✅ 已实现（含测试） | `agent.rs`（`with_effort_routing` / `with_observe_compression` / `with_tool_cache`）、CLI `step_effort_providers` |
 | P3.1 真实 token 计量 | ✅ 已实现（含测试） | `core/tokens.rs`（官方口径 0.3/0.6 转换）、`agent/tokens.rs` 接入各截断点 |
 | P3.2 中途检索 | ✅ 已实现 | 续聊含工具轮时召回 + 压缩驱逐后按最近用户意图召回（`MidRunRetrieval`，runtime 经记忆召回提供器装配） |
