@@ -1,11 +1,17 @@
 /**
  * session.ts — 会话级 Solid hooks。
  *
- * 封装 bridge.ts 的 submitPrompt（Channel 事件流）+ 会话 CRUD，
- * 将 WireEvent 流聚合为消息列表信号，供会话页面消费。
+ * 封装 bridge.ts 的 submitPrompt（Channel 事件流）+ 会话 CRUD。
+ *
+ * 关键设计（Bugbot 审查后重构）：
+ * - sendPrompt 在 invoke 回调内**直接调用纯聚合函数**，不再经 bus 订阅中转，
+ *   避免「订阅在流式事件到达前被销毁」的竞态（C1）。
+ * - done 携带后端累积的全量文本，直接替换而非追加，避免内容翻倍（H1）。
+ * - running 标记立即置 true（同步），杜绝双击提交并发（M2）。
+ * - 会话切换时调用 clearSessionMessages 清理模块级消息（M1）。
  */
 
-import { createSignal, createResource, createMemo, onCleanup } from "solid-js";
+import { createSignal, createResource, createMemo } from "solid-js";
 import {
   submitPrompt as invokeSubmit,
   cancelRun as invokeCancel,
@@ -16,98 +22,34 @@ import {
   renameSession,
   type SessionInfo,
 } from "../bridge.ts";
-import { pushEvent, resetBus, clearPendingApproval, useBus, onEvent } from "./bus";
+import { pushEvent, resetBus, clearPendingApproval, useBus } from "./bus";
+import { aggregateMessages } from "./aggregate";
 import type { Message, WireEvent, SubmitRequest } from "../types";
 
-// ── 消息聚合 ──────────────────────────────────────────────────────────
+// ── 消息状态（模块级：会话页面消费）──────────────────────────────
 
 interface MessageState {
   messages: Message[];
+  /** 当前是否有运行中的 run（同步守卫，杜绝双击提交） */
+  running: boolean;
+  /** paused 的 reason（供 UI 展示可恢复提示） */
+  pausedReason: string | null;
 }
 
-const [msg, setMsg] = createSignal<MessageState>({ messages: [] });
+const [msg, setMsg] = createSignal<MessageState>({
+  messages: [],
+  running: false,
+  pausedReason: null,
+});
 
-function aggregate(ev: WireEvent) {
+function applyEvent(ev: WireEvent) {
   setMsg((s) => {
-    const messages = [...s.messages];
-    const last = messages[messages.length - 1];
-
-    switch (ev.kind) {
-      case "text_delta": {
-        if (last && last.role === "assistant") {
-          last.content += ev.text;
-        } else {
-          messages.push({
-            id: `msg-${messages.length}`,
-            role: "assistant",
-            content: ev.text,
-          });
-        }
-        break;
-      }
-      case "reasoning_delta": {
-        if (last && last.role === "reasoning") {
-          last.content += ev.text;
-        } else {
-          messages.push({
-            id: `msg-${messages.length}`,
-            role: "reasoning",
-            content: ev.text,
-            reasoningDone: false,
-          });
-        }
-        break;
-      }
-      case "tool_call_start": {
-        messages.push({
-          id: ev.id,
-          role: "tool",
-          content: "",
-          toolName: ev.name,
-          toolId: ev.id,
-          toolArgs: "",
-          startTs: Date.now(),
-        });
-        break;
-      }
-      case "tool_call_delta": {
-        const t = messages.find((m) => m.toolId === ev.id);
-        if (t) t.toolArgs = (t.toolArgs ?? "") + ev.args_delta;
-        break;
-      }
-      case "tool_call_end": {
-        const t = messages.find((m) => m.toolId === ev.id);
-        if (t) {
-          t.toolName = ev.name;
-          t.toolArgs = ev.arguments;
-          t.endTs = Date.now();
-        }
-        break;
-      }
-      case "tool_result": {
-        const t = messages.find((m) => m.toolId === ev.call_id);
-        if (t) t.toolResult = ev.result;
-        break;
-      }
-      case "done": {
-        if (last && last.role === "reasoning") last.reasoningDone = true;
-        if (ev.text) {
-          if (last && last.role === "assistant") {
-            last.content += ev.text;
-          } else {
-            messages.push({ id: `msg-${messages.length}`, role: "assistant", content: ev.text });
-          }
-        }
-        break;
-      }
-      case "error": {
-        messages.push({ id: `msg-${messages.length}`, role: "error", content: ev.message });
-        break;
-      }
-      default:
-        break;
-    }
-    return { messages };
+    const { messages, finished, pausedReason } = aggregateMessages(s.messages, ev);
+    return {
+      messages,
+      running: finished ? false : s.running,
+      pausedReason: pausedReason ?? s.pausedReason,
+    };
   });
 }
 
@@ -118,7 +60,7 @@ export function useMessages() {
 }
 
 export function useRunning() {
-  return createMemo(() => useBus()().running);
+  return createMemo(() => msg().running);
 }
 
 export function usePhase() {
@@ -133,39 +75,40 @@ export function useToolCalls() {
   return createMemo(() => useBus()().toolCalls);
 }
 
-/** 提交一条用户消息；自动订阅后端事件流聚合消息 */
+export function usePausedReason() {
+  return createMemo(() => msg().pausedReason);
+}
+
+/** 提交一条用户消息；invoke 回调内同步聚合事件流。 */
 export async function sendPrompt(request: Omit<SubmitRequest, "prompt"> & { prompt: string }) {
   resetBus();
-  setMsg({ messages: [] });
+  setMsg({ messages: [], running: true, pausedReason: null });
 
-  const unsub = onEvent("*", aggregate);
-  try {
-    await invokeSubmit(request, {
-      onText: (text) => pushEvent({ kind: "text_delta", text }),
-      onReasoning: (text, signature) =>
-        pushEvent({ kind: "reasoning_delta", text, signature: signature ?? null }),
-      onToolCallStart: (id, name) => pushEvent({ kind: "tool_call_start", id, name }),
-      onToolCallDelta: (id, argsDelta) =>
-        pushEvent({ kind: "tool_call_delta", id, args_delta: argsDelta }),
-      onToolCallEnd: (id, name, arguments_) =>
-        pushEvent({ kind: "tool_call_end", id, name, arguments: arguments_ }),
-      onToolResult: (callId, result) =>
-        pushEvent({ kind: "tool_result", call_id: callId, result }),
-      onUsage: (usage) => pushEvent({ kind: "usage", ...usage }),
-      onApprovalRequest: (req) =>
-        pushEvent({ kind: "approval_request", id: req.id, title: req.title, description: req.description }),
-      onDone: (text, usage) =>
-        pushEvent({ kind: "done", text, usage: usage ?? null }),
-      onError: (message) => pushEvent({ kind: "error", message }),
-      onTurnComplete: () => pushEvent({ kind: "turn_complete" }),
-    });
-  } finally {
-    unsub();
-  }
+  await invokeSubmit(request, {
+    onText: (text) => applyEvent({ kind: "text_delta", text }),
+    onReasoning: (text, signature) => applyEvent({ kind: "reasoning_delta", text, signature: signature ?? null }),
+    onToolCallStart: (id, name) => applyEvent({ kind: "tool_call_start", id, name }),
+    onToolCallDelta: (id, argsDelta) => applyEvent({ kind: "tool_call_delta", id, args_delta: argsDelta }),
+    onToolCallEnd: (id, name, arguments_) => applyEvent({ kind: "tool_call_end", id, name, arguments: arguments_ }),
+    onToolResult: (callId, result) => applyEvent({ kind: "tool_result", call_id: callId, result }),
+    onUsage: (usage) => pushEvent({ kind: "usage", ...usage }),
+    onApprovalRequest: (req) => pushEvent({ kind: "approval_request", id: req.id, title: req.title, description: req.description }),
+    onPaused: (ev) => applyEvent({ kind: "paused", reason: ev.reason, session_id: ev.session_id }),
+    onDone: (text, usage) => {
+      applyEvent({ kind: "done", text, usage: usage ?? null });
+      pushEvent({ kind: "done", text, usage: usage ?? null });
+    },
+    onError: (message) => {
+      applyEvent({ kind: "error", message });
+      pushEvent({ kind: "error", message });
+    },
+    onTurnComplete: () => pushEvent({ kind: "turn_complete" }),
+  });
 }
 
 export async function cancelRun() {
   await invokeCancel();
+  applyEvent({ kind: "done", text: "", usage: null });
   pushEvent({ kind: "done", text: "", usage: null });
 }
 
@@ -192,9 +135,9 @@ export function useRenameSession() {
   return async (id: string, title: string) => await renameSession(id, title);
 }
 
-// 清理函数（供会话切换/卸载时调用）
+/** 会话切换/卸载时清理模块级消息与总线（防止串会话显示陈旧转录） */
 export function clearSessionMessages() {
-  setMsg({ messages: [] });
+  setMsg({ messages: [], running: false, pausedReason: null });
   resetBus();
 }
 

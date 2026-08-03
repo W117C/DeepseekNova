@@ -25,7 +25,6 @@ export default defineConfig({
       "@opencode-ai/ui/v2": fileURLToPath(new URL("./vendor/ui/v2/components", import.meta.url)),
       "@opencode-ai/ui": fileURLToPath(new URL("./vendor/ui/components", import.meta.url)),
       "@opencode-ai/session-ui": fileURLToPath(new URL("./vendor/session-ui", import.meta.url)),
-      "@opencode-ai/app": fileURLToPath(new URL("./vendor/app", import.meta.url)),
       "@opencode-ai/sdk": fileURLToPath(new URL("./shims/sdk", import.meta.url)),
       "@opencode-ai/core": fileURLToPath(new URL("./shims/core", import.meta.url)),
       "@opencode-ai/client": fileURLToPath(new URL("./shims/client", import.meta.url)),

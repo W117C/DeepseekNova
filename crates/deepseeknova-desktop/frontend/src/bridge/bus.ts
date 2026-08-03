@@ -91,6 +91,10 @@ function push(ev: WireEvent) {
       case "turn_complete":
         next.turnCount = s.turnCount + 1;
         break;
+      case "paused":
+        next.phase = "stopped";
+        next.running = false;
+        break;
       case "done":
         next.phase = "done";
         next.running = false;

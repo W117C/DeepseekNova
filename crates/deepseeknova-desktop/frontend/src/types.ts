@@ -24,6 +24,8 @@ export type WireEvent =
     }
   | { kind: "turn_complete" }
   | { kind: "approval_request"; id: string; title: string; description: string | null }
+  /** 运行被暂停（max-steps 暂停或预算拒绝），任务可恢复 */
+  | { kind: "paused"; reason: string; session_id: string | null }
   | { kind: "done"; text: string; usage: UsageInfo | null }
   | { kind: "error"; message: string };
 

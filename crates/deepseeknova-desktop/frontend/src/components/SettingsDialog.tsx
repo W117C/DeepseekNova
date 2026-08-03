@@ -13,7 +13,6 @@ import { FieldV2 } from "@opencode-ai/ui/v2/field-v2";
 import { TextInputV2 } from "@opencode-ai/ui/v2/text-input-v2";
 import { Switch } from "@opencode-ai/ui/v2/switch-v2";
 import {
-  saveSettings,
   getSystemPrompt,
   setSystemPrompt,
   getReasoningParams,
@@ -80,7 +79,7 @@ export default function SettingsDialog(props: SettingsDialogProps) {
   const [maxRetries, setMaxRetries] = createSignal(2);
   const [toolToggles, setToolToggles] = createSignal<Record<string, boolean>>({});
 
-  // 打开时加载数据并填充草稿
+  // 打开时加载数据
   createEffect(() => {
     if (!props.open) return;
     void refetchPrompt();
@@ -88,27 +87,36 @@ export default function SettingsDialog(props: SettingsDialogProps) {
     void refetchTools();
   });
 
+  // 仅首次打开时填充草稿；之后 tools/params 重新拉取不得覆盖用户未保存编辑（H2）
+  let hydrated = false;
   createEffect(() => {
-    if (!props.open) return;
+    if (!props.open || hydrated) return;
+    // 资源 state 就绪（含空串/默认值）才视为可填充
+    if (systemPrompt.state !== "ready" || params.state !== "ready") return;
     const p = params();
     const t = tools();
-    if (!systemPrompt.loading && !params.loading) {
-      setPromptDraft(systemPrompt() ?? "");
-      setTemp(p.temperature);
-      setTopP(p.top_p);
-      setMaxTokens(p.max_tokens);
-      setFallbackModel(p.fallback_model ?? "");
-      setTimeoutSecs(p.timeout_secs);
-      setMaxRetries(p.max_retries);
-    }
+    hydrated = true;
+    setPromptDraft(systemPrompt() ?? "");
+    setTemp(p.temperature);
+    setTopP(p.top_p);
+    setMaxTokens(p.max_tokens);
+    setFallbackModel(p.fallback_model ?? "");
+    setTimeoutSecs(p.timeout_secs);
+    setMaxRetries(p.max_retries);
     if (t.length > 0) {
       setToolToggles(Object.fromEntries(t.map((x) => [x.name, x.enabled])));
     }
   });
 
+  // 关闭对话框时重置 hydrated，下次打开重新填充
+  createEffect(() => {
+    if (!props.open) hydrated = false;
+  });
+
   const save = async () => {
     setSaving(true);
     try {
+      // C2：各 set* 命令按 key 增量写盘；不得调用 saveSettings({}) 整文件覆盖
       await setSystemPrompt(promptDraft());
       await setReasoningParams({
         temperature: temp(),
@@ -123,7 +131,6 @@ export default function SettingsDialog(props: SettingsDialogProps) {
       await Promise.all(
         Object.entries(toggles).map(([name, enabled]) => setToolEnabled(name, enabled)),
       );
-      await saveSettings({});
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } finally {

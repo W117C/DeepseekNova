@@ -36,6 +36,8 @@ export default function Home(props: HomeProps) {
 
   const removeSession = async (id: string, e: MouseEvent) => {
     e.stopPropagation();
+    // L3：删除前确认，避免误删
+    if (!window.confirm("确定删除该会话？此操作不可撤销。")) return;
     await deleteSession(id);
     await refetch();
   };

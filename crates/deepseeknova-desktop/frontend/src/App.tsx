@@ -11,6 +11,8 @@ import Home from "./pages/Home";
 import Session from "./pages/Session";
 import SettingsDialog from "./components/SettingsDialog";
 import CommandPalette from "./components/CommandPalette";
+import { clearSessionMessages } from "./bridge/session";
+import { createSession } from "./bridge";
 import type { SessionInfo } from "./bridge";
 
 export default function App() {
@@ -20,11 +22,14 @@ export default function App() {
   const [showPalette, setShowPalette] = createSignal(false);
 
   const openSession = (s: SessionInfo) => {
+    // 进入新会话前清理模块级消息，防止串会话显示陈旧转录（M1）
+    clearSessionMessages();
     setActiveSession(s);
     setView("session");
   };
 
   const backToHome = () => {
+    clearSessionMessages();
     setView("home");
     setActiveSession(null);
   };
@@ -41,11 +46,14 @@ export default function App() {
     onCleanup(() => window.removeEventListener("keydown", onKey));
   });
 
-  const handleCommand = (cmd: { id: string }) => {
+  const handleCommand = async (cmd: { id: string }) => {
     switch (cmd.id) {
-      case "session.new":
-        setView("home");
+      case "session.new": {
+        // L3：命令面板"新建会话"与 Home 按钮行为一致——真正创建并进入
+        const s = await createSession();
+        openSession(s);
         break;
+      }
       case "session.back":
         backToHome();
         break;

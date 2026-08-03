@@ -23,6 +23,7 @@ export interface EventHandlers {
   onUsage?: (usage: UsageInfo) => void;
   onTurnComplete?: () => void;
   onApprovalRequest?: (req: { id: string; title: string; description: string | null }) => void;
+  onPaused?: (ev: { reason: string; session_id: string | null }) => void;
   onDone?: (text: string, usage?: UsageInfo) => void;
   onError?: (message: string) => void;
 }
@@ -51,6 +52,7 @@ export async function submitPrompt(request: SubmitRequest, handlers: EventHandle
       }); break;
       case "turn_complete": handlers.onTurnComplete?.(); break;
       case "approval_request": handlers.onApprovalRequest?.({ id: event.id, title: event.title, description: event.description }); break;
+      case "paused": handlers.onPaused?.({ reason: event.reason, session_id: event.session_id }); break;
       case "done": handlers.onDone?.(event.text, event.usage ?? undefined); break;
       case "error": handlers.onError?.(event.message); break;
       default: console.warn("Unknown WireEvent kind:", (event as { kind: string }).kind);

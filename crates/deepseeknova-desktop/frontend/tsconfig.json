@@ -32,7 +32,6 @@
       "@opencode-ai/ui/*": ["vendor/ui/components/*"],
       "@opencode-ai/session-ui/*": ["vendor/session-ui/*"],
       "@opencode-ai/session-ui": ["vendor/session-ui"],
-      "@opencode-ai/app/*": ["vendor/app/*"],
       "@opencode-ai/sdk/*": ["shims/sdk/*"],
       "@opencode-ai/core/*": ["shims/core/*"],
       "@opencode-ai/client/*": ["shims/client/*"],
