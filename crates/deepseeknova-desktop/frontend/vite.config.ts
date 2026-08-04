@@ -11,6 +11,11 @@ export default defineConfig({
     strictPort: true,
   },
   envPrefix: ["VITE_", "TAURI_"],
+  // opencode 的 markdown worker 用 `?worker&url` 引入；vite 默认 worker
+  // 为 IIFE，与 code-splitting 冲突，改 ES 格式（与 opencode 的 vite.js 一致）
+  worker: {
+    format: "es",
+  },
   resolve: {
     alias: {
       // opencode exports 语义：ui/* 默认落到 components/*，特殊子路径单独映射
@@ -24,7 +29,9 @@ export default defineConfig({
       "@opencode-ai/ui/v2/styles": fileURLToPath(new URL("./vendor/ui/v2/styles", import.meta.url)),
       "@opencode-ai/ui/v2": fileURLToPath(new URL("./vendor/ui/v2/components", import.meta.url)),
       "@opencode-ai/ui": fileURLToPath(new URL("./vendor/ui/components", import.meta.url)),
-      "@opencode-ai/session-ui": fileURLToPath(new URL("./vendor/session-ui", import.meta.url)),
+      "@opencode-ai/session-ui/context": fileURLToPath(new URL("./vendor/session-ui/context", import.meta.url)),
+      "@opencode-ai/session-ui/styles": fileURLToPath(new URL("./vendor/session-ui/styles", import.meta.url)),
+      "@opencode-ai/session-ui": fileURLToPath(new URL("./vendor/session-ui/components", import.meta.url)),
       "@opencode-ai/sdk": fileURLToPath(new URL("./shims/sdk", import.meta.url)),
       "@opencode-ai/core": fileURLToPath(new URL("./shims/core", import.meta.url)),
       "@opencode-ai/client": fileURLToPath(new URL("./shims/client", import.meta.url)),

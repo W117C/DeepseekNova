@@ -9,6 +9,7 @@ import { createSignal, For, Show, createMemo } from "solid-js";
 import { Icon } from "@opencode-ai/ui/v2/icon";
 import { ButtonV2 } from "@opencode-ai/ui/v2/button-v2";
 import { ScrollView } from "@opencode-ai/ui/scroll-view";
+import { Markdown } from "@opencode-ai/session-ui/markdown";
 import { sendPrompt, cancelRun, approve, useMessages, useRunning, usePendingApproval } from "../bridge/session";
 import type { SessionInfo } from "../bridge";
 import type { Message } from "../types";
@@ -64,7 +65,7 @@ function ErrorBlock(props: { message: Message }) {
   );
 }
 
-function MessageItem(props: { message: Message }) {
+function MessageItem(props: { message: Message; streaming?: boolean }) {
   const isUser = () => props.message.role === "user";
   return (
     <div class="flex w-full flex-col gap-2 px-4" data-role={props.message.role}>
@@ -74,9 +75,11 @@ function MessageItem(props: { message: Message }) {
         </div>
       </Show>
       <Show when={props.message.role === "assistant"}>
-        <p class="whitespace-pre-wrap text-[13.5px] leading-[21px] tracking-[-0.04px] text-v2-text-text-base [font-weight:440]">
-          {props.message.content}
-        </p>
+        <Markdown
+          text={props.message.content}
+          streaming={props.streaming ?? false}
+          class="text-[13.5px] leading-[21px] tracking-[-0.04px] text-v2-text-text-base [font-weight:440]"
+        />
       </Show>
       <Show when={props.message.role === "reasoning"}>
         <ReasoningBlock message={props.message} />
@@ -224,7 +227,14 @@ export default function Session(props: SessionProps) {
               </div>
             }
           >
-            <For each={list()}>{(m) => <MessageItem message={m} />}</For>
+            <For each={list()}>
+              {(m, i) => (
+                <MessageItem
+                  message={m}
+                  streaming={running() && i() === list().length - 1 && m.role === "assistant"}
+                />
+              )}
+            </For>
           </Show>
           <ApprovalCard />
         </div>

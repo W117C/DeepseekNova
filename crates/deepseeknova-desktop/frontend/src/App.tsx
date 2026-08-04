@@ -7,6 +7,7 @@
 
 import { createSignal, createEffect, onCleanup, Show, type JSX } from "solid-js";
 import { Icon } from "@opencode-ai/ui/v2/icon";
+import { MarkedProvider } from "@opencode-ai/ui/context/marked";
 import Home from "./pages/Home";
 import Session from "./pages/Session";
 import SettingsDialog from "./components/SettingsDialog";
@@ -66,27 +67,29 @@ export default function App() {
   };
 
   return (
-    <div
-      class="relative flex h-dvh min-w-0 flex-col bg-v2-background-bg-base select-none [&_input]:select-text [&_textarea]:select-text [&_[contenteditable]]:select-text"
-      data-new-layout
-    >
-      <Show when={view() === "home"} fallback={<Session session={activeSession()!} onBack={backToHome} />}>
-        <Home onOpenSession={openSession} />
-      </Show>
-
-      {/* 全局设置入口（右下角，opencode help-button 视觉） */}
-      <button
-        type="button"
-        class="absolute bottom-4 right-4 z-40 flex size-8 items-center justify-center rounded-[6px] text-v2-icon-icon-muted hover:bg-v2-overlay-simple-overlay-hover"
-        onClick={() => setShowSettings(true)}
-        aria-label="设置"
+    <MarkedProvider>
+      <div
+        class="relative flex h-dvh min-w-0 flex-col bg-v2-background-bg-base select-none [&_input]:select-text [&_textarea]:select-text [&_[contenteditable]]:select-text"
+        data-new-layout
       >
-        <Icon name="settings-gear" />
-      </button>
+        <Show when={view() === "home"} fallback={<Session session={activeSession()!} onBack={backToHome} />}>
+          <Home onOpenSession={openSession} />
+        </Show>
 
-      <SettingsDialog open={showSettings()} onOpenChange={setShowSettings} />
-      <CommandPalette open={showPalette()} onOpenChange={setShowPalette} onSelect={handleCommand} />
-    </div>
+        {/* 全局设置入口（右下角，opencode help-button 视觉） */}
+        <button
+          type="button"
+          class="absolute bottom-4 right-4 z-40 flex size-8 items-center justify-center rounded-[6px] text-v2-icon-icon-muted hover:bg-v2-overlay-simple-overlay-hover"
+          onClick={() => setShowSettings(true)}
+          aria-label="设置"
+        >
+          <Icon name="settings-gear" />
+        </button>
+
+        <SettingsDialog open={showSettings()} onOpenChange={setShowSettings} />
+        <CommandPalette open={showPalette()} onOpenChange={setShowPalette} onSelect={handleCommand} />
+      </div>
+    </MarkedProvider>
   );
 }
 
