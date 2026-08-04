@@ -151,7 +151,7 @@ impl DelegateEngine {
     }
 }
 
-/// 驱动子 Agent 的 run_stream 并收集最终文本（与 CLI/desktop 收集方式一致）。
+/// 驱动子 Agent 的 run_stream 并收集最终文本（与 CLI/serve 收集方式一致）。
 async fn collect_final_text(agent: &Agent, input: RunInput) -> anyhow::Result<String> {
     let mut stream = agent.run_stream(input).await?;
     let mut final_text = String::new();

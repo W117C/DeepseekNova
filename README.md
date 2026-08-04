@@ -20,11 +20,10 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 
 [![CI](https://github.com/W117C/DeepseekNova/actions/workflows/ci.yml/badge.svg)](https://github.com/W117C/DeepseekNova/actions/workflows/ci.yml)
 [![Security](https://github.com/W117C/DeepseekNova/actions/workflows/security.yml/badge.svg)](https://github.com/W117C/DeepseekNova/actions/workflows/security.yml)
-[![Desktop Build](https://github.com/W117C/DeepseekNova/actions/workflows/desktop.yml/badge.svg)](https://github.com/W117C/DeepseekNova/actions/workflows/desktop.yml)
 [![Release](https://github.com/W117C/DeepseekNova/actions/workflows/release.yml/badge.svg)](https://github.com/W117C/DeepseekNova/actions/workflows/release.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 [![Rust](https://img.shields.io/badge/rust-stable%201.97-orange.svg)](https://www.rust-lang.org)
-[![Crates](https://img.shields.io/badge/crates-22-green.svg)](#-22-个-crate)
+[![Crates](https://img.shields.io/badge/crates-21-green.svg)](#-21-个-crate)
 [![Tests](https://img.shields.io/badge/tests-739-brightgreen.svg)](#-技术栈)
 
 </div>
@@ -34,11 +33,6 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 ## 📸 截图
 
 <div align="center">
-
-| 亮色主题 | 暗色主题 |
-|----------|----------|
-| ![Light](docs/screenshots/desktop-light.png) | ![Dark](docs/screenshots/desktop-dark.png) |
-
 </div>
 
 ---
@@ -190,9 +184,6 @@ deepseeknova serve --port 8080
 
 # TUI
 deepseeknova chat --tui
-
-# Desktop
-deepseeknova desktop
 ```
 
 ## 📊 CI 检查项
@@ -202,14 +193,12 @@ deepseeknova desktop
 | 检查项 | 工作流 |
 |--------|--------|
 | cargo check (全 workspace) | CI |
-| cargo check (desktop + Tauri) | CI |
 | cargo clippy (-D warnings) | CI |
 | cargo fmt | CI |
 | cargo test (Ubuntu / macOS / Windows) | CI |
 | cargo doc | CI |
 | cargo llvm-cov (覆盖率) | CI |
 | cargo bench (基准测试) | CI |
-| frontend build (TypeScript + Vite) | CI |
 | release build (Linux / macOS / Windows) | Release |
 | cargo audit + cargo deny (安全审计) | Security |
 
@@ -217,10 +206,9 @@ deepseeknova desktop
 
 | 层 | 技术 |
 |----|------|
-| 语言 | Rust (stable 1.97) + TypeScript |
+| 语言 | Rust (stable 1.97) |
 | 后端 | Rust + SQLite FTS5 + tokio + axum |
-| 前端 | React 18 + Vite 5 + Zustand |
-| 桌面 | Tauri 2.0 |
+| 前端 | TUI (ratatui) · CLI (clap) · HTTP API (axum + SSE) |
 | 追踪 | OpenTelemetry (OTLP) |
 | 测试 | 739 tests · cargo-llvm-cov · CI 三平台 |
 

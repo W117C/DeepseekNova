@@ -123,7 +123,7 @@ pub enum RunEvent {
 
 // ---------------------------------------------------------------------------
 // WireEvent — cross-frontend serializable event format
-// Shared by Desktop (Tauri Channel), Serve (SSE), and CLI/TUI
+// Shared by Serve (SSE), CLI/TUI
 // ---------------------------------------------------------------------------
 
 /// A single event serialized for frontend consumption.

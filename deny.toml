@@ -28,27 +28,11 @@ version = 2
 # Review quarterly — remove items when upstream upgrades resolve them.
 # Each entry below has a comment explaining why it's ignored.
 ignore = [
-    # RUSTSEC-2026-0194, RUSTSEC-2026-0195: quick-xml 0.39.4 DoS vulnerabilities.
-    # Used transitively by some XML parsing deps. Upgrade to >=0.41.0 when possible.
-    "RUSTSEC-2026-0194",
-    "RUSTSEC-2026-0195",
-
     # RUSTSEC-2024-0436: paste 1.0.15 unmaintained — used by ratatui.
     "RUSTSEC-2024-0436",
 
-    # RUSTSEC-2024-0370: proc-macro-error 1.0.4 unmaintained — transitive dep.
-    "RUSTSEC-2024-0370",
-
     # RUSTSEC-2025-0068: serde_yml 0.0.13 — transitive dep, no direct usage.
     "RUSTSEC-2025-0068",
-
-    # RUSTSEC-2025-0075, 0080, 0081, 0098, 0100: unic-* crates unmaintained.
-    # Transitive deps from Unicode normalization libraries.
-    "RUSTSEC-2025-0075",
-    "RUSTSEC-2025-0080",
-    "RUSTSEC-2025-0081",
-    "RUSTSEC-2025-0098",
-    "RUSTSEC-2025-0100",
 ]
 
 [sources]

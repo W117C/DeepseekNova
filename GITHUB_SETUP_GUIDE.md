@@ -30,8 +30,8 @@ feat(security): inject configurable security policy into tool execution
 - Syncs docs: README Security section, CHANGELOG [0.3.0], SECURITY.md, CODEOWNERS
 
 ## Verification
-- [x] `cargo clippy --workspace --exclude deepseeknova-desktop --all-targets -- -D warnings` → 0 warnings
-- [x] `cargo test --workspace --exclude deepseeknova-desktop` → ~253 tests, 0 failures
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` → 0 warnings
+- [x] `cargo test --workspace` → ~253 tests, 0 failures
 - [x] `cargo fmt --all -- --check` → clean
 
 ## Test plan

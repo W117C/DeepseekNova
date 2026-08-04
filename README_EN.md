@@ -4,7 +4,7 @@
 
 ### A DeepSeek-Native AI Coding Agent Framework
 
-**22 Rust crates · 61 Tauri commands · 3 frontends (CLI / TUI / Desktop)**
+**21 Rust crates · 3 frontends (CLI / TUI / HTTP API)**
 
 A Rust-from-scratch AI agent framework — not a wrapper. Built specifically for DeepSeek models.
 
@@ -20,7 +20,6 @@ A Rust-from-scratch AI agent framework — not a wrapper. Built specifically for
 
 [![CI](https://github.com/W117C/DeepseekNova/actions/workflows/ci.yml/badge.svg)](https://github.com/W117C/DeepseekNova/actions/workflows/ci.yml)
 [![Security](https://github.com/W117C/DeepseekNova/actions/workflows/security.yml/badge.svg)](https://github.com/W117C/DeepseekNova/actions/workflows/security.yml)
-[![Desktop Build](https://github.com/W117C/DeepseekNova/actions/workflows/desktop.yml/badge.svg)](https://github.com/W117C/DeepseekNova/actions/workflows/desktop.yml)
 [![Release](https://github.com/W117C/DeepseekNova/actions/workflows/release.yml/badge.svg)](https://github.com/W117C/DeepseekNova/actions/workflows/release.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 [![Rust](https://img.shields.io/badge/rust-stable%201.97-orange.svg)](https://www.rust-lang.org)
@@ -41,11 +40,8 @@ A Rust-from-scratch AI agent framework — not a wrapper. Built specifically for
 ## 🏗️ Architecture
 
 ```
-Frontend    Tauri 2.0 + React 18 + TypeScript (Desktop)
-            ratatui (TUI) · clap (CLI)
-               │ 61 Tauri Commands / IPC
-Desktop RT  Tauri 2.0 · Channel<WireEvent>
-               │
+Frontend    ratatui (TUI) · clap (CLI) · axum HTTP + SSE (API)
+               │ WireEvent / SSE / CLI output
 Runtime     Agent Loop · Coordinator · Plan-Mode Runner
             Event Bus · Permission Gate · Security Context
                │
@@ -118,7 +114,6 @@ model = "deepseek-chat"
 | cargo clippy (-D warnings) | CI |
 | cargo test (Ubuntu / macOS / Windows) | CI |
 | cargo llvm-cov | CI |
-| frontend build | CI |
 | release build (3 platforms) | Release |
 | cargo audit + cargo deny | Security |
 
@@ -126,10 +121,9 @@ model = "deepseek-chat"
 
 | Layer | Technology |
 |-------|-----------|
-| Language | Rust (stable 1.97) + TypeScript |
+| Language | Rust (stable 1.97) |
 | Backend | Rust + SQLite FTS5 + tokio + axum |
-| Frontend | React 18 + Vite 5 + Zustand |
-| Desktop | Tauri 2.0 |
+| Frontend | TUI (ratatui) · CLI (clap) · HTTP API (axum + SSE) |
 | Tracing | OpenTelemetry (OTLP) |
 | Tests | 739 tests · cargo-llvm-cov · 3-platform CI |
 
