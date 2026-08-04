@@ -77,4 +77,5 @@ dist: release
 
 # ── Security audit ─────────────────────────────────────────────
 audit:
-	cargo audit || cargo install cargo-audit && cargo audit
+	@command -v cargo-deny >/dev/null 2>&1 || { echo "cargo-deny 未安装，请先安装: cargo install cargo-deny --locked"; exit 1; }
+	cargo deny --all-features check

@@ -24,17 +24,22 @@
 //! using the provider, keeping the working set small.
 
 pub mod agent;
+pub mod attribution;
 pub mod budget;
 mod compaction;
 pub mod coordinator;
 pub mod delegate;
+pub mod diagnose;
 pub mod memory;
 pub mod memory_distill;
+pub mod phase_runner;
 pub mod plan_mode;
 pub mod prompts;
+pub mod quality;
 pub mod reflection;
 mod review;
 pub mod sub_agent;
+pub mod task_spec;
 pub mod test_utils;
 pub mod tokens;
 mod verify;
@@ -46,3 +51,4 @@ pub use memory::*;
 pub use plan_mode::*;
 pub use prompts::DEFAULT_SYSTEM_PROMPT;
 pub use sub_agent::*;
+pub use task_spec::*;

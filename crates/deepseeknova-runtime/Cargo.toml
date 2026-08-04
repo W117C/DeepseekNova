@@ -26,6 +26,8 @@ deepseeknova-checkpoint = { workspace = true }
 deepseeknova-event = { workspace = true }
 deepseeknova-security = { workspace = true }
 deepseeknova-mcp = { workspace = true }
+deepseeknova-metrics = { workspace = true }
+deepseeknova-skills = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }

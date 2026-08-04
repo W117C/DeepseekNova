@@ -1,7 +1,10 @@
 use crate::chunk::Usage;
-use crate::graph::{Action, ExecutionGraph, ExecutionNode, ExecutionResult, NodeId, NodeOutput};
+use crate::graph::{
+    Action, Edge, EdgeCondition, ExecutionGraph, ExecutionNode, ExecutionResult, NodeId, NodeOutput,
+};
 use rand::Rng;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinSet;
@@ -44,14 +47,63 @@ pub trait DelegateCallback: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// Attribution hook — node failure attribution (wired by the runtime)
+// ---------------------------------------------------------------------------
+
+/// Node failure attribution hook. Default no-op; the agent layer implements
+/// real attribution logic and the runtime wires it in during finalization.
+pub trait AttributionHook: Send + Sync {
+    /// Called when a node fails after exhausting its retry policy. May
+    /// return an attribution summary (root cause / fix plan) for logging or
+    /// downstream use; `None` means no attribution was produced.
+    fn on_node_failure(&self, node_id: &NodeId, error: &NodeOutput) -> Option<String> {
+        let _ = (self, node_id, error);
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
 // GraphExecutor
 // ---------------------------------------------------------------------------
+
+/// Wraps a `JoinSet` so that dropping it aborts every task spawned onto it.
+///
+/// `tokio::task::JoinSet`'s `Drop` does **not** abort tasks that have already
+/// been spawned — they keep running detached in the background. When a node
+/// times out, `execute_node` drops the in-flight action future; without this
+/// guard the `Action::Parallel` branch's children would keep running past the
+/// node's timeout and its declared "timeout means failure" semantics would
+/// not bound side effects. The guard makes the drop path explicitly call
+/// `abort_all()`, so a timed-out (or early-bailed) Parallel node cancels all
+/// of its children.
+struct JoinSetAbortGuard<T: 'static>(JoinSet<T>);
+
+impl<T> Deref for JoinSetAbortGuard<T> {
+    type Target = JoinSet<T>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T> DerefMut for JoinSetAbortGuard<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl<T: 'static> Drop for JoinSetAbortGuard<T> {
+    fn drop(&mut self) {
+        self.0.abort_all();
+    }
+}
 
 pub struct GraphExecutor {
     think: Arc<dyn ThinkCallback>,
     tool: Arc<dyn ToolCallback>,
     reflect: Arc<dyn ReflectCallback>,
     delegate: Option<Arc<dyn DelegateCallback>>,
+    attribution: Option<Arc<dyn AttributionHook>>,
 }
 
 impl GraphExecutor {
@@ -65,12 +117,20 @@ impl GraphExecutor {
             tool,
             reflect,
             delegate: None,
+            attribution: None,
         }
     }
 
     /// Attach a delegate callback for handling `Action::Delegate` nodes.
     pub fn with_delegate(mut self, delegate: Arc<dyn DelegateCallback>) -> Self {
         self.delegate = Some(delegate);
+        self
+    }
+
+    /// Attach a node-failure attribution hook. Called on the failure path of
+    /// `execute_node` after retries are exhausted. Default: no-op.
+    pub fn with_attribution(mut self, attribution: Arc<dyn AttributionHook>) -> Self {
+        self.attribution = Some(attribution);
         self
     }
 
@@ -98,6 +158,12 @@ impl GraphExecutor {
                     .get(node_id)
                     .ok_or_else(|| anyhow::anyhow!("node must exist"))?;
 
+                if should_skip_node(node, graph, &outputs) {
+                    debug!("node {node_id} skipped: no incoming edge condition satisfied");
+                    outputs.insert(node_id.clone(), NodeOutput::Skipped);
+                    continue;
+                }
+
                 match self.clone().execute_node(node, &outputs).await {
                     Ok(output) => {
                         outputs.insert(node.id.clone(), output);
@@ -119,6 +185,12 @@ impl GraphExecutor {
                         .clone();
                     let outputs_snapshot = outputs.clone();
                     let this = Arc::clone(&self);
+
+                    if should_skip_node(&node, graph, &outputs_snapshot) {
+                        debug!("node {node_id} skipped: no incoming edge condition satisfied");
+                        outputs.insert(node.id.clone(), NodeOutput::Skipped);
+                        continue;
+                    }
 
                     set.spawn(async move {
                         (
@@ -154,7 +226,11 @@ impl GraphExecutor {
         })
     }
 
-    /// Execute a single node with retry.
+    /// Execute a single node with retry, bounded by `node.timeout` when set.
+    ///
+    /// A timeout is treated as a failure: it consumes a retry attempt, and
+    /// after `retry.max_attempts` timeouts the node fails with
+    /// `NodeOutput::Error(Timeout ...)` through the attribution hook path.
     async fn execute_node(
         self: Arc<Self>,
         node: &ExecutionNode,
@@ -163,7 +239,22 @@ impl GraphExecutor {
         let mut attempt = 0u32;
         loop {
             attempt += 1;
-            match self.execute_action(&node.action, outputs).await {
+            let action_result = match node.timeout {
+                Some(d) => {
+                    let this = Arc::clone(&self);
+                    match tokio::time::timeout(d, this.execute_action(&node.action, outputs)).await
+                    {
+                        Ok(Ok(output)) => Ok(output),
+                        Ok(Err(e)) => Err(e),
+                        Err(_) => Err(anyhow::anyhow!("node {} timed out after {d:?}", node.id)),
+                    }
+                }
+                None => {
+                    let this = Arc::clone(&self);
+                    this.execute_action(&node.action, outputs).await
+                }
+            };
+            match action_result {
                 Ok(output) => return Ok(output),
                 Err(e) if attempt < node.retry.max_attempts => {
                     let mut delay = node.retry.backoff * attempt;
@@ -178,80 +269,135 @@ impl GraphExecutor {
                     );
                     sleep(delay).await;
                 }
-                Err(e) => return Err(e),
+                Err(e) => {
+                    // Retries exhausted — surface the failure to the
+                    // attribution hook (default no-op) before returning.
+                    let error_output = NodeOutput::Error(format!("{e}"));
+                    if let Some(hook) = &self.attribution {
+                        if let Some(attr) = hook.on_node_failure(&node.id, &error_output) {
+                            debug!("node {} attribution: {attr}", node.id);
+                        }
+                    }
+                    return Err(e);
+                }
             }
         }
     }
 
     /// Execute a single Action.
-    async fn execute_action(
-        &self,
-        action: &Action,
-        outputs: &HashMap<NodeId, NodeOutput>,
-    ) -> anyhow::Result<NodeOutput> {
-        match action {
-            Action::Think { prompt } => {
-                let text = self.think.think(prompt).await?;
-                Ok(NodeOutput::Text(text))
-            }
-            Action::CallTool { tool, args } => {
-                let result = self.tool.call_tool(tool, args).await?;
-                Ok(NodeOutput::ToolResult(result))
-            }
-            Action::Observe { tool_call_id: _ } => {
-                // Find the tool result from a preceding node
-                let result = outputs
-                    .values()
-                    .find_map(|o| match o {
-                        NodeOutput::ToolResult(r) => Some(r.clone()),
-                        _ => None,
-                    })
-                    .unwrap_or_default();
-                Ok(NodeOutput::ToolResult(result))
-            }
-            Action::Reflect { criteria } => {
-                // Build context from all prior outputs
-                let context = build_context(outputs);
-                let result = self.reflect.reflect(criteria, &context).await?;
-                Ok(NodeOutput::Text(if result.passed {
-                    format!("✓ passed: {}", result.feedback)
-                } else {
-                    format!("✗ failed: {}", result.feedback)
-                }))
-            }
-            Action::Delegate { sub_agent, goal } => {
-                if let Some(ref d) = self.delegate {
-                    let text = d.delegate(sub_agent, goal).await?;
+    ///
+    /// Returns a boxed future explicitly `+ Send` so that `Action::Parallel`
+    /// children can be spawned onto a `JoinSet` (recursive async fns would
+    /// otherwise fail the `Send` bound of `JoinSet::spawn`).
+    fn execute_action<'a>(
+        self: Arc<Self>,
+        action: &'a Action,
+        outputs: &'a HashMap<NodeId, NodeOutput>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<NodeOutput>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            match action {
+                Action::Think { prompt } => {
+                    let text = self.think.think(prompt).await?;
                     Ok(NodeOutput::Text(text))
-                } else {
-                    anyhow::bail!(
-                        "Delegate action (sub_agent='{sub_agent}') requires a \
-                         DelegateCallback, but none was configured on GraphExecutor"
-                    )
                 }
-            }
-            Action::Parallel(nodes) => {
-                // Execute sub-nodes sequentially within this action.
-                let mut combined = String::new();
-                for child in nodes {
-                    let result = Box::pin(self.execute_action(&child.action, outputs)).await;
-                    match result {
-                        Ok(output) => {
-                            combined.push_str(&format!("{output:?}\n"));
-                        }
-                        Err(e) => {
-                            combined.push_str(&format!("error: {e}\n"));
-                        }
+                Action::CallTool { tool, args } => {
+                    let result = self.tool.call_tool(tool, args).await?;
+                    Ok(NodeOutput::ToolResult(result))
+                }
+                Action::Observe { tool_call_id: _ } => {
+                    // Find the tool result from a preceding node
+                    let result = outputs
+                        .values()
+                        .find_map(|o| match o {
+                            NodeOutput::ToolResult(r) => Some(r.clone()),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    Ok(NodeOutput::ToolResult(result))
+                }
+                Action::Reflect { criteria } => {
+                    // Build context from all prior outputs
+                    let context = build_context(outputs);
+                    let result = self.reflect.reflect(criteria, &context).await?;
+                    Ok(NodeOutput::Text(if result.passed {
+                        format!("✓ passed: {}", result.feedback)
+                    } else {
+                        format!("✗ failed: {}", result.feedback)
+                    }))
+                }
+                Action::Delegate { sub_agent, goal } => {
+                    if let Some(ref d) = self.delegate {
+                        let text = d.delegate(sub_agent, goal).await?;
+                        Ok(NodeOutput::Text(text))
+                    } else {
+                        anyhow::bail!(
+                            "Delegate action (sub_agent='{sub_agent}') requires a \
+                             DelegateCallback, but none was configured on GraphExecutor"
+                        )
                     }
                 }
-                Ok(NodeOutput::Text(combined))
+                Action::Parallel(nodes) => {
+                    // Execute sub-nodes concurrently via JoinSet, collecting
+                    // results in input order.
+                    //
+                    // The JoinSet is wrapped in `JoinSetAbortGuard` so that
+                    // when this action future is dropped (node timeout, or an
+                    // early bail on a join error) every spawned child is
+                    // aborted. A bare JoinSet would leave already-spawned
+                    // children running detached past the node's timeout.
+                    let mut set = JoinSetAbortGuard(JoinSet::new());
+                    for (idx, child) in nodes.iter().enumerate() {
+                        let child = child.clone();
+                        let outputs = outputs.clone();
+                        let this = Arc::clone(&self);
+                        set.spawn(async move {
+                            (idx, this.execute_action(&child.action, &outputs).await)
+                        });
+                    }
+                    let mut results: Vec<Option<anyhow::Result<NodeOutput>>> =
+                        (0..nodes.len()).map(|_| None).collect();
+                    while let Some(joined) = set.join_next().await {
+                        match joined {
+                            Ok((idx, result)) => results[idx] = Some(result),
+                            Err(e) => anyhow::bail!("parallel node join error: {e}"),
+                        }
+                    }
+                    let mut combined = String::new();
+                    let mut all_failed = !nodes.is_empty();
+                    for (i, result) in results.into_iter().enumerate() {
+                        let child = &nodes[i];
+                        let output = result.unwrap_or_else(|| {
+                            Err(anyhow::anyhow!(
+                                "parallel node '{}' produced no result",
+                                child.id
+                            ))
+                        });
+                        match output {
+                            Ok(output) => {
+                                all_failed = false;
+                                combined.push_str(&format!("[{}]: {output:?}\n", child.id));
+                            }
+                            Err(e) => {
+                                combined.push_str(&format!("[{}] error: {e}\n", child.id));
+                            }
+                        }
+                    }
+                    // 子节点全部失败时返回 Err：让节点级重试、归因 hook 与
+                    // 下游 Failure/Retry 条件边可观测（Bugbot 审查 MEDIUM 修复；
+                    // 部分失败仍以文本合并返回，保留中间产物）。
+                    if all_failed {
+                        anyhow::bail!("all {} parallel children failed:\n{combined}", nodes.len());
+                    }
+                    Ok(NodeOutput::Text(combined))
+                }
+                Action::Conditional {
+                    condition: _,
+                    then,
+                    r#else: _,
+                } => self.execute_action(&then.action, outputs).await,
             }
-            Action::Conditional {
-                condition: _,
-                then,
-                r#else: _,
-            } => Box::pin(self.execute_action(&then.action, outputs)).await,
-        }
+        })
     }
 }
 
@@ -302,15 +448,16 @@ fn topological_sort(graph: &ExecutionGraph) -> anyhow::Result<Vec<NodeId>> {
 }
 
 /// Group topologically sorted nodes into waves of concurrent execution.
+///
+/// Dependencies are derived exclusively from `graph.edges` (incoming edges
+/// are the single source of truth); the deprecated `ExecutionNode.depends_on`
+/// field is not consulted.
 fn group_into_waves(sorted: &[NodeId], graph: &ExecutionGraph) -> Vec<Vec<NodeId>> {
-    // Build reverse adjacency: which nodes depend on which
-    let mut depends_on: HashMap<&NodeId, HashSet<&NodeId>> = HashMap::new();
-    for node_id in sorted {
-        if let Some(node) = graph.nodes.get(node_id) {
-            for dep in &node.depends_on {
-                depends_on.entry(node_id).or_default().insert(dep);
-            }
-        }
+    // Build reverse adjacency: for each node, the set of nodes it depends on
+    // (its incoming-edge sources).
+    let mut deps_by_node: HashMap<&NodeId, HashSet<&NodeId>> = HashMap::new();
+    for edge in &graph.edges {
+        deps_by_node.entry(&edge.to).or_default().insert(&edge.from);
     }
 
     let mut waves: Vec<Vec<NodeId>> = Vec::new();
@@ -330,7 +477,7 @@ fn group_into_waves(sorted: &[NodeId], graph: &ExecutionGraph) -> Vec<Vec<NodeId
                 i += 1;
                 continue;
             }
-            let deps = depends_on.get(candidate);
+            let deps = deps_by_node.get(candidate);
             let all_deps_placed = deps.is_none_or(|deps| deps.iter().all(|d| placed.contains(*d)));
             if all_deps_placed {
                 wave.push(candidate.clone());
@@ -358,6 +505,49 @@ fn group_into_waves(sorted: &[NodeId], graph: &ExecutionGraph) -> Vec<Vec<NodeId
     waves
 }
 
+/// Decide whether a node must be skipped: every incoming edge condition is
+/// unsatisfied given the outputs of its (already executed) predecessors.
+///
+/// A node with no incoming edges always runs. An edge condition is satisfied
+/// when the source node's output matches it — `None`/`Success` for
+/// `Text`/`ToolResult`, `Failure`/`Retry(_)` for `Error`, `ToolCall(id)` for
+/// a `ToolResult` mentioning `id`. `Skipped` outputs satisfy nothing, so a
+/// skipped node propagates as skipped through Success-conditioned edges.
+fn should_skip_node(
+    node: &ExecutionNode,
+    graph: &ExecutionGraph,
+    outputs: &HashMap<NodeId, NodeOutput>,
+) -> bool {
+    let incoming: Vec<&Edge> = graph.edges.iter().filter(|e| e.to == node.id).collect();
+    if incoming.is_empty() {
+        return false;
+    }
+    !incoming
+        .iter()
+        .any(|e| edge_condition_satisfied(e, outputs))
+}
+
+/// Whether an edge's condition is satisfied by the source node's output.
+fn edge_condition_satisfied(edge: &Edge, outputs: &HashMap<NodeId, NodeOutput>) -> bool {
+    let Some(source_output) = outputs.get(&edge.from) else {
+        return false;
+    };
+    match &edge.condition {
+        None | Some(EdgeCondition::Success) => {
+            matches!(
+                source_output,
+                NodeOutput::Text(_) | NodeOutput::ToolResult(_)
+            )
+        }
+        Some(EdgeCondition::Failure) => matches!(source_output, NodeOutput::Error(_)),
+        Some(EdgeCondition::Retry(_)) => matches!(source_output, NodeOutput::Error(_)),
+        Some(EdgeCondition::ToolCall(id)) => match source_output {
+            NodeOutput::ToolResult(r) => r.contains(id),
+            _ => false,
+        },
+    }
+}
+
 fn build_context(outputs: &HashMap<NodeId, NodeOutput>) -> String {
     let mut ctx = String::new();
     for (id, output) in outputs {
@@ -365,6 +555,7 @@ fn build_context(outputs: &HashMap<NodeId, NodeOutput>) -> String {
             NodeOutput::Text(t) => ctx.push_str(&format!("[{id}]: {t}\n")),
             NodeOutput::ToolResult(r) => ctx.push_str(&format!("[{id}]: {r}\n")),
             NodeOutput::Error(e) => ctx.push_str(&format!("[{id}] ERROR: {e}\n")),
+            NodeOutput::Skipped => ctx.push_str(&format!("[{id}]: (skipped)\n")),
         }
     }
     ctx
@@ -448,11 +639,84 @@ mod tests {
     }
 
     #[test]
+    fn waves_derive_dependencies_from_edges() {
+        // Dependency wiring must come from edges (single source of truth),
+        // not from the deprecated `depends_on` field.
+        let mut g = ExecutionGraph::new("a".into());
+        g.add_node(make_think_node("a", "start"));
+        g.add_node(make_think_node("b", "left"));
+        g.add_node(make_think_node("c", "right"));
+        g.add_node(make_think_node("d", "end"));
+        g.add_edge("a".into(), "b".into(), None);
+        g.add_edge("a".into(), "c".into(), None);
+        g.add_edge("b".into(), "d".into(), None);
+        g.add_edge("c".into(), "d".into(), None);
+
+        let sorted = topological_sort(&g).unwrap();
+        let waves = group_into_waves(&sorted, &g);
+
+        // a alone, then b+c concurrently, then d alone.
+        assert_eq!(waves.len(), 3);
+        assert_eq!(waves[0], vec!["a".to_string()]);
+        let wave1: HashSet<&String> = waves[1].iter().collect();
+        let binding = ["b".to_string(), "c".to_string()];
+        let expected: HashSet<&String> = binding.iter().collect();
+        assert_eq!(wave1, expected);
+        assert_eq!(waves[2], vec!["d".to_string()]);
+
+        // And the deprecated depends_on field must NOT be consulted: even if
+        // a node declares no deps, edges still order the waves.
+        let mut g2 = ExecutionGraph::new("a".into());
+        g2.add_node(ExecutionNode {
+            id: "a".into(),
+            action: Action::Think { prompt: "a".into() },
+            depends_on: Vec::new(),
+            retry: RetryPolicy::default(),
+            timeout: None,
+        });
+        g2.add_node(ExecutionNode {
+            id: "b".into(),
+            action: Action::Think { prompt: "b".into() },
+            depends_on: Vec::new(),
+            retry: RetryPolicy::default(),
+            timeout: None,
+        });
+        g2.add_edge("a".into(), "b".into(), None);
+        let sorted = topological_sort(&g2).unwrap();
+        let waves = group_into_waves(&sorted, &g2);
+        assert_eq!(waves, vec![vec!["a".to_string()], vec!["b".to_string()]]);
+    }
+
+    #[test]
     fn retry_policy_defaults() {
         let policy = RetryPolicy::default();
         assert_eq!(policy.max_attempts, 3);
         assert_eq!(policy.backoff, Duration::from_secs(1));
         assert!(policy.jitter);
+    }
+
+    #[test]
+    fn add_edge_drops_edges_referencing_unknown_nodes() {
+        let mut g = ExecutionGraph::new("a".into());
+        g.add_node(make_think_node("a", "only node"));
+        g.add_node(make_think_node("b", "second"));
+
+        // Phantom ids (hallucinated planner output) must not enter the graph:
+        // keeping them would poison topological sort / wave grouping.
+        g.add_edge("a".into(), "ghost".into(), None); // phantom target
+        g.add_edge("ghost".into(), "a".into(), None); // phantom source
+        g.add_edge("ghost".into(), "wraith".into(), None); // both phantom
+        assert!(
+            g.edges.is_empty(),
+            "phantom edges must be dropped, got {:?}",
+            g.edges
+        );
+
+        // Valid edges still work.
+        g.add_edge("a".into(), "b".into(), None);
+        assert_eq!(g.edges.len(), 1);
+        assert_eq!(g.edges[0].from, "a");
+        assert_eq!(g.edges[0].to, "b");
     }
 
     // Mock callbacks for integration tests
@@ -625,5 +889,336 @@ mod tests {
             }
             other => panic!("expected Error, got {other:?}"),
         }
+    }
+
+    // ---- DAG wiring: edge-derived waves, conditions, timeout, parallel ----
+
+    fn failing_delegate_node(id: &str) -> ExecutionNode {
+        // Delegate without a callback always fails; no retries so tests are fast.
+        let mut node = ExecutionNode::new(
+            id,
+            Action::Delegate {
+                sub_agent: "nobody".into(),
+                goal: "always fails".into(),
+            },
+        );
+        node.retry = RetryPolicy {
+            max_attempts: 1,
+            backoff: Duration::ZERO,
+            jitter: false,
+        };
+        node
+    }
+
+    fn make_executor() -> Arc<GraphExecutor> {
+        Arc::new(GraphExecutor::new(
+            Arc::new(MockThink),
+            Arc::new(MockTool),
+            Arc::new(MockReflect),
+        ))
+    }
+
+    #[tokio::test]
+    async fn executor_waves_run_in_dependency_order() {
+        let mut g = ExecutionGraph::new("a".into());
+        g.add_node(make_think_node("a", "first"));
+        g.add_node(make_think_node("b", "second"));
+        g.add_node(make_think_node("c", "third"));
+        g.add_edge("a".into(), "b".into(), None);
+        g.add_edge("b".into(), "c".into(), None);
+
+        let sorted = topological_sort(&g).unwrap();
+        let waves = group_into_waves(&sorted, &g);
+        assert_eq!(
+            waves,
+            vec![
+                vec![String::from("a")],
+                vec![String::from("b")],
+                vec![String::from("c")],
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn executor_failure_edge_advances_downstream() {
+        let mut g = ExecutionGraph::new("a".into());
+        g.add_node(failing_delegate_node("a"));
+        g.add_node(make_think_node("b", "recovery"));
+        g.add_node(make_think_node("c", "final"));
+        // Failure-conditioned edge: a's failure must still trigger b.
+        g.add_edge("a".into(), "b".into(), Some(EdgeCondition::Failure));
+        g.add_edge("b".into(), "c".into(), None);
+
+        let exec = make_executor();
+        let result = exec.execute(&g).await.unwrap();
+
+        assert!(!result.completed, "a failed so the graph is not completed");
+        match &result.node_outputs["a"] {
+            NodeOutput::Error(_) => {}
+            other => panic!("expected Error for a, got {other:?}"),
+        }
+        // b and c must have run despite a's failure (Failure edge + Success edge).
+        match &result.node_outputs["b"] {
+            NodeOutput::Text(t) => assert!(t.contains("thought: recovery")),
+            other => panic!("expected Text for b, got {other:?}"),
+        }
+        match &result.node_outputs["c"] {
+            NodeOutput::Text(t) => assert!(t.contains("thought: final")),
+            other => panic!("expected Text for c, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn executor_skips_node_when_conditions_unsatisfied() {
+        let mut g = ExecutionGraph::new("a".into());
+        g.add_node(failing_delegate_node("a"));
+        g.add_node(make_think_node("b", "dependent"));
+        g.add_node(make_think_node("c", "further"));
+        // Default Success edges: b and c must never run because a failed.
+        g.add_edge("a".into(), "b".into(), None);
+        g.add_edge("b".into(), "c".into(), None);
+
+        let exec = make_executor();
+        let result = exec.execute(&g).await.unwrap();
+
+        assert!(!result.completed);
+        match &result.node_outputs["a"] {
+            NodeOutput::Error(_) => {}
+            other => panic!("expected Error for a, got {other:?}"),
+        }
+        assert!(
+            matches!(result.node_outputs.get("b"), Some(NodeOutput::Skipped)),
+            "b should be Skipped, got {:?}",
+            result.node_outputs.get("b")
+        );
+        assert!(
+            matches!(result.node_outputs.get("c"), Some(NodeOutput::Skipped)),
+            "c should be Skipped, got {:?}",
+            result.node_outputs.get("c")
+        );
+    }
+
+    struct MockSlowThink {
+        delay: Duration,
+        calls: Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    #[async_trait::async_trait]
+    impl ThinkCallback for MockSlowThink {
+        async fn think(&self, prompt: &str) -> anyhow::Result<String> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            sleep(self.delay).await;
+            Ok(format!("slow: {prompt}"))
+        }
+    }
+
+    #[tokio::test]
+    async fn executor_timeout_produces_error_and_counts_retry() {
+        let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let exec = Arc::new(GraphExecutor::new(
+            Arc::new(MockSlowThink {
+                delay: Duration::from_millis(500),
+                calls: Arc::clone(&calls),
+            }),
+            Arc::new(MockTool),
+            Arc::new(MockReflect),
+        ));
+
+        let mut node = make_think_node("slow", "will timeout");
+        node.timeout = Some(Duration::from_millis(50));
+        node.retry = RetryPolicy {
+            max_attempts: 2,
+            backoff: Duration::ZERO,
+            jitter: false,
+        };
+
+        let mut g = ExecutionGraph::new("slow".into());
+        g.add_node(node);
+
+        let result = exec.execute(&g).await.unwrap();
+        assert!(!result.completed);
+
+        match &result.node_outputs["slow"] {
+            NodeOutput::Error(e) => assert!(e.contains("timed out"), "got error: {e}"),
+            other => panic!("expected Error(Timeout), got {other:?}"),
+        }
+        // Timeout counts as failure: 2 attempts consumed before giving up.
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn executor_parallel_action_runs_concurrently() {
+        // Direct action-level test: Parallel must run children concurrently
+        // instead of sequentially. Use a slow think mock to measure overlap.
+        let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let slow = Arc::new(MockSlowThink {
+            delay: Duration::from_millis(100),
+            calls: Arc::clone(&calls),
+        });
+        let exec = Arc::new(GraphExecutor::new(
+            slow.clone(),
+            Arc::new(MockTool),
+            Arc::new(MockReflect),
+        ));
+
+        let mut g = ExecutionGraph::new("p".into());
+        let mut node = ExecutionNode::new(
+            "p",
+            Action::Parallel(vec![
+                ExecutionNode::new(
+                    "p1",
+                    Action::Think {
+                        prompt: "one".into(),
+                    },
+                ),
+                ExecutionNode::new(
+                    "p2",
+                    Action::Think {
+                        prompt: "two".into(),
+                    },
+                ),
+                ExecutionNode::new(
+                    "p3",
+                    Action::Think {
+                        prompt: "three".into(),
+                    },
+                ),
+            ]),
+        );
+        node.retry = RetryPolicy {
+            max_attempts: 1,
+            backoff: Duration::ZERO,
+            jitter: false,
+        };
+        g.add_node(node);
+
+        let start = std::time::Instant::now();
+        let result = exec.execute(&g).await.unwrap();
+        let elapsed = start.elapsed();
+
+        assert!(result.completed);
+        // 3 × 100ms sequential would take >= 300ms; concurrent is ~100ms.
+        assert!(
+            elapsed < Duration::from_millis(250),
+            "Parallel children did not overlap: took {elapsed:?}"
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    struct MockHeartbeatThink {
+        heartbeat: Arc<std::sync::atomic::AtomicU64>,
+    }
+
+    #[async_trait::async_trait]
+    impl ThinkCallback for MockHeartbeatThink {
+        async fn think(&self, _prompt: &str) -> anyhow::Result<String> {
+            // Infinite heartbeat loop: keeps bumping the counter as long as
+            // the task is polled. Cancellation (abort) freezes the counter.
+            loop {
+                self.heartbeat
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                tokio::task::yield_now().await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn executor_parallel_timeout_aborts_children() {
+        // A Parallel node whose children run an infinite heartbeat loop. If
+        // the executor fails to abort spawned children on timeout, the
+        // heartbeat keeps growing in the background after the node returns;
+        // the test asserts the counter freezes.
+        let heartbeat = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let exec = Arc::new(GraphExecutor::new(
+            Arc::new(MockHeartbeatThink {
+                heartbeat: Arc::clone(&heartbeat),
+            }),
+            Arc::new(MockTool),
+            Arc::new(MockReflect),
+        ));
+
+        let mut node = ExecutionNode::new(
+            "p",
+            Action::Parallel(vec![
+                ExecutionNode::new(
+                    "p1",
+                    Action::Think {
+                        prompt: "one".into(),
+                    },
+                ),
+                ExecutionNode::new(
+                    "p2",
+                    Action::Think {
+                        prompt: "two".into(),
+                    },
+                ),
+            ]),
+        );
+        node.timeout = Some(Duration::from_millis(50));
+        node.retry = RetryPolicy {
+            max_attempts: 1,
+            backoff: Duration::ZERO,
+            jitter: false,
+        };
+
+        let mut g = ExecutionGraph::new("p".into());
+        g.add_node(node);
+
+        let result = exec.execute(&g).await.unwrap();
+        assert!(!result.completed);
+        match &result.node_outputs["p"] {
+            NodeOutput::Error(e) => assert!(e.contains("timed out"), "got error: {e}"),
+            other => panic!("expected Error(Timeout), got {other:?}"),
+        }
+
+        // The children must have started before the abort...
+        assert!(heartbeat.load(std::sync::atomic::Ordering::SeqCst) > 0);
+        // ...and their heartbeats must freeze after the timeout: sample
+        // twice with a gap — a leaked background task would keep bumping the
+        // counter in between.
+        sleep(Duration::from_millis(100)).await;
+        let first = heartbeat.load(std::sync::atomic::Ordering::SeqCst);
+        sleep(Duration::from_millis(300)).await;
+        let second = heartbeat.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            first, second,
+            "parallel child kept running after node timeout"
+        );
+    }
+
+    struct RecordingHook(Arc<std::sync::Mutex<Vec<(String, String)>>>);
+
+    impl AttributionHook for RecordingHook {
+        fn on_node_failure(&self, node_id: &NodeId, error: &NodeOutput) -> Option<String> {
+            self.0
+                .lock()
+                .unwrap()
+                .push((node_id.clone(), format!("{error:?}")));
+            Some(format!("attributed {node_id}"))
+        }
+    }
+
+    #[tokio::test]
+    async fn executor_attribution_hook_called_on_failure() {
+        let recorded = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let exec = Arc::new(
+            GraphExecutor::new(
+                Arc::new(MockThink),
+                Arc::new(MockTool),
+                Arc::new(MockReflect),
+            )
+            .with_attribution(Arc::new(RecordingHook(Arc::clone(&recorded)))),
+        );
+
+        let mut g = ExecutionGraph::new("a".into());
+        g.add_node(failing_delegate_node("a"));
+
+        let result = exec.execute(&g).await.unwrap();
+        assert!(!result.completed);
+
+        let recorded = recorded.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].0, "a");
+        assert!(recorded[0].1.contains("DelegateCallback"));
     }
 }

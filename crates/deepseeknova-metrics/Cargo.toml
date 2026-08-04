@@ -1,0 +1,17 @@
+[package]
+name = "deepseeknova-metrics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Session-level effectiveness metrics and JSON reports for DeepseekNova agent runs."
+documentation = "https://docs.rs/deepseeknova-metrics/0.4.0"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+deepseeknova-provider = { workspace = true }
+deepseeknova-core = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

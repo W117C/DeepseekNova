@@ -1,16 +1,23 @@
+use crate::diagnose::{DiagnoseGuard, DiagnoseHook};
 use crate::memory::Memory;
 use crate::prompts::DEFAULT_SYSTEM_PROMPT;
 use deepseeknova_core::chunk::{Chunk, Usage};
 use deepseeknova_core::memory::skill::{TaskObservation, TaskOutcome};
+use deepseeknova_core::protocol::{Phase, PhaseGate, PhaseOutcome, PhaseTransition};
 use deepseeknova_core::tool::ToolContext;
+use deepseeknova_core::tool_hook::{
+    FindingSeverity, HookVerdict, QualityFinding, ToolHook, ToolHookCtx,
+};
 use deepseeknova_core::types::{FunctionCall, ToolCall};
 use deepseeknova_core::{
     Message, Role, RunEvent, RunEventStream, RunInput, RunOutput, Runner, Tool,
 };
+use deepseeknova_metrics::{RunOutcome, SessionSnapshot, SessionTracker};
 use deepseeknova_permission::{Decision, PermissionGate};
 use deepseeknova_provider::Provider;
 use deepseeknova_security::context::SecurityContext;
 use std::collections::HashMap;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -76,6 +83,8 @@ pub struct Agent {
     /// P3.3 中途检索（续聊开头 / 压缩后注入记忆 + 代码图命中）。
     mid_run: Option<MidRunRetrieval>,
     distill_hook: Option<DistillHook>,
+    /// 会话效能快照钩子（run 结束调用一次；None = 关闭）。
+    metrics_hook: Option<MetricsHook>,
 
     /// max_steps 到顶行为：true = 优雅暂停（默认），false = 旧版报错。
     pause_on_max_steps: bool,
@@ -111,6 +120,10 @@ pub struct Agent {
     /// 反思教训沉淀钩子（runtime 注入落记忆库；None = 仅对话内）。
     lesson_hook: Option<crate::reflection::LessonHook>,
 
+    /// B 失败归因设置（verify/review 达 max_cycles 的 Paused 前先归因，
+    /// reason 附带 fix_plan 摘要）；None = 关闭（默认）。
+    attribution_settings: Option<Arc<crate::attribution::AttributionSettings>>,
+
     /// P2 每步 effort 路由（quick=thinking off / high=高推理）；None = 固定主 provider。
     effort_routing: Option<EffortRouting>,
 
@@ -119,6 +132,25 @@ pub struct Agent {
 
     /// P2 会话内只读工具结果缓存（写执行后失效）。
     tool_cache: bool,
+
+    /// 工具生命周期钩子（任务质量闭环 A 阶段）：before 预检 / after 策略
+    /// 评估，按注册顺序串行执行。
+    tool_hooks: Vec<Arc<dyn ToolHook>>,
+
+    /// 会话级质量 findings 累计（跨 run 累积；供阶段 B/C 消费，本次只累积）。
+    quality_findings: Arc<tokio::sync::Mutex<Vec<QualityFinding>>>,
+
+    /// 失败诊断回调（任务质量闭环 B 阶段）：run 以非 success 结束时构造
+    /// [`crate::diagnose::DiagnoseReport`] 传出；None = 关闭（默认）。
+    diagnose_hook: Option<DiagnoseHook>,
+
+    /// 协议门控（阶段3）：阶段边界求值的门集合；空 = 协议关闭（零成本路径，
+    /// 行为与现状完全一致）。
+    protocol_gates: Vec<Arc<dyn PhaseGate>>,
+
+    /// 对抗审查开关（阶段3）：会话收尾按触发条件委派 adversarial-review
+    /// 子代理，产出写入诊断报告 `adversarial_review` 字段；默认关闭。
+    adversarial_review: bool,
 }
 
 /// Type-erased provider that yields the current repo-map text (or `None`)
@@ -130,6 +162,30 @@ pub type RecallProvider = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
 /// Run-end 沉淀钩子：接收本轮组装的 TaskObservation（非阻塞捕获）。
 pub type DistillHook = Arc<dyn Fn(TaskObservation) + Send + Sync>;
+
+/// Run-end 效能快照钩子：接收本 run 的 [`SessionSnapshot`] 与 [`QualitySummary`]
+/// （非阻塞捕获）。
+pub type MetricsHook = Arc<dyn Fn(SessionSnapshot, QualitySummary) + Send + Sync>;
+
+/// Run-end 质量摘要（[`MetricsHook`] 第二参数，任务质量闭环 C）：会话累计的
+/// quality findings 快照 + 本 run 的 reflection/review 计数，供评分卡等消费。
+/// 定义为 agent 侧私有载体，避免 hook 参数爆炸；runtime 仅消费字段。
+#[derive(Debug, Clone, Default)]
+pub struct QualitySummary {
+    /// 本 run 新增的 quality findings（F4 run 级差分切片：run 开始时已存在
+    /// 的历史 findings 不计入；跨 run 累计语义由会话级 `Arc\<Mutex\>` 承载）。
+    pub findings: Vec<QualityFinding>,
+    /// 本 run 失败回炉路径上实际产出 reflection 记录的次数。
+    pub reflection_count: u32,
+    /// 本 run 审查轮中判定 Approve 的轮数。
+    pub review_passes: u32,
+    /// 本 run 审查轮中判定 Issues 的轮数。
+    pub review_issues: u32,
+    /// 协议门控统计（阶段3）：本 run 累计的门控违规数。
+    pub protocol_violations: u32,
+    /// 协议门控统计（阶段3）：本 run 累计的阶段迁移数。
+    pub phase_transitions: u32,
+}
 
 /// 审查指标计数钩子：name ∈ review_triggered/issues_found/fix_succeeded。
 pub type ReviewCounterHook = Arc<dyn Fn(&str) + Send + Sync>;
@@ -156,6 +212,136 @@ pub(crate) struct ObserveSettings {
     pub max_chars: usize,
 }
 
+/// 会话级 quality findings 累积上限（F9：长会话保护）。超过后新 finding
+/// 丢弃（仅 warn 一次），避免无界内存增长；事件流照常发出。
+pub(crate) const MAX_QUALITY_FINDINGS: usize = 10_000;
+
+/// 会话效能采集守卫：持有本 run 的局部 [`SessionTracker`]，保证每次 run
+/// 恰好向 hook 发一次快照——显式终端路径先 `emit(outcome)`，`?` 提前返回
+/// 时由 Drop 兜底（outcome=None）。
+struct MetricsGuard {
+    tracker: SessionTracker,
+    hook: Option<MetricsHook>,
+    emitted: bool,
+    /// 会话累计 findings 的 Arc 引用（emit 时快照进 QualitySummary）。
+    quality_findings: Option<Arc<tokio::sync::Mutex<Vec<QualityFinding>>>>,
+    /// F4：本 run 起始时会话 findings 长度。emit 时只取 `[start_len..]` 差分
+    /// 切片——并发 run 共享同一 Agent 级 `Arc\<Mutex\>` 时，各 run 的 QualitySummary
+    /// 只含本 run 新增，不互相污染。
+    start_len: usize,
+    /// 本 run 失败回炉路径上实际产出 reflection 记录的次数。
+    reflection_count: u32,
+    /// 本 run 审查轮中判定 Approve / Issues 的轮数。
+    review_passes: u32,
+    review_issues: u32,
+    /// 协议门控统计（阶段3）：本 run 累计违规/迁移（emit 时并入
+    /// QualitySummary；由 run_agent_loop 每次 transition 后同步）。
+    protocol_violations: u32,
+    phase_transitions: u32,
+}
+
+impl MetricsGuard {
+    fn new(
+        hook: Option<MetricsHook>,
+        quality_findings: &Arc<tokio::sync::Mutex<Vec<QualityFinding>>>,
+    ) -> Self {
+        Self {
+            tracker: SessionTracker::new(),
+            hook,
+            emitted: false,
+            quality_findings: Some(quality_findings.clone()),
+            start_len: quality_findings.try_lock().map(|g| g.len()).unwrap_or(0),
+            reflection_count: 0,
+            review_passes: 0,
+            review_issues: 0,
+            protocol_violations: 0,
+            phase_transitions: 0,
+        }
+    }
+
+    fn observe_step(&mut self) {
+        self.tracker.observe_step();
+    }
+
+    fn observe_tool_call(&mut self, name: &str, ok: bool) {
+        self.tracker.observe_tool_call(name, ok);
+    }
+
+    fn observe_retry(&mut self) {
+        self.tracker.observe_retry();
+    }
+
+    fn observe_verify(&mut self, passed: bool) {
+        self.tracker.observe_verify(passed);
+    }
+
+    fn emit(&mut self, outcome: Option<RunOutcome>) {
+        if self.emitted {
+            return;
+        }
+        if let Some(o) = outcome {
+            self.tracker.mark_outcome(o);
+        }
+        if let Some(ref hook) = self.hook {
+            // F4：run 级差分切片——只取本 run 新增的 findings `[start_len..]`。
+            // try_lock 失败时切片为空 + warn，语义为「本次 run 无新增」而非
+            // 「空数据」（后者会让并发 run 的 governance 快照虚高）。注意
+            // F9 超限丢弃只发生在 start_len 之后，不会把历史 findings 挤进
+            // 本 run 切片。
+            let findings = match self
+                .quality_findings
+                .as_ref()
+                .and_then(|qf| qf.try_lock().ok())
+            {
+                Some(guard) => {
+                    let all = guard.clone();
+                    all.get(self.start_len..).unwrap_or(&[]).to_vec()
+                }
+                None => {
+                    warn!("metrics emit: quality_findings lock busy; reporting empty run findings");
+                    Vec::new()
+                }
+            };
+            let summary = QualitySummary {
+                findings,
+                reflection_count: self.reflection_count,
+                review_passes: self.review_passes,
+                review_issues: self.review_issues,
+                protocol_violations: self.protocol_violations,
+                phase_transitions: self.phase_transitions,
+            };
+            hook(self.tracker.snapshot(), summary);
+        }
+        self.emitted = true;
+    }
+
+    /// 记录一次实际产出 reflection 记录的失败回炉路径。
+    fn observe_reflection(&mut self) {
+        self.reflection_count += 1;
+    }
+
+    /// 记录一轮审查判定结果（Approve / Issues）。
+    fn observe_review_pass(&mut self) {
+        self.review_passes += 1;
+    }
+
+    fn observe_review_issues(&mut self) {
+        self.review_issues += 1;
+    }
+
+    /// 同步协议门控统计（每次 PhaseRunner.transition 后调用）。
+    fn sync_protocol_stats(&mut self, violations: u32, transitions: u32) {
+        self.protocol_violations = violations;
+        self.phase_transitions = transitions;
+    }
+}
+
+impl Drop for MetricsGuard {
+    fn drop(&mut self) {
+        self.emit(None);
+    }
+}
+
 impl Agent {
     pub fn new(provider: Arc<dyn Provider>, max_steps: usize) -> Self {
         Self {
@@ -175,6 +361,7 @@ impl Agent {
             recall_provider: None,
             mid_run: None,
             distill_hook: None,
+            metrics_hook: None,
             pause_on_max_steps: true,
             l3_enabled: true,
             compact_provider: None,
@@ -187,9 +374,15 @@ impl Agent {
             verify_settings: None,
             reflect_settings: None,
             lesson_hook: None,
+            attribution_settings: None,
             effort_routing: None,
             observe: None,
             tool_cache: false,
+            tool_hooks: Vec::new(),
+            quality_findings: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            diagnose_hook: None,
+            protocol_gates: Vec::new(),
+            adversarial_review: false,
         }
     }
 
@@ -216,7 +409,7 @@ impl Agent {
 
     /// Attach a persistent conversation store so this agent carries memory
     /// across successive `run_stream` calls. Callers share one
-    /// `Arc<Mutex<Vec<Message>>>` across turns (and reset it to start a new
+    /// `Arc\<Mutex\<Vec\<Message\>\>\>` across turns (and reset it to start a new
     /// session). When the store is non-empty at run start, the system prompt
     /// is *not* re-injected — the prior turns already contain it.
     pub fn with_conversation_history(
@@ -296,6 +489,15 @@ impl Agent {
     /// 附加结束沉淀钩子。循环结束后组装 TaskObservation 并调用（非阻塞捕获）。
     pub fn with_distill_hook(mut self, hook: DistillHook) -> Self {
         self.distill_hook = Some(hook);
+        self
+    }
+
+    /// 附加会话效能快照钩子。每次 `run_stream` 结束恰好调用一次，传入该 run
+    /// 的 [`SessionSnapshot`]（含 outcome）与 [`QualitySummary`]（会话 findings
+    /// 快照 + reflection/review 计数）；run 隔离由 Agent 保证，跨 run 聚合由
+    /// 调用方负责。
+    pub fn with_metrics_hook(mut self, hook: MetricsHook) -> Self {
+        self.metrics_hook = Some(hook);
         self
     }
 
@@ -391,6 +593,51 @@ impl Agent {
     /// 反思教训沉淀钩子（runtime 注入，落 core 记忆库；None = 仅对话内）。
     pub fn with_lesson_hook(mut self, hook: crate::reflection::LessonHook) -> Self {
         self.lesson_hook = Some(hook);
+        self
+    }
+
+    /// 注入工具生命周期钩子（任务质量闭环 A 阶段）。可多次调用注册多个
+    /// 钩子，before/after 按注册顺序串行执行；钩子 panic 时按 fail-open
+    /// 处理（放行 + 空 findings，仅记录 warn）。
+    pub fn with_tool_hook(mut self, hook: Arc<dyn ToolHook>) -> Self {
+        self.tool_hooks.push(hook);
+        self
+    }
+
+    /// 注入协议门控集合（阶段3）：阶段边界对门求值并产出
+    /// PhaseTransition/GateViolation/DriftFinding 事件；空集合 = 协议关闭
+    /// （零成本路径）。可多次调用追加。门 panic 由调用方按 fail-closed
+    /// 处理（与 ToolHook before 语义对齐）。
+    pub fn with_protocol_gates(mut self, gates: Vec<Arc<dyn PhaseGate>>) -> Self {
+        self.protocol_gates.extend(gates);
+        self
+    }
+
+    /// 启用对抗审查（阶段3）：会话收尾按触发条件（Blocking finding /
+    /// 敏感工具调用）委派 adversarial-review 子代理，产出写入诊断报告
+    /// `adversarial_review` 字段；无技能/无 provider 时优雅跳过（warn）。
+    /// 默认关闭。
+    pub fn with_adversarial_review(mut self, enabled: bool) -> Self {
+        self.adversarial_review = enabled;
+        self
+    }
+
+    /// 注册失败诊断回调（任务质量闭环 B 阶段）。每次 `run_stream` 以非
+    /// success 结束（Paused/failed）时调用一次，传入结构化
+    /// [`crate::diagnose::DiagnoseReport`]（阶段分解 + 时序 + 失败详情 +
+    /// 子代理近似 + 本会话 quality findings）；成功结束不产出。回调 panic
+    /// 或报告构造失败不影响主流程（仅记录 warn）。
+    pub fn with_diagnose_hook(mut self, hook: DiagnoseHook) -> Self {
+        self.diagnose_hook = Some(hook);
+        self
+    }
+
+    /// 启用失败归因（B）：verify/review 达 max_cycles 的 Paused 前先 LLM
+    /// 归因，reason 附带 `fix_plan` 摘要（Paused 恢复时可续用）。归因受
+    /// `max_attributions` 硬预算约束（run 内累计，防烧 token），预算超限或
+    /// 归因失败时 reason 保持原样（不阻塞、不猜）。
+    pub fn with_attribution(mut self, settings: crate::attribution::AttributionSettings) -> Self {
+        self.attribution_settings = Some(Arc::new(settings));
         self
     }
 
@@ -502,6 +749,7 @@ impl Runner for Agent {
         let recall_provider = self.recall_provider.clone();
         let mid_run = self.mid_run.clone();
         let distill_hook = self.distill_hook.clone();
+        let metrics_hook = self.metrics_hook.clone();
         let pause_on_max_steps = self.pause_on_max_steps;
         let l3_enabled = self.l3_enabled;
         let compact_provider = self.compact_provider.clone();
@@ -528,6 +776,7 @@ impl Runner for Agent {
         let verify_settings = self.verify_settings.clone();
         let reflect_settings = self.reflect_settings.clone();
         let lesson_hook = self.lesson_hook.clone();
+        let attribution_settings = self.attribution_settings.clone();
         let effort_routing = self.effort_routing.clone();
         let observe = self.observe.clone();
         let tool_cache = self.tool_cache;
@@ -549,6 +798,16 @@ impl Runner for Agent {
                 }
             }
         });
+
+        // 任务质量闭环 A：钩子链与会话级 findings 在 spawn 前 clone，
+        // 供 spawned task 内引用（避免 self 借用逃逸出方法体）。
+        let tool_hooks = self.tool_hooks.clone();
+        let quality_findings = self.quality_findings.clone();
+        // 任务质量闭环 B：诊断回调同法 clone 带进 spawned task。
+        let diagnose_hook = self.diagnose_hook.clone();
+        // 协议门控（阶段3）：门集合与对抗审查开关 clone 带进 spawned task。
+        let protocol_gates = self.protocol_gates.clone();
+        let adversarial_review_enabled = self.adversarial_review;
 
         tokio::spawn(async move {
             let mut memory = Memory::new();
@@ -651,11 +910,18 @@ impl Runner for Agent {
                 verify_settings,
                 reflect_settings,
                 lesson_hook,
+                attribution_settings,
                 effort_routing,
                 observe,
                 tool_cache,
                 recall_provider_for_loop,
+                metrics_hook,
                 mid_run,
+                &tool_hooks,
+                &quality_findings,
+                diagnose_hook,
+                protocol_gates,
+                adversarial_review_enabled,
             )
             .await;
 
@@ -742,8 +1008,183 @@ fn verify_failure_message(reason: &str) -> String {
     )
 }
 
+// ---------------------------------------------------------------------------
+// 协议阶段3：对抗审查（会话收尾触发）
+// ---------------------------------------------------------------------------
+
+/// 对抗审查子代理系统提示（内联技能文本；只读审查、不执行工具）。
+const ADVERSARIAL_REVIEW_PROMPT: &str = "\
+You are an adversarial reviewer for an AI agent session. Review the session \
+evidence for security, safety, and permission-boundary issues: secret leakage, \
+unsafe commands, sandbox escape attempts, permission policy violations, \
+destructive filesystem operations, and unreviewed risky changes.\n\
+Respond with a concise findings list. For each finding: severity, location \
+(tool call / rule), and a one-line recommendation. If nothing is wrong, say \
+so explicitly. Do not invent findings; only report what the evidence supports.";
+
+/// 审查输出预算（字符上限；超出截断）。
+const ADVERSARIAL_REVIEW_CAP_CHARS: usize = 4000;
+/// 审查输入证据预算（字符上限；超出截断）。
+const ADVERSARIAL_REVIEW_INPUT_CAP_CHARS: usize = 6000;
+/// 子代理步数预算（防烧 token）。
+const ADVERSARIAL_REVIEW_MAX_STEPS: usize = 3;
+
+/// 触发条件判定（纯函数，供测试）：(a) 会话 QualityFinding 存在 Blocking 级；
+/// (b) 工具调用命中 security/sandbox/permission 相关路径（工具名或参数）。
+pub fn adversarial_review_needed(findings: &[QualityFinding], messages: &[Message]) -> bool {
+    if findings
+        .iter()
+        .any(|f| f.severity == FindingSeverity::Blocking)
+    {
+        return true;
+    }
+    messages
+        .iter()
+        .filter(|m| m.role == Role::Assistant)
+        .filter_map(|m| m.tool_calls.as_ref())
+        .flatten()
+        .any(|tc| tool_call_touches_sensitive_path(&tc.function.name, &tc.function.arguments))
+}
+
+/// 敏感工具/参数启发式（Bugbot #9 收紧）：删除/移动类工具无条件敏感
+/// （本身高风险）；bash/shell 命令执行类必须同时命中命令内容 marker 才敏感；
+/// write/edit 写类必须命中目标路径/内容 marker 才敏感（避免任意 bash 调用、
+/// 任意文件写都烧子代理 token）；其余工具参数命中安全边界关键词仍判敏感
+/// （如 read_file 读 /etc/passwd）。
+fn tool_call_touches_sensitive_path(name: &str, args: &str) -> bool {
+    /// 无条件敏感：删除/移动本身高风险。
+    const UNCONDITIONALLY_SENSITIVE: [&str; 2] = ["delete_file", "move_file"];
+    /// 需叠加 marker 才敏感的工具。
+    const MARKER_GATED_TOOLS: [&str; 4] = ["bash", "shell", "write_file", "edit_file"];
+    const SENSITIVE_MARKERS: [&str; 7] = [
+        "security",
+        "sandbox",
+        "permission",
+        "sudo",
+        "chmod",
+        "chown",
+        "/etc/",
+    ];
+    if UNCONDITIONALLY_SENSITIVE.contains(&name) {
+        return true;
+    }
+    if MARKER_GATED_TOOLS.contains(&name) {
+        return SENSITIVE_MARKERS.iter().any(|m| args.contains(m));
+    }
+    SENSITIVE_MARKERS.iter().any(|m| args.contains(m))
+}
+
+/// 渲染审查输入证据（任务 + findings + 工具调用摘要，字符预算截断）。
+fn render_adversarial_evidence(
+    task: &str,
+    findings: &[QualityFinding],
+    messages: &[Message],
+) -> String {
+    let mut out = format!("# Task\n{task}\n");
+    if !findings.is_empty() {
+        out.push_str("\n# Quality findings\n");
+        for f in findings {
+            let sev = match f.severity {
+                FindingSeverity::Info => "info",
+                FindingSeverity::Warning => "warning",
+                FindingSeverity::Blocking => "blocking",
+            };
+            out.push_str(&format!("- [{sev}] {}: {}\n", f.rule, f.evidence));
+        }
+    }
+    out.push_str("\n# Tool calls\n");
+    for m in messages.iter().filter(|m| m.role == Role::Assistant) {
+        if let Some(calls) = &m.tool_calls {
+            for tc in calls {
+                let args: String = tc.function.arguments.chars().take(300).collect();
+                out.push_str(&format!("- {}: {args}\n", tc.function.name));
+            }
+        }
+    }
+    let cap: String = out
+        .chars()
+        .take(ADVERSARIAL_REVIEW_INPUT_CAP_CHARS)
+        .collect();
+    cap
+}
+
+/// 会话收尾对抗审查：条件命中时以只读子代理（独立 [`Agent`] 实例，
+/// max_steps=3 budget）跑一轮审查并返回产出文本（cap 到输出预算）。
+/// 子代理不可用（provider 缺失）/失败/无产出 → `None`（warn 优雅跳过），
+/// 不阻断主流程。产出由调用方写入诊断报告 `adversarial_review` 字段。
+pub(crate) async fn maybe_spawn_adversarial_review(
+    provider: Arc<dyn Provider>,
+    task: &str,
+    findings: &[QualityFinding],
+    messages: &[Message],
+    enabled: bool,
+) -> Option<String> {
+    if !enabled || !adversarial_review_needed(findings, messages) {
+        return None;
+    }
+    let evidence = render_adversarial_evidence(task, findings, messages);
+    let prompt = format!("Review the following agent session adversarially.\n\n{evidence}");
+    let sub = Agent::new(provider, ADVERSARIAL_REVIEW_MAX_STEPS)
+        .with_system_prompt(ADVERSARIAL_REVIEW_PROMPT);
+    let input = RunInput {
+        prompt,
+        images: Vec::new(),
+        model_override: None,
+    };
+    let mut stream = match sub.run_stream(input).await {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("adversarial review skipped (sub-agent unavailable): {e}");
+            return None;
+        }
+    };
+    let mut text = String::new();
+    while let Some(ev) = stream.next().await {
+        match ev {
+            Ok(RunEvent::TextDelta(t)) => text.push_str(&t),
+            Ok(RunEvent::Done(out)) if !out.text.is_empty() => text = out.text,
+            Ok(_) => {}
+            Err(e) => {
+                warn!("adversarial review skipped (sub-agent failed): {e}");
+                return None;
+            }
+        }
+    }
+    let capped: String = text.chars().take(ADVERSARIAL_REVIEW_CAP_CHARS).collect();
+    if capped.trim().is_empty() {
+        warn!("adversarial review skipped (no output)");
+        None
+    } else {
+        Some(capped)
+    }
+}
+
+/// 会话收尾对抗审查接线（Complete/Paused 共用；Bugbot #2）：启用且条件
+/// 命中（Blocking finding / 敏感工具调用，见 [`adversarial_review_needed`]）
+/// → 跑只读子代理并注入诊断报告；否则优雅跳过（子代理不可用/无产出 →
+/// `None`，不阻断主流程）。Paused 各终端分支（budget / verify / max-steps）
+/// 必须在 `diagnose.emit("paused", ..)` **之前**调用——emit 在调用时立即
+/// 构建报告，之后注入不生效。
+async fn wire_session_adversarial_review(
+    diagnose: &mut DiagnoseGuard,
+    provider: Arc<dyn Provider>,
+    enabled: bool,
+    task: &str,
+    memory: &Memory,
+    quality_findings: &Arc<tokio::sync::Mutex<Vec<QualityFinding>>>,
+) {
+    if !enabled {
+        return;
+    }
+    let findings = quality_findings.lock().await.clone();
+    let msgs = memory.get_all();
+    let review = maybe_spawn_adversarial_review(provider, task, &findings, &msgs, true).await;
+    diagnose.set_adversarial_review(review);
+}
+
 /// 失败回炉前可选反思：无设置/反思失败 → 原文案；成功 → lesson 走钩子、
-/// 回炉消息前置反思（根因 + 修复计划）。
+/// 回炉消息前置反思（根因 + 修复计划）。返回 (回炉文案, 反思产物)——
+/// 反思产物供失败诊断报告取 root_cause/fix_plan（任务质量闭环 B 阶段）。
 async fn reflect_retry(
     reflect_settings: &Option<crate::reflection::ReflectSettings>,
     lesson_hook: &Option<crate::reflection::LessonHook>,
@@ -751,9 +1192,9 @@ async fn reflect_retry(
     failure: &str,
     completion: &str,
     original: String,
-) -> String {
+) -> (String, Option<crate::reflection::Reflection>) {
     let Some(settings) = reflect_settings else {
-        return original;
+        return (original, None);
     };
     match crate::reflection::run_reflection(
         settings.provider.as_ref(),
@@ -768,9 +1209,50 @@ async fn reflect_retry(
             if let Some(hook) = lesson_hook {
                 hook(r.lesson.clone());
             }
-            crate::reflection::compose_retry_message(&original, &r)
+            (
+                crate::reflection::compose_retry_message(&original, &r),
+                Some(r),
+            )
         }
-        None => original,
+        None => (original, None),
+    }
+}
+
+/// Paused reason 中 fix_plan 摘要的截断上限（字符）。
+const PAUSE_FIX_PLAN_CAP: usize = 200;
+
+/// verify/review 达 max_cycles 的 Paused 前归因：预算内调用 LLM，产出
+/// `fix_plan` 摘要拼进 reason（恢复时可续用）；预算超限/归因失败 → 原
+/// reason（不阻塞、不猜）。verdict 本身不改变 Paused 语义（达上限即暂停）。
+async fn attribute_pause_reason(
+    attribution: Option<&Arc<crate::attribution::AttributionSettings>>,
+    budget: &crate::attribution::AttributionBudget,
+    task: &str,
+    failure: &str,
+    reason: String,
+) -> String {
+    let Some(cfg) = attribution else {
+        return reason;
+    };
+    if !budget.try_consume() {
+        return reason;
+    }
+    match crate::attribution::run_attribution(
+        cfg.provider.as_ref(),
+        task,
+        failure,
+        crate::attribution::MAX_ATTRIBUTION_INPUT_CHARS,
+    )
+    .await
+    {
+        Some(a) => match a.fix_plan {
+            Some(plan) if !plan.is_empty() => {
+                let capped: String = plan.chars().take(PAUSE_FIX_PLAN_CAP).collect();
+                format!("{reason}; fix_plan: {capped}")
+            }
+            _ => reason,
+        },
+        None => reason,
     }
 }
 
@@ -800,11 +1282,18 @@ async fn run_agent_loop(
     verify_settings: Option<crate::verify::VerifySettings>,
     reflect_settings: Option<crate::reflection::ReflectSettings>,
     lesson_hook: Option<crate::reflection::LessonHook>,
+    attribution_settings: Option<Arc<crate::attribution::AttributionSettings>>,
     effort_routing: Option<EffortRouting>,
     observe: Option<ObserveSettings>,
     tool_cache: bool,
     recall_provider: Option<RecallProvider>,
+    metrics_hook: Option<MetricsHook>,
     mid_run: Option<MidRunRetrieval>,
+    tool_hooks: &[Arc<dyn ToolHook>],
+    quality_findings: &Arc<tokio::sync::Mutex<Vec<QualityFinding>>>,
+    diagnose_hook: Option<DiagnoseHook>,
+    protocol_gates: Vec<Arc<dyn PhaseGate>>,
+    adversarial_review_enabled: bool,
 ) -> anyhow::Result<()> {
     // Add user prompt
     memory.add_message(Message {
@@ -825,6 +1314,8 @@ async fn run_agent_loop(
     // B3 审查状态：本轮是否有写类工具执行过 + 已回炉修复的轮次。
     let mut wrote_files = false;
     let mut review_cycles = 0usize;
+    // 任务质量闭环 A：本轮是否产出过 Blocking finding（B3 review 短路前置）。
+    let mut quality_blocked = false;
     // P1 验证状态：写入后确定性验证的失败回炉轮次。
     let mut verify_cycles = 0usize;
 
@@ -832,10 +1323,35 @@ async fn run_agent_loop(
     let mut l3 = crate::compaction::L3Compactor::new();
     // P2.3 会话内只读工具结果缓存（写执行后整体失效）。
     let mut tool_cache_map: HashMap<u64, String> = HashMap::new();
+    // 会话效能采集（局部 tracker，run 隔离）。
+    let mut metrics = MetricsGuard::new(metrics_hook, quality_findings);
+    // 任务质量闭环 B：失败诊断采集（Paused/failed 结束路径产出报告；
+    // 成功路径 suppress 关闭；Drop 兜底异常路径）。
+    let mut diagnose = DiagnoseGuard::new(
+        diagnose_hook,
+        session_label.clone(),
+        Arc::clone(quality_findings),
+    );
+    diagnose.phase_enter("plan");
+    // 协议门控（阶段3）：会话级阶段运行器；门集合为空时走零成本路径。
+    let mut phase_runner = crate::phase_runner::PhaseRunner::new();
+    let protocol_active = !protocol_gates.is_empty();
+    // B 失败归因预算（run 内累计，防烧 token；未配置归因时上限 0 = 关闭）。
+    let attribution_budget = crate::attribution::AttributionBudget::new(
+        attribution_settings
+            .as_ref()
+            .map(|s| s.max_attributions)
+            .unwrap_or(0),
+    );
 
     for step in 0..max_steps {
+        metrics.observe_step();
         // Check for cancellation between steps
         if cancel.is_cancelled() {
+            metrics.emit(Some(RunOutcome::Cancelled));
+            // F5：取消是正常终止（metrics 已计 Cancelled），不产诊断报告；
+            // suppress 防止 Drop 兜底误报 outcome=failed。
+            diagnose.suppress();
             tx.send(Ok(RunEvent::Done(RunOutput {
                 text: String::new(),
                 tool_calls: Vec::new(),
@@ -882,6 +1398,25 @@ async fn run_agent_loop(
                 BudgetDecision::CompressHistory => budget_wants_compress = true,
                 BudgetDecision::Reject(why) => {
                     warn!("budget rejected further work: {why}");
+                    metrics.emit(None);
+                    diagnose.record_failure(
+                        "budget",
+                        None,
+                        None,
+                        format!("budget rejected: {why}"),
+                    );
+                    // Bugbot #2：Paused 终端分支同样接对抗审查（spec §4.2
+                    // 无 unverified 限定）；须在 emit 之前注入。
+                    wire_session_adversarial_review(
+                        &mut diagnose,
+                        provider.clone(),
+                        adversarial_review_enabled,
+                        &input.prompt,
+                        memory,
+                        quality_findings,
+                    )
+                    .await;
+                    diagnose.emit("paused", &memory.get_all()).await;
                     tx.send(Ok(RunEvent::Paused {
                         reason: format!("budget: {why}"),
                         session_id: session_label.clone(),
@@ -971,6 +1506,56 @@ async fn run_agent_loop(
             &provider
         };
 
+        // ── 协议门控（阶段3）：阶段边界。Understand 仅首轮；Plan 每轮
+        // LLM 调用前推进。违规进事件流；stats 同步给 MetricsGuard。
+        if protocol_active {
+            if step == 0 {
+                // Bugbot #12：findings 接会话质量容器实时快照（首轮通常为空，
+                // 但自定义门可依赖 ctx.findings 的非空语义）。
+                let findings = quality_findings.lock().await.clone();
+                let ctx =
+                    phase_runner.build_ctx(Phase::Understand, verify_settings.is_some(), findings);
+                let violations = phase_runner.transition(Phase::Understand, &protocol_gates, &ctx);
+                tx.send(Ok(RunEvent::PhaseTransition {
+                    transition: PhaseTransition {
+                        phase: Phase::Understand,
+                        outcome: if violations.is_empty() {
+                            PhaseOutcome::Pass
+                        } else {
+                            PhaseOutcome::Violated
+                        },
+                    },
+                }))
+                .await
+                .ok();
+                for v in &violations {
+                    tx.send(Ok(RunEvent::GateViolation(v.clone()))).await.ok();
+                }
+                let (pv, pt) = phase_runner.stats();
+                metrics.sync_protocol_stats(pv, pt);
+            }
+            let findings = quality_findings.lock().await.clone();
+            let ctx = phase_runner.build_ctx(Phase::Plan, verify_settings.is_some(), findings);
+            let violations = phase_runner.transition(Phase::Plan, &protocol_gates, &ctx);
+            tx.send(Ok(RunEvent::PhaseTransition {
+                transition: PhaseTransition {
+                    phase: Phase::Plan,
+                    outcome: if violations.is_empty() {
+                        PhaseOutcome::Pass
+                    } else {
+                        PhaseOutcome::Violated
+                    },
+                },
+            }))
+            .await
+            .ok();
+            for v in &violations {
+                tx.send(Ok(RunEvent::GateViolation(v.clone()))).await.ok();
+            }
+            let (pv, pt) = phase_runner.stats();
+            metrics.sync_protocol_stats(pv, pt);
+        }
+
         // Stream from provider
         let step_result = stream_and_process_turn(
             step_provider,
@@ -983,6 +1568,9 @@ async fn run_agent_loop(
             &security,
             &mut tool_calls_made,
             &mut wrote_files,
+            tool_hooks,
+            quality_findings,
+            &mut quality_blocked,
             permission.as_ref(),
             approval.as_ref(),
             &extensions,
@@ -990,6 +1578,9 @@ async fn run_agent_loop(
             tool_cache,
             &mut tool_cache_map,
             observe.as_ref(),
+            &mut metrics,
+            &mut phase_runner,
+            &protocol_gates,
         )
         .await?;
 
@@ -997,7 +1588,14 @@ async fn run_agent_loop(
             StepOutcome::Complete(output) => {
                 // ── P1 完成前确定性验证：有文件写入才触发；bash 缺失或未配置降级放行 ──
                 if let Some(vs) = verify_settings.as_ref() {
+                    // F10：verify 相位起点移入 `wrote_files && !commands` 分支内
+                    // （与 run_verify_pass 同条件）——无写文件/无验证命令时不
+                    // 产出空 verify 相位（此前无条件 phase_enter 会在报告中
+                    // 留一个空相位）。review 相位已在 `wrote_files` 分支内，
+                    // 无同类问题。
                     if wrote_files && !vs.commands.is_empty() {
+                        // 任务质量闭环 B：verify 相位起点（报告阶段时间戳）。
+                        diagnose.phase_enter("verify");
                         match crate::verify::run_verify_pass(
                             &tool_map,
                             vs,
@@ -1009,21 +1607,71 @@ async fn run_agent_loop(
                         )
                         .await
                         {
-                            crate::verify::VerifyOutcome::Pass => {}
+                            crate::verify::VerifyOutcome::Pass => {
+                                metrics.observe_verify(true);
+                                // 协议门控（阶段3）：verify pass → Verify 阶段
+                                // 边界（verify-evidence 门在此快照评估，此时
+                                // 计数含本轮 passed → 通过）。
+                                if protocol_active {
+                                    phase_runner.observe_verify(true);
+                                    // Bugbot #12：findings 接会话质量快照。
+                                    let findings = quality_findings.lock().await.clone();
+                                    let ctx = phase_runner.build_ctx(Phase::Verify, true, findings);
+                                    let violations = phase_runner.transition(
+                                        Phase::Verify,
+                                        &protocol_gates,
+                                        &ctx,
+                                    );
+                                    tx.send(Ok(RunEvent::PhaseTransition {
+                                        transition: PhaseTransition {
+                                            phase: Phase::Verify,
+                                            outcome: if violations.is_empty() {
+                                                PhaseOutcome::Pass
+                                            } else {
+                                                PhaseOutcome::Violated
+                                            },
+                                        },
+                                    }))
+                                    .await
+                                    .ok();
+                                    for v in &violations {
+                                        tx.send(Ok(RunEvent::GateViolation(v.clone()))).await.ok();
+                                    }
+                                    let (pv, pt) = phase_runner.stats();
+                                    metrics.sync_protocol_stats(pv, pt);
+                                }
+                            }
                             crate::verify::VerifyOutcome::Fail(reason)
                                 if verify_cycles < vs.max_cycles =>
                             {
                                 verify_cycles += 1;
+                                metrics.observe_verify(false);
+                                if protocol_active {
+                                    phase_runner.observe_verify(false);
+                                }
+                                metrics.observe_retry();
                                 let original = verify_failure_message(&reason);
-                                let content = reflect_retry(
+                                // 任务质量闭环 B：reflect 相位起点（报告阶段时间戳）。
+                                diagnose.phase_enter("reflect");
+                                let (content, reflection) = reflect_retry(
                                     &reflect_settings,
                                     &lesson_hook,
                                     &input.prompt,
                                     &reason,
                                     &output.text,
-                                    original,
+                                    original.clone(),
                                 )
                                 .await;
+                                // 任务质量闭环 B：反思产物进诊断（root_cause/fix_plan）。
+                                if let Some(r) = reflection {
+                                    diagnose.record_reflection(r);
+                                }
+                                // 任务质量闭环 C：retry 文案发生反思改写才计为
+                                // 失败路径上有 reflection 记录（compose_retry_message
+                                // 恒前置 [Reflection] 前缀，可直接比较）。
+                                if content != original {
+                                    metrics.observe_reflection();
+                                }
                                 memory.add_message(Message {
                                     role: Role::User,
                                     content,
@@ -1035,8 +1683,35 @@ async fn run_agent_loop(
                                 continue; // 回炉修复，下一次 Complete 再验证
                             }
                             crate::verify::VerifyOutcome::Fail(reason) => {
+                                metrics.observe_verify(false);
+                                if protocol_active {
+                                    phase_runner.observe_verify(false);
+                                }
+                                metrics.emit(None);
+                                let reason = attribute_pause_reason(
+                                    attribution_settings.as_ref(),
+                                    &attribution_budget,
+                                    &input.prompt,
+                                    &reason,
+                                    format!("verify_failed: {reason}"),
+                                )
+                                .await;
+                                // 任务质量闭环 B：verify 达上限的 Paused 显式产出
+                                // 报告（outcome=paused，失败详情带最终 pause reason）。
+                                diagnose.record_failure("verify", None, None, reason.clone());
+                                // Bugbot #2：Paused 终端分支同样接对抗审查。
+                                wire_session_adversarial_review(
+                                    &mut diagnose,
+                                    provider.clone(),
+                                    adversarial_review_enabled,
+                                    &input.prompt,
+                                    memory,
+                                    quality_findings,
+                                )
+                                .await;
+                                diagnose.emit("paused", &memory.get_all()).await;
                                 tx.send(Ok(RunEvent::Paused {
-                                    reason: format!("verify_failed: {reason}"),
+                                    reason,
                                     session_id: session_label.clone(),
                                 }))
                                 .await
@@ -1058,11 +1733,23 @@ async fn run_agent_loop(
                             )
                             .await
                             {
-                                crate::verify::VerifyOutcome::Pass => {}
+                                crate::verify::VerifyOutcome::Pass => {
+                                    metrics.observe_verify(true);
+                                    // 协议门控（阶段3）：LLM verify 只同步计数
+                                    // （Verify 阶段边界已由确定性 verify Pass 产出）。
+                                    if protocol_active {
+                                        phase_runner.observe_verify(true);
+                                    }
+                                }
                                 crate::verify::VerifyOutcome::Fail(reason)
                                     if verify_cycles < vs.max_cycles =>
                                 {
                                     verify_cycles += 1;
+                                    metrics.observe_verify(false);
+                                    if protocol_active {
+                                        phase_runner.observe_verify(false);
+                                    }
+                                    metrics.observe_retry();
                                     memory.add_message(Message {
                                         role: Role::User,
                                         content: verify_failure_message(&reason),
@@ -1074,8 +1761,35 @@ async fn run_agent_loop(
                                     continue; // 回炉修复，下一次 Complete 再验证
                                 }
                                 crate::verify::VerifyOutcome::Fail(reason) => {
+                                    metrics.observe_verify(false);
+                                    if protocol_active {
+                                        phase_runner.observe_verify(false);
+                                    }
+                                    metrics.emit(None);
+                                    let reason = attribute_pause_reason(
+                                        attribution_settings.as_ref(),
+                                        &attribution_budget,
+                                        &input.prompt,
+                                        &reason,
+                                        format!("verify_failed: {reason}"),
+                                    )
+                                    .await;
+                                    // 任务质量闭环 B：LLM verify 达上限的 Paused
+                                    // 显式产出报告（outcome=paused）。
+                                    diagnose.record_failure("verify", None, None, reason.clone());
+                                    // Bugbot #2：Paused 终端分支同样接对抗审查。
+                                    wire_session_adversarial_review(
+                                        &mut diagnose,
+                                        provider.clone(),
+                                        adversarial_review_enabled,
+                                        &input.prompt,
+                                        memory,
+                                        quality_findings,
+                                    )
+                                    .await;
+                                    diagnose.emit("paused", &memory.get_all()).await;
                                     tx.send(Ok(RunEvent::Paused {
-                                        reason: format!("verify_failed: {reason}"),
+                                        reason,
                                         session_id: session_label.clone(),
                                     }))
                                     .await
@@ -1087,9 +1801,14 @@ async fn run_agent_loop(
                         }
                     }
                 }
-                // ── B3 完成前自审：有文件写入才触发；降级路径一律放行 Done ──
+                // ── B3 完成前自审：有文件写入才触发；质量系统在场（注册了
+                // tool_hook）时要求 Blocking finding（质量闭环 A 的 review
+                // 短路：无 Blocking finding 直接跳过），质量系统缺席
+                // （tool_hooks 为空）时照旧自审；降级路径一律放行 Done ──
                 if let (Some(rp), Some(rs)) = (&review_provider, &review_settings) {
-                    if wrote_files {
+                    if wrote_files && (tool_hooks.is_empty() || quality_blocked) {
+                        // 任务质量闭环 B：review 相位起点（报告阶段时间戳）。
+                        diagnose.phase_enter("review");
                         let bump = |name: &str| {
                             if let Some(ref h) = review_counter {
                                 h(name);
@@ -1108,22 +1827,34 @@ async fn run_agent_loop(
                         .await
                         {
                             ReviewOutcome::Approve => {
+                                metrics.observe_review_pass();
                                 if review_cycles > 0 {
                                     bump("fix_succeeded");
                                 }
                             }
                             ReviewOutcome::Issues(issues) if review_cycles < rs.max_cycles => {
                                 review_cycles += 1;
+                                metrics.observe_retry();
+                                metrics.observe_review_issues();
                                 let original = crate::review::render_feedback(&issues);
-                                let content = reflect_retry(
+                                // 任务质量闭环 B：reflect 相位起点（报告阶段时间戳）。
+                                diagnose.phase_enter("reflect");
+                                let (content, reflection) = reflect_retry(
                                     &reflect_settings,
                                     &lesson_hook,
                                     &input.prompt,
                                     &issues.join("; "),
                                     &output.text,
-                                    original,
+                                    original.clone(),
                                 )
                                 .await;
+                                // 任务质量闭环 B：反思产物进诊断（root_cause/fix_plan）。
+                                if let Some(r) = reflection {
+                                    diagnose.record_reflection(r);
+                                }
+                                if content != original {
+                                    metrics.observe_reflection();
+                                }
                                 memory.add_message(Message {
                                     role: Role::User,
                                     content,
@@ -1135,14 +1866,28 @@ async fn run_agent_loop(
                                 continue; // 回炉修复，下一次 Complete 再审
                             }
                             ReviewOutcome::Issues(issues) => {
+                                metrics.observe_review_issues();
+                                metrics.emit(None);
                                 let head = issues
                                     .iter()
                                     .take(3)
                                     .cloned()
                                     .collect::<Vec<_>>()
                                     .join("; ");
+                                let reason = attribute_pause_reason(
+                                    attribution_settings.as_ref(),
+                                    &attribution_budget,
+                                    &input.prompt,
+                                    &head,
+                                    format!("review_issues: {head}"),
+                                )
+                                .await;
+                                // 任务质量闭环 B：review 达上限的 Paused 显式产出
+                                // 报告（outcome=paused，失败详情带最终 pause reason）。
+                                diagnose.record_failure("review", None, None, reason.clone());
+                                diagnose.emit("paused", &memory.get_all()).await;
                                 tx.send(Ok(RunEvent::Paused {
-                                    reason: format!("review_issues: {head}"),
+                                    reason,
                                     session_id: session_label.clone(),
                                 }))
                                 .await
@@ -1153,6 +1898,75 @@ async fn run_agent_loop(
                         }
                     }
                 }
+                // 任务质量闭环 B：Complete 分支结束（成功或取消）统一
+                // suppress 诊断守卫，禁止 Drop 兜底产出报告——取消是正常
+                // 终止（metrics 已计 Cancelled），与成功一样不产诊断报告；
+                // Drop 兜底仅覆盖「异常/panic 终止」路径。
+                //
+                // 协议阶段3 例外：协议启用 + verify 已配置 + 会话无任何
+                // passed 验证证据（verify-evidence 硬门未通过）时**不**
+                // suppress，产 `DiagnoseReport { outcome: "unverified" }`
+                // 报告（证据链判定，spec §4.1）；verify-evidence 通过时
+                // 维持现状（suppress，不产报告）。
+                let mut unverified = false;
+                if protocol_active && !cancel.is_cancelled() {
+                    // 会话收尾：Distill 阶段边界 + 门快照（verify-evidence /
+                    // distill-on-complex 在此求值）。lesson 代理：本 run 有
+                    // 反思记录即视为已产出 lesson（memory_distill 钩子在
+                    // run_stream 层，主循环不可见）。
+                    phase_runner.set_has_lesson(metrics.reflection_count > 0);
+                    // Bugbot #12：findings 接会话质量快照。
+                    let findings = quality_findings.lock().await.clone();
+                    let ctx =
+                        phase_runner.build_ctx(Phase::Distill, verify_settings.is_some(), findings);
+                    let violations = phase_runner.transition(Phase::Distill, &protocol_gates, &ctx);
+                    tx.send(Ok(RunEvent::PhaseTransition {
+                        transition: PhaseTransition {
+                            phase: Phase::Distill,
+                            outcome: if violations.is_empty() {
+                                PhaseOutcome::Pass
+                            } else {
+                                PhaseOutcome::Violated
+                            },
+                        },
+                    }))
+                    .await
+                    .ok();
+                    for v in &violations {
+                        tx.send(Ok(RunEvent::GateViolation(v.clone()))).await.ok();
+                    }
+                    let (pv, pt) = phase_runner.stats();
+                    metrics.sync_protocol_stats(pv, pt);
+                    if verify_settings.is_some() && !phase_runner.verify_evidence_passed() {
+                        unverified = true;
+                    }
+                }
+                // 对抗审查（阶段3）：会话收尾触发（Blocking finding / 敏感
+                // 工具调用），**与 unverified 无关**（Bugbot #2 修正：原实现
+                // 放在 unverified 分支内，verify 通过的成功会话——Blocking
+                // finding 常见场景——直接 suppress，审查永不发生）。verify
+                // 通过与否只影响报告 outcome；子代理不可用或条件不满足 →
+                // 优雅跳过（warn），报告 adversarial_review 保持 None。
+                wire_session_adversarial_review(
+                    &mut diagnose,
+                    provider.clone(),
+                    adversarial_review_enabled,
+                    &input.prompt,
+                    memory,
+                    quality_findings,
+                )
+                .await;
+                if unverified {
+                    diagnose.emit("unverified", &memory.get_all()).await;
+                } else {
+                    diagnose.suppress();
+                }
+                let outcome = if cancel.is_cancelled() {
+                    RunOutcome::Cancelled
+                } else {
+                    RunOutcome::Completed
+                };
+                metrics.emit(Some(outcome));
                 tx.send(Ok(RunEvent::Done(output))).await.ok();
                 return Ok(());
             }
@@ -1163,6 +1977,25 @@ async fn run_agent_loop(
             StepOutcome::MaxSteps => {
                 warn!("agent reached max steps ({max_steps})");
                 if pause_on_max_steps {
+                    metrics.emit(Some(RunOutcome::PausedMaxSteps));
+                    // 任务质量闭环 B：max-steps 的 Paused 显式产出报告。
+                    diagnose.record_failure(
+                        "tool",
+                        None,
+                        None,
+                        format!("reached max steps ({max_steps})"),
+                    );
+                    // Bugbot #2：Paused 终端分支同样接对抗审查。
+                    wire_session_adversarial_review(
+                        &mut diagnose,
+                        provider.clone(),
+                        adversarial_review_enabled,
+                        &input.prompt,
+                        memory,
+                        quality_findings,
+                    )
+                    .await;
+                    diagnose.emit("paused", &memory.get_all()).await;
                     tx.send(Ok(RunEvent::Paused {
                         reason: format!("reached max steps ({max_steps})"),
                         session_id: session_label.clone(),
@@ -1180,6 +2013,25 @@ async fn run_agent_loop(
 
     warn!("agent reached max steps ({max_steps})");
     if pause_on_max_steps {
+        metrics.emit(Some(RunOutcome::PausedMaxSteps));
+        // 任务质量闭环 B：max-steps 的 Paused 显式产出报告。
+        diagnose.record_failure(
+            "tool",
+            None,
+            None,
+            format!("reached max steps ({max_steps})"),
+        );
+        // Bugbot #2：Paused 终端分支同样接对抗审查。
+        wire_session_adversarial_review(
+            &mut diagnose,
+            provider.clone(),
+            adversarial_review_enabled,
+            &input.prompt,
+            memory,
+            quality_findings,
+        )
+        .await;
+        diagnose.emit("paused", &memory.get_all()).await;
         tx.send(Ok(RunEvent::Paused {
             reason: format!("reached max steps ({max_steps})"),
             session_id: session_label.clone(),
@@ -1261,6 +2113,9 @@ async fn stream_and_process_turn(
     security: &SecurityContext,
     tool_calls_made: &mut usize,
     wrote_files: &mut bool,
+    tool_hooks: &[Arc<dyn ToolHook>],
+    quality_findings: &Arc<tokio::sync::Mutex<Vec<QualityFinding>>>,
+    quality_blocked: &mut bool,
     permission: Option<&Arc<PermissionGate>>,
     approval: Option<&Arc<dyn ApprovalResponder>>,
     extensions: &[Arc<ExtensionApplier>],
@@ -1268,6 +2123,9 @@ async fn stream_and_process_turn(
     tool_cache_enabled: bool,
     tool_cache: &mut HashMap<u64, String>,
     observe: Option<&ObserveSettings>,
+    metrics: &mut MetricsGuard,
+    phase_runner: &mut crate::phase_runner::PhaseRunner,
+    protocol_gates: &[Arc<dyn PhaseGate>],
 ) -> anyhow::Result<StepOutcome> {
     // Build tool refs for provider
     let tool_refs: Vec<&dyn Tool> = tools.iter().map(|t| t.as_ref()).collect();
@@ -1437,56 +2295,187 @@ async fn stream_and_process_turn(
             },
         });
 
+        // ── 协议门控（阶段3）：Execute 阶段边界（工具执行前）──
+        // 本轮已产出文本 → 会话级 has_plan_text 置位（单调）。
+        // Blocking violation → 拒绝本轮全部工具执行（复用既有 Deny 语义：
+        // 工具结果回填 "blocked by protocol gate" 错误，模型可见；不产生
+        // 悬空 tool_calls，保住 replay 不变量）。
+        // Bugbot #3 修正：drift 二次不再产 Blocking（阶段级无 Ask 桥可用），
+        // 降级为 Warning + 「需人工确认」标注（见 phase_runner.rs transition
+        // 注释与 spec §13 #2/#4 修正记录）——此处仅真实 Blocking（如
+        // verify-evidence 硬门）触发全轮 deny。
+        let mut protocol_block: Option<String> = None;
+        if !protocol_gates.is_empty() {
+            phase_runner.set_has_plan_text(!text_buf.is_empty());
+            // Bugbot #12：findings 接会话质量快照。
+            let findings = quality_findings.lock().await.clone();
+            let ctx = phase_runner.build_ctx(Phase::Execute, false, findings);
+            let violations = phase_runner.transition(Phase::Execute, protocol_gates, &ctx);
+            tx.send(Ok(RunEvent::PhaseTransition {
+                transition: PhaseTransition {
+                    phase: Phase::Execute,
+                    outcome: if violations.is_empty() {
+                        PhaseOutcome::Pass
+                    } else {
+                        PhaseOutcome::Violated
+                    },
+                },
+            }))
+            .await
+            .ok();
+            for v in &violations {
+                tx.send(Ok(RunEvent::GateViolation(v.clone()))).await.ok();
+            }
+            let (pv, pt) = phase_runner.stats();
+            metrics.sync_protocol_stats(pv, pt);
+            if violations
+                .iter()
+                .any(|v| v.severity == FindingSeverity::Blocking)
+            {
+                protocol_block = Some("blocked by protocol gate".to_string());
+            }
+        }
+
         // ── P1 执行调度：权限预检先行，读类并发、写类保序串行 ──
         // 预检按原始顺序串行执行（Ask 等待用户，避免并发弹窗），随后按
         // `read_only` 分段：段内只读工具并发（JoinSet），写工具独占段串行。
         let mut decisions: Vec<Option<String>> = Vec::with_capacity(pending_calls.len());
         for call in &pending_calls {
-            let gate_block: Option<String> = match permission {
-                Some(gate) => {
-                    let decision = match tool_map.get(&call.name) {
-                        Some(tool) => gate.check(tool.as_ref(), &call.arguments),
-                        None => Decision::Allow,
-                    };
-                    match decision {
-                        Decision::Allow => None,
-                        Decision::Deny => Some("blocked by permission policy".to_string()),
-                        Decision::Ask => {
-                            let approved = if let Some(responder) = approval {
-                                let approval_id = format!("approval_{}", uuid::Uuid::new_v4());
-                                tx.send(Ok(RunEvent::ApprovalRequest {
-                                    id: approval_id.clone(),
-                                    title: format!("Allow tool: {}", call.name),
-                                    description: Some(call.arguments.clone()),
-                                }))
-                                .await
-                                .ok();
-                                // Block until the user answers, but never
-                                // deadlock: cancellation resolves to a denial.
-                                tokio::select! {
-                                    ans = responder.request(
-                                        &approval_id,
+            let mut gate_block: Option<String> = protocol_block.clone();
+            if gate_block.is_none() {
+                gate_block = match permission {
+                    Some(gate) => {
+                        let decision = match tool_map.get(&call.name) {
+                            Some(tool) => gate.check(tool.as_ref(), &call.arguments),
+                            None => Decision::Allow,
+                        };
+                        match decision {
+                            Decision::Allow => None,
+                            Decision::Deny => Some("blocked by permission policy".to_string()),
+                            Decision::Ask => {
+                                let approved = if let Some(responder) = approval {
+                                    let approval_id = format!("approval_{}", uuid::Uuid::new_v4());
+                                    tx.send(Ok(RunEvent::ApprovalRequest {
+                                        id: approval_id.clone(),
+                                        title: format!("Allow tool: {}", call.name),
+                                        description: Some(call.arguments.clone()),
+                                    }))
+                                    .await
+                                    .ok();
+                                    // Block until the user answers, but never
+                                    // deadlock: cancellation resolves to a denial.
+                                    tokio::select! {
+                                        ans = responder.request(
+                                            &approval_id,
+                                            &call.name,
+                                            Some(&call.arguments),
+                                        ) => ans,
+                                        _ = cancel.cancelled() => false,
+                                    }
+                                } else {
+                                    // No responder wired (CLI/tests) → allow, so
+                                    // non-interactive callers keep working.
+                                    true
+                                };
+                                if approved {
+                                    gate.cache_decision(
                                         &call.name,
-                                        Some(&call.arguments),
-                                    ) => ans,
-                                    _ = cancel.cancelled() => false,
+                                        &call.arguments,
+                                        Decision::Allow,
+                                    );
+                                    None
+                                } else {
+                                    Some("denied by user".to_string())
                                 }
-                            } else {
-                                // No responder wired (CLI/tests) → allow, so
-                                // non-interactive callers keep working.
-                                true
-                            };
-                            if approved {
-                                gate.cache_decision(&call.name, &call.arguments, Decision::Allow);
-                                None
-                            } else {
-                                Some("denied by user".to_string())
                             }
                         }
                     }
+                    None => None,
+                };
+            }
+            // ── 任务质量闭环 A：ToolHook before 预检（gate 决策之后串行执行）。
+            // 决策合并：任一 Deny → 拒绝；无 Deny 且任一 Ask → 走 approval 桥
+            // （与 gate Ask 同路径）；全 Allow → 放行。
+            // F3 契约变更（fail-closed）：`interested()` 与 `before()` 均在
+            // `catch_unwind` 内执行；任一 panic → 按 `HookVerdict::Deny` 拒绝
+            // 执行（安全判定 fail-closed，warn 注明）。注意：`core/src/tool_hook.rs`
+            // 的 trait 文档仍写 fail-open 旧契约，需由 core 侧同步（见任务报告）。
+            if gate_block.is_none() && !tool_hooks.is_empty() {
+                let hook_call = ToolCall {
+                    id: call.id.clone(),
+                    ty: "function".to_string(),
+                    function: FunctionCall {
+                        name: call.name.clone(),
+                        arguments: call.arguments.clone(),
+                    },
+                };
+                let ctx = ToolHookCtx { workspace_root };
+                let mut hook_deny: Option<String> = None;
+                let mut hook_ask: Option<String> = None;
+                for hook in tool_hooks {
+                    // F3a：interested 同样进 catch_unwind——panic 按未注册处理
+                    // （跳过该钩子），不让单个钩子的崩溃炸掉整个 run。
+                    let interested = catch_unwind(AssertUnwindSafe(|| hook.interested(&hook_call)))
+                        .unwrap_or_else(|_| {
+                            warn!(
+                                "tool hook '{}' panicked in interested(); treated as not interested",
+                                hook.name()
+                            );
+                            false
+                        });
+                    if !interested {
+                        continue;
+                    }
+                    let verdict = catch_unwind(AssertUnwindSafe(|| hook.before(&ctx, &hook_call)))
+                        .unwrap_or_else(|_| {
+                            // F3b：before panic → deny（fail-closed）。
+                            warn!(
+                                "tool hook '{}' panicked in before() → deny (fail-closed)",
+                                hook.name()
+                            );
+                            HookVerdict::Deny(format!(
+                                "tool hook '{}' panicked during pre-check (fail-closed deny)",
+                                hook.name()
+                            ))
+                        });
+                    match verdict {
+                        HookVerdict::Allow | HookVerdict::AllowWith(_) => {}
+                        HookVerdict::Deny(reason) => {
+                            hook_deny = Some(reason);
+                            break;
+                        }
+                        HookVerdict::Ask(reason) => hook_ask = Some(reason),
+                    }
                 }
-                None => None,
-            };
+                if let Some(reason) = hook_deny {
+                    gate_block = Some(reason);
+                } else if let Some(reason) = hook_ask {
+                    let approved = if let Some(responder) = approval {
+                        let approval_id = format!("approval_{}", uuid::Uuid::new_v4());
+                        tx.send(Ok(RunEvent::ApprovalRequest {
+                            id: approval_id.clone(),
+                            title: format!("Allow tool: {}", call.name),
+                            description: Some(reason),
+                        }))
+                        .await
+                        .ok();
+                        tokio::select! {
+                            ans = responder.request(
+                                &approval_id,
+                                &call.name,
+                                Some(&call.arguments),
+                            ) => ans,
+                            _ = cancel.cancelled() => false,
+                        }
+                    } else {
+                        // 无 responder（CLI/tests）→ allow，非交互调用方保持可用。
+                        true
+                    };
+                    if !approved {
+                        gate_block = Some("denied by user".to_string());
+                    }
+                }
+            }
             decisions.push(gate_block);
         }
 
@@ -1547,8 +2536,20 @@ async fn stream_and_process_turn(
                             max_out,
                         )
                         .await;
+                        let ok = !is_tool_error_result(&result);
                         results[idx] = Some(result);
                         executed[idx] = true;
+                        metrics.observe_tool_call(&pending_calls[idx].name, ok);
+                        // Bugbot #4：drift-detection=off 时门从 builtin 列表
+                        // 摘除，PhaseRunner 在 Execute transition 已探测到并
+                        // 关闭计数——此处调用自然返回 None（不发 DriftFinding）。
+                        if !protocol_gates.is_empty() {
+                            if let Some(drift) =
+                                phase_runner.note_tool_failure(&pending_calls[idx].name, ok)
+                            {
+                                tx.send(Ok(RunEvent::DriftFinding(drift))).await.ok();
+                            }
+                        }
                     }
                 } else {
                     let mut set = JoinSet::new();
@@ -1575,8 +2576,18 @@ async fn stream_and_process_turn(
                     }
                     while let Some(joined) = set.join_next().await {
                         if let Ok((idx, result)) = joined {
+                            let ok = !is_tool_error_result(&result);
                             results[idx] = Some(result);
                             executed[idx] = true;
+                            metrics.observe_tool_call(&pending_calls[idx].name, ok);
+                            // Bugbot #4：同顺序路径，drift-off 时返回 None。
+                            if !protocol_gates.is_empty() {
+                                if let Some(drift) =
+                                    phase_runner.note_tool_failure(&pending_calls[idx].name, ok)
+                                {
+                                    tx.send(Ok(RunEvent::DriftFinding(drift))).await.ok();
+                                }
+                            }
                         }
                     }
                 }
@@ -1590,7 +2601,7 @@ async fn stream_and_process_turn(
                     }
                     if let Some((_, key)) = cache_keys.iter().find(|(idx, _)| *idx == i) {
                         if let Some(r) = &results[i] {
-                            if !r.starts_with("Error:") && !r.starts_with("[cached]") {
+                            if !is_tool_error_result(r) && !r.starts_with("[cached]") {
                                 tool_cache.insert(*key, r.clone());
                             }
                         }
@@ -1625,7 +2636,7 @@ async fn stream_and_process_turn(
             // P2.2 观察压缩：事件透出原始结果；历史存压缩摘要（压缩失败回退原始截断）。
             let stored = if let Some(obs) = observe {
                 if result.len() > obs.threshold_chars
-                    && !result.starts_with("Error:")
+                    && !is_tool_error_result(&result)
                     && !result.starts_with("[cached]")
                 {
                     match compress_observation(obs, &call.name, &result).await {
@@ -1646,6 +2657,77 @@ async fn stream_and_process_turn(
             }))
             .await
             .ok();
+            // ── 任务质量闭环 A：ToolHook after 写后评估（执行成功才评估）。
+            // findings 进事件流 + 会话级累计；Blocking 置位 review 短路标志。
+            // F3：after 的 panic 保持 fail-open（空 findings + warn，不影响
+            // 执行）；`interested()` 同样进 catch_unwind（panic 按未注册处理）。
+            if executed[i] && !is_tool_error_result(&result) && !tool_hooks.is_empty() {
+                let hook_call = ToolCall {
+                    id: call.id.clone(),
+                    ty: "function".to_string(),
+                    function: FunctionCall {
+                        name: call.name.clone(),
+                        arguments: call.arguments.clone(),
+                    },
+                };
+                let ctx = ToolHookCtx { workspace_root };
+                for hook in tool_hooks {
+                    let interested =
+                        catch_unwind(AssertUnwindSafe(|| hook.interested(&hook_call)))
+                            .unwrap_or_else(|_| {
+                                warn!(
+                                    "tool hook '{}' panicked in interested(); treated as not interested",
+                                    hook.name()
+                                );
+                                false
+                            });
+                    if !interested {
+                        continue;
+                    }
+                    let findings =
+                        catch_unwind(AssertUnwindSafe(|| hook.after(&ctx, &hook_call, &result)))
+                            .unwrap_or_else(|_| {
+                                warn!(
+                                    "tool hook '{}' panicked in after(); fail-open empty findings",
+                                    hook.name()
+                                );
+                                Vec::new()
+                            });
+                    if findings.is_empty() {
+                        continue;
+                    }
+                    // F9：会话级 findings 有界累积——超限丢弃新 finding 并仅
+                    // warn 一次（长会话保护；避免 Vec::remove(0) 的 O(n) 搬迁）。
+                    // 事件流照常发出（用户可见），仅不入会话累计。与 MetricsGuard
+                    // 的 run 级差分切片（F4）兼容：切片起点为 run 开始时长度，
+                    // 丢弃只会让切片更短，不会混入他 run 数据。
+                    let mut dropped_warned = false;
+                    let mut emitted = Vec::with_capacity(findings.len());
+                    {
+                        let mut qf = quality_findings.lock().await;
+                        for finding in findings {
+                            if finding.severity == FindingSeverity::Blocking {
+                                *quality_blocked = true;
+                            }
+                            if qf.len() >= MAX_QUALITY_FINDINGS {
+                                if !dropped_warned {
+                                    warn!(
+                                        "quality findings exceeded cap ({}); dropping new findings",
+                                        MAX_QUALITY_FINDINGS
+                                    );
+                                    dropped_warned = true;
+                                }
+                            } else {
+                                qf.push(finding.clone());
+                            }
+                            emitted.push(finding);
+                        }
+                    }
+                    for finding in emitted {
+                        tx.send(Ok(RunEvent::QualityFinding(finding))).await.ok();
+                    }
+                }
+            }
             memory.add_message(Message {
                 role: Role::Tool,
                 content: stored,
@@ -1702,6 +2784,46 @@ fn group_call_indices(
         segments.push(reads);
     }
     segments
+}
+
+/// 工具结果是否呈错误形态（供 metrics 计数 / 缓存回填 / 观察压缩分流）。
+/// 保守策略：只识别明确错误形态——`Error:` / `error:` 前缀（trim 后）、
+/// 以及工具返回的错误 JSON（`{"error": ...}` / `{"success": false, ...}`
+/// 开头形态）；`{"error": null|false}` 与 `{"success": true}` 不判错，
+/// 其余正常输出一律计为成功。
+pub(crate) fn is_tool_error_result(result: &str) -> bool {
+    let s = result.trim_start();
+    if s.starts_with("Error:") || s.starts_with("error:") {
+        return true;
+    }
+    // 错误 JSON：仅检查首个字段（开头形态），字段值需明确指向错误。
+    let Some(rest) = s
+        .strip_prefix('{')
+        .map(str::trim_start)
+        .and_then(|r| r.strip_prefix('"'))
+    else {
+        return false;
+    };
+    let Some(end) = rest.find('"') else {
+        return false;
+    };
+    let field = &rest[..end];
+    let Some(value) = rest[end + 1..]
+        .trim_start()
+        .strip_prefix(':')
+        .map(str::trim_start)
+    else {
+        return false;
+    };
+    if field.eq_ignore_ascii_case("error") {
+        // `{"error": ...}`：null/false 值不算明确错误，其余值视为错误形态。
+        return !value.starts_with("null") && !value.starts_with("false");
+    }
+    if field.eq_ignore_ascii_case("success") {
+        // `{"success": false, ...}`：仅显式 false 判错。
+        return value.starts_with("false");
+    }
+    false
 }
 
 /// 执行单个工具调用（并发段内每个任务调用一次），返回 (原始下标, 结果字符串)。
@@ -1761,11 +2883,45 @@ async fn execute_tool_call(
     (idx, result)
 }
 
-/// P2.1 每步分类：上一条消息是工具结果且不含 `Error:` → 机械续步（quick）；
-/// 其余（首步、出错、回炉反馈）→ high。
+/// 结果文本是否含错误指示（宽松 contains 语义，供机械续步分类，与
+/// `is_tool_error_result` 的整体判定互补）：大小写不敏感的 `error:` 片段、
+/// JSON `"error"` 键出现、以及 `{"success": false}` 显式 false 值。
+/// 宁可多判错误（→ high，更强模型），不漏判错误走 quick。
+fn contains_error_signal(text: &str) -> bool {
+    if text.to_ascii_lowercase().contains("error:") {
+        return true;
+    }
+    // JSON `{"error": ...}` 形态：`"error"` 键（后随 `:`）出现即视为错误指示
+    // （宽松判定，null/false 值也判错；与 is_tool_error_result 的首字段
+    // null/false 特判互补）。字符串值位置的 `"error"`（后随 `}`/`,`）不判。
+    let mut rest = text;
+    while let Some(idx) = rest.find("\"error\"") {
+        let after = rest[idx + "\"error\"".len()..].trim_start();
+        if after.starts_with(':') {
+            return true;
+        }
+        rest = after;
+    }
+    // `{"success": false, ...}`：`"success"` 键后紧跟 `: false`。
+    let mut rest = text;
+    while let Some(idx) = rest.find("\"success\"") {
+        let after = &rest[idx + "\"success\"".len()..];
+        let after = after.trim_start();
+        if let Some(after) = after.strip_prefix(':') {
+            return after.trim_start().starts_with("false");
+        }
+        rest = after;
+    }
+    false
+}
+
+/// P2.1 每步分类：上一条消息是工具结果且不含错误信号 → 机械续步（quick）；
+/// 其余（首步、出错、回炉反馈）→ high。错误识别与 `is_tool_error_result`
+/// 语义一致（大小写不敏感 `error:` + 错误 JSON 形态），但保持 contains
+/// 语义（长输出中任何位置出现即算错误信号）。
 fn classify_quick_step(memory: &Memory) -> bool {
     match memory.get_all().last() {
-        Some(m) if m.role == Role::Tool => !m.content.contains("Error:"),
+        Some(m) if m.role == Role::Tool => !contains_error_signal(&m.content),
         _ => false,
     }
 }
@@ -1937,6 +3093,135 @@ mod tests {
         assert!(tokens < 100);
     }
 
+    #[test]
+    fn tool_error_heuristic_flags_error_forms_only() {
+        // 错误形态 → 判失败。
+        for s in [
+            "Error: boom",
+            "error: boom",
+            "  error: boom", // trim 后
+            "Error: unknown tool 'x'",
+            r#"{"error": "boom"}"#,
+            r#"{"error":"boom"}"#,
+            r#"{"error": {"code": 1}}"#,
+            r#"{"success": false, "detail": "x"}"#,
+            r#"{"success":false}"#,
+            r#"{ "success" : false }"#,
+        ] {
+            assert!(is_tool_error_result(s), "应判为错误: {s}");
+        }
+        // 正常输出 → 判成功（不得误伤）。
+        for s in [
+            "all good",
+            "Error handling code lives in src/error.rs",
+            "erroneous result", // 非前缀
+            "we got an error somewhere in the middle",
+            r#"{"success": true, "data": 1}"#,
+            r#"{"error": null}"#,
+            r#"{"error": false}"#,
+            r#"{"errorless": true}"#,
+            r#"{"status": "error"}"#, // 非 error/success 键名不判错
+            "",
+        ] {
+            assert!(!is_tool_error_result(s), "应判为成功: {s}");
+        }
+    }
+
+    #[test]
+    fn classify_quick_step_flags_error_signals_case_insensitive() {
+        // 错误指示（含小写 error、JSON 形态）→ 非 quick（high）。
+        for content in [
+            "Error: boom",
+            "error: boom",
+            "lots of text then Error: boom",
+            r#"{"error": "boom"}"#,
+            r#"{"error":null}"#,
+            r#"{"success": false, "detail": "x"}"#,
+            "prefix\n{\"error\": 1}\nsuffix",
+        ] {
+            let mut mem = Memory::new();
+            mem.add_message(Message {
+                role: Role::Tool,
+                content: content.to_string(),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            });
+            assert!(
+                !classify_quick_step(&mem),
+                "含错误指示应判 high（非 quick）: {content}"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_quick_step_normal_output_stays_quick() {
+        // 正常工具输出 → quick（机械续步）。
+        for content in [
+            "all good",
+            "42 lines read",
+            r#"{"success": true, "data": 1}"#,
+            r#"{"status": "error"}"#, // 非 error/success 键名不判错
+            "errorless result",
+        ] {
+            let mut mem = Memory::new();
+            mem.add_message(Message {
+                role: Role::Tool,
+                content: content.to_string(),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            });
+            assert!(classify_quick_step(&mem), "正常输出应判 quick: {content}");
+        }
+    }
+
+    #[test]
+    fn classify_quick_step_non_tool_last_message_is_not_quick() {
+        let mut mem = Memory::new();
+        mem.add_message(Message {
+            role: Role::User,
+            content: "Error: boom".to_string(),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        });
+        assert!(!classify_quick_step(&mem), "非工具消息不判 quick");
+        assert!(!classify_quick_step(&Memory::new()), "空记忆不判 quick");
+    }
+
+    #[test]
+    fn node_failure_summary_truncates_and_formats() {
+        use deepseeknova_core::executor::AttributionHook as _;
+        use deepseeknova_core::graph::{NodeId, NodeOutput};
+
+        let hook = crate::attribution::NodeFailureSummary;
+        let cap = crate::attribution::MAX_ATTRIBUTION_INPUT_CHARS;
+
+        // 超长输入 → 截断到上限（字符级）。
+        let long = "x".repeat(5000);
+        let out = hook.on_node_failure(&NodeId::from("n1"), &NodeOutput::Error(long));
+        let s = out.expect("Error 输出应产生摘要");
+        let prefix = "node n1 failed: ";
+        assert!(s.starts_with(prefix));
+        assert_eq!(s.len(), prefix.len() + cap, "超长输入应被截断");
+
+        // 短输入 → 原样保留。
+        let out = hook.on_node_failure(&NodeId::from("n2"), &NodeOutput::Error("boom".into()));
+        assert_eq!(out.as_deref(), Some("node n2 failed: boom"));
+
+        // 非 Error 形态 → None。
+        assert!(hook
+            .on_node_failure(&NodeId::from("n3"), &NodeOutput::Text("ok".into()))
+            .is_none());
+        assert!(hook
+            .on_node_failure(&NodeId::from("n3"), &NodeOutput::ToolResult("ok".into()))
+            .is_none());
+    }
+
     // -----------------------------------------------------------------------
     // Integration tests: Agent + MockProvider
     // -----------------------------------------------------------------------
@@ -2059,6 +3344,426 @@ mod tests {
         assert!(
             saw_err,
             "error mode must surface a stream error (pre-B2 contract)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 任务质量闭环 B：结构化失败诊断报告（DiagnoseReport）集成测试
+    // -----------------------------------------------------------------------
+
+    /// Paused 结束（max-steps）→ 恰好一份报告：outcome=paused、阶段时序单调、
+    /// failures 非空、session_id 与标注一致。
+    #[tokio::test]
+    async fn diagnose_hook_emits_report_on_paused_failure() {
+        let captured = Arc::new(std::sync::Mutex::new(
+            Vec::<crate::diagnose::DiagnoseReport>::new(),
+        ));
+        let cap = captured.clone();
+        let hook: DiagnoseHook = Arc::new(move |report| cap.lock().unwrap().push(report));
+        let agent = looping_agent(2)
+            .with_on_max_steps("pause")
+            .with_session_label("sess-diag-1")
+            .with_diagnose_hook(hook);
+
+        let mut stream = agent
+            .run_stream(RunInput {
+                prompt: "loop forever".into(),
+                images: vec![],
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+
+        let reports = captured.lock().unwrap();
+        assert_eq!(reports.len(), 1, "exactly one report per failed run");
+        let r = &reports[0];
+        assert_eq!(r.outcome, "paused");
+        assert_eq!(r.session_id, "sess-diag-1");
+        assert!(!r.phases.is_empty(), "phases must be recorded");
+        for p in &r.phases {
+            assert!(
+                p.ended_at_ms >= p.started_at_ms,
+                "phase {} ended < started",
+                p.name
+            );
+            assert_eq!(p.duration_ms, p.ended_at_ms - p.started_at_ms);
+        }
+        assert!(!r.failures.is_empty(), "failures must be non-empty");
+    }
+
+    /// 成功结束 → diagnose_hook 不被调用（success 路径 suppress 生效）。
+    #[tokio::test]
+    async fn diagnose_hook_not_called_on_success() {
+        let captured = Arc::new(std::sync::Mutex::new(
+            Vec::<crate::diagnose::DiagnoseReport>::new(),
+        ));
+        let cap = captured.clone();
+        let hook: DiagnoseHook = Arc::new(move |report| cap.lock().unwrap().push(report));
+        let agent =
+            Agent::new(Arc::new(MockProvider::text("all good")), 3).with_diagnose_hook(hook);
+
+        let mut stream = agent
+            .run_stream(RunInput {
+                prompt: "say hi".into(),
+                images: vec![],
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+
+        assert!(
+            captured.lock().unwrap().is_empty(),
+            "success run must not emit a diagnose report"
+        );
+    }
+
+    /// 错误结束（max-steps error 模式，run_agent_loop 返回 Err）→ Drop 兜底
+    /// 产出 outcome=failed 的报告。
+    #[tokio::test]
+    async fn diagnose_hook_reports_failed_on_error_mode() {
+        let captured = Arc::new(std::sync::Mutex::new(
+            Vec::<crate::diagnose::DiagnoseReport>::new(),
+        ));
+        let cap = captured.clone();
+        let hook: DiagnoseHook = Arc::new(move |report| cap.lock().unwrap().push(report));
+        let agent = looping_agent(2)
+            .with_on_max_steps("error")
+            .with_diagnose_hook(hook);
+
+        let mut stream = agent
+            .run_stream(RunInput {
+                prompt: "loop forever".into(),
+                images: vec![],
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+
+        let reports = captured.lock().unwrap();
+        assert_eq!(reports.len(), 1, "error path must emit via Drop fallback");
+        assert_eq!(reports[0].outcome, "failed");
+        assert!(
+            !reports[0].failures.is_empty(),
+            "Drop fallback must record the abnormal termination"
+        );
+    }
+
+    /// 协议阶段3：协议启用 + verify 配置 + 无 passed 证据 → Complete 仍产出
+    /// outcome=unverified 报告（证据链判定，spec §4.1）；协议未启用时维持
+    /// 现状（suppress，不产报告）。
+    #[tokio::test]
+    async fn diagnose_hook_emits_unverified_when_protocol_enabled_without_verify_evidence() {
+        // 无工具调用 → 无 wrote_files → verify 不执行 → 零 Verification 事件。
+        let captured = Arc::new(std::sync::Mutex::new(
+            Vec::<crate::diagnose::DiagnoseReport>::new(),
+        ));
+        let cap = captured.clone();
+        let hook: DiagnoseHook = Arc::new(move |report| cap.lock().unwrap().push(report));
+
+        let gates = crate::phase_runner::builtin_phase_gates(&HashMap::new());
+        let agent = Agent::new(Arc::new(MockProvider::text("done")), 3)
+            .with_verify(vec!["cargo check".into()], 1)
+            .with_protocol_gates(gates)
+            .with_session_label("sess-unverified")
+            .with_diagnose_hook(hook);
+
+        let mut stream = agent
+            .run_stream(RunInput {
+                prompt: "fix the bug".into(),
+                images: vec![],
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+
+        {
+            let reports = captured.lock().unwrap();
+            assert_eq!(reports.len(), 1, "unverified run must emit one report");
+            assert_eq!(reports[0].outcome, "unverified");
+            assert_eq!(reports[0].session_id, "sess-unverified");
+        }
+
+        // 对照：协议未启用 → 现状（suppress，无报告）。
+        let captured2 = Arc::new(std::sync::Mutex::new(
+            Vec::<crate::diagnose::DiagnoseReport>::new(),
+        ));
+        let cap2 = captured2.clone();
+        let hook2: DiagnoseHook = Arc::new(move |report| cap2.lock().unwrap().push(report));
+        let agent2 = Agent::new(Arc::new(MockProvider::text("done")), 3)
+            .with_verify(vec!["cargo check".into()], 1)
+            .with_diagnose_hook(hook2);
+        let mut stream2 = agent2
+            .run_stream(RunInput {
+                prompt: "fix the bug".into(),
+                images: vec![],
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while stream2.next().await.is_some() {}
+        assert!(
+            captured2.lock().unwrap().is_empty(),
+            "protocol disabled must keep suppress-on-success behavior"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 协议阶段3：对抗审查触发条件（纯函数）
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn adversarial_review_needed_blocks_on_blocking_finding() {
+        let findings = vec![QualityFinding {
+            rule: "no-commit-secret".into(),
+            severity: FindingSeverity::Blocking,
+            passed: false,
+            evidence: "AKIA...".into(),
+        }];
+        assert!(adversarial_review_needed(&findings, &[]));
+    }
+
+    #[test]
+    fn adversarial_review_needed_ignores_non_blocking_findings() {
+        let findings = vec![QualityFinding {
+            rule: "oversized-write".into(),
+            severity: FindingSeverity::Warning,
+            passed: false,
+            evidence: "1024 bytes".into(),
+        }];
+        assert!(!adversarial_review_needed(&findings, &[]));
+    }
+
+    #[test]
+    fn adversarial_review_needed_triggers_on_sensitive_tool_call() {
+        let msg = Message {
+            role: Role::Assistant,
+            content: String::new(),
+            name: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "t1".into(),
+                ty: "function".into(),
+                function: FunctionCall {
+                    name: "bash".into(),
+                    arguments: r#"{"command":"chmod 777 /etc/hosts"}"#.into(),
+                },
+            }]),
+            tool_call_id: None,
+            reasoning_content: None,
+        };
+        assert!(adversarial_review_needed(&[], &[msg]));
+    }
+
+    #[test]
+    fn adversarial_review_needed_skips_benign_session() {
+        let msg = Message {
+            role: Role::Assistant,
+            content: String::new(),
+            name: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "t1".into(),
+                ty: "function".into(),
+                function: FunctionCall {
+                    name: "read_file".into(),
+                    arguments: r#"{"path":"src/main.rs"}"#.into(),
+                },
+            }]),
+            tool_call_id: None,
+            reasoning_content: None,
+        };
+        assert!(!adversarial_review_needed(&[], &[msg]));
+    }
+
+    /// Bugbot #9 负例：bash/shell 类无 SENSITIVE_MARKERS 命中 → 不触发
+    /// （任意 bash 调用不得烧子代理 token）；write_file 写普通路径 → 不
+    /// 触发、写安全边界路径（/etc/）→ 触发；delete_file 保持无条件敏感。
+    #[test]
+    fn adversarial_review_needed_marker_gating_on_bash_and_write() {
+        let call = |name: &str, args: &str| Message {
+            role: Role::Assistant,
+            content: String::new(),
+            name: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "t1".into(),
+                ty: "function".into(),
+                function: FunctionCall {
+                    name: name.into(),
+                    arguments: args.into(),
+                },
+            }]),
+            tool_call_id: None,
+            reasoning_content: None,
+        };
+        // bash 无 marker → 不触发。
+        assert!(!adversarial_review_needed(
+            &[],
+            &[call("bash", r#"{"command":"ls -la"}"#)]
+        ));
+        // bash 命中 marker（chmod /etc/）→ 触发。
+        assert!(adversarial_review_needed(
+            &[],
+            &[call("bash", r#"{"command":"chmod 777 /etc/hosts"}"#)]
+        ));
+        // write_file 普通源码路径 → 不触发。
+        assert!(!adversarial_review_needed(
+            &[],
+            &[call(
+                "write_file",
+                r#"{"path":"src/main.rs","content":"fn main() {}"}"#
+            )]
+        ));
+        // write_file 命中路径 marker（/etc/）→ 触发。
+        assert!(adversarial_review_needed(
+            &[],
+            &[call(
+                "write_file",
+                r#"{"path":"/etc/hosts","content":"127.0.0.1 x"}"#
+            )]
+        ));
+        // delete_file 无条件敏感（不依赖 marker）。
+        assert!(adversarial_review_needed(
+            &[],
+            &[call("delete_file", r#"{"path":"src/main.rs"}"#)]
+        ));
+    }
+
+    /// Bugbot #10：loop 级「Blocking 违规确实拒绝工具」接线测试——Hard
+    /// plan-before-execute 门（无计划文本 → Blocking）在 Execute transition
+    /// 拒绝本轮全部工具：工具不执行（调用计数 0）、ToolResult 回填
+    /// "blocked by protocol gate"（replay 不变量：不产生悬空 tool_calls）、
+    /// 会话正常完成（模型收到回填结果后产出最终文本）。
+    #[tokio::test]
+    async fn protocol_blocking_violation_rejects_tool_execution() {
+        let invoked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let inv = invoked.clone();
+        struct CountingSpy {
+            inv: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        #[async_trait::async_trait]
+        impl Tool for CountingSpy {
+            fn schema(&self) -> ToolSchema {
+                ToolSchema {
+                    name: "spy".to_string(),
+                    description: "counting spy".to_string(),
+                    parameters: serde_json::json!({"type":"object","properties":{}}),
+                }
+            }
+            fn read_only(&self) -> bool {
+                true
+            }
+            async fn execute(&self, _ctx: &ToolContext, _args: &str) -> anyhow::Result<String> {
+                self.inv.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok("ran".to_string())
+            }
+        }
+
+        let provider = MockProvider::tool_call("spy", "{}", "ignored", "done");
+        let levels = HashMap::from([(
+            "plan-before-execute".to_string(),
+            crate::phase_runner::GateLevel::Hard,
+        )]);
+        let gates = crate::phase_runner::builtin_phase_gates(&levels);
+        let mut agent = Agent::new(Arc::new(provider), 5).with_protocol_gates(gates);
+        agent.register_tool(Arc::new(CountingSpy { inv }));
+        let events = drain(agent, "do the thing").await;
+
+        // 门确实产出 Blocking 违规。
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                RunEvent::GateViolation(v)
+                    if v.gate == "plan-before-execute" && v.severity == FindingSeverity::Blocking
+            )),
+            "plan-before-execute Hard 门应在 Execute transition 产 Blocking"
+        );
+        // 工具结果回填 blocked 错误（模型可见，无悬空 tool_calls）。
+        let blocked: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                RunEvent::ToolResult { result, .. } => Some(result.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            blocked
+                .iter()
+                .any(|r| r.contains("blocked by protocol gate")),
+            "ToolResult 必须回填 'blocked by protocol gate'：{blocked:?}"
+        );
+        // 工具确实未被调用。
+        assert_eq!(
+            invoked.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "Blocking 违规时工具不得执行"
+        );
+        // 会话正常完成。
+        assert!(events.iter().any(|e| matches!(e, RunEvent::Done(_))));
+    }
+
+    /// Bugbot #10/#5/#3：drift 语义 agent 级行为断言——bash 连续 4 败只产
+    /// 1 条 DriftFinding（阈值首次跨越，窗口未清零前不重复发）、无 Blocking
+    /// 违规、无工具被协议拒绝（#3：drift 二次不再走 Blocking/Ask，降级
+    /// Warning + 需人工确认，见 phase_runner 单测）。
+    #[tokio::test]
+    async fn protocol_drift_emits_single_finding_and_never_blocks() {
+        let tool_turn = |id: &str| {
+            vec![
+                Chunk::ToolCallStart {
+                    id: id.to_string(),
+                    name: "bash".to_string(),
+                },
+                Chunk::ToolCallEnd {
+                    id: id.to_string(),
+                    name: "bash".to_string(),
+                    arguments: "{}".to_string(),
+                },
+                Chunk::Done,
+            ]
+        };
+        let provider = MockProvider::sequential(vec![
+            tool_turn("c1"),
+            tool_turn("c2"),
+            tool_turn("c3"),
+            tool_turn("c4"),
+            vec![
+                Chunk::TextDelta("done".to_string()),
+                Chunk::Usage(Usage::default()),
+                Chunk::Done,
+            ],
+        ]);
+        let mut agent = Agent::new(Arc::new(provider), 10)
+            .with_protocol_gates(crate::phase_runner::builtin_phase_gates(&HashMap::new()));
+        agent.register_tool(Arc::new(BashSpy { fail: true }));
+        let events = drain(agent, "run bash").await;
+
+        let drifts = events
+            .iter()
+            .filter(|e| matches!(e, RunEvent::DriftFinding(_)))
+            .count();
+        assert_eq!(
+            drifts, 1,
+            "连续 4 败只应发 1 条 DriftFinding（阈值首次跨越）：{events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                RunEvent::GateViolation(v) if v.severity == FindingSeverity::Blocking
+            )),
+            "drift 路径不得产 Blocking（Bugbot #3：二次 drift 降级 Warning）：{events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                RunEvent::ToolResult { result, .. } if result.contains("blocked by protocol gate")
+            )),
+            "drift 路径不得触发协议拒绝：{events:?}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, RunEvent::Done(_))),
+            "会话应正常完成"
         );
     }
 
@@ -2732,6 +4437,46 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn metrics_hook_fires_once_with_completed_snapshot() {
+        use std::sync::Mutex as StdMutex;
+        let fired = Arc::new(StdMutex::new(Vec::new()));
+        let f2 = fired.clone();
+        let hook: MetricsHook = Arc::new(move |stats, summary| {
+            f2.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((stats, summary));
+        });
+        let agent = Agent::new(Arc::new(MockProvider::text("ok")), 3)
+            .with_system_prompt("sp")
+            .with_metrics_hook(hook);
+        let mut stream = agent
+            .run_stream(RunInput {
+                prompt: "do it".into(),
+                images: vec![],
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        // hook 由 spawned task 在流耗尽后触发，与 distill 同款有界等待。
+        for _ in 0..50 {
+            if !fired.lock().unwrap_or_else(|e| e.into_inner()).is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let snapshots = fired.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(snapshots.len(), 1, "metrics hook must fire exactly once");
+        assert_eq!(snapshots[0].0.steps, 1);
+        assert_eq!(snapshots[0].0.outcome, Some(RunOutcome::Completed));
+        // 无 hook 链时 summary 全空（findings/reflection/review 均为默认值）。
+        assert!(snapshots[0].1.findings.is_empty());
+        assert_eq!(snapshots[0].1.reflection_count, 0);
+        assert_eq!(snapshots[0].1.review_passes, 0);
+        assert_eq!(snapshots[0].1.review_issues, 0);
+    }
+
     // -----------------------------------------------------------------------
     // B3 pre-completion review gate
     // -----------------------------------------------------------------------
@@ -2856,6 +4601,31 @@ mod tests {
         (hook, seen)
     }
 
+    /// 测试用 ToolHook：after 恒产出 Blocking finding。B3 review 短路门
+    /// `wrote_files && quality_blocked` 要求 Blocking 级 finding 才进入
+    /// review——08-04 的 review 测试未注册钩子，A 阶段接入短路后 review
+    /// 被整体跳过（直接 Done），补此钩子恢复原测试语义。
+    struct BlockingFindingHook;
+
+    impl ToolHook for BlockingFindingHook {
+        fn name(&self) -> &str {
+            "blocking-finding-hook"
+        }
+        fn after(
+            &self,
+            _ctx: &ToolHookCtx,
+            _call: &ToolCall,
+            _result: &str,
+        ) -> Vec<QualityFinding> {
+            vec![QualityFinding {
+                rule: "test-blocking".into(),
+                severity: FindingSeverity::Blocking,
+                passed: false,
+                evidence: "test".into(),
+            }]
+        }
+    }
+
     async fn drain(agent: Agent, prompt: &str) -> Vec<RunEvent> {
         let mut stream = agent
             .run_stream(RunInput {
@@ -2902,7 +4672,8 @@ mod tests {
         let mut agent = Agent::new(provider, 6)
             .with_workspace_root(repo.clone())
             .with_review(reviewer, 4000, 2)
-            .with_review_counter(hook);
+            .with_review_counter(hook)
+            .with_tool_hook(Arc::new(BlockingFindingHook));
         agent.register_tool(Arc::new(SpyTool {
             name: "write_file",
             result: "written".into(),
@@ -2937,7 +4708,8 @@ mod tests {
         ])));
         let mut agent = Agent::new(provider, 6)
             .with_workspace_root(repo.clone())
-            .with_review(reviewer, 4000, 1);
+            .with_review(reviewer, 4000, 1)
+            .with_tool_hook(Arc::new(BlockingFindingHook));
         agent.register_tool(Arc::new(SpyTool {
             name: "write_file",
             result: "written".into(),
@@ -2956,6 +4728,52 @@ mod tests {
         assert!(
             reason.starts_with("review_issues"),
             "pause reason must start with review_issues, got: {reason}"
+        );
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[tokio::test]
+    async fn review_pause_reason_includes_fix_plan_when_attribution_enabled() {
+        // review 达 max_cycles → Paused 前归因；reason 附带 fix_plan（恢复建议，
+        // Paused 恢复时可续用），与 verify 达上限路径共用 attribute_pause_reason。
+        let repo = temp_git_repo_with_diff("pause");
+        // 审查 provider 永远回 issues（单响应重复模式）。
+        let reviewer = Arc::new(SeqProvider::new(vec![
+            r#"{"verdict":"issues","issues":["still broken"]}"#,
+        ]));
+        let attrib = Arc::new(SeqProvider::new(vec![
+            r#"{"root_cause":"broken import","verdict":"abort","fix_plan":"rewrite the import"}"#,
+        ]));
+        let provider = Arc::new(MockProvider::sequential(write_then_texts(&[
+            "done v1", "done v2",
+        ])));
+        let mut agent = Agent::new(provider, 6)
+            .with_workspace_root(repo.clone())
+            .with_review(reviewer, 4000, 1)
+            .with_attribution(crate::attribution::AttributionSettings {
+                provider: attrib.clone(),
+                max_retries: 0,
+                max_attributions: 3,
+                degrade_map: std::collections::HashMap::new(),
+            })
+            .with_tool_hook(Arc::new(BlockingFindingHook));
+        agent.register_tool(Arc::new(SpyTool {
+            name: "write_file",
+            result: "written".into(),
+        }));
+
+        let events = drain(agent, "write something").await;
+        let reason = events
+            .iter()
+            .find_map(|e| match e {
+                RunEvent::Paused { reason, .. } => Some(reason.clone()),
+                _ => None,
+            })
+            .expect("must emit Paused on persistent review issues");
+        assert!(reason.starts_with("review_issues:"), "got: {reason}");
+        assert!(
+            reason.contains("fix_plan: rewrite the import"),
+            "Paused reason must carry fix_plan, got: {reason}"
         );
         let _ = std::fs::remove_dir_all(&repo);
     }
@@ -3190,6 +5008,43 @@ mod tests {
         assert!(
             !events.iter().any(|e| matches!(e, RunEvent::Done(_))),
             "persistent verify failure must NOT reach Done"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_pause_reason_includes_fix_plan_when_attribution_enabled() {
+        // verify 达 max_cycles → Paused 前归因；reason 附带 fix_plan（恢复建议，
+        // Paused 恢复时可续用）。归因失败/关闭时 reason 保持原文案。
+        let provider = Arc::new(MockProvider::sequential(write_then_texts(&["done v1"])));
+        let attrib = Arc::new(SeqProvider::new(vec![
+            r#"{"root_cause":"broken import","verdict":"abort","fix_plan":"rewrite the import"}"#,
+        ]));
+        let mut agent = Agent::new(provider, 6)
+            .with_verify(vec!["cargo check --quiet".into()], 1)
+            .with_attribution(crate::attribution::AttributionSettings {
+                provider: attrib.clone(),
+                max_retries: 0,
+                max_attributions: 3,
+                degrade_map: std::collections::HashMap::new(),
+            });
+        agent.register_tool(Arc::new(WritableSpy {
+            name: "write_file",
+            result: "written".into(),
+        }));
+        agent.register_tool(Arc::new(BashSpy { fail: true }));
+
+        let events = drain(agent, "write something").await;
+        let reason = events
+            .iter()
+            .find_map(|e| match e {
+                RunEvent::Paused { reason, .. } => Some(reason.clone()),
+                _ => None,
+            })
+            .expect("must emit Paused on persistent verify failure");
+        assert!(reason.starts_with("verify_failed:"), "got: {reason}");
+        assert!(
+            reason.contains("fix_plan: rewrite the import"),
+            "Paused reason must carry fix_plan, got: {reason}"
         );
     }
 
@@ -3523,5 +5378,394 @@ mod tests {
             store.iter().any(|m| m.content.contains("mid-hit")),
             "mid-run retrieval must inject on a seeded tool-active turn"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // F3：interested() panic 按未注册处理（不 panic run，钩子不执行）
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn interested_panic_treated_as_not_registered() {
+        struct InterestedPanicHook;
+        impl ToolHook for InterestedPanicHook {
+            fn name(&self) -> &str {
+                "interested-panic"
+            }
+            fn interested(&self, _call: &ToolCall) -> bool {
+                panic!("interested panic")
+            }
+            fn before(&self, _ctx: &ToolHookCtx, _call: &ToolCall) -> HookVerdict {
+                HookVerdict::Deny("should never run".into())
+            }
+            fn after(
+                &self,
+                _ctx: &ToolHookCtx,
+                _call: &ToolCall,
+                _result: &str,
+            ) -> Vec<QualityFinding> {
+                vec![QualityFinding {
+                    rule: "never".into(),
+                    severity: FindingSeverity::Blocking,
+                    passed: false,
+                    evidence: "never".into(),
+                }]
+            }
+        }
+
+        let workspace = std::env::temp_dir().join(format!(
+            "dnv-interested-panic-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let provider = MockProvider::tool_call(
+            "write_file",
+            r#"{"path":"src/main.rs","content":"fn main() {}"}"#,
+            "ignored",
+            "done",
+        );
+        let mut agent = Agent::new(Arc::new(provider), 5)
+            .with_workspace_root(workspace.clone())
+            .with_tool_hook(Arc::new(InterestedPanicHook));
+        agent.register_tool(Arc::new(WritableSpy {
+            name: "write_file",
+            result: "written".into(),
+        }));
+        let events = drain(agent, "write main.rs").await;
+        // interested panic → 按未注册处理：before/after 均未执行，工具正常跑。
+        assert!(events.iter().any(|e| matches!(e, RunEvent::Done(_))));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, RunEvent::ToolResult { .. })),
+            "tool must execute and emit ToolResult (hook treated as not registered)"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, RunEvent::QualityFinding(_))),
+            "panicking interested must not produce findings"
+        );
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    // -----------------------------------------------------------------------
+    // F4：MetricsGuard run 级差分切片（run 前已有历史 findings 不混入）
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn metrics_summary_findings_are_run_scoped() {
+        use std::sync::Mutex as StdMutex;
+        let fired = Arc::new(StdMutex::new(Vec::<QualitySummary>::new()));
+        let f2 = fired.clone();
+        let hook: MetricsHook = Arc::new(move |_stats, summary| {
+            f2.lock().unwrap_or_else(|e| e.into_inner()).push(summary);
+        });
+        // 同一 agent 跑两次 run：quality_findings 跨 run 累积，summary 只含本 run。
+        let mut agent = Agent::new(
+            Arc::new(MockProvider::sequential(vec![
+                // run 1：write_file 工具调用 + 完成文本。
+                vec![
+                    Chunk::ToolCallStart {
+                        id: "w1".into(),
+                        name: "write_file".into(),
+                    },
+                    Chunk::ToolCallEnd {
+                        id: "w1".into(),
+                        name: "write_file".into(),
+                        arguments: r#"{"path":"src/a.rs","content":"x"}"#.into(),
+                    },
+                    Chunk::Done,
+                ],
+                vec![
+                    Chunk::TextDelta("done1".into()),
+                    Chunk::Usage(Usage::default()),
+                    Chunk::Done,
+                ],
+                // run 2：同上。
+                vec![
+                    Chunk::ToolCallStart {
+                        id: "w2".into(),
+                        name: "write_file".into(),
+                    },
+                    Chunk::ToolCallEnd {
+                        id: "w2".into(),
+                        name: "write_file".into(),
+                        arguments: r#"{"path":"src/b.rs","content":"y"}"#.into(),
+                    },
+                    Chunk::Done,
+                ],
+                vec![
+                    Chunk::TextDelta("done2".into()),
+                    Chunk::Usage(Usage::default()),
+                    Chunk::Done,
+                ],
+            ])),
+            5,
+        )
+        .with_metrics_hook(hook)
+        .with_tool_hook(Arc::new(BlockingFindingHook));
+        agent.register_tool(Arc::new(WritableSpy {
+            name: "write_file",
+            result: "written".into(),
+        }));
+
+        // 同一 agent 跑两次 run（run_stream 取 &self，可复用）。
+        for _ in 0..2 {
+            let mut stream = agent
+                .run_stream(RunInput {
+                    prompt: "write a file".into(),
+                    images: vec![],
+                    model_override: None,
+                })
+                .await
+                .unwrap();
+            while let Some(ev) = stream.next().await {
+                let _ = ev.unwrap();
+            }
+            for _ in 0..50 {
+                if fired.lock().unwrap_or_else(|e| e.into_inner()).len() >= 2 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+        let summaries = fired.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(summaries.len(), 2, "two runs must fire two summaries");
+        // 每个 run 的 summary 只含本 run 新增的 1 条 finding（run 级差分切片），
+        // 而非会话累计的 1 条 / 2 条。
+        assert_eq!(
+            summaries[0].findings.len(),
+            1,
+            "run 1 summary must contain exactly its own finding, got {}",
+            summaries[0].findings.len()
+        );
+        assert_eq!(
+            summaries[1].findings.len(),
+            1,
+            "run 2 summary must contain exactly its own finding (no cross-run pollution), got {}",
+            summaries[1].findings.len()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // F9：quality findings 有界累积（超限丢弃新 finding）
+    // -----------------------------------------------------------------------
+
+    /// after 恒产出 N 条 finding 的钩子。
+    struct FloodFindingHook {
+        count: usize,
+    }
+
+    impl ToolHook for FloodFindingHook {
+        fn name(&self) -> &str {
+            "flood-finding-hook"
+        }
+        fn after(
+            &self,
+            _ctx: &ToolHookCtx,
+            _call: &ToolCall,
+            _result: &str,
+        ) -> Vec<QualityFinding> {
+            (0..self.count)
+                .map(|i| QualityFinding {
+                    rule: format!("flood-{i}"),
+                    severity: FindingSeverity::Warning,
+                    passed: false,
+                    evidence: "flood".into(),
+                })
+                .collect()
+        }
+    }
+
+    #[tokio::test]
+    async fn quality_findings_capped_at_max() {
+        let workspace = std::env::temp_dir().join(format!(
+            "dnv-quality-cap-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let provider = MockProvider::tool_call(
+            "write_file",
+            r#"{"path":"src/a.rs","content":"x"}"#,
+            "ignored",
+            "done",
+        );
+        let agent = Agent::new(Arc::new(provider), 5)
+            .with_workspace_root(workspace.clone())
+            .with_tool_hook(Arc::new(FloodFindingHook {
+                count: MAX_QUALITY_FINDINGS + 1,
+            }));
+        let mut agent = agent;
+        agent.register_tool(Arc::new(WritableSpy {
+            name: "write_file",
+            result: "written".into(),
+        }));
+        let events = drain(agent, "flood findings").await;
+        // 事件流照常全部发出（用户可见）。
+        let emitted = events
+            .iter()
+            .filter(|e| matches!(e, RunEvent::QualityFinding(_)))
+            .count();
+        assert_eq!(
+            emitted,
+            MAX_QUALITY_FINDINGS + 1,
+            "all findings must reach the event stream"
+        );
+        // 会话累计被截断到上限——通过 metrics summary 快照断言（findings
+        // 切片 [start_len..] = 会话新增 = min(上限, 产出数)）。
+        let fired = Arc::new(std::sync::Mutex::new(Vec::<QualitySummary>::new()));
+        let f2 = fired.clone();
+        let hook: MetricsHook = Arc::new(move |_stats, summary| {
+            f2.lock().unwrap_or_else(|e| e.into_inner()).push(summary);
+        });
+        // 重跑：带 metrics hook 断言存储截断。
+        let provider = MockProvider::tool_call(
+            "write_file",
+            r#"{"path":"src/a.rs","content":"x"}"#,
+            "ignored",
+            "done",
+        );
+        let mut agent2 = Agent::new(Arc::new(provider), 5)
+            .with_workspace_root(workspace.clone())
+            .with_metrics_hook(hook)
+            .with_tool_hook(Arc::new(FloodFindingHook {
+                count: MAX_QUALITY_FINDINGS + 1,
+            }));
+        agent2.register_tool(Arc::new(WritableSpy {
+            name: "write_file",
+            result: "written".into(),
+        }));
+        let _ = drain(agent2, "flood findings again").await;
+        for _ in 0..50 {
+            if !fired.lock().unwrap_or_else(|e| e.into_inner()).is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let summaries = fired.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(
+            summaries[0].findings.len(),
+            MAX_QUALITY_FINDINGS,
+            "stored findings must be capped at MAX_QUALITY_FINDINGS"
+        );
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    // -----------------------------------------------------------------------
+    // F5：取消路径 suppress 诊断（不产报告）
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn cancel_path_suppresses_diagnose_report() {
+        use crate::diagnose::DiagnoseReport;
+        let captured = Arc::new(std::sync::Mutex::new(Vec::<DiagnoseReport>::new()));
+        let cap = captured.clone();
+        let hook: DiagnoseHook = Arc::new(move |report| cap.lock().unwrap().push(report));
+        let (tx, mut rx) = mpsc::channel(64);
+        let mut memory = Memory::new();
+        let cancel = CancellationToken::new();
+        cancel.cancel(); // 预置取消：步边界立即走取消路径
+        let provider = Arc::new(MockProvider::text("never used"));
+        let quality_findings = Arc::new(tokio::sync::Mutex::new(Vec::<QualityFinding>::new()));
+        let result = run_agent_loop(
+            provider,
+            Vec::new(),
+            5,
+            None,
+            &mut memory,
+            RunInput {
+                prompt: "x".into(),
+                images: vec![],
+                model_override: None,
+            },
+            &tx,
+            &cancel,
+            std::env::temp_dir(),
+            SecurityContext::with_safe_defaults(),
+            None,
+            None,
+            Vec::new(),
+            true,
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+            &[],
+            &quality_findings,
+            Some(hook),
+            Vec::new(), // 协议门控（阶段3）：空 = 关闭
+            false,      // 对抗审查（阶段3）：关闭
+        )
+        .await;
+        assert!(result.is_ok(), "cancel path must return Ok");
+        // Done 事件已发出。
+        while let Some(ev) = rx.recv().await {
+            if matches!(ev, Ok(RunEvent::Done(_))) {
+                break;
+            }
+        }
+        drop(rx);
+        // 取消 → suppress → 诊断 hook 不被调用（不落盘，无 outcome=failed 误报）。
+        assert!(
+            captured.lock().unwrap().is_empty(),
+            "cancel must not emit a diagnose report"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // F10：无写文件场景不产出空 verify 相位
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn verify_phase_absent_without_file_writes() {
+        use crate::diagnose::DiagnoseReport;
+        let captured = Arc::new(std::sync::Mutex::new(Vec::<DiagnoseReport>::new()));
+        let cap = captured.clone();
+        let hook: DiagnoseHook = Arc::new(move |report| cap.lock().unwrap().push(report));
+        // max-steps pause 路径产出报告；配置 verify（有命令）但 run 从不写文件
+        // （只读工具）→ 报告 phases 不含 verify。
+        let agent = looping_agent(2)
+            .with_on_max_steps("pause")
+            .with_diagnose_hook(hook)
+            .with_verify(vec!["cargo check".into()], 2);
+        let mut stream = agent
+            .run_stream(RunInput {
+                prompt: "loop forever".into(),
+                images: vec![],
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        let reports = captured.lock().unwrap();
+        assert_eq!(reports.len(), 1, "max-steps pause must emit one report");
+        let names: Vec<&str> = reports[0].phases.iter().map(|p| p.name.as_str()).collect();
+        assert!(
+            !names.contains(&"verify"),
+            "no empty verify phase expected without file writes, got {names:?}"
+        );
+        assert!(names.contains(&"plan"), "plan phase must be present");
     }
 }

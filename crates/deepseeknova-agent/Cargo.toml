@@ -12,6 +12,7 @@ documentation = "https://docs.rs/deepseeknova-agent/0.4.0"
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
@@ -24,3 +25,4 @@ deepseeknova-permission = { workspace = true }
 deepseeknova-provider = { workspace = true }
 deepseeknova-security = { workspace = true }
 deepseeknova-context = { workspace = true }
+deepseeknova-metrics = { workspace = true }

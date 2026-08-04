@@ -23,6 +23,8 @@
 
 mod loader;
 
+pub mod fitness;
+
 pub use loader::SkillLoader;
 
 /// Path to the built-in skills bundled with this crate.

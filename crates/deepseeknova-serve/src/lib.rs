@@ -20,6 +20,7 @@
 //! ```
 
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::response::sse::{Event, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -27,6 +28,7 @@ use deepseeknova_core::runner::{ApprovalResponder, RunEvent, RunInput, Runner};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex};
 use tower_http::cors::{Any, CorsLayer};
@@ -70,6 +72,9 @@ impl ApprovalResponder for ServerApprovalResponder {
 pub struct Server {
     pub runner: Arc<dyn Runner>,
     pending: PendingApprovals,
+    /// Metrics/diagnose 输出目录（`<dir>/<id>.scorecard.json` 与
+    /// `<dir>/diagnose/<id>.json` 的读取根目录）。`None` 时相关端点返回 404。
+    metrics_dir: Option<PathBuf>,
 }
 
 impl Server {
@@ -77,6 +82,7 @@ impl Server {
         Self {
             runner,
             pending: new_pending_approvals(),
+            metrics_dir: None,
         }
     }
 
@@ -84,7 +90,29 @@ impl Server {
     /// runner's [`ServerApprovalResponder`] and the `/v1/approval` route
     /// resolve against the same map.
     pub fn with_pending(runner: Arc<dyn Runner>, pending: PendingApprovals) -> Self {
-        Self { runner, pending }
+        Self {
+            runner,
+            pending,
+            metrics_dir: None,
+        }
+    }
+
+    /// Point the server at the metrics/diagnose output directory (the same
+    /// `[metrics] dir` the runtime writes scorecards and diagnose reports
+    /// into). Enables `GET /v1/sessions/{id}/diagnose`,
+    /// `GET /v1/sessions/{id}/scorecard` and `GET /v1/metrics/scorecards`.
+    /// Defaults to `None` (endpoints return 404).
+    ///
+    /// 注意：三个 metrics 端点均无认证，仅供本地/可信网络使用；装配到公网
+    /// 地址时需自行加认证层（本实现不做认证，属刻意范围裁剪）。
+    pub fn with_metrics_dir(mut self, dir: PathBuf) -> Self {
+        self.metrics_dir = Some(dir);
+        self
+    }
+
+    /// Configured metrics/diagnose output directory, if any.
+    pub fn metrics_dir(&self) -> Option<&PathBuf> {
+        self.metrics_dir.as_ref()
     }
 
     /// Start the server and block until it shuts down.
@@ -98,6 +126,9 @@ impl Server {
             .route("/health", get(health))
             .route("/v1/chat", post(chat))
             .route("/v1/approval", post(approval))
+            .route("/v1/sessions/{id}/diagnose", get(session_diagnose))
+            .route("/v1/sessions/{id}/scorecard", get(session_scorecard))
+            .route("/v1/metrics/scorecards", get(metrics_scorecards))
             .layer(cors)
             .with_state(Arc::new(self));
 
@@ -251,6 +282,21 @@ async fn chat(
                                 .event("verification")
                                 .data(json.to_string()))
                         }
+                        Ok(RunEvent::QualityFinding(finding)) => Ok(Event::default()
+                            .event("quality_finding")
+                            .data(serde_json::to_string(&finding).unwrap_or_default())),
+                        // 协议增强：阶段迁移 / 门控违规 / drift 事件最小序列化透传
+                        // （前端可按 kind 渲染；WireEvent 字段名为
+                        // transition/violation/drift，见 core::runner）。
+                        Ok(RunEvent::PhaseTransition { transition }) => Ok(Event::default()
+                            .event("phase_transition")
+                            .data(serde_json::to_string(&transition).unwrap_or_default())),
+                        Ok(RunEvent::GateViolation(violation)) => Ok(Event::default()
+                            .event("gate_violation")
+                            .data(serde_json::to_string(&violation).unwrap_or_default())),
+                        Ok(RunEvent::DriftFinding(drift)) => Ok(Event::default()
+                            .event("drift_finding")
+                            .data(serde_json::to_string(&drift).unwrap_or_default())),
                         Err(e) => Ok(Event::default().event("error").data(e.to_string())),
                     };
                     if tx.unbounded_send(sse_event).is_err() {
@@ -266,6 +312,89 @@ async fn chat(
     });
 
     Sse::new(rx)
+}
+
+/// 会话 id 合法性校验：仅允许 `[A-Za-z0-9_-]`，防 URL path 拼接路径穿越。
+fn valid_session_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// 读取 metrics 根目录下单个文件并解析为 JSON。`metrics_dir` 未配置、
+/// 文件缺失或 id 非法 → 404；文件内容非法 JSON → 500。
+fn read_metrics_json(
+    dir: Option<&PathBuf>,
+    rel: PathBuf,
+) -> Result<serde_json::Value, (StatusCode, String)> {
+    let Some(dir) = dir else {
+        return Err((StatusCode::NOT_FOUND, "not found".into()));
+    };
+    match std::fs::read_to_string(dir.join(rel)) {
+        Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(v) => Ok(v),
+            Err(_) => Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "stored file is not valid JSON".into(),
+            )),
+        },
+        Err(_) => Err((StatusCode::NOT_FOUND, "not found".into())),
+    }
+}
+
+/// `GET /v1/sessions/{id}/diagnose` — 读 `<dir>/diagnose/<id>.json`。
+/// 返回 200 JSON 或 404（未配置 metrics dir / 无该会话诊断报告）。
+///
+/// 注意：无认证，仅供本地/可信网络使用；装配到公网地址需自行加认证层。
+async fn session_diagnose(
+    State(state): State<Arc<Server>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !valid_session_id(&id) {
+        return Err((StatusCode::NOT_FOUND, "not found".into()));
+    }
+    let value = read_metrics_json(
+        state.metrics_dir.as_ref(),
+        PathBuf::from("diagnose").join(format!("{id}.json")),
+    )?;
+    Ok(Json(value))
+}
+
+/// `GET /v1/sessions/{id}/scorecard` — 读 `<dir>/<id>.scorecard.json`。
+/// 返回 200 JSON 或 404（未配置 metrics dir / 无该会话评分卡）。
+///
+/// 注意：无认证，仅供本地/可信网络使用；装配到公网地址需自行加认证层。
+async fn session_scorecard(
+    State(state): State<Arc<Server>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !valid_session_id(&id) {
+        return Err((StatusCode::NOT_FOUND, "not found".into()));
+    }
+    let value = read_metrics_json(
+        state.metrics_dir.as_ref(),
+        PathBuf::from(format!("{id}.scorecard.json")),
+    )?;
+    Ok(Json(value))
+}
+
+/// `GET /v1/metrics/scorecards` — 扫描 `<dir>/*.scorecard.json` 并返回聚合
+/// （count / 各维均值 / overall / 最差维度）。未配置 metrics dir → 404。
+///
+/// 注意：无认证，仅供本地/可信网络使用；装配到公网地址需自行加认证层。
+async fn metrics_scorecards(
+    State(state): State<Arc<Server>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let Some(dir) = &state.metrics_dir else {
+        return Err((StatusCode::NOT_FOUND, "metrics dir not configured".into()));
+    };
+    let cards = deepseeknova_metrics::list_scorecards(dir);
+    let aggregate = deepseeknova_metrics::aggregate_scorecards(&cards);
+    Ok(Json(serde_json::json!({
+        "count": aggregate.count,
+        "aggregate": aggregate,
+    })))
 }
 
 // ── Request / Response types ───────────────────────────────────

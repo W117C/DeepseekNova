@@ -10,13 +10,14 @@ use crate::{Provider, ValidatedRequest};
 use async_trait::async_trait;
 use deepseeknova_core::chunk::{Chunk, ChunkStream, Usage};
 use deepseeknova_core::Message;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 /// The role a model plays in the agent pipeline (Kode-style pointers).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ModelRole {
     /// Primary conversation.
     Main,
@@ -52,7 +53,7 @@ impl ModelRole {
 }
 
 /// Accumulated token counts for one (role, model) pair.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UsageBucket {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
@@ -79,7 +80,7 @@ pub struct ModelPrices {
 pub type PriceTable = HashMap<String, ModelPrices>;
 
 /// One line of a [`CostReport`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CostRow {
     pub model: String,
     pub role: ModelRole,
@@ -89,7 +90,7 @@ pub struct CostRow {
 }
 
 /// Aggregated accounting snapshot.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CostReport {
     pub rows: Vec<CostRow>,
     /// Sum over rows that have an estimate; `None` when no row has one.

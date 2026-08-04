@@ -11,6 +11,10 @@ documentation = "https://docs.rs/deepseeknova-security/0.4.0"
 [dependencies]
 anyhow = { workspace = true }
 tracing = { workspace = true }
+regex = { workspace = true }
+glob = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 deepseeknova-core = { workspace = true }
 
 [dev-dependencies]

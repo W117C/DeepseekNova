@@ -1,11 +1,15 @@
 //! delegate 工具：把子任务委派给独立子代理（explorer/coder/tester/reviewer）。
 //! 引擎句柄经 `ToolContext.extensions` 注入（`DelegateHandle`），缺失时优雅降级。
+//! 参数化任务书：`inputs` 传值（`${{ inputs.x }}` 占位符），仅对已声明 inputs
+//! 的预设生效；simple 预设的多余键被忽略。
 
 use async_trait::async_trait;
+use deepseeknova_agent::task_spec::InputValues;
 use deepseeknova_agent::DelegateEngine;
 use deepseeknova_core::{Tool, ToolContext, ToolSchema};
 use serde::Deserialize;
 use serde_json::json;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// 共享委派引擎句柄（runtime 注入，对称于 Graph/MemoryHandle）。
@@ -25,6 +29,9 @@ struct DelegateArgs {
     goal: String,
     #[serde(default)]
     context: Option<String>,
+    /// 参数化任务书传值（`${{ inputs.<name> }}` 占位符），仅对已声明 inputs 的预设生效。
+    #[serde(default)]
+    inputs: Option<HashMap<String, String>>,
 }
 
 #[async_trait]
@@ -42,7 +49,12 @@ impl Tool for DelegateTool {
                         "description": "Agent."
                     },
                     "goal": {"type": "string", "description": "Goal."},
-                    "context": {"type": "string", "description": "Context."}
+                    "context": {"type": "string", "description": "Context."},
+                    "inputs": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                        "description": "Values for task-spec placeholders (${{ inputs.x }}). Ignored for presets without declared inputs."
+                    }
                 },
                 "required": ["agent", "goal"]
             }),
@@ -62,7 +74,8 @@ impl Tool for DelegateTool {
             Some(c) if !c.is_empty() => format!("{c}\n\n{}", parsed.goal),
             _ => parsed.goal.clone(),
         };
-        match h.run(&parsed.agent, &goal).await {
+        let values = InputValues::from(parsed.inputs.unwrap_or_default());
+        match h.run_with_inputs(&parsed.agent, &goal, values).await {
             Ok(text) => Ok(format!("[delegate:{}] {text}", parsed.agent)),
             Err(e) => Ok(format!(
                 "delegate to '{}' failed: {e}. Available agents: {}",
@@ -127,5 +140,98 @@ mod tests {
             .await
             .unwrap();
         assert!(out.contains("未启用"), "got: {out}");
+    }
+
+    #[tokio::test]
+    async fn delegate_inputs_supply_required() {
+        use deepseeknova_agent::task_spec::{InputSpec, InputType, InputValues, TaskSpec};
+        use std::collections::HashMap;
+
+        let mut agents: HashMap<String, Arc<Agent>> = HashMap::new();
+        agents.insert(
+            "reviewer".into(),
+            Arc::new(
+                Agent::new(
+                    Arc::new(deepseeknova_agent::test_utils::MockProvider::text(
+                        "reviewed",
+                    )),
+                    3,
+                )
+                .with_system_prompt("reviewer"),
+            ),
+        );
+        let mut engine = DelegateEngine::new(agents, 2, 2000);
+        engine.register_spec(
+            "reviewer".into(),
+            TaskSpec {
+                name: "reviewer".into(),
+                task: "Review ${{ inputs.path }}".into(),
+                rules: vec![],
+                inputs: vec![InputSpec {
+                    name: "path".into(),
+                    ty: InputType::String,
+                    required: true,
+                    default: None,
+                }],
+                tools: vec!["read_file".into()],
+                max_steps: 10,
+            },
+            InputValues::new(),
+        );
+        let ctx = ToolContext::new("t").with_extension(Arc::new(engine) as DelegateHandle);
+        let out = DelegateTool
+            .execute(
+                &ctx,
+                r#"{"agent":"reviewer","goal":"go","inputs":{"path":"src/lib.rs"}}"#,
+            )
+            .await
+            .unwrap();
+        assert!(out.contains("[delegate:reviewer]"), "got: {out}");
+        assert!(out.contains("reviewed"), "got: {out}");
+    }
+
+    #[tokio::test]
+    async fn delegate_missing_required_is_friendly() {
+        use deepseeknova_agent::task_spec::{InputSpec, InputType, InputValues, TaskSpec};
+        use std::collections::HashMap;
+
+        let mut agents: HashMap<String, Arc<Agent>> = HashMap::new();
+        agents.insert(
+            "reviewer".into(),
+            Arc::new(
+                Agent::new(
+                    Arc::new(deepseeknova_agent::test_utils::MockProvider::text(
+                        "reviewed",
+                    )),
+                    3,
+                )
+                .with_system_prompt("reviewer"),
+            ),
+        );
+        let mut engine = DelegateEngine::new(agents, 2, 2000);
+        engine.register_spec(
+            "reviewer".into(),
+            TaskSpec {
+                name: "reviewer".into(),
+                task: "Review ${{ inputs.path }}".into(),
+                rules: vec![],
+                inputs: vec![InputSpec {
+                    name: "path".into(),
+                    ty: InputType::String,
+                    required: true,
+                    default: None,
+                }],
+                tools: vec!["read_file".into()],
+                max_steps: 10,
+            },
+            InputValues::new(),
+        );
+        let ctx = ToolContext::new("t").with_extension(Arc::new(engine) as DelegateHandle);
+        let out = DelegateTool
+            .execute(&ctx, r#"{"agent":"reviewer","goal":"go"}"#)
+            .await
+            .unwrap();
+        assert!(out.contains("missing required input 'path'"), "got: {out}");
+        assert!(out.contains("Available agents: reviewer"), "got: {out}");
     }
 }

@@ -116,6 +116,64 @@ impl ConversationApply for Conversation {
             RunEvent::Usage(_) => {
                 // usage 由 AppState 单独消费（状态行），不落消息树。
             }
+            RunEvent::QualityFinding(finding) => {
+                // 任务质量闭环：finding 以系统段呈现（与 Verification 同级）。
+                let Some(turn) = self.current_mut() else {
+                    return;
+                };
+                turn.assistant.flush_reasoning();
+                let severity = match finding.severity {
+                    deepseeknova_core::tool_hook::FindingSeverity::Blocking => "🔴",
+                    deepseeknova_core::tool_hook::FindingSeverity::Warning => "🟡",
+                    deepseeknova_core::tool_hook::FindingSeverity::Info => "🔵",
+                };
+                let passed = if finding.passed { "pass" } else { "fail" };
+                turn.assistant.segments.push(Segment::System {
+                    kind: SystemKind::Info,
+                    text: format!(
+                        "🔎 质量检查 [{severity} {passed}] {}: {}",
+                        finding.rule, finding.evidence
+                    ),
+                });
+            }
+            // 协议增强：阶段迁移 / 门控违规 / drift 以最小可见系统段呈现。
+            // 渲染为文本即可（完整协议状态面板属范围外，见设计 §11）。
+            RunEvent::PhaseTransition { transition } => {
+                let Some(turn) = self.current_mut() else {
+                    return;
+                };
+                turn.assistant.flush_reasoning();
+                turn.assistant.segments.push(Segment::System {
+                    kind: SystemKind::Info,
+                    text: format!(
+                        "🔁 阶段迁移: {:?} ({:?})",
+                        transition.phase, transition.outcome
+                    ),
+                });
+            }
+            RunEvent::GateViolation(violation) => {
+                let Some(turn) = self.current_mut() else {
+                    return;
+                };
+                turn.assistant.flush_reasoning();
+                turn.assistant.segments.push(Segment::System {
+                    kind: SystemKind::Info,
+                    text: format!("🚧 门控违规: {} — {}", violation.gate, violation.detail),
+                });
+            }
+            RunEvent::DriftFinding(drift) => {
+                let Some(turn) = self.current_mut() else {
+                    return;
+                };
+                turn.assistant.flush_reasoning();
+                turn.assistant.segments.push(Segment::System {
+                    kind: SystemKind::Info,
+                    text: format!(
+                        "🧭 drift: {} 连续失败 {} 次 — {}",
+                        drift.tool_family, drift.failures, drift.detail
+                    ),
+                });
+            }
             RunEvent::TurnComplete => {
                 if let Some(turn) = self.current_mut() {
                     turn.assistant.flush_all();

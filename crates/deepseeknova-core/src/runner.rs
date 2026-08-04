@@ -1,4 +1,6 @@
 use crate::chunk::Usage;
+use crate::protocol::{DriftFinding, GateViolation, PhaseTransition};
+use crate::tool_hook::QualityFinding;
 use crate::types::ToolCall;
 use futures_core::Stream;
 use serde::{Deserialize, Serialize};
@@ -98,6 +100,17 @@ pub enum RunEvent {
         call_id: String,
         result: String,
     },
+    /// 任务质量闭环（A 阶段）：工具执行后质量策略产出的 finding。
+    /// 供前端渲染与后续阶段（B/C）消费。
+    QualityFinding(QualityFinding),
+    /// 协议增强：阶段迁移事件（供前端渲染 + 度量）。
+    PhaseTransition {
+        transition: PhaseTransition,
+    },
+    /// 协议增强：门控违规记录（供评分卡 protocol 维）。
+    GateViolation(GateViolation),
+    /// 协议增强：Execute 阶段 drift 检测产出（供前端渲染）。
+    DriftFinding(DriftFinding),
     /// P4 完成前确定性验证：一条验证命令的结果（供前端渲染）。
     Verification {
         command: String,
@@ -155,6 +168,18 @@ pub enum WireEvent {
     ToolResult {
         call_id: String,
         result: String,
+    },
+    QualityFinding {
+        finding: QualityFinding,
+    },
+    PhaseTransition {
+        transition: PhaseTransition,
+    },
+    GateViolation {
+        violation: GateViolation,
+    },
+    DriftFinding {
+        drift: DriftFinding,
     },
     Verification {
         command: String,
@@ -240,6 +265,10 @@ impl From<RunEvent> for WireEvent {
                 arguments,
             },
             RunEvent::ToolResult { call_id, result } => WireEvent::ToolResult { call_id, result },
+            RunEvent::QualityFinding(f) => WireEvent::QualityFinding { finding: f },
+            RunEvent::PhaseTransition { transition } => WireEvent::PhaseTransition { transition },
+            RunEvent::GateViolation(v) => WireEvent::GateViolation { violation: v },
+            RunEvent::DriftFinding(d) => WireEvent::DriftFinding { drift: d },
             RunEvent::Verification {
                 command,
                 passed,
@@ -309,5 +338,26 @@ mod tests {
         };
         let json = serde_json::to_string(&wire).unwrap();
         assert!(json.contains("\"kind\":\"paused\""), "json = {json}");
+    }
+
+    #[test]
+    fn quality_finding_event_maps_to_wire() {
+        let f = crate::tool_hook::QualityFinding {
+            rule: "no-commit-secret".into(),
+            severity: crate::tool_hook::FindingSeverity::Blocking,
+            passed: false,
+            evidence: "-----BEGIN RSA PRIVATE KEY-----".into(),
+        };
+        let ev = RunEvent::QualityFinding(f.clone());
+        let wire: WireEvent = ev.into();
+        match wire {
+            WireEvent::QualityFinding { finding } => assert_eq!(finding, f),
+            other => panic!("expected QualityFinding, got {other:?}"),
+        }
+        let json = serde_json::to_string(&WireEvent::QualityFinding { finding: f }).unwrap();
+        assert!(
+            json.contains("\"kind\":\"quality_finding\""),
+            "json = {json}"
+        );
     }
 }

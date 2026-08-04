@@ -7,7 +7,7 @@ use crate::SubAgentRunner;
 use deepseeknova_core::executor::{
     DelegateCallback, GraphExecutor, ReflectCallback, ReflectResult, ThinkCallback, ToolCallback,
 };
-use deepseeknova_core::graph::{Action, ExecutionGraph, ExecutionNode};
+use deepseeknova_core::graph::{Action, EdgeCondition, ExecutionGraph, ExecutionNode};
 use deepseeknova_core::tool::ToolContext;
 use deepseeknova_core::{
     Message, Role, RunEvent, RunEventStream, RunInput, RunOutput, Runner, Tool,
@@ -48,12 +48,25 @@ struct PlanNode {
     sub_agent: Option<String>,
     #[serde(default)]
     goal: Option<String>,
+    /// Node-level dependency hints (deprecated — edges are the single source
+    /// of truth; parsed for backwards compatibility and converted to default
+    /// Success-conditioned edges when no explicit edge exists).
+    #[serde(default)]
+    depends_on: Vec<String>,
+    /// When set, the node is wrapped in `Action::Parallel` running its child
+    /// steps concurrently.
+    #[serde(default)]
+    parallel: Option<Vec<PlanNode>>,
 }
 
 #[derive(Debug, Deserialize)]
 struct PlanEdge {
     from: String,
     to: String,
+    /// Edge condition: "success" (default), "failure", "retry", or
+    /// "tool_call:&lt;id&gt;". Missing/unknown values behave as success.
+    #[serde(default)]
+    condition: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -188,7 +201,10 @@ Rules:
 - "call_read_tool" nodes: include "tool" (name) and "args" (JSON object)
 - "reflect" nodes: include "criteria" (array of strings)
 - "delegate" nodes: include "sub_agent" and "goal"
-- Edges define the execution order (from → to)
+- Edges define the execution order (from → to); independent branches run in parallel automatically
+- Optional edge field "condition": "success" (default), "failure" (advance downstream when the source node fails), "retry", or "tool_call:<id>" (advance when the source tool result mentions <id>)
+- Optional node field "depends_on": array of node ids that must finish first (deprecated; prefer edges)
+- Optional node field "parallel": array of child node objects that run concurrently inside this node
 - Keep plans concise: 3–8 nodes typically
 - Output ONLY the JSON object. No markdown, no explanation, no backticks."#;
 
@@ -221,7 +237,10 @@ Rules:
 - "id" must be unique for every node
 - Valid actions: "think", "call_read_tool" (read-only only), "reflect", "delegate"
 - The Goal Contract's Constraints and Pause When must appear in your plan's reflect criteria
-- Edges define the execution order (from → to)
+- Edges define the execution order (from → to); independent branches run in parallel automatically
+- Optional edge field "condition": "success" (default), "failure", "retry", or "tool_call:<id>"
+- Optional node field "depends_on": array of node ids that must finish first (deprecated; prefer edges)
+- Optional node field "parallel": array of child node objects that run concurrently inside this node
 - Keep plans concise: 3–8 nodes typically
 - Output ONLY the JSON object. No markdown, no explanation, no backticks."#;
 
@@ -581,7 +600,13 @@ async fn run_coordinator(
     let reflect: Arc<dyn ReflectCallback> = callbacks.clone();
     let delegate: Arc<dyn DelegateCallback> = callbacks;
 
-    let graph_executor = Arc::new(GraphExecutor::new(think, tool, reflect).with_delegate(delegate));
+    let graph_executor = Arc::new(
+        GraphExecutor::new(think, tool, reflect)
+            .with_delegate(delegate)
+            // 收尾接线：core 图节点失败归因摘要（同步适配；LLM 归因由
+            // DelegateEngine / agent 循环内部承担）。
+            .with_attribution(Arc::new(crate::attribution::NodeFailureSummary)),
+    );
 
     let result = graph_executor.execute(&graph).await?;
 
@@ -606,6 +631,10 @@ async fn run_coordinator(
             }
             deepseeknova_core::graph::NodeOutput::Error(e) => {
                 let chunk = format!("[{node_id}] ERROR: {e}\n\n");
+                combined.push_str(&chunk);
+            }
+            deepseeknova_core::graph::NodeOutput::Skipped => {
+                let chunk = format!("[{node_id}]: (skipped)\n\n");
                 combined.push_str(&chunk);
             }
         }
@@ -662,32 +691,27 @@ fn parse_plan(plan_text: &str, goal: &str, max_nodes: usize, goal_mode: bool) ->
             let mut graph = ExecutionGraph::new(entry);
 
             for node in plan.nodes.iter().take(max_nodes) {
-                let action = match node.action.as_str() {
-                    "call_read_tool" | "call_tool" => Action::CallTool {
-                        tool: node.tool.clone().unwrap_or_default(),
-                        args: node.args.clone().unwrap_or(serde_json::Value::Null),
-                    },
-                    "reflect" => Action::Reflect {
-                        criteria: node.criteria.clone().unwrap_or_default(),
-                    },
-                    "delegate" => {
-                        let sub_agent = node
-                            .sub_agent
-                            .clone()
-                            .or_else(|| node.tool.clone())
-                            .unwrap_or_default();
-                        let goal = node.goal.clone().unwrap_or_else(|| node.prompt.clone());
-                        Action::Delegate { sub_agent, goal }
-                    }
-                    _ => Action::Think {
-                        prompt: node.prompt.clone(),
-                    },
-                };
+                let action = parse_plan_node_action(node);
                 graph.add_node(ExecutionNode::new(&node.id, action));
+
+                // Backwards-compatible node-level dependency hints: convert to
+                // default Success-conditioned edges when no explicit edge
+                // already wires this dependency.
+                for dep in &node.depends_on {
+                    let already_wired =
+                        plan.edges.iter().any(|e| e.from == *dep && e.to == node.id);
+                    if !already_wired {
+                        graph.add_edge(dep.clone(), node.id.clone(), None);
+                    }
+                }
             }
 
             for edge in &plan.edges {
-                graph.add_edge(edge.from.clone(), edge.to.clone(), None);
+                graph.add_edge(
+                    edge.from.clone(),
+                    edge.to.clone(),
+                    parse_edge_condition(edge.condition.as_deref()),
+                );
             }
 
             graph
@@ -705,6 +729,55 @@ fn parse_plan(plan_text: &str, goal: &str, max_nodes: usize, goal_mode: bool) ->
             ));
             graph
         }
+    }
+}
+
+/// Map a `PlanNode` to its `Action`. A node carrying `parallel` children
+/// becomes `Action::Parallel` (children run concurrently in the executor);
+/// otherwise the node is a plain Think/CallTool/Reflect/Delegate step.
+fn parse_plan_node_action(node: &PlanNode) -> Action {
+    if let Some(children) = &node.parallel {
+        return Action::Parallel(
+            children
+                .iter()
+                .map(|child| ExecutionNode::new(&child.id, parse_plan_node_action(child)))
+                .collect(),
+        );
+    }
+    match node.action.as_str() {
+        "call_read_tool" | "call_tool" => Action::CallTool {
+            tool: node.tool.clone().unwrap_or_default(),
+            args: node.args.clone().unwrap_or(serde_json::Value::Null),
+        },
+        "reflect" => Action::Reflect {
+            criteria: node.criteria.clone().unwrap_or_default(),
+        },
+        "delegate" => {
+            let sub_agent = node
+                .sub_agent
+                .clone()
+                .or_else(|| node.tool.clone())
+                .unwrap_or_default();
+            let goal = node.goal.clone().unwrap_or_else(|| node.prompt.clone());
+            Action::Delegate { sub_agent, goal }
+        }
+        _ => Action::Think {
+            prompt: node.prompt.clone(),
+        },
+    }
+}
+
+/// Map a planner edge condition string to `EdgeCondition`. Missing or unknown
+/// values map to `None` (default = Success, fully backwards compatible).
+fn parse_edge_condition(condition: Option<&str>) -> Option<EdgeCondition> {
+    let c = condition?.trim().to_ascii_lowercase();
+    if c == "failure" || c == "on_failure" || c == "on-failure" {
+        Some(EdgeCondition::Failure)
+    } else if c == "retry" {
+        Some(EdgeCondition::Retry(1))
+    } else {
+        c.strip_prefix("tool_call:")
+            .map(|id| EdgeCondition::ToolCall(id.trim().to_string()))
     }
 }
 
@@ -906,6 +979,10 @@ impl DelegateCallback for CoordinatorCallbacks {
                     text = output.text;
                     break;
                 }
+                // 协议增强（阶段3）：协议事件不参与子代理文本收集。
+                RunEvent::PhaseTransition { .. }
+                | RunEvent::GateViolation(_)
+                | RunEvent::DriftFinding(_) => {}
                 _ => {}
             }
         }
@@ -1059,6 +1136,112 @@ mod tests {
             }
             other => panic!("expected Delegate action, got {:?}", other), // test-only
         }
+    }
+
+    #[test]
+    fn parse_plan_parses_depends_on_parallel_and_condition() {
+        let json = r#"{
+            "nodes": [
+                {"id": "a", "action": "think", "prompt": "first"},
+                {"id": "b", "action": "think", "prompt": "second", "depends_on": ["a"]},
+                {
+                    "id": "fanout",
+                    "action": "think",
+                    "prompt": "fanout",
+                    "parallel": [
+                        {"id": "p1", "action": "think", "prompt": "child one"},
+                        {"id": "p2", "action": "think", "prompt": "child two"}
+                    ]
+                },
+                {"id": "c", "action": "think", "prompt": "third", "depends_on": ["a"]}
+            ],
+            "edges": [
+                {"from": "a", "to": "fanout", "condition": "failure"},
+                {"from": "fanout", "to": "c", "condition": "tool_call:abc"}
+            ]
+        }"#;
+
+        let graph = parse_plan(json, "goal", 20, false);
+        assert_eq!(graph.nodes.len(), 4);
+
+        // depends_on (no explicit edge) becomes a default Success edge.
+        assert!(graph.edges.iter().any(|e| e.from == "a" && e.to == "b"));
+
+        // parallel node wraps children in Action::Parallel.
+        match graph.nodes.get("fanout").map(|n| &n.action) {
+            Some(Action::Parallel(children)) => {
+                assert_eq!(children.len(), 2);
+                assert_eq!(children[0].id, "p1");
+                assert_eq!(children[1].id, "p2");
+            }
+            other => panic!("expected Parallel action, got {other:?}"), // test-only
+        }
+
+        // Explicit edge conditions map to EdgeCondition.
+        let failure_edge = graph
+            .edges
+            .iter()
+            .find(|e| e.from == "a" && e.to == "fanout")
+            .expect("failure edge");
+        assert!(matches!(
+            failure_edge.condition,
+            Some(EdgeCondition::Failure)
+        ));
+        let tool_call_edge = graph
+            .edges
+            .iter()
+            .find(|e| e.from == "fanout" && e.to == "c")
+            .expect("tool_call edge");
+        assert!(matches!(
+            tool_call_edge.condition,
+            Some(EdgeCondition::ToolCall(ref id)) if id == "abc"
+        ));
+    }
+
+    #[test]
+    fn parse_plan_backwards_compatible_without_new_fields() {
+        // Old-style plan with no depends_on/parallel/condition parses exactly
+        // as before: no synthetic edges, plain actions, default conditions.
+        let json = r#"{
+            "nodes": [
+                {"id": "a", "action": "think", "prompt": "first"},
+                {"id": "b", "action": "reflect", "prompt": "check", "criteria": ["ok?"]}
+            ],
+            "edges": [
+                {"from": "a", "to": "b"}
+            ]
+        }"#;
+
+        let graph = parse_plan(json, "goal", 20, false);
+        assert_eq!(graph.nodes.len(), 2);
+        assert_eq!(graph.edges.len(), 1);
+        assert!(matches!(graph.nodes["a"].action, Action::Think { .. }));
+        assert!(matches!(graph.nodes["b"].action, Action::Reflect { .. }));
+        // Explicit edge without condition → default Success (None).
+        assert!(graph.edges[0].condition.is_none());
+    }
+
+    #[test]
+    fn parse_plan_condition_defaults_and_unknown_map_to_success() {
+        assert!(parse_edge_condition(None).is_none());
+        assert!(parse_edge_condition(Some("success")).is_none());
+        assert!(parse_edge_condition(Some("bogus")).is_none());
+        assert!(matches!(
+            parse_edge_condition(Some("failure")),
+            Some(EdgeCondition::Failure)
+        ));
+        assert!(matches!(
+            parse_edge_condition(Some("on_failure")),
+            Some(EdgeCondition::Failure)
+        ));
+        assert!(matches!(
+            parse_edge_condition(Some("retry")),
+            Some(EdgeCondition::Retry(_))
+        ));
+        assert!(matches!(
+            parse_edge_condition(Some("tool_call:abc")),
+            Some(EdgeCondition::ToolCall(ref id)) if id == "abc"
+        ));
     }
 
     #[test]

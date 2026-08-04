@@ -4,7 +4,7 @@
 //! 启发式 record_task 兜底），绝不阻断 run。JSON 契约：
 //! `{"kind":"skill"|"lesson","title":"...","body":"...","tags":[...]}`。
 
-use deepseeknova_core::memory::skill::TaskObservation;
+use deepseeknova_core::memory::skill::{SkillManager, TaskObservation};
 use deepseeknova_core::{Message, Role};
 use deepseeknova_provider::{Provider, ValidatedRequest};
 use tracing::warn;
@@ -103,6 +103,27 @@ pub fn parse_distilled(raw: &str) -> Option<DistilledKnowledge> {
         body,
         tags,
     })
+}
+
+/// 蒸馏知识 → SkillManager 落盘（设计 C 技能热更新闭环）。
+///
+/// 仅 `kind == "skill"` 且 `SkillManager::should_extract_skill` 启发式
+/// 达标时，写入 `<skill_dir>/auto/`（frontmatter 强制 `source: distill`、
+/// 初始态 `draft`，与用户手写 skill 隔离）。返回是否写入。
+/// 失败返回 Err（调用方仅 warn，不阻断 run）。
+pub fn persist_distilled_skill(
+    skills: &mut SkillManager,
+    obs: &TaskObservation,
+    k: &DistilledKnowledge,
+) -> anyhow::Result<bool> {
+    if k.kind != "skill" {
+        return Ok(false);
+    }
+    if !skills.should_extract_skill(obs) {
+        return Ok(false);
+    }
+    skills.create_distilled_skill(&k.title, &k.body, k.tags.clone(), Some(&obs.session_id))?;
+    Ok(true)
 }
 
 /// 单次 LLM 蒸馏调用（复用 review 同款 ValidatedRequest 通路）。
@@ -209,6 +230,85 @@ mod tests {
             None
         );
         assert_eq!(parse_distilled(r#"{"kind":"skill","title":"x"}"#), None);
+    }
+
+    /// 构造含 6 次工具调用（≥ min_tool_calls=5）的观察，触发蒸馏门槛。
+    fn obs_for_persist() -> TaskObservation {
+        let mut o = obs("build auth flow");
+        o.tool_calls = vec!["write_file".into(); 6];
+        o.steps_taken = vec!["s1".into(), "s2".into(), "s3".into()];
+        o
+    }
+
+    #[test]
+    fn persist_skill_writes_auto_dir_and_skips_lessons() {
+        use deepseeknova_core::memory::skill::{SkillExtractionConfig, SkillManager};
+        let dir = std::env::temp_dir().join(format!("dnv-distill-persist-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut skills = SkillManager::new(SkillExtractionConfig {
+            skill_dir: dir.clone(),
+            ..Default::default()
+        });
+
+        // kind=skill 且启发式达标 → 落盘 auto/ 且 frontmatter 含 source: distill
+        let skill_k = DistilledKnowledge {
+            kind: "skill".into(),
+            title: "Fix Auth Flow".into(),
+            body: "Validate tokens before routing".into(),
+            tags: vec!["auth".into()],
+        };
+        assert!(persist_distilled_skill(&mut skills, &obs_for_persist(), &skill_k).unwrap());
+        let path = dir.join("auto/fix-auth-flow.md");
+        assert!(path.exists(), "distilled skill 应写入 auto/ 子目录");
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            content.contains("source: distill"),
+            "frontmatter 必须含 source: distill"
+        );
+        assert_eq!(
+            skills.skill_state("fix-auth-flow"),
+            Some(deepseeknova_core::memory::skill::SkillState::Draft)
+        );
+
+        // 同标题二次蒸馏 → 覆盖更新而非新建（幂等）
+        assert!(persist_distilled_skill(&mut skills, &obs_for_persist(), &skill_k).unwrap());
+        assert!(path.exists());
+
+        // kind=lesson → 不写 skill 文件
+        let lesson_k = DistilledKnowledge {
+            kind: "lesson".into(),
+            title: "Avoid Editing Generated Files".into(),
+            body: "Regenerate instead".into(),
+            tags: vec![],
+        };
+        assert!(!persist_distilled_skill(&mut skills, &obs_for_persist(), &lesson_k).unwrap());
+        assert!(!dir.join("auto/avoid-editing-generated-files.md").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn persist_skill_respects_extraction_heuristic() {
+        use deepseeknova_core::memory::skill::{SkillExtractionConfig, SkillManager};
+        let dir =
+            std::env::temp_dir().join(format!("dnv-distill-heuristic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut skills = SkillManager::new(SkillExtractionConfig {
+            skill_dir: dir.clone(),
+            ..Default::default()
+        });
+        // 观察不达标（仅 1 次工具调用）→ 不落盘
+        let small = obs("quick question");
+        let k = DistilledKnowledge {
+            kind: "skill".into(),
+            title: "Quick Tip".into(),
+            body: "b".into(),
+            tags: vec![],
+        };
+        assert!(!persist_distilled_skill(&mut skills, &small, &k).unwrap());
+        assert!(!dir.join("auto/quick-tip.md").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     struct FixedProvider {

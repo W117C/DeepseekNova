@@ -553,12 +553,14 @@ dependencies = [
  "async-trait",
  "deepseeknova-context",
  "deepseeknova-core",
+ "deepseeknova-metrics",
  "deepseeknova-permission",
  "deepseeknova-provider",
  "deepseeknova-security",
  "serde",
  "serde_json",
  "sha2",
+ "thiserror 1.0.69",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -720,6 +722,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "deepseeknova-metrics"
+version = "0.4.0"
+dependencies = [
+ "deepseeknova-core",
+ "deepseeknova-provider",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "deepseeknova-permission"
 version = "0.4.0"
 dependencies = [
@@ -772,10 +785,12 @@ dependencies = [
  "deepseeknova-event",
  "deepseeknova-graph",
  "deepseeknova-mcp",
+ "deepseeknova-metrics",
  "deepseeknova-permission",
  "deepseeknova-provider",
  "deepseeknova-sandbox",
  "deepseeknova-security",
+ "deepseeknova-skills",
  "deepseeknova-tools",
  "futures",
  "serde_json",
@@ -816,6 +831,10 @@ version = "0.4.0"
 dependencies = [
  "anyhow",
  "deepseeknova-core",
+ "glob",
+ "regex",
+ "serde",
+ "serde_json",
  "tempfile",
  "tracing",
 ]
@@ -828,6 +847,7 @@ dependencies = [
  "async-trait",
  "axum 0.8.9",
  "deepseeknova-core",
+ "deepseeknova-metrics",
  "futures",
  "futures-core",
  "reqwest",

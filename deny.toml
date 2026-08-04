@@ -7,10 +7,8 @@ allow = [
     "BSD-2-Clause",
     "BSD-3-Clause",
     "ISC",
-    "Unicode-DFS-2016",
     "Unicode-3.0",
     "Zlib",
-    "CC0-1.0",
     "MPL-2.0",
     "Unlicense",
     "BSL-1.0",
@@ -31,8 +29,16 @@ ignore = [
     # RUSTSEC-2024-0436: paste 1.0.15 unmaintained — used by ratatui.
     "RUSTSEC-2024-0436",
 
-    # RUSTSEC-2025-0068: serde_yml 0.0.13 — transitive dep, no direct usage.
+    # RUSTSEC-2025-0068: serde_yml 0.0.13 — direct dep of deepseeknova-skills,
+    # used for skill frontmatter parsing; revisit when an upstream fix lands.
     "RUSTSEC-2025-0068",
+
+    # RUSTSEC-2026-0002 (lru 0.9.0-0.16.2 IterMut unsoundness, patched >=0.16.3):
+    # lru 0.12.5 是 ratatui 0.29 的传递依赖（^0.12 semver 约束，工作区无直接
+    # 依赖），无法单独升级；消除路径为升级 ratatui 0.30（breaking 大改，子
+    # crate ratatui-core 依赖 lru ^0.18 已修复）。升级后从 deny.toml 与
+    # .github/workflows/security.yml 两处 ignore 清单同步移除。
+    "RUSTSEC-2026-0002",
 ]
 
 [sources]

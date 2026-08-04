@@ -1,4 +1,5 @@
 use crate::memory::Memory;
+use crate::task_spec::{InputValues, TaskSpec};
 use deepseeknova_core::chunk::{Chunk, Usage};
 use deepseeknova_core::{
     Message, Role, RunEvent, RunEventStream, RunInput, RunOutput, Runner, Tool,
@@ -21,12 +22,27 @@ use crate::tokens::estimate_tokens;
 
 /// Configuration for a named sub-agent. Each sub-agent has its own
 /// system prompt, tool set, and execution parameters.
+///
+/// 任务书支持：`spec` 承载可参数化任务文本（`${{ inputs.x }}` 占位符）与 RULES
+/// 约束；`config_inputs` 为配置层默认参数值。inputs 来源为 prompt 协议的
+/// `input:<name>=<value>` 行（调用方传值优先）；渲染后 RULES 追加进 System
+/// 消息、task 追加进 User 消息（goal 之后）。
+///
+/// 执行参数（`tools` / `max_steps`）与渲染描述（`spec.tools` / `spec.max_steps`）
+/// 由 builder 同步维护；`with_task_spec` 只替换渲染用 spec，调用方需自行保证
+/// 执行参数一致。
 #[derive(Clone)]
 pub struct SubAgentConfig {
     pub name: String,
     pub system_prompt: String,
-    pub tools: Vec<Arc<dyn Tool>>,
-    pub max_steps: usize,
+    /// 任务书（渲染用：task/rules/inputs；tools/max_steps 仅作描述）。
+    pub spec: TaskSpec,
+    /// 配置层默认参数值，prompt 传值优先。
+    pub config_inputs: InputValues,
+    /// 执行用工具集（完整工具对象）。
+    tools: Vec<Arc<dyn Tool>>,
+    /// 执行步数上限。
+    max_steps: usize,
 }
 
 impl fmt::Debug for SubAgentConfig {
@@ -42,21 +58,39 @@ impl fmt::Debug for SubAgentConfig {
 
 impl SubAgentConfig {
     pub fn new(name: impl Into<String>, system_prompt: impl Into<String>) -> Self {
+        let name = name.into();
         Self {
-            name: name.into(),
+            name: name.clone(),
             system_prompt: system_prompt.into(),
+            spec: TaskSpec::simple(name, "", Vec::new(), 10),
+            config_inputs: InputValues::new(),
             tools: Vec::new(),
             max_steps: 10,
         }
     }
 
     pub fn with_tools(mut self, tools: Vec<Arc<dyn Tool>>) -> Self {
+        self.spec.tools = tools.iter().map(|t| t.schema().name.clone()).collect();
         self.tools = tools;
         self
     }
 
     pub fn with_max_steps(mut self, steps: usize) -> Self {
-        self.max_steps = if steps == 0 { 10 } else { steps };
+        self.spec.max_steps = if steps == 0 { 10 } else { steps };
+        self.max_steps = self.spec.max_steps;
+        self
+    }
+
+    /// 进入参数化路径：替换渲染用任务书（tools/max_steps 仅作描述，执行参数
+    /// 仍由 `with_tools` / `with_max_steps` 控制）。
+    pub fn with_task_spec(mut self, spec: TaskSpec) -> Self {
+        self.spec = spec;
+        self
+    }
+
+    /// 配置层默认参数值（prompt 传值优先，仅补缺）。
+    pub fn with_config_inputs(mut self, inputs: InputValues) -> Self {
+        self.config_inputs = inputs;
         self
     }
 }
@@ -124,20 +158,38 @@ impl SubAgentRunner {
         self
     }
 
-    /// Parse the input prompt to extract sub-agent name and goal.
-    /// Returns (sub_agent_name, goal_text).
-    fn parse_input(prompt: &str) -> (Option<String>, String) {
+    /// Parse the input prompt to extract sub-agent name, goal, and input values.
+    /// Returns (sub_agent_name, goal_text, input_values).
+    ///
+    /// Input lines must appear before the `goal:` line:
+    /// `input:<name>=<value>`. Malformed lines (no `=`, empty name, or empty
+    /// value) are ignored.
+    fn parse_input(prompt: &str) -> (Option<String>, String, InputValues) {
         let mut sub_agent: Option<String> = None;
+        let mut inputs: HashMap<String, String> = HashMap::new();
         let mut goal_start = 0usize;
 
+        // 逐行累加字节偏移：`goal:` 命中时取其行首偏移，而非
+        // `prompt.find("goal:")`（后者会命中 input 值里的 "goal:" 子串，
+        // 导致 goal 文本被污染——Bugbot 审查 MEDIUM 修复）。
+        let mut line_offset = 0usize;
         for line in prompt.lines() {
             let trimmed = line.trim();
             if let Some(name) = trimmed.strip_prefix("sub_agent:") {
                 sub_agent = Some(name.trim().to_string());
-            } else if let Some(_goal) = trimmed.strip_prefix("goal:") {
-                goal_start = prompt.find("goal:").unwrap_or(0);
+            } else if let Some(kv) = trimmed.strip_prefix("input:") {
+                if let Some((k, v)) = kv.split_once('=') {
+                    let key = k.trim();
+                    let value = v.trim();
+                    if !key.is_empty() && !value.is_empty() {
+                        inputs.insert(key.to_string(), value.to_string());
+                    }
+                }
+            } else if trimmed.strip_prefix("goal:").is_some() {
+                goal_start = line_offset;
                 break;
             }
+            line_offset += line.len() + 1; // 行内容 + 换行符
         }
 
         let goal = if goal_start > 0 {
@@ -147,7 +199,7 @@ impl SubAgentRunner {
             prompt.to_string()
         };
 
-        (sub_agent, goal)
+        (sub_agent, goal, InputValues::from(inputs))
     }
 
     /// Resolve the sub-agent to use. Falls back to default or error.
@@ -174,11 +226,17 @@ impl Runner for SubAgentRunner {
     async fn run_stream(&self, input: RunInput) -> anyhow::Result<RunEventStream> {
         let (tx, rx) = mpsc::channel(64);
 
-        // Parse input: extract sub-agent name and goal
-        let (sub_agent_name, goal) = Self::parse_input(&input.prompt);
+        // Parse input: extract sub-agent name, goal, and input values
+        let (sub_agent_name, goal, parsed_inputs) = Self::parse_input(&input.prompt);
 
         // Resolve sub-agent config
         let config = self.resolve_sub_agent(sub_agent_name)?;
+
+        // 渲染任务书：prompt 传值优先，config 默认值仅补缺。
+        // 渲染失败（如缺 required 输入）直接报错。
+        let rendered = config
+            .spec
+            .render(&parsed_inputs.merged_with(&config.config_inputs))?;
 
         // Clone what the spawned task needs
         let provider = Arc::clone(&self.provider);
@@ -189,7 +247,16 @@ impl Runner for SubAgentRunner {
             .unwrap_or_else(|| Arc::clone(&self.provider));
         let tools = config.tools.clone();
         let max_steps = config.max_steps;
-        let system_prompt = config.system_prompt.clone();
+        let mut system_prompt = config.system_prompt.clone();
+        if !rendered.rules.is_empty() {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(&rendered.rules);
+        }
+        let mut task = goal.clone();
+        if !rendered.task.is_empty() {
+            task.push_str("\n\n");
+            task.push_str(&rendered.task);
+        }
         let compaction_threshold = self.compaction_threshold_tokens;
 
         // Each sub-agent invocation gets fully independent memory
@@ -212,7 +279,7 @@ impl Runner for SubAgentRunner {
             "dispatching sub-agent"
         );
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             if let Err(e) = run_sub_agent_loop(
                 provider,
                 compact_provider,
@@ -220,7 +287,7 @@ impl Runner for SubAgentRunner {
                 max_steps,
                 compaction_threshold,
                 &mut memory,
-                goal,
+                task,
                 &tx,
             )
             .await
@@ -230,7 +297,38 @@ impl Runner for SubAgentRunner {
             }
         });
 
-        Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+        Ok(Box::pin(AbortOnDropStream {
+            inner: rx,
+            handle: Some(handle),
+        }))
+    }
+}
+
+/// 子代理事件流包装：`tokio::spawn` 的子代理任务不随调用方 future 被丢弃而
+/// 取消（timeout/提前返回会 drop 掉 `run_stream` 的 future，但 spawn 的任务
+/// 会继续跑到 `max_steps`，导致重试并发 fan-out）。本包装在 stream 被 drop
+/// 时 abort 子代理任务，阻断后台执行与重复副作用（Bugbot 审查 HIGH-2 修复）。
+struct AbortOnDropStream {
+    inner: mpsc::Receiver<anyhow::Result<RunEvent>>,
+    handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl tokio_stream::Stream for AbortOnDropStream {
+    type Item = anyhow::Result<RunEvent>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.inner.poll_recv(cx)
+    }
+}
+
+impl Drop for AbortOnDropStream {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
     }
 }
 
@@ -530,15 +628,16 @@ mod tests {
     #[test]
     fn parse_input_structured() {
         let prompt = "sub_agent:researcher\ngoal:find all Rust files";
-        let (name, goal) = SubAgentRunner::parse_input(prompt);
+        let (name, goal, inputs) = SubAgentRunner::parse_input(prompt);
         assert_eq!(name, Some("researcher".to_string()));
         assert_eq!(goal, "goal:find all Rust files");
+        assert!(inputs.is_empty());
     }
 
     #[test]
     fn parse_input_just_goal() {
         let prompt = "goal:analyze this codebase";
-        let (name, goal) = SubAgentRunner::parse_input(prompt);
+        let (name, goal, _) = SubAgentRunner::parse_input(prompt);
         assert_eq!(name, None);
         assert_eq!(goal, "goal:analyze this codebase");
     }
@@ -546,7 +645,7 @@ mod tests {
     #[test]
     fn parse_input_plain_text() {
         let prompt = "just a plain prompt with no structure";
-        let (name, goal) = SubAgentRunner::parse_input(prompt);
+        let (name, goal, _) = SubAgentRunner::parse_input(prompt);
         assert_eq!(name, None);
         assert_eq!(goal, prompt);
     }
@@ -554,7 +653,7 @@ mod tests {
     #[test]
     fn parse_input_only_sub_agent() {
         let prompt = "sub_agent:reviewer\nsome free text here";
-        let (name, goal) = SubAgentRunner::parse_input(prompt);
+        let (name, goal, _) = SubAgentRunner::parse_input(prompt);
         assert_eq!(name, Some("reviewer".to_string()));
         assert_eq!(goal, prompt);
     }
@@ -562,9 +661,37 @@ mod tests {
     #[test]
     fn parse_input_whitespace_handling() {
         let prompt = "sub_agent:  security-auditor  \ngoal:  scan for vulnerabilities  ";
-        let (name, goal) = SubAgentRunner::parse_input(prompt);
+        let (name, goal, _) = SubAgentRunner::parse_input(prompt);
         assert_eq!(name, Some("security-auditor".to_string()));
         assert!(goal.starts_with("goal:"));
+    }
+
+    #[test]
+    fn parse_input_with_values() {
+        let prompt =
+            "sub_agent:reviewer\ninput:path=src/lib.rs\ninput:depth=3\ngoal:review the change";
+        let (name, goal, inputs) = SubAgentRunner::parse_input(prompt);
+        assert_eq!(name, Some("reviewer".to_string()));
+        assert!(goal.starts_with("goal:review the change"));
+        assert_eq!(inputs.get("path"), Some("src/lib.rs"));
+        assert_eq!(inputs.get("depth"), Some("3"));
+    }
+
+    #[test]
+    fn parse_input_ignores_malformed_value_lines() {
+        let prompt =
+            "sub_agent:reviewer\ninput:no-equals\ninput:=empty-key\ninput:trailing=\ngoal:x";
+        let (_, _, inputs) = SubAgentRunner::parse_input(prompt);
+        assert!(inputs.is_empty());
+    }
+
+    #[test]
+    fn parse_input_value_after_goal_is_goal_text() {
+        // `input:` 行必须在 `goal:` 行之前；之后的行属于 goal 文本。
+        let prompt = "sub_agent:reviewer\ngoal:see input:path=x";
+        let (_, goal, inputs) = SubAgentRunner::parse_input(prompt);
+        assert!(goal.contains("input:path=x"));
+        assert!(inputs.is_empty());
     }
 
     // --- SubAgentRunner registration tests ---

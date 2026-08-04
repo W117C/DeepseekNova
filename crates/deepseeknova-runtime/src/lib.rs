@@ -17,6 +17,7 @@ use deepseeknova_security::capability::Capability;
 use deepseeknova_security::context::SecurityContext;
 use deepseeknova_security::limits::ResourceLimits;
 use deepseeknova_security::policy::SecurityPolicy;
+use deepseeknova_security::quality::redact_secrets;
 
 /// Retrieval-strategy hint appended to the system prompt when the code graph
 /// is enabled, steering the model toward graph tools over brute-force grep.
@@ -32,6 +33,12 @@ read_file once the target is confirmed;\n\
 5. `impact_code` to estimate the blast radius of a refactor;\n\
 6. `explore_code` to read several entities' source grouped by file;\n\
 7. `deps_code` to inspect imports and external dependencies.";
+
+/// 设计 C：运行时「会话边界」序号。每次 `build_agent` 递增一次，用作
+/// skill `record_use` 的会话 id——每次构造 = 新会话，跨 build 的 recall
+/// 命中推进 `sessions_seen`（`verified` → `active` 的跨会话存活判据）。
+/// recall 闭包签名（`Fn(&str)`）无 session 参数，故由运行时持有。
+static SKILL_SESSION_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// A3 从用户输入提取 repo map 个性化 seeds：标识符 token（≥3 字符、
 /// 去停用词、去重、上限 8），用于对图节点做 personalized PageRank。
@@ -476,30 +483,116 @@ pub fn build_agent_with_role_providers(
                 agent = agent.with_extension(handle.clone());
                 memory_ext = Some(handle.clone());
 
+                // 设计 C：技能热更新——SkillManager 装配（skill 即记忆上下文）。
+                // 蒸馏 skill 写入 `<root>/.deepseeknova/skills/auto/`（与用户手写
+                // skill 隔离，frontmatter 强制 `source: distill`）；会话边界
+                // （每次 build_agent 新构造 = 天然重载）+ 蒸馏落盘后显式 reload，
+                // 同会话后续 recall 即可注入新 skill。
+                let skill_manager: Arc<
+                    std::sync::Mutex<deepseeknova_core::memory::skill::SkillManager>,
+                > = Arc::new(std::sync::Mutex::new(
+                    deepseeknova_core::memory::skill::SkillManager::new(
+                        deepseeknova_core::memory::skill::SkillExtractionConfig {
+                            skill_dir: workspace_root.join(".deepseeknova/skills"),
+                            // 蒸馏提取门槛与 `[memory] min_tool_calls/min_steps` 同源：
+                            // 测试与用户配置才能实际调低/调高 auto/ 落盘门槛。
+                            min_tool_calls: config.memory.min_tool_calls,
+                            min_steps: config.memory.min_steps,
+                            // 三态质量门槛与 `[memory] verify_use_threshold /
+                            // active_session_threshold / max_auto_draft_skills` 同源
+                            // （默认 3/3/20，对齐 skill.rs 常量）。
+                            verify_use_threshold: config.memory.verify_use_threshold,
+                            active_session_threshold: config.memory.active_session_threshold,
+                            max_auto_draft_skills: config.memory.max_auto_draft_skills,
+                        },
+                    ),
+                ));
+                let skills_for_distill = skill_manager.clone();
+
                 // 起点召回注入（token 预算内的极简块）。
                 let rp = handle.clone();
                 let top_k = config.memory.recall_top_k;
                 let cap_chars =
                     deepseeknova_core::tokens::chars_for_tokens(config.memory.recall_inject_tokens);
                 if cap_chars > 0 {
+                    let skills_for_recall = skill_manager.clone();
+                    // 设计 C 三态闭环：每次 build_agent = 新会话，recall 注入
+                    // 命中即计一次 use（success=true），驱动 draft → verified
+                    // → active 状态迁移（阈值来自 SkillExtractionConfig）。
+                    let skill_session_id = format!(
+                        "rt-{}-{}",
+                        std::process::id(),
+                        SKILL_SESSION_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    );
                     let recall: deepseeknova_agent::RecallProvider =
                         Arc::new(move |query: &str| {
-                            let hits = rp.recall(query, top_k).ok()?;
-                            if hits.is_empty() {
-                                return None;
-                            }
-                            let mut block = String::from("## Recalled Context\n");
+                            let hits = rp.recall(query, top_k).ok().unwrap_or_default();
+                            let mut block = String::new();
                             let mut budget = cap_chars;
-                            for h in &hits {
-                                let snippet: String = h.entry.content.chars().take(160).collect();
-                                let line = format!("- [{}] {}\n", h.entry.id, snippet);
-                                if line.len() > budget {
-                                    break;
+                            if !hits.is_empty() {
+                                block.push_str("## Recalled Context\n");
+                                for h in &hits {
+                                    let snippet: String =
+                                        h.entry.content.chars().take(160).collect();
+                                    let line = format!("- [{}] {}\n", h.entry.id, snippet);
+                                    if line.len() > budget {
+                                        break;
+                                    }
+                                    budget -= line.len();
+                                    block.push_str(&line);
                                 }
-                                budget -= line.len();
-                                block.push_str(&line);
                             }
-                            Some(block)
+                            // 设计 C：追加匹配 skill。draft 仅高匹配度注入且排最后
+                            // （低优先级试用）；verified/active 常规注入。
+                            if let Ok(mut sm) = skills_for_recall.lock() {
+                                // 先取 owned (name, description)，结束不可变借用
+                                // 后再 record_use（需要 &mut）。
+                                let matched: Vec<(String, String)> = sm
+                                    .find_matching_skills(query)
+                                    .iter()
+                                    .map(|s| {
+                                        (
+                                            s.frontmatter.name.clone(),
+                                            s.frontmatter.description.clone(),
+                                        )
+                                    })
+                                    .collect();
+                                if !matched.is_empty() {
+                                    let mut lines = String::from("## Available Skills\n");
+                                    // P2 修复：只对真正写入注入内容（lines）的 skill
+                                    // 计数。受 take(top_k) 与字符预算双重约束，超预算
+                                    // break 后剩余的匹配项未进入 prompt，不得 record_use
+                                    // （否则「匹配即计 use」会污染 draft → verified 晋升）。
+                                    let mut injected: Vec<&str> = Vec::new();
+                                    for (name, desc) in matched.iter().take(top_k) {
+                                        let line = format!("- **{name}**: {desc}\n");
+                                        if lines.len() > budget {
+                                            break;
+                                        }
+                                        lines.push_str(&line);
+                                        injected.push(name);
+                                    }
+                                    if lines.len() > "## Available Skills\n".len() {
+                                        block.push_str(&lines);
+                                    }
+                                    // 三态闭环：注入即计一次 use（成功语义）。
+                                    // 失败仅 warn（record_use 落盘失败不阻断注入）。
+                                    for name in injected {
+                                        if let Err(e) =
+                                            sm.record_use(name, true, Some(&skill_session_id))
+                                        {
+                                            tracing::warn!(
+                                                "skill record_use failed for '{name}': {e}"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            if block.is_empty() {
+                                None
+                            } else {
+                                Some(block)
+                            }
                         });
                     agent = agent.with_recall_provider(recall);
 
@@ -623,6 +716,9 @@ pub fn build_agent_with_role_providers(
                 } else {
                     None
                 };
+                // 设计 C 三态闭环：会话边界清理超额 distill draft 的上限
+                // （`[memory] max_auto_draft_skills`，默认 20，对齐 skill.rs 常量）。
+                let max_auto_draft_skills = config.memory.max_auto_draft_skills;
                 let distill: deepseeknova_agent::DistillHook = Arc::new(move |obs| {
                     if let Err(e) = dh.record_task(&obs, &guards) {
                         tracing::warn!("memory distill failed: {e}");
@@ -631,6 +727,7 @@ pub fn build_agent_with_role_providers(
                         let engine = dh.clone();
                         let llm = llm_distill_provider.clone();
                         let max_chars = llm_distill_max_chars;
+                        let skills = skills_for_distill.clone();
                         let obs = obs.clone();
                         handle.spawn(async move {
                             if let Some(k) = deepseeknova_agent::memory_distill::run_llm_distill(
@@ -640,6 +737,26 @@ pub fn build_agent_with_role_providers(
                             )
                             .await
                             {
+                                // 设计 C：skill 分支 → SkillManager auto/ 落盘
+                                // （source: distill 隔离；should_extract_skill 门槛），
+                                // 落盘后 reload 使同会话后续 recall 立即可注入。
+                                if let Ok(mut sm) = skills.lock() {
+                                    match deepseeknova_agent::memory_distill::
+                                        persist_distilled_skill(&mut sm, &obs, &k)
+                                    {
+                                        Ok(true) => {
+                                            if let Err(e) = sm.reload() {
+                                                tracing::warn!(
+                                                    "skill manager reload failed: {e}"
+                                                );
+                                            }
+                                        }
+                                        Ok(false) => {}
+                                        Err(e) => {
+                                            tracing::warn!("distilled skill persist failed: {e}")
+                                        }
+                                    }
+                                }
                                 if let Err(e) =
                                     engine.record_llm_knowledge(&k.kind, &k.title, &k.body, k.tags)
                                 {
@@ -647,6 +764,14 @@ pub fn build_agent_with_role_providers(
                                 }
                             }
                         });
+                    }
+                    // 设计 C 三态闭环：会话边界（run 结束）清理超额 distill draft。
+                    // 仅删 `source: distill` + `state: draft`（LRU）；用户手写、
+                    // verified、active 一律豁免。失败仅 warn，不阻断 run。
+                    if let Ok(mut sm) = skills_for_distill.lock() {
+                        if let Err(e) = sm.prune_auto_drafts(max_auto_draft_skills) {
+                            tracing::warn!("skill prune failed: {e}");
+                        }
                     }
                 });
                 agent = agent.with_distill_hook(distill);
@@ -681,6 +806,20 @@ pub fn build_agent_with_role_providers(
             .as_ref()
             .map(Arc::clone)
             .unwrap_or_else(|| Arc::clone(&provider));
+        // 归因 provider：review 指针优先（低成本判定），否则主 provider。
+        let attribution_provider = roles
+            .review
+            .as_ref()
+            .map(Arc::clone)
+            .unwrap_or_else(|| Arc::clone(&provider));
+        let attribution = config.attribution.enabled.then(|| {
+            Arc::new(deepseeknova_agent::attribution::AttributionSettings {
+                provider: attribution_provider,
+                max_retries: config.attribution.max_retries,
+                max_attributions: config.attribution.max_attributions,
+                degrade_map: config.attribution.degrade_map.clone(),
+            })
+        });
         let engine = build_delegate_engine(
             config,
             delegate_provider,
@@ -689,9 +828,27 @@ pub fn build_agent_with_role_providers(
             gate.clone(),
             graph_ext.clone(),
             memory_ext.clone(),
+            attribution,
         );
         let handle: deepseeknova_tools::DelegateHandle = engine;
         agent = agent.with_extension(handle);
+    }
+
+    // ── 失败归因（B，默认关）：verify/review 达上限 Paused 前 LLM 归因，──
+    // reason 附带 fix_plan 摘要（Paused 恢复可续用）；归因受硬预算约束。
+    // 注意：须在 B3 review 段（move roles.review）之前完成。
+    if config.attribution.enabled {
+        let attribution_provider = roles
+            .review
+            .as_ref()
+            .map(Arc::clone)
+            .unwrap_or_else(|| Arc::clone(&provider));
+        agent = agent.with_attribution(deepseeknova_agent::attribution::AttributionSettings {
+            provider: attribution_provider,
+            max_retries: config.attribution.max_retries,
+            max_attributions: config.attribution.max_attributions,
+            degrade_map: config.attribution.degrade_map.clone(),
+        });
     }
 
     // ── B2 续航：max_steps 行为 / L3 压缩 / 预算守门 ──
@@ -943,6 +1100,402 @@ pub fn build_agent(
     )
 }
 
+/// 会话效能落盘所需的成本面数据与输出目录。
+pub struct MetricsSink {
+    pub ledger: Arc<deepseeknova_provider::cost::CostLedger>,
+    pub prices: deepseeknova_provider::cost::PriceTable,
+    pub dir: PathBuf,
+}
+
+/// 留存策略：目录下 `*.json` 报告数超过 `max_reports` 时删除最旧的（按文件
+/// 修改时间排序，同刻按文件名字典序兜底），只保留最新的 `max_reports` 个。
+/// `*.scorecard.json` 评分卡（跨会话对比数据）不参与裁剪，永不因留存被删。
+/// 匹配大小写不敏感：`X.SCORECARD.JSON` 等大写扩展名同样按评分卡排除，普通
+/// 大写 `.JSON` 报告同样参与留存计数（否则留存口径会漏掉它们、目录无限累积）。
+/// 目录不存在/读取失败静默跳过；删除失败仅 warn，不阻断 run。`max_reports=0`
+/// 视为不清理（防御，配置层默认 100 不会走到）。
+pub fn enforce_metrics_retention(dir: &std::path::Path, max_reports: usize) {
+    if max_reports == 0 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut files: Vec<std::path::PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            // 只统计普通报告 json；`.scorecard.json` 是跨会话对比数据，不参与
+            // 报告留存裁剪（任务质量闭环 C）。文件名统一 lowercase 后匹配，
+            // 大写扩展名（`X.SCORECARD.JSON`）不会被误当普通报告裁剪或漏计。
+            let name = p.file_name().map(|n| n.to_string_lossy().to_lowercase());
+            match name {
+                Some(n) => n.ends_with(".json") && !n.ends_with(".scorecard.json"),
+                None => false,
+            }
+        })
+        .collect();
+    if files.len() <= max_reports {
+        return;
+    }
+    files.sort_by(|a, b| {
+        let ma = std::fs::metadata(a)
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        let mb = std::fs::metadata(b)
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        ma.cmp(&mb).then_with(|| a.cmp(b))
+    });
+    let excess = files.len() - max_reports;
+    for old in files.into_iter().take(excess) {
+        if let Err(e) = std::fs::remove_file(&old) {
+            tracing::warn!("metrics retention remove failed ({}): {e}", old.display());
+        }
+    }
+}
+
+/// 按配置为 Agent 挂载会话效能钩子：`[metrics] enabled=true` 时，每次 run
+/// 结束生成 SessionReport（执行面 + 成本面）写入 `sink.dir`，并在其后按
+/// QualitySummary 组装四维评分卡（`<session_id>.scorecard.json`，任务质量
+/// 闭环 C）落盘；写入失败仅 warn，不阻断 run。落盘后执行留存策略
+/// （`[metrics] max_reports`，默认 100）：报告数超上限时删除最旧报告，
+/// 防止 chat 每轮落盘长期累积。`enabled=false` 时原样返回，Agent 行为零变化。
+///
+/// 委托 [`attach_metrics_hook_with_fitness`]（空会话技能集合 + 空 workspace，
+/// 不启用 fitness 记录），保持既有签名与语义不变。
+pub fn attach_metrics_hook(
+    agent: deepseeknova_agent::Agent,
+    config: &Config,
+    sink: MetricsSink,
+) -> deepseeknova_agent::Agent {
+    attach_metrics_hook_with_fitness(
+        agent,
+        config,
+        sink,
+        std::path::Path::new(""),
+        Arc::new(std::sync::Mutex::new(Vec::new())),
+    )
+}
+
+/// [`attach_metrics_hook`] 的协议增强扩展：`[protocol] enabled=true` 且
+/// `workspace_root` 非空时，会话结束（metrics hook 内）按 outcome 对
+/// `session_skills`（本会话激活过的技能名）逐条调
+/// [`FitnessStore::record_result`](deepseeknova_skills::fitness::FitnessStore)
+/// 并 save 到 `<workspace_root>/.deepseeknova/skills/fitness.json`
+/// （协议增强设计 §5；失败仅 warn，不阻断 run）。
+///
+/// outcome 判定：`stats.outcome == Some(Completed)` 记 success=true，其余
+/// （PausedMaxSteps/Cancelled）记 success=false。技能激活的 `record_use`
+/// 本阶段未接线（技能名集合由 CLI 持有，recall 注入侧暂未写入，集合为空时
+/// 跳过记录并仅首次会话 warn 一次——warn-once 防每会话噪音，留接口，见
+/// spec §13 #9）。`enabled=false` 或空 workspace 时
+/// 行为与 [`attach_metrics_hook`] 完全一致。
+pub fn attach_metrics_hook_with_fitness(
+    agent: deepseeknova_agent::Agent,
+    config: &Config,
+    sink: MetricsSink,
+    workspace_root: &std::path::Path,
+    session_skills: Arc<std::sync::Mutex<Vec<String>>>,
+) -> deepseeknova_agent::Agent {
+    if !config.metrics.enabled {
+        return agent;
+    }
+    let max_reports = config.metrics.max_reports;
+    // 协议增强：fitness 仅在 `[protocol] enabled` 且提供 workspace 时启用。
+    let fitness_on = config.protocol.enabled && !workspace_root.as_os_str().is_empty();
+    let fitness_path = workspace_root
+        .join(".deepseeknova")
+        .join("skills")
+        .join("fitness.json");
+    // warn-once 标志：空技能集（record_use 未接线）时仅首次会话 warn 一次，
+    // 之后静默——避免每会话 warn 噪音；接线后（recall 注入侧回填技能名）此
+    // 分支自然消失（见 spec §13 #9）。
+    let warned_empty_skills = std::sync::atomic::AtomicBool::new(false);
+    let hook: deepseeknova_agent::MetricsHook = Arc::new(move |stats, summary| {
+        // 任务质量闭环 C：会话 id 两份文件共用，保证
+        // `<id>.json` 与 `<id>.scorecard.json` 可对账。
+        let session_id = deepseeknova_metrics::new_session_id();
+        let mut card = deepseeknova_metrics::Scorecard::compute(
+            &session_id,
+            &stats,
+            &summary.findings,
+            summary.reflection_count,
+            summary.review_issues,
+            summary.review_passes,
+        );
+        // 协议增强：覆写 protocol/composite 维（Scorecard::compute 已将
+        // protocol 置 1.0 占位，此处用 QualitySummary 的协议统计填真实值；
+        // fill_protocol 同时重算 composite 加权均值，见 metrics 侧注释）。
+        card.fill_protocol(summary.protocol_violations, summary.phase_transitions);
+        let report = deepseeknova_metrics::SessionReport {
+            session_id,
+            stats: stats.clone(),
+            cost: sink.ledger.report(&sink.prices),
+        };
+        if let Err(e) = deepseeknova_metrics::write_report(&report, &sink.dir) {
+            tracing::warn!("metrics report write failed: {e}");
+            return;
+        }
+        // 评分卡独立文件落盘；失败仅 warn，不阻断 run（与 write_report 同模式）。
+        if let Err(e) = deepseeknova_metrics::write_scorecard(&card, &sink.dir) {
+            tracing::warn!("metrics scorecard write failed: {e}");
+            return;
+        }
+        // P3：落盘后按 max_reports 清理最旧报告。
+        enforce_metrics_retention(&sink.dir, max_reports);
+
+        // 协议增强：会话结束 fitness 记录（仅 protocol.enabled 时动作）。
+        if fitness_on {
+            let skills: Vec<String> = match session_skills.lock() {
+                Ok(guard) => guard.clone(),
+                Err(_) => Vec::new(),
+            };
+            if skills.is_empty() {
+                // 技能激活记录（record_use）未接线，本会话无技能名——跳过。
+                // 仅首次会话 warn 一次，之后静默（warn-once 防每会话噪音）。
+                // TODO(record_use 接线)：把 recall 注入的技能名写入 session_skills
+                // 后此分支自然消失（阶段4 留接口项，非门控 TODO；见 spec §13 #9）。
+                if !warned_empty_skills.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    tracing::warn!(
+                        "fitness record skipped: no session skill names collected \
+                         (skill record_use wiring pending)"
+                    );
+                }
+            } else {
+                let success = matches!(
+                    stats.outcome,
+                    Some(deepseeknova_metrics::RunOutcome::Completed)
+                );
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                match deepseeknova_skills::fitness::FitnessStore::load(&fitness_path) {
+                    Ok(mut store) => {
+                        for name in &skills {
+                            store.record_result(name, success, now_ms);
+                        }
+                        if let Err(e) = store.save() {
+                            tracing::warn!("fitness save failed: {e}");
+                        }
+                    }
+                    Err(e) => tracing::warn!("fitness load failed: {e}"),
+                }
+            }
+        }
+    });
+    agent.with_metrics_hook(hook)
+}
+
+/// 按配置为 Agent 挂载任务质量钩子（A 阶段：ToolHook 链 + 写后策略评估）：
+/// `[quality] enabled=true` 时注册内置
+/// [`QualityHook`](deepseeknova_agent::quality::QualityHook)（builtin 策略，含
+/// no-commit-secret / no-forbidden-path / oversized-write 三条规则）。
+/// `enabled=false` 时原样返回，Agent 行为零变化。
+pub fn attach_quality_hook(
+    agent: deepseeknova_agent::Agent,
+    config: &Config,
+) -> deepseeknova_agent::Agent {
+    if !config.quality.enabled {
+        return agent;
+    }
+    let hook = deepseeknova_agent::quality::QualityHook::new(
+        deepseeknova_security::quality::QualityPolicy::builtin(),
+    );
+    agent.with_tool_hook(Arc::new(hook))
+}
+
+/// 诊断报告留存上限：对齐 `[metrics] max_reports` 配置默认值（100）。诊断
+/// 子目录与 metrics 目录共用同一留存语义（`enforce_metrics_retention`）。
+const DIAGNOSE_RETENTION_MAX: usize = 100;
+
+/// 按目录为 Agent 挂载失败诊断钩子（任务质量闭环 B 阶段）：run 以非
+/// success 结束（Paused/failed）时，回调闭包在 `<dir>/diagnose/` 子目录
+/// （不存在则建）写 `<session_id>.json`，并复用 [`enforce_metrics_retention`]
+/// 对诊断子目录执行留存（上限对齐 `[metrics] max_reports` 默认值 100）。
+/// 无条件装配（低风险旁路）：写入/留存失败仅 warn，不阻断 run；成功结束
+/// 不产生任何文件。
+///
+/// 委托 [`attach_diagnose_hook_with_ingest`]（`None` 配置 = 不启用失败模式
+/// 聚类），保持既有签名与语义不变。
+pub fn attach_diagnose_hook(
+    agent: deepseeknova_agent::Agent,
+    dir: PathBuf,
+) -> deepseeknova_agent::Agent {
+    attach_diagnose_hook_with_ingest(agent, dir, None, std::path::Path::new(""))
+}
+
+/// [`attach_diagnose_hook`] 的协议增强扩展：`[protocol] enabled=true` 且
+/// `workspace_root` 非空时，除原落盘/留存逻辑外，把本会话
+/// [`DiagnoseReport`](deepseeknova_agent::diagnose::DiagnoseReport) 的
+/// `failures` 逐条聚类进
+/// [`FailurePatternStore`](deepseeknova_security::failure_pattern::FailurePatternStore)
+/// （`<workspace_root>/.deepseeknova/security/failure-patterns.json`，协议增强
+/// 设计 §6）并 save。字段映射：`FailureDetail.phase → phase`、
+/// `.tool → tool`、`.error → error`、`.root_cause.or(fix_plan) → lesson`。
+/// 注入内容先脱敏（spec §6.2）：error/lesson 过
+/// [`redact_secrets`] 再 ingest，防止密钥原文进模式库并被下会话回灌进
+/// system prompt（接线侧最后防线；security 侧 ingest 入口另有双保险）。
+/// 诊断钩子天然只在非 success 结束时触发，满足「仅失败会话 ingest」语义；
+/// 所有 IO 失败仅 warn，不阻断 run。`None` 配置或 disabled 时与
+/// [`attach_diagnose_hook`] 完全一致。
+pub fn attach_diagnose_hook_with_ingest(
+    agent: deepseeknova_agent::Agent,
+    dir: PathBuf,
+    config: Option<&Config>,
+    workspace_root: &std::path::Path,
+) -> deepseeknova_agent::Agent {
+    let diagnose_dir = dir.join("diagnose");
+    // 协议增强：聚类仅在 `[protocol] enabled` 且提供 workspace 时启用。
+    let ingest_on = config
+        .map(|c| c.protocol.enabled && !workspace_root.as_os_str().is_empty())
+        .unwrap_or(false);
+    let patterns_path = workspace_root
+        .join(".deepseeknova")
+        .join("security")
+        .join("failure-patterns.json");
+    let hook: deepseeknova_agent::diagnose::DiagnoseHook = Arc::new(move |report| {
+        // DiagnoseReport::write_to 负责建目录 + 写 `<session_id>.json`；
+        // 失败仅 warn（与 attach_metrics_hook 落盘同模式，不阻断 run）。
+        if let Err(e) = report.write_to(&diagnose_dir) {
+            tracing::warn!("diagnose report write failed: {e}");
+            return;
+        }
+        enforce_metrics_retention(&diagnose_dir, DIAGNOSE_RETENTION_MAX);
+
+        // 协议增强：失败模式聚类（仅 protocol.enabled 时动作）。
+        if ingest_on {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            match deepseeknova_security::failure_pattern::FailurePatternStore::load(&patterns_path)
+            {
+                Ok(mut store) => {
+                    ingest_failure_patterns(&mut store, &report.failures, now_ms);
+                    if let Err(e) = store.save() {
+                        tracing::warn!("failure pattern store save failed: {e}");
+                    }
+                }
+                Err(e) => tracing::warn!("failure pattern store load failed: {e}"),
+            }
+        }
+    });
+    agent.with_diagnose_hook(hook)
+}
+
+/// 失败模式聚类写入（协议增强 §6）：把 `failures` 逐条 ingest 进 store。
+/// 注入内容脱敏（spec §6.2）：每条 `FailureDetail` 的 `error` 与 `lesson`
+/// （`root_cause.or(fix_plan)`）先过 [`redact_secrets`] 再 ingest，防止密钥/
+/// 凭据原文进 failure-patterns.json 并被下会话回灌进 system prompt（接线侧
+/// 最后防线；security 侧 ingest 入口另有双保险）。
+fn ingest_failure_patterns(
+    store: &mut deepseeknova_security::failure_pattern::FailurePatternStore,
+    failures: &[deepseeknova_agent::diagnose::FailureDetail],
+    now_ms: u64,
+) {
+    for f in failures {
+        let lesson = f
+            .root_cause
+            .as_deref()
+            .or(f.fix_plan.as_deref())
+            .map(str::to_string);
+        let error = redact_secrets(&f.error);
+        let lesson = lesson.as_deref().map(redact_secrets);
+        store.ingest(
+            &f.phase,
+            f.tool.as_deref(),
+            &error,
+            lesson.as_deref(),
+            now_ms,
+        );
+    }
+}
+
+/// 失败模式回灌（协议增强设计 §6.2）：`[protocol] enabled=true` 时，会话
+/// 启动前（run 开始前）从 `<workspace_root>/.deepseeknova/security/
+/// failure-patterns.json` 加载历史失败模式库，`suggest(3)` 取 top-3 后追加
+/// `## 本会话已知失败模式（自动注入）` 块到首轮 system prompt（复用
+/// `Agent::with_appended_system_prompt` 先例，见 graph 检索提示注入）。
+///
+/// 无模式 / store 缺失 / IO 失败时零注入（仅 warn），`enabled=false` 时
+/// 原样返回，Agent 行为零变化。本函数只做回灌，不涉及门控/对抗审查
+/// （见 [`attach_protocol_gates`]）。
+pub fn attach_failure_pattern_injection(
+    agent: deepseeknova_agent::Agent,
+    config: &Config,
+    workspace_root: &std::path::Path,
+) -> deepseeknova_agent::Agent {
+    if !config.protocol.enabled {
+        return agent;
+    }
+    let path = workspace_root
+        .join(".deepseeknova")
+        .join("security")
+        .join("failure-patterns.json");
+    let suggestions = match deepseeknova_security::failure_pattern::FailurePatternStore::load(&path)
+    {
+        Ok(store) => store.suggest(3),
+        Err(e) => {
+            tracing::warn!("failure pattern store load failed: {e}");
+            Vec::new()
+        }
+    };
+    if suggestions.is_empty() {
+        return agent;
+    }
+    let mut block = String::from("\n\n## 本会话已知失败模式（自动注入）\n");
+    for s in &suggestions {
+        block.push_str(&format!("- {s}\n"));
+    }
+    agent.with_appended_system_prompt(block)
+}
+
+/// 协议门控装配（协议增强设计 §3.3/§3.4）：`[protocol] enabled=true` 时，
+/// 解析 `config.protocol.gates`（`HashMap<String, String>`，值 `hard|soft|off`，
+/// 非法值 warn 跳过该项；缺省门名用 `builtin_phase_gates` 内置默认力度表）
+/// → `agent::phase_runner::builtin_phase_gates(&levels)` →
+/// `Agent::with_protocol_gates`。`enabled=false`（默认）原样返回，Agent
+/// 行为零变化（零成本路径，见 phase_runner 文档）。
+///
+/// 对抗审查（设计 §4.2）：`config.protocol.adversarial_review=true` 时调用
+/// `Agent::with_adversarial_review(true)`——开关独立于 `enabled`，E 侧
+/// 全包 spawn/写报告，runtime 只传开关。
+///
+/// `workspace_root` 暂未使用（预留：未来门配置可能含工作区相对路径），
+/// 保持签名与装配链其他函数一致。
+pub fn attach_protocol_gates(
+    agent: deepseeknova_agent::Agent,
+    config: &Config,
+    _workspace_root: &std::path::Path,
+) -> deepseeknova_agent::Agent {
+    let mut agent = agent;
+    if config.protocol.enabled {
+        use deepseeknova_agent::phase_runner::GateLevel;
+        use std::str::FromStr;
+
+        let mut levels: std::collections::HashMap<String, GateLevel> =
+            std::collections::HashMap::new();
+        for (name, raw) in &config.protocol.gates {
+            match GateLevel::from_str(raw) {
+                Ok(level) => {
+                    levels.insert(name.clone(), level);
+                }
+                Err(e) => {
+                    tracing::warn!("protocol gate '{name}' skipped: {e} (config value '{raw}')");
+                }
+            }
+        }
+        let gates = deepseeknova_agent::phase_runner::builtin_phase_gates(&levels);
+        agent = agent.with_protocol_gates(gates);
+    }
+    if config.protocol.adversarial_review {
+        agent = agent.with_adversarial_review(true);
+    }
+    agent
+}
+
 /// Connect to every enabled MCP server in `config` and return their tools,
 /// ready to hand to [`build_agent`] as `extra_tools`.
 ///
@@ -988,6 +1541,8 @@ pub async fn discover_mcp_tools(config: &Config) -> Vec<Arc<dyn deepseeknova_cor
 /// 合并内置委派预设与 `config.delegate.agents` 覆盖（按 name 匹配覆盖字段，
 /// 未匹配则新增）。供委派引擎与 coordinator 的 SubAgentRunner 共用。
 fn merged_delegate_presets(config: &Config) -> Vec<deepseeknova_agent::DelegatePreset> {
+    use deepseeknova_agent::task_spec::InputValues;
+
     let mut presets = deepseeknova_agent::builtin_presets();
     for ov in &config.delegate.agents {
         if let Some(p) = presets.iter_mut().find(|p| p.name == ov.name) {
@@ -995,18 +1550,35 @@ fn merged_delegate_presets(config: &Config) -> Vec<deepseeknova_agent::DelegateP
                 p.system_prompt = sp.clone();
             }
             if let Some(tools) = &ov.tools {
-                p.tools = tools.clone();
+                p.spec.tools = tools.clone();
             }
             if let Some(ms) = ov.max_steps {
-                p.max_steps = ms;
+                p.spec.max_steps = ms;
+            }
+            if let Some(inputs) = &ov.inputs {
+                p.config_inputs = InputValues::from(
+                    inputs
+                        .iter()
+                        .map(|i| (i.name.clone(), i.value.clone()))
+                        .collect::<std::collections::HashMap<_, _>>(),
+                );
             }
         } else {
-            presets.push(deepseeknova_agent::DelegatePreset {
-                name: ov.name.clone(),
-                system_prompt: ov.system_prompt.clone().unwrap_or_default(),
-                tools: ov.tools.clone().unwrap_or_default(),
-                max_steps: ov.max_steps.unwrap_or(10),
-            });
+            let mut preset = deepseeknova_agent::DelegatePreset::simple(
+                ov.name.clone(),
+                ov.system_prompt.clone().unwrap_or_default(),
+                ov.tools.clone().unwrap_or_default(),
+                ov.max_steps.unwrap_or(10),
+            );
+            if let Some(inputs) = &ov.inputs {
+                preset.config_inputs = InputValues::from(
+                    inputs
+                        .iter()
+                        .map(|i| (i.name.clone(), i.value.clone()))
+                        .collect::<std::collections::HashMap<_, _>>(),
+                );
+            }
+            presets.push(preset);
         }
     }
     presets
@@ -1014,6 +1586,7 @@ fn merged_delegate_presets(config: &Config) -> Vec<deepseeknova_agent::DelegateP
 
 /// 构建委派引擎：合并内置预设与配置覆盖，为每个预设造一个受限工具集的子 Agent
 /// （共享主 agent 的 graph/memory 句柄与安全策略）。禁递归：剔除任何 "delegate" 工具。
+/// `attribution` 提供子代理失败归因重试（None = 旧行为，失败直接上抛）。
 #[allow(clippy::too_many_arguments)]
 fn build_delegate_engine(
     config: &Config,
@@ -1023,6 +1596,7 @@ fn build_delegate_engine(
     gate: Option<Arc<PermissionGate>>,
     graph_ext: Option<deepseeknova_tools::GraphHandle>,
     memory_ext: Option<deepseeknova_tools::MemoryHandle>,
+    attribution: Option<Arc<deepseeknova_agent::attribution::AttributionSettings>>,
 ) -> Arc<deepseeknova_agent::DelegateEngine> {
     use deepseeknova_core::Tool;
 
@@ -1051,11 +1625,11 @@ fn build_delegate_engine(
             .iter()
             .filter(|t| {
                 let n = t.schema().name;
-                n != "delegate" && p.tools.iter().any(|allow| allow == &n)
+                n != "delegate" && p.spec.tools.iter().any(|allow| allow == &n)
             })
             .cloned()
             .collect();
-        let mut sub = deepseeknova_agent::Agent::new(Arc::clone(&provider), p.max_steps)
+        let mut sub = deepseeknova_agent::Agent::new(Arc::clone(&provider), p.spec.max_steps)
             .with_workspace_root(workspace_root.to_path_buf())
             .with_security(security.clone())
             .with_system_prompt(p.system_prompt.clone());
@@ -1074,11 +1648,18 @@ fn build_delegate_engine(
         agents.insert(p.name.clone(), Arc::new(sub));
     }
 
-    Arc::new(deepseeknova_agent::DelegateEngine::new(
+    let mut engine = deepseeknova_agent::DelegateEngine::new(
         agents,
         config.delegate.max_concurrent,
         config.delegate.output_cap_tokens,
-    ))
+    );
+    for p in &presets {
+        engine.register_spec(p.name.clone(), p.spec.clone(), p.config_inputs.clone());
+    }
+    if let Some(a) = attribution {
+        engine = engine.with_attribution((*a).clone());
+    }
+    Arc::new(engine)
 }
 
 /// Build a [`SubAgentRunner`](deepseeknova_agent::SubAgentRunner) for
@@ -1115,14 +1696,21 @@ pub fn build_sub_agent_runner(
             .iter()
             .filter(|t| {
                 let n = t.schema().name;
-                n != "delegate" && p.tools.iter().any(|allow| allow == &n)
+                n != "delegate" && p.spec.tools.iter().any(|allow| allow == &n)
             })
             .cloned()
             .collect();
         runner.register(
             deepseeknova_agent::SubAgentConfig::new(p.name.clone(), p.system_prompt.clone())
+                // P2 修复：把预设的任务书（含 inputs 声明与 task 模板）接入
+                // SubAgentRunner 渲染路径。当前 config 只能产出 simple spec
+                // （无 inputs 声明 → render 返回空 → 行为与接线前完全一致）；
+                // 未来 spec 声明源就位后此路径立即生效。with_tools/with_max_steps
+                // 在其后调用，保持 spec.tools/spec.max_steps 与执行参数同步。
+                .with_task_spec(p.spec.clone())
                 .with_tools(sub_tools)
-                .with_max_steps(p.max_steps),
+                .with_max_steps(p.spec.max_steps)
+                .with_config_inputs(p.config_inputs.clone()),
         );
     }
     if let Some(threshold) = derive_compaction_threshold(config) {
@@ -1139,6 +1727,7 @@ mod tests {
     use super::*;
     use deepseeknova_config::Config;
     use deepseeknova_context::ContextEngine;
+    use deepseeknova_core::memory::skill::{SkillExtractionConfig, SkillManager, SkillState};
     use deepseeknova_security::capability::Capability;
 
     // Minimal Provider stub: never actually called by these tests (they only
@@ -1154,7 +1743,7 @@ mod tests {
         ) -> anyhow::Result<deepseeknova_core::Message> {
             Ok(deepseeknova_core::Message {
                 role: deepseeknova_core::Role::Assistant,
-                content: String::new(),
+                content: "ok".to_string(),
                 name: None,
                 tool_calls: None,
                 tool_call_id: None,
@@ -1165,6 +1754,28 @@ mod tests {
 
     fn stub_provider() -> StubProvider {
         StubProvider
+    }
+
+    /// 空内容 provider：agent 每步无输出 → MaxSteps → Paused（构造失败 run
+    /// 用；默认 `stream` 只透出 TextDelta+Done，Message 带 tool_calls 也不会
+    /// 触发工具执行，故空内容即可稳定命中 MaxSteps 路径）。
+    struct EmptyProvider;
+
+    #[async_trait::async_trait]
+    impl deepseeknova_provider::Provider for EmptyProvider {
+        async fn generate(
+            &self,
+            _validated: deepseeknova_provider::ValidatedRequest<'_>,
+        ) -> anyhow::Result<deepseeknova_core::Message> {
+            Ok(deepseeknova_core::Message {
+                role: deepseeknova_core::Role::Assistant,
+                content: String::new(),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            })
+        }
     }
 
     // --- build_sub_agent_runner (coordinator Delegate wiring) ---
@@ -1235,6 +1846,87 @@ mod tests {
         assert_eq!(derive_compaction_threshold(&c), None); // budget 关 → None
     }
 
+    /// 参数化任务书在 SubAgentRunner 路径的渲染生效证明：spec 含 inputs 声明
+    /// 与 `${{ inputs.x }}` 占位符时，prompt 协议 `input:` 行传入的值必须渲染
+    /// 进子代理消息（task 追加 User、RULES 追加 System）。无 spec/无 input 行
+    /// 时渲染为空 = 行为不变（既有 sub_agent_runner_registers_presets 测试守护）。
+    #[tokio::test]
+    async fn sub_agent_task_spec_inputs_render_into_prompt() {
+        use deepseeknova_agent::task_spec::{InputSpec, InputType, TaskSpec};
+        use deepseeknova_core::Runner;
+        use futures::StreamExt;
+        use std::sync::Mutex;
+
+        // 捕获 provider 收到的全部消息文本。不覆写 stream：默认 stream 回退
+        // 到 generate，在此处截获 messages 即可覆盖子代理每次调用的输入。
+        struct CapturingProvider {
+            seen: Arc<Mutex<Vec<String>>>,
+        }
+        #[async_trait::async_trait]
+        impl deepseeknova_provider::Provider for CapturingProvider {
+            async fn generate(
+                &self,
+                v: deepseeknova_provider::ValidatedRequest<'_>,
+            ) -> anyhow::Result<deepseeknova_core::Message> {
+                let mut texts: Vec<String> = v.messages.iter().map(|m| m.content.clone()).collect();
+                self.seen.lock().unwrap().append(&mut texts);
+                Ok(deepseeknova_core::Message {
+                    role: deepseeknova_core::Role::Assistant,
+                    content: "ok".to_string(),
+                    name: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                })
+            }
+        }
+
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let provider: Arc<dyn deepseeknova_provider::Provider> =
+            Arc::new(CapturingProvider { seen: seen.clone() });
+        let spec = TaskSpec {
+            name: "reviewer".into(),
+            task: "Review ${{ inputs.path }} carefully".into(),
+            rules: vec!["Do not modify files".into()],
+            inputs: vec![InputSpec {
+                name: "path".into(),
+                ty: InputType::String,
+                required: true,
+                default: None,
+            }],
+            tools: Vec::new(),
+            max_steps: 2,
+        };
+        let mut runner = deepseeknova_agent::SubAgentRunner::new(provider);
+        runner.register(
+            deepseeknova_agent::SubAgentConfig::new("reviewer", "you are a reviewer")
+                .with_task_spec(spec)
+                .with_max_steps(2),
+        );
+        let runner = runner.with_default("reviewer");
+
+        let mut stream = runner
+            .run_stream(deepseeknova_core::RunInput {
+                prompt: "sub_agent:reviewer\ninput:path=src/lib.rs\ngoal:review the change".into(),
+                images: Vec::new(),
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+
+        let texts = seen.lock().unwrap();
+        let all: String = texts.join("\n");
+        assert!(
+            all.contains("Review src/lib.rs carefully"),
+            "占位符必须被 input: 行渲染替换，实得: {all}"
+        );
+        assert!(
+            all.contains("## RULES\n- Do not modify files"),
+            "RULES 必须渲染进消息，实得: {all}"
+        );
+    }
+
     #[test]
     fn sub_agent_runner_builds_with_delegate_tool_override() {
         // "delegate" 恒被过滤（与 build_delegate_engine 同款谓词）；此处验证
@@ -1249,6 +1941,7 @@ mod tests {
                 system_prompt: None,
                 tools: Some(vec!["delegate".into(), "read_file".into()]),
                 max_steps: None,
+                inputs: None,
             });
         let task = std::sync::Arc::new(stub_provider());
         let _runner = build_sub_agent_runner(&config, task, None);
@@ -1352,6 +2045,123 @@ mod tests {
         let _ = engine
             .list(deepseeknova_core::memory::store::MemoryCategory::Skill)
             .unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 递归列出 skills 目录（诊断辅助）。
+    fn walk_skills_tree(dir: &std::path::Path) -> std::io::Result<()> {
+        if !dir.exists() {
+            eprintln!("[diag]   (skills dir does not exist)");
+            return Ok(());
+        }
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if entry.file_type()?.is_dir() {
+                eprintln!("[diag]   dir: {}", path.display());
+                let _ = walk_skills_tree(&path);
+            } else {
+                eprintln!("[diag]   file: {}", path.display());
+            }
+        }
+        Ok(())
+    }
+
+    /// 设计 C 集成测试：蒸馏产出 → auto/ 落盘（frontmatter 含 source: distill）
+    /// → reload 后状态保持 → recall 匹配注入。
+    #[tokio::test]
+    async fn build_agent_distill_writes_auto_skill_and_recall_injects() {
+        use futures::StreamExt;
+        let mut config = Config::default();
+        config.memory.enabled = true;
+        config.memory.llm_distill = true;
+        // stub provider 不产生工具调用 → 蒸馏门槛调低，保证 skill 分支落盘
+        config.memory.min_tool_calls = 0;
+        config.memory.min_steps = 0;
+        config.graph.enabled = false;
+        config.verify.enabled = false;
+        config.review.enabled = false;
+        let root = std::env::temp_dir().join(format!("dnv-skill-hot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        // Provider 返回可解析的蒸馏 JSON（主循环视作普通 assistant 文本，
+        // 回合结束蒸馏可解析 → 落盘 skill）。
+        struct SkillProvider;
+        #[async_trait::async_trait]
+        impl deepseeknova_provider::Provider for SkillProvider {
+            async fn generate(
+                &self,
+                _v: deepseeknova_provider::ValidatedRequest<'_>,
+            ) -> anyhow::Result<deepseeknova_core::Message> {
+                Ok(deepseeknova_core::Message {
+                    role: deepseeknova_core::Role::Assistant,
+                    content: r#"{"kind":"skill","title":"Fix Auth Flow","body":"Validate tokens first","tags":["auth"]}"#
+                        .into(),
+                    name: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                })
+            }
+        }
+        let provider: Arc<dyn deepseeknova_provider::Provider> = Arc::new(SkillProvider);
+        let agent = build_agent(&config, root.clone(), provider, 5, None, vec![]).unwrap();
+        let mut stream = agent
+            .run_stream(RunInput {
+                prompt: "hi".into(),
+                images: vec![],
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+
+        // 异步蒸馏 spawn 无法 join → 轮询等待落盘文件出现。
+        let auto_path = root.join(".deepseeknova/skills/auto/fix-auth-flow.md");
+        // 诊断：确认 run 后蒸馏目录与记忆库状态。
+        let skills_dir = root.join(".deepseeknova/skills");
+        let db_path = root.join(".deepseeknova/memory.db");
+        eprintln!(
+            "[diag] after run: skills_dir={:?} exists={} db={:?} exists={}",
+            skills_dir,
+            skills_dir.exists(),
+            db_path,
+            db_path.exists()
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !auto_path.exists() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        if !auto_path.exists() {
+            eprintln!("[diag] auto skill NOT written after 5s; skills tree:");
+            let _ = walk_skills_tree(&skills_dir);
+        }
+        assert!(auto_path.exists(), "蒸馏 skill 应落盘 auto/ 子目录");
+        let content = std::fs::read_to_string(&auto_path).unwrap();
+        assert!(
+            content.contains("source: distill"),
+            "frontmatter 必须含 source: distill"
+        );
+        assert!(content.contains("state: draft"), "初始态必须是 draft");
+
+        // reload 后状态保持 + recall 注入前置：全新实例重开同一目录
+        let m = SkillManager::new(SkillExtractionConfig {
+            skill_dir: root.join(".deepseeknova/skills"),
+            ..Default::default()
+        });
+        assert_eq!(m.skill_state("fix-auth-flow"), Some(SkillState::Draft));
+        let matched = m.find_matching_skills("auth");
+        assert!(
+            !matched.is_empty(),
+            "reload 后 recall 应能匹配到该 distill skill"
+        );
+        assert!(
+            matched
+                .iter()
+                .any(|s| s.frontmatter.name == "fix-auth-flow"),
+            "匹配结果应含 fix-auth-flow"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1779,5 +2589,1189 @@ mod tests {
             !GRAPH_RETRIEVAL_HINT.contains("检索"),
             "hint must be English, not Chinese"
         );
+    }
+
+    #[tokio::test]
+    async fn metrics_enabled_writes_one_report_per_run() {
+        use deepseeknova_core::Runner;
+        use futures::StreamExt;
+
+        let dir = std::env::temp_dir().join(format!("dsn-metrics-on-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut config = Config::default();
+        config.metrics.enabled = true;
+        config.graph.enabled = false;
+        config.memory.enabled = false;
+        config.delegate.enabled = false;
+        let ledger = Arc::new(deepseeknova_provider::cost::CostLedger::new());
+        let agent = attach_metrics_hook(
+            deepseeknova_agent::Agent::new(Arc::new(stub_provider()), 3),
+            &config,
+            MetricsSink {
+                ledger,
+                prices: Default::default(),
+                dir: dir.clone(),
+            },
+        );
+        let mut stream = agent
+            .run_stream(deepseeknova_core::RunInput {
+                prompt: "hi".into(),
+                images: Vec::new(),
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while let Some(ev) = stream.next().await {
+            ev.unwrap();
+        }
+        let names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names.len(), 2, "expected report + scorecard files");
+        let report_name = names
+            .iter()
+            .find(|n| n.ends_with(".json") && !n.ends_with(".scorecard.json"))
+            .expect("report file missing");
+        let card_name = names
+            .iter()
+            .find(|n| n.ends_with(".scorecard.json"))
+            .expect("scorecard file missing");
+        let report: deepseeknova_metrics::SessionReport =
+            serde_json::from_str(&std::fs::read_to_string(dir.join(report_name)).unwrap()).unwrap();
+        assert_eq!(
+            report.stats.outcome,
+            Some(deepseeknova_metrics::RunOutcome::Completed)
+        );
+        assert_eq!(report.stats.steps, 1);
+        // 评分卡：与报告同会话 id；无 finding/无失败/空审查 → governance 1.0。
+        let card: deepseeknova_metrics::Scorecard =
+            serde_json::from_str(&std::fs::read_to_string(dir.join(card_name)).unwrap()).unwrap();
+        assert_eq!(card.session_id, report.session_id);
+        assert_eq!(card.dimensions.governance, 1.0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn metrics_disabled_writes_nothing() {
+        use deepseeknova_core::Runner;
+        use futures::StreamExt;
+
+        let dir = std::env::temp_dir().join(format!("dsn-metrics-off-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut config = Config::default();
+        config.metrics.enabled = false;
+        config.graph.enabled = false;
+        config.memory.enabled = false;
+        config.delegate.enabled = false;
+        let ledger = Arc::new(deepseeknova_provider::cost::CostLedger::new());
+        let agent = attach_metrics_hook(
+            deepseeknova_agent::Agent::new(Arc::new(stub_provider()), 3),
+            &config,
+            MetricsSink {
+                ledger,
+                prices: Default::default(),
+                dir: dir.clone(),
+            },
+        );
+        let mut stream = agent
+            .run_stream(deepseeknova_core::RunInput {
+                prompt: "hi".into(),
+                images: Vec::new(),
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while let Some(ev) = stream.next().await {
+            ev.unwrap();
+        }
+        assert!(!dir.exists(), "metrics disabled must not create output dir");
+    }
+
+    /// 任务质量闭环 B：attach_diagnose_hook 仅失败 run 在 `<dir>/diagnose/`
+    /// 落盘 `<session_id>.json`；成功 run 不产生新文件。
+    #[tokio::test]
+    async fn diagnose_hook_writes_report_for_failed_run_only() {
+        use deepseeknova_core::Runner;
+        use futures::StreamExt;
+
+        let dir = std::env::temp_dir().join(format!("dsn-diag-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // 失败 run：空内容 → MaxSteps → Paused → 报告落盘。
+        let agent = attach_diagnose_hook(
+            deepseeknova_agent::Agent::new(Arc::new(EmptyProvider), 2),
+            dir.clone(),
+        );
+        let mut stream = agent
+            .run_stream(deepseeknova_core::RunInput {
+                prompt: "hi".into(),
+                images: Vec::new(),
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while let Some(ev) = stream.next().await {
+            ev.unwrap();
+        }
+        let diag_dir = dir.join("diagnose");
+        let mut files: Vec<String> = std::fs::read_dir(&diag_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(files.len(), 1, "expected exactly one diagnose report");
+        let report: deepseeknova_agent::diagnose::DiagnoseReport =
+            serde_json::from_str(&std::fs::read_to_string(diag_dir.join(&files[0])).unwrap())
+                .unwrap();
+        assert_eq!(report.outcome, "paused");
+        assert!(!report.phases.is_empty(), "phases must be recorded");
+        assert!(!report.failures.is_empty(), "failures must be non-empty");
+
+        // 成功 run：不新增报告文件。
+        let agent = attach_diagnose_hook(
+            deepseeknova_agent::Agent::new(Arc::new(stub_provider()), 3),
+            dir.clone(),
+        );
+        let mut stream = agent
+            .run_stream(deepseeknova_core::RunInput {
+                prompt: "hi".into(),
+                images: Vec::new(),
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while let Some(ev) = stream.next().await {
+            ev.unwrap();
+        }
+        files = std::fs::read_dir(&diag_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(files.len(), 1, "success must not add a diagnose report");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// P3：留存助手单测——报告数超上限时删最旧（按 mtime），新文件保留。
+    /// 文件名故意与创建顺序相反，若实现误按文件名排序本测试会失败。
+    #[test]
+    fn metrics_retention_helper_removes_oldest_beyond_max() {
+        let dir = std::env::temp_dir().join(format!("dsn-metrics-helper-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 评分卡最先创建（mtime 最旧）：即便按 mtime 是"最旧候选"，也因
+        // `.scorecard.json` 排除规则永不参与裁剪。大写扩展名变体同规则
+        // （F12：大小写不敏感）——同样最旧、同样永不裁剪。
+        std::fs::write(dir.join("oldest.scorecard.json"), "{}").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        std::fs::write(dir.join("OLD.SCORECARD.JSON"), "{}").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(25));
+
+        // 创建顺序 old → new，但名字排序相反（z 最旧、a 最新）。
+        for (name, i) in [
+            ("z.json", 0usize),
+            ("m.json", 1),
+            ("a.json", 2),
+            ("k.json", 3),
+        ] {
+            std::fs::write(dir.join(name), "{}").unwrap();
+            if i < 3 {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+        }
+        // 非 json 文件不受影响。
+        std::fs::write(dir.join("README.txt"), "x").unwrap();
+
+        enforce_metrics_retention(&dir, 2);
+
+        let mut names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "OLD.SCORECARD.JSON",
+                "README.txt",
+                "a.json",
+                "k.json",
+                "oldest.scorecard.json",
+            ],
+            "应删最旧两个（z/m），保留最新两个 json + 非 json 文件 + 大小写两种 scorecard（永不裁剪）"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// P3 集成：attach_metrics_hook 落盘后按 `[metrics] max_reports` 清理。
+    /// 预置 max 个旧报告（mtime 递增），本轮 run 写第 max+1 个 → 最旧的被删。
+    #[tokio::test]
+    async fn metrics_retention_trims_oldest_reports_beyond_max() {
+        use deepseeknova_core::Runner;
+        use futures::StreamExt;
+
+        let dir = std::env::temp_dir().join(format!("dsn-metrics-ret-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let max = 3usize;
+        for i in 0..max {
+            // 名字与创建顺序相反（z 最旧、a 最新），防止误按名字排序的假通过。
+            let name = ["z", "m", "a"][i];
+            std::fs::write(dir.join(format!("{name}.json")), "{}").unwrap();
+            if i + 1 < max {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+        }
+
+        let mut config = Config::default();
+        config.metrics.enabled = true;
+        config.metrics.max_reports = max;
+        config.graph.enabled = false;
+        config.memory.enabled = false;
+        config.delegate.enabled = false;
+        let ledger = Arc::new(deepseeknova_provider::cost::CostLedger::new());
+        let agent = attach_metrics_hook(
+            deepseeknova_agent::Agent::new(Arc::new(stub_provider()), 3),
+            &config,
+            MetricsSink {
+                ledger,
+                prices: Default::default(),
+                dir: dir.clone(),
+            },
+        );
+        let mut stream = agent
+            .run_stream(deepseeknova_core::RunInput {
+                prompt: "hi".into(),
+                images: Vec::new(),
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while let Some(ev) = stream.next().await {
+            ev.unwrap();
+        }
+
+        let mut names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        // 本轮 run 写入 report + scorecard 两份；scorecard 不占留存名额，
+        // 参与裁剪的普通报告 = z/m/a + 本轮 report 共 4 份 → max=3 只删最旧
+        // 一份（z），保留 m/a + 本轮 report + 本轮 scorecard。
+        assert_eq!(
+            names.len(),
+            max + 1,
+            "清理后应保留 max 个普通报告 + 1 个 scorecard（scorecard 永不裁剪）"
+        );
+        assert!(
+            !names.contains(&"z.json".to_string()),
+            "最旧报告 z 必须被删"
+        );
+        assert!(
+            names.contains(&"m.json".to_string()),
+            "scorecard 不占留存名额，次旧报告 m 必须保留"
+        );
+        assert!(names.contains(&"a.json".to_string()));
+        // 新文件（本轮 run 写入）：report + scorecard 两份。
+        let newest: Vec<String> = names
+            .iter()
+            .filter(|n| !["z.json", "m.json", "a.json"].contains(&n.as_str()))
+            .cloned()
+            .collect();
+        assert_eq!(newest.len(), 2, "应保留本轮 report + scorecard 两份");
+        assert!(
+            newest.iter().any(|n| n.ends_with(".scorecard.json")),
+            "本轮 scorecard 必须存活：{newest:?}"
+        );
+        let report_name = newest
+            .iter()
+            .find(|n| n.ends_with(".json") && !n.ends_with(".scorecard.json"))
+            .expect("new report missing");
+        let report: deepseeknova_metrics::SessionReport =
+            serde_json::from_str(&std::fs::read_to_string(dir.join(report_name)).unwrap()).unwrap();
+        assert_eq!(
+            report.stats.outcome,
+            Some(deepseeknova_metrics::RunOutcome::Completed)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn build_agent_with_attribution_enabled_constructs() {
+        // [attribution] enabled=true 时主 agent 与 delegate 引擎都装配归因
+        // （字段私有，行为由 agent crate 测试覆盖；此处验证装配路径不 panic）。
+        let mut config = Config::default();
+        config.graph.enabled = false;
+        config.memory.enabled = false;
+        config.delegate.enabled = true;
+        config.attribution.enabled = true;
+        config.attribution.max_retries = 2;
+        config.attribution.max_attributions = 5;
+        config.attribution.degrade_map =
+            std::collections::HashMap::from([("researcher".to_string(), "explorer".to_string())]);
+        let provider = std::sync::Arc::new(stub_provider());
+        let agent = build_agent(&config, std::env::temp_dir(), provider, 5, None, vec![]).unwrap();
+        let _ = agent;
+    }
+
+    #[test]
+    fn build_agent_with_attribution_disabled_matches_legacy() {
+        // 默认（enabled=false）：不调用 with_attribution，行为零变化；装配路径不 panic。
+        let mut config = Config::default();
+        config.graph.enabled = false;
+        config.memory.enabled = false;
+        config.delegate.enabled = true;
+        let provider = std::sync::Arc::new(stub_provider());
+        let agent = build_agent(&config, std::env::temp_dir(), provider, 5, None, vec![]).unwrap();
+        let _ = agent;
+    }
+
+    /// 预置一个 distill draft skill（命中 recall 查询 "auth..."）。
+    fn seed_skill(skills_dir: &std::path::Path, title: &str, tags: Vec<&str>) {
+        let mut sm = SkillManager::new(SkillExtractionConfig {
+            skill_dir: skills_dir.to_path_buf(),
+            ..Default::default()
+        });
+        sm.create_distilled_skill(
+            title,
+            "Validate tokens first",
+            tags.into_iter().map(str::to_string).collect(),
+            Some("seed"),
+        )
+        .unwrap();
+    }
+
+    /// P2 回归：超 budget 场景下只对「实际注入 prompt」的 skill 计 use。
+    /// 匹配多项但字符预算只容得下第一项（verified 排 draft 前，顺序确定），
+    /// 断言注入项 use_count +1、未注入项 use_count 保持 0（draft 不因
+    /// 「匹配即计 use」被污染晋升）。
+    #[tokio::test]
+    async fn skill_recall_counts_only_injected_skills() {
+        use deepseeknova_core::Runner;
+        use futures::StreamExt;
+
+        let root = std::env::temp_dir().join(format!("dnv-skill-budget-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let skills_dir = root.join(".deepseeknova/skills");
+        {
+            let mut sm = SkillManager::new(SkillExtractionConfig {
+                skill_dir: skills_dir.clone(),
+                ..Default::default()
+            });
+            // Alpha：先经 3 次 record_use 升为 verified（rank 0，注入时排最前）。
+            sm.create_distilled_skill(
+                "Auth Alpha",
+                "fix auth",
+                vec!["auth".to_string()],
+                Some("seed"),
+            )
+            .unwrap();
+            for _ in 0..deepseeknova_core::memory::skill::VERIFY_USE_THRESHOLD {
+                sm.record_use("auth-alpha", true, Some("seed")).unwrap();
+            }
+            // Beta：draft（rank 2），描述超长 → 预算不足时排 Alpha 后 break。
+            sm.create_distilled_skill(
+                "Auth Beta",
+                &"very long description ".repeat(6),
+                vec!["auth".to_string()],
+                Some("seed"),
+            )
+            .unwrap();
+        }
+
+        let mut config = Config::default();
+        config.memory.enabled = true;
+        // 预算收紧：cap_chars = 10*4 = 40 字符。header（20）+ Alpha 行（27）
+        // 累计 47 > 40 → Alpha 注入后 Beta 的 check 必 break → 未注入。
+        // （check 语义：注入前比较「已累计 lines.len() > budget」。）
+        config.memory.recall_inject_tokens = 10;
+        config.memory.recall_top_k = 3;
+        config.graph.enabled = false;
+        config.review.enabled = false;
+        config.verify.enabled = false;
+        config.delegate.enabled = false;
+        config.memory.llm_distill = false;
+        let provider: Arc<dyn deepseeknova_provider::Provider> = Arc::new(stub_provider());
+        let agent = build_agent(&config, root.clone(), provider, 5, None, vec![]).unwrap();
+        let mut stream = agent
+            .run_stream(deepseeknova_core::RunInput {
+                prompt: "auth".into(),
+                images: vec![],
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+
+        let m = SkillManager::new(SkillExtractionConfig {
+            skill_dir: skills_dir.clone(),
+            ..Default::default()
+        });
+        let find = |name: &str| -> usize {
+            m.list_skills()
+                .iter()
+                .find(|s| s.frontmatter.name == name)
+                .map(|s| s.frontmatter.use_count)
+                .unwrap_or(0) as usize
+        };
+        assert_eq!(
+            find("auth-alpha"),
+            deepseeknova_core::memory::skill::VERIFY_USE_THRESHOLD as usize + 1,
+            "注入项（Alpha）应计 1 次 use（3 次预置 + 1 次注入）"
+        );
+        assert_eq!(find("auth-beta"), 0, "未注入项（Beta）use_count 不得增长");
+        // Beta 未达阈值 → 仍为 draft（未被污染晋升）。
+        assert_eq!(m.skill_state("auth-beta"), Some(SkillState::Draft));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 设计 C 三态闭环集成测试：recall 命中 → record_use → 跨 build 会话推进
+    /// → draft → verified → active；会话边界（run 结束）prune 超额 draft。
+    #[tokio::test]
+    async fn skill_use_loop_closes_via_recall_record_use_and_prune() {
+        use deepseeknova_core::Runner;
+        use futures::StreamExt;
+
+        let root = std::env::temp_dir().join(format!("dnv-skill-loop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let skills_dir = root.join(".deepseeknova/skills");
+        seed_skill(&skills_dir, "Fix Auth Flow", vec!["auth"]);
+
+        let mut config = Config::default();
+        config.memory.enabled = true;
+        config.graph.enabled = false;
+        config.review.enabled = false;
+        config.verify.enabled = false;
+        config.delegate.enabled = false;
+        config.memory.llm_distill = false; // 避免异步蒸馏干扰，聚焦 recall 闭环
+        let provider: Arc<dyn deepseeknova_provider::Provider> = Arc::new(stub_provider());
+
+        // 三次独立 build_agent = 三个会话边界；每次 recall 命中即 record_use。
+        // 注意 find_matching_skills 的 strong 匹配是「skill name/tag 包含 query」，
+        // 故 query 用短词 "auth"（tag "auth" 命中）。
+        for _ in 0..3 {
+            let agent =
+                build_agent(&config, root.clone(), provider.clone(), 5, None, vec![]).unwrap();
+            let mut stream = agent
+                .run_stream(deepseeknova_core::RunInput {
+                    prompt: "auth".into(),
+                    images: vec![],
+                    model_override: None,
+                })
+                .await
+                .unwrap();
+            while stream.next().await.is_some() {}
+        }
+
+        // use_count=3 → verified；sessions_seen=3（每 build 新会话 id）→ active
+        let m = SkillManager::new(SkillExtractionConfig {
+            skill_dir: skills_dir.clone(),
+            ..Default::default()
+        });
+        assert_eq!(
+            m.skill_state("fix-auth-flow"),
+            Some(SkillState::Active),
+            "三态推进必须到达 active"
+        );
+        let content = std::fs::read_to_string(skills_dir.join("auto/fix-auth-flow.md")).unwrap();
+        assert!(content.contains("use_count: 3"), "use_count 必须落盘为 3");
+        assert!(content.contains("state: active"), "state 必须落盘为 active");
+
+        // 清理阶段：再灌 22 个不匹配的 draft，跑一轮 → 会话边界 prune 到 20 个
+        // draft（active 豁免），auto/ 下共 21 个文件。
+        {
+            let mut sm = SkillManager::new(SkillExtractionConfig {
+                skill_dir: skills_dir.clone(),
+                ..Default::default()
+            });
+            for i in 0..22 {
+                sm.create_distilled_skill(
+                    &format!("Noise Skill {i:02}"),
+                    "noise",
+                    vec![],
+                    Some("seed"),
+                )
+                .unwrap();
+            }
+        }
+        let agent = build_agent(&config, root.clone(), provider, 5, None, vec![]).unwrap();
+        let mut stream = agent
+            .run_stream(deepseeknova_core::RunInput {
+                prompt: "unrelated topic".into(),
+                images: vec![],
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+
+        let auto_dir = skills_dir.join("auto");
+        let count = std::fs::read_dir(&auto_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .count();
+        assert_eq!(
+            count, 21,
+            "会话边界应清理超额 draft：22 draft + 1 active(豁免) → 20 + 1 = 21，实得 {count}"
+        );
+        // active skill 未被清理
+        assert!(auto_dir.join("fix-auth-flow.md").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 配置装配：`[memory] max_auto_draft_skills` 覆盖默认 20，且用户手写与
+    /// verified 始终豁免清理。
+    #[tokio::test]
+    async fn skill_prune_honors_configured_max_auto_draft_skills() {
+        use deepseeknova_core::Runner;
+        use futures::StreamExt;
+
+        let root = std::env::temp_dir().join(format!("dnv-skill-prune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let skills_dir = root.join(".deepseeknova/skills");
+        {
+            let mut sm = SkillManager::new(SkillExtractionConfig {
+                skill_dir: skills_dir.clone(),
+                ..Default::default()
+            });
+            // 5 个 draft
+            for i in 0..5 {
+                sm.create_distilled_skill(&format!("Draft {i}"), "d", vec![], Some("seed"))
+                    .unwrap();
+            }
+            // 1 个 verified（豁免）
+            sm.create_distilled_skill("Keep Verified", "v", vec![], Some("seed"))
+                .unwrap();
+            for _ in 0..deepseeknova_core::memory::skill::VERIFY_USE_THRESHOLD {
+                sm.record_use("keep-verified", true, Some("seed")).unwrap();
+            }
+            // 1 个用户手写（豁免）
+            sm.create_skill(deepseeknova_core::memory::skill::Skill {
+                frontmatter: deepseeknova_core::memory::skill::SkillFrontmatter {
+                    name: "user-skill".into(),
+                    version: "1.0.0".into(),
+                    description: "user authored".into(),
+                    triggers: vec![],
+                    tags: vec![],
+                    created_at: "2026-01-01T00:00:00Z".into(),
+                    updated_at: "2026-01-01T00:00:00Z".into(),
+                    use_count: 0,
+                    success_count: 0,
+                    source_session: None,
+                },
+                body: "b".into(),
+            })
+            .unwrap();
+        }
+
+        let mut config = Config::default();
+        config.memory.enabled = true;
+        config.memory.max_auto_draft_skills = 2; // 覆盖默认 20
+        config.graph.enabled = false;
+        config.review.enabled = false;
+        config.verify.enabled = false;
+        config.delegate.enabled = false;
+        config.memory.llm_distill = false;
+        let provider: Arc<dyn deepseeknova_provider::Provider> = Arc::new(stub_provider());
+        let agent = build_agent(&config, root.clone(), provider, 5, None, vec![]).unwrap();
+        let mut stream = agent
+            .run_stream(deepseeknova_core::RunInput {
+                prompt: "no match here".into(),
+                images: vec![],
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+
+        // auto/ 下：2 draft + 1 verified = 3；用户手写文件仍在根目录
+        let auto_dir = skills_dir.join("auto");
+        let count = std::fs::read_dir(&auto_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .count();
+        assert_eq!(
+            count, 3,
+            "应只保留 2 个 draft + 1 个 verified，实得 {count}"
+        );
+        assert!(
+            skills_dir.join("user-skill.md").exists(),
+            "用户手写 skill 必须豁免"
+        );
+        let m = SkillManager::new(SkillExtractionConfig {
+            skill_dir: skills_dir.clone(),
+            ..Default::default()
+        });
+        assert_eq!(m.skill_state("keep-verified"), Some(SkillState::Verified));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // -----------------------------------------------------------------------
+    // 协议增强能力包（阶段4）：失败模式回灌 / ingest 聚类 / fitness 记录
+    // -----------------------------------------------------------------------
+
+    /// 协议增强 §6.2：`[protocol] enabled=true` 且 store 有模式时，回灌注入
+    /// 首轮 system prompt；≤3 条；enabled=false 时零注入。
+    #[tokio::test]
+    async fn failure_pattern_injection_injects_up_to_three() {
+        use deepseeknova_core::Runner;
+        use futures::StreamExt;
+
+        let root = std::env::temp_dir().join(format!("dsn-protocol-inj-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".deepseeknova/security")).unwrap();
+
+        // 构造 store：4 条模式（count 4/3/2/1）。
+        let mut store = deepseeknova_security::failure_pattern::FailurePatternStore::load(
+            &root.join(".deepseeknova/security/failure-patterns.json"),
+        )
+        .unwrap();
+        for (i, err) in ["err-a", "err-b", "err-c", "err-d"].iter().enumerate() {
+            for _ in 0..(4 - i) {
+                store.ingest("execute", Some("bash"), err, None, 1000 + i as u64);
+            }
+        }
+        store.save().unwrap();
+
+        // enabled=true：注入（捕获首轮 system prompt）。
+        struct PromptCapture {
+            system: Arc<std::sync::Mutex<Option<String>>>,
+        }
+        #[async_trait::async_trait]
+        impl deepseeknova_provider::Provider for PromptCapture {
+            async fn generate(
+                &self,
+                validated: deepseeknova_provider::ValidatedRequest<'_>,
+            ) -> anyhow::Result<deepseeknova_core::Message> {
+                *self.system.lock().unwrap() = validated
+                    .messages
+                    .iter()
+                    .find(|m| m.role == deepseeknova_core::Role::System)
+                    .map(|m| m.content.clone());
+                Ok(deepseeknova_core::Message {
+                    role: deepseeknova_core::Role::Assistant,
+                    content: "ok".to_string(),
+                    name: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                })
+            }
+        }
+        let mut config = Config::default();
+        config.protocol.enabled = true;
+        config.graph.enabled = false;
+        config.memory.enabled = false;
+        config.delegate.enabled = false;
+        let capture = Arc::new(std::sync::Mutex::new(None));
+        let provider: Arc<dyn deepseeknova_provider::Provider> = Arc::new(PromptCapture {
+            system: capture.clone(),
+        });
+        let agent = attach_failure_pattern_injection(
+            deepseeknova_agent::Agent::new(provider, 2),
+            &config,
+            &root,
+        );
+        let mut stream = agent
+            .run_stream(deepseeknova_core::RunInput {
+                prompt: "hi".into(),
+                images: Vec::new(),
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        let system = capture.lock().unwrap().clone().expect("system prompt set");
+        assert!(system.contains("## 本会话已知失败模式（自动注入）"));
+        // 3 条模式（top-3 by count），第 4 条不注入。
+        assert_eq!(system.matches("- [失败模式]").count(), 3);
+        assert!(system.contains("err-a") && system.contains("err-b") && system.contains("err-c"));
+        assert!(
+            !system.contains("err-d"),
+            "4th pattern must not be injected"
+        );
+
+        // enabled=false：零注入。
+        let mut config_off = Config::default();
+        config_off.protocol.enabled = false;
+        config_off.graph.enabled = false;
+        config_off.memory.enabled = false;
+        config_off.delegate.enabled = false;
+        let capture_off = Arc::new(std::sync::Mutex::new(None));
+        let provider_off: Arc<dyn deepseeknova_provider::Provider> = Arc::new(PromptCapture {
+            system: capture_off.clone(),
+        });
+        let agent = attach_failure_pattern_injection(
+            deepseeknova_agent::Agent::new(provider_off, 2),
+            &config_off,
+            &root,
+        );
+        let mut stream = agent
+            .run_stream(deepseeknova_core::RunInput {
+                prompt: "hi".into(),
+                images: Vec::new(),
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        let system_off = capture_off.lock().unwrap().clone().unwrap_or_default();
+        assert!(
+            !system_off.contains("本会话已知失败模式"),
+            "protocol disabled must not inject"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 协议增强 §6.1：失败 run 结束后，diagnose hook 把 failures 聚类进
+    /// failure-patterns.json（phase/tool/error/lesson 映射）；成功 run 不产生
+    /// 模式文件（无 diagnose 报告）。enabled=false 时不写模式文件。
+    #[tokio::test]
+    async fn failure_pattern_ingest_clusters_from_diagnose() {
+        use deepseeknova_core::Runner;
+        use futures::StreamExt;
+
+        let root = std::env::temp_dir().join(format!("dsn-protocol-ingest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let metrics_dir = root.join(".deepseeknova/metrics");
+        let patterns_path = root.join(".deepseeknova/security/failure-patterns.json");
+
+        let mut config = Config::default();
+        config.protocol.enabled = true;
+
+        // 失败 run（EmptyProvider → MaxSteps → Paused → diagnose 报告）。
+        let agent = attach_diagnose_hook_with_ingest(
+            deepseeknova_agent::Agent::new(Arc::new(EmptyProvider), 2),
+            metrics_dir.clone(),
+            Some(&config),
+            &root,
+        );
+        let mut stream = agent
+            .run_stream(deepseeknova_core::RunInput {
+                prompt: "hi".into(),
+                images: Vec::new(),
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        // 模式文件已生成且非空（failures 非空 → 至少 1 簇）。
+        let store =
+            deepseeknova_security::failure_pattern::FailurePatternStore::load(&patterns_path)
+                .unwrap();
+        assert!(
+            !store.suggest(3).is_empty(),
+            "failed run must cluster at least one pattern"
+        );
+
+        // enabled=false：不写模式文件。
+        let root2 =
+            std::env::temp_dir().join(format!("dsn-protocol-ingest-off-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root2);
+        std::fs::create_dir_all(&root2).unwrap();
+        let metrics_dir2 = root2.join(".deepseeknova/metrics");
+        let patterns_path2 = root2.join(".deepseeknova/security/failure-patterns.json");
+        let mut config_off = Config::default();
+        config_off.protocol.enabled = false;
+        let agent = attach_diagnose_hook_with_ingest(
+            deepseeknova_agent::Agent::new(Arc::new(EmptyProvider), 2),
+            metrics_dir2.clone(),
+            Some(&config_off),
+            &root2,
+        );
+        let mut stream = agent
+            .run_stream(deepseeknova_core::RunInput {
+                prompt: "hi".into(),
+                images: Vec::new(),
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        assert!(
+            !patterns_path2.exists(),
+            "protocol disabled must not create failure-patterns.json"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&root2);
+    }
+
+    /// 协议增强 §6.2：聚类入口 ingest 前对 failures 的 error/lesson 过
+    /// `redact_secrets`——构造含密钥原文（AWS AKIA 键 + PEM 私钥头）的
+    /// failures 直连 [`ingest_failure_patterns`]，断言落盘文件不含密钥原文、
+    /// 只含 `[REDACTED]` 标记（接线侧最后防线；security 侧 ingest 入口另有
+    /// 双保险）。
+    #[test]
+    fn failure_pattern_ingest_redacts_secrets_before_write() {
+        use deepseeknova_agent::diagnose::FailureDetail;
+
+        let root =
+            std::env::temp_dir().join(format!("dsn-protocol-ingest-redact-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let patterns_path = root.join(".deepseeknova/security/failure-patterns.json");
+
+        let aws_key = "AKIAIOSFODNN7EXAMPLE";
+        let pem = "-----BEGIN RSA PRIVATE KEY-----";
+        let failures = vec![
+            FailureDetail {
+                phase: "tool".into(),
+                tool: Some("bash".into()),
+                command: Some("aws s3 ls".into()),
+                error: format!("Error: credentials {aws_key} rejected"),
+                root_cause: Some(format!("env dump leaked {aws_key}")),
+                fix_plan: None,
+            },
+            FailureDetail {
+                phase: "plan".into(),
+                tool: None,
+                command: None,
+                error: format!("config load failed: {pem}\nMIIEpAIBAAK..."),
+                root_cause: None,
+                fix_plan: Some(format!("rotate key material behind {pem}")),
+            },
+        ];
+        let mut store =
+            deepseeknova_security::failure_pattern::FailurePatternStore::load(&patterns_path)
+                .unwrap();
+        ingest_failure_patterns(&mut store, &failures, 1);
+        store.save().unwrap();
+
+        let text = std::fs::read_to_string(&patterns_path).unwrap();
+        assert!(
+            !text.contains(aws_key),
+            "raw AWS key must not be persisted into failure-patterns.json"
+        );
+        assert!(
+            !text.contains(pem),
+            "raw PEM private key header must not be persisted"
+        );
+        assert!(
+            text.contains("[REDACTED]"),
+            "redacted marker must be persisted for secret-bearing failures"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 协议增强 §5：会话结束时按 outcome 记 fitness record_result 并落盘
+    /// `<root>/.deepseeknova/skills/fitness.json`；会话技能名为空时跳过。
+    #[tokio::test]
+    async fn fitness_record_result_persists_on_session_end() {
+        use deepseeknova_core::Runner;
+        use futures::StreamExt;
+
+        let root = std::env::temp_dir().join(format!("dsn-protocol-fit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let fitness_path = root.join(".deepseeknova/skills/fitness.json");
+        let metrics_dir = root.join(".deepseeknova/metrics");
+
+        let mut config = Config::default();
+        config.protocol.enabled = true;
+        config.metrics.enabled = true;
+        config.graph.enabled = false;
+        config.memory.enabled = false;
+        config.delegate.enabled = false;
+
+        let ledger = Arc::new(deepseeknova_provider::cost::CostLedger::new());
+        let session_skills = Arc::new(std::sync::Mutex::new(vec!["fix-auth".to_string()]));
+        let agent = attach_metrics_hook_with_fitness(
+            deepseeknova_agent::Agent::new(Arc::new(stub_provider()), 3),
+            &config,
+            MetricsSink {
+                ledger,
+                prices: Default::default(),
+                dir: metrics_dir,
+            },
+            &root,
+            session_skills,
+        );
+        let mut stream = agent
+            .run_stream(deepseeknova_core::RunInput {
+                prompt: "hi".into(),
+                images: Vec::new(),
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        // 成功 run：fitness.json 落盘且 success=1。
+        let store = deepseeknova_skills::fitness::FitnessStore::load(&fitness_path).unwrap();
+        let snap = store.snapshot();
+        assert_eq!(snap.len(), 1, "one skill recorded");
+        assert_eq!(snap[0].skill, "fix-auth");
+        assert_eq!(snap[0].successes, 1);
+        assert_eq!(snap[0].failures, 0);
+
+        // 失败 run（EmptyProvider → Paused）：failures=1（同一技能）。
+        let metrics_dir2 = root.join(".deepseeknova/metrics2");
+        let session_skills2 = Arc::new(std::sync::Mutex::new(vec!["fix-auth".to_string()]));
+        let agent2 = attach_metrics_hook_with_fitness(
+            deepseeknova_agent::Agent::new(Arc::new(EmptyProvider), 2),
+            &config,
+            MetricsSink {
+                ledger: Arc::new(deepseeknova_provider::cost::CostLedger::new()),
+                prices: Default::default(),
+                dir: metrics_dir2,
+            },
+            &root,
+            session_skills2,
+        );
+        let mut stream = agent2
+            .run_stream(deepseeknova_core::RunInput {
+                prompt: "hi".into(),
+                images: Vec::new(),
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        let store = deepseeknova_skills::fitness::FitnessStore::load(&fitness_path).unwrap();
+        let snap = store.snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].successes, 1);
+        assert_eq!(snap[0].failures, 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 协议增强 §5：空技能集（record_use 未接线，CLI 现状）时 hook 幂等
+    /// 执行不 panic、fitness 文件不被写（save 不产生文件）；同一 hook 连续
+    /// 两个会话可重复运行（warn-once 路径，第二次会话静默）。warn 噪音
+    /// 本身不易断言（需挂 tracing subscriber），此测试守住行为面。
+    #[tokio::test]
+    async fn fitness_empty_skills_skips_silently_and_writes_no_file() {
+        use deepseeknova_core::Runner;
+        use futures::StreamExt;
+
+        let root =
+            std::env::temp_dir().join(format!("dsn-protocol-fit-empty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let fitness_path = root.join(".deepseeknova/skills/fitness.json");
+        let metrics_dir = root.join(".deepseeknova/metrics");
+
+        let mut config = Config::default();
+        config.protocol.enabled = true;
+        config.metrics.enabled = true;
+        config.graph.enabled = false;
+        config.memory.enabled = false;
+        config.delegate.enabled = false;
+
+        let agent = attach_metrics_hook_with_fitness(
+            deepseeknova_agent::Agent::new(Arc::new(stub_provider()), 3),
+            &config,
+            MetricsSink {
+                ledger: Arc::new(deepseeknova_provider::cost::CostLedger::new()),
+                prices: Default::default(),
+                dir: metrics_dir,
+            },
+            &root,
+            Arc::new(std::sync::Mutex::new(Vec::new())),
+        );
+        // 同一 hook 连续两个会话（warn-once 路径）：不 panic、不写文件。
+        for _ in 0..2 {
+            let mut stream = agent
+                .run_stream(deepseeknova_core::RunInput {
+                    prompt: "hi".into(),
+                    images: Vec::new(),
+                    model_override: None,
+                })
+                .await
+                .unwrap();
+            while stream.next().await.is_some() {}
+        }
+        assert!(
+            !fitness_path.exists(),
+            "empty session skills must not produce fitness.json"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 协议增强 §3.4：`[protocol] enabled=false`（默认）时 attach_protocol_gates
+    /// 原样返回——run 事件流中不出现任何 PhaseTransition（protocol_active =
+    /// gates 非空，零成本路径）。
+    #[tokio::test]
+    async fn protocol_gates_disabled_leaves_agent_unchanged() {
+        use deepseeknova_core::Runner;
+        use futures::StreamExt;
+
+        let mut config = Config::default();
+        config.protocol.enabled = false;
+        config.protocol.adversarial_review = false;
+        let root = std::path::Path::new("");
+        let agent = attach_protocol_gates(
+            deepseeknova_agent::Agent::new(Arc::new(EmptyProvider), 2),
+            &config,
+            root,
+        );
+        let mut stream = agent
+            .run_stream(deepseeknova_core::RunInput {
+                prompt: "hi".into(),
+                images: Vec::new(),
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while let Some(ev) = stream.next().await {
+            let ev = ev.unwrap();
+            assert!(
+                !matches!(
+                    ev,
+                    deepseeknova_core::runner::RunEvent::PhaseTransition { .. }
+                ),
+                "protocol disabled must not emit phase events"
+            );
+        }
+    }
+
+    /// 协议增强 §3.4：enabled=true 时门注入（run 事件流出现 PhaseTransition
+    /// 事件）；gates 配置解析（hard/soft/off + 非法值 warn 跳过）。
+    #[tokio::test]
+    async fn protocol_gates_enabled_injects_gates_and_parses_levels() {
+        use deepseeknova_core::Runner;
+        use futures::StreamExt;
+        use std::str::FromStr;
+
+        // GateLevel 解析：合法三值 + 非法值报错（运行时 warn 跳过该项）。
+        assert!(matches!(
+            deepseeknova_agent::phase_runner::GateLevel::from_str("hard").unwrap(),
+            deepseeknova_agent::phase_runner::GateLevel::Hard
+        ));
+        assert!(matches!(
+            deepseeknova_agent::phase_runner::GateLevel::from_str("soft").unwrap(),
+            deepseeknova_agent::phase_runner::GateLevel::Soft
+        ));
+        assert!(matches!(
+            deepseeknova_agent::phase_runner::GateLevel::from_str("off").unwrap(),
+            deepseeknova_agent::phase_runner::GateLevel::Off
+        ));
+        assert!(deepseeknova_agent::phase_runner::GateLevel::from_str("bogus").is_err());
+
+        // builtin_phase_gates：缺省力度 + 覆盖 → 4 门。
+        let mut levels: std::collections::HashMap<
+            String,
+            deepseeknova_agent::phase_runner::GateLevel,
+        > = std::collections::HashMap::new();
+        levels.insert(
+            "verify-evidence".to_string(),
+            deepseeknova_agent::phase_runner::GateLevel::from_str("hard").unwrap(),
+        );
+        let gates = deepseeknova_agent::phase_runner::builtin_phase_gates(&levels);
+        assert_eq!(gates.len(), 4, "four builtin gates");
+
+        // enabled=true（含一个非法 gate 值）→ run 产 PhaseTransition 事件。
+        let mut config = Config::default();
+        config.protocol.enabled = true;
+        config
+            .protocol
+            .gates
+            .insert("verify-evidence".to_string(), "hard".to_string());
+        config
+            .protocol
+            .gates
+            .insert("drift-detection".to_string(), "off".to_string());
+        config
+            .protocol
+            .gates
+            .insert("unknown-gate".to_string(), "bogus".to_string());
+        let agent = attach_protocol_gates(
+            deepseeknova_agent::Agent::new(Arc::new(EmptyProvider), 2),
+            &config,
+            std::path::Path::new(""),
+        );
+        let mut stream = agent
+            .run_stream(deepseeknova_core::RunInput {
+                prompt: "hi".into(),
+                images: Vec::new(),
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        let mut transitions = 0usize;
+        while let Some(ev) = stream.next().await {
+            if matches!(
+                ev.unwrap(),
+                deepseeknova_core::runner::RunEvent::PhaseTransition { .. }
+            ) {
+                transitions += 1;
+            }
+        }
+        assert!(
+            transitions >= 1,
+            "protocol enabled must emit at least one phase transition, got {transitions}"
+        );
+    }
+
+    /// 协议增强 §7：metrics hook 接线 fill_protocol——scorecard 落盘文件
+    /// 含 protocol/composite 维（enabled=true 时 run 产阶段迁移 → 接线生效）。
+    /// 数值语义（protocol_dim/composite_index 公式）由 metrics crate 单测
+    /// 覆盖，此处验证 runtime 侧「compute 后覆写」接线存在。
+    #[tokio::test]
+    async fn scorecard_wires_protocol_dimension() {
+        use deepseeknova_core::Runner;
+        use futures::StreamExt;
+
+        let root = std::env::temp_dir().join(format!("dsn-protocol-card-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let metrics_dir = root.join(".deepseeknova/metrics");
+
+        let mut config = Config::default();
+        config.protocol.enabled = true;
+        config.metrics.enabled = true;
+        let ledger = Arc::new(deepseeknova_provider::cost::CostLedger::new());
+        let agent = attach_metrics_hook_with_fitness(
+            deepseeknova_agent::Agent::new(Arc::new(EmptyProvider), 2),
+            &config,
+            MetricsSink {
+                ledger,
+                prices: Default::default(),
+                dir: metrics_dir.clone(),
+            },
+            &root,
+            Arc::new(std::sync::Mutex::new(Vec::new())),
+        );
+        let mut stream = agent
+            .run_stream(deepseeknova_core::RunInput {
+                prompt: "hi".into(),
+                images: Vec::new(),
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+
+        // 读 scorecard 落盘文件：protocol/composite 字段存在且值合法。
+        let files: Vec<String> = std::fs::read_dir(&metrics_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".scorecard.json"))
+            .collect();
+        assert_eq!(files.len(), 1, "one scorecard written");
+        let card: deepseeknova_metrics::Scorecard =
+            serde_json::from_str(&std::fs::read_to_string(metrics_dir.join(&files[0])).unwrap())
+                .unwrap();
+        assert!(
+            (0.0..=1.0).contains(&card.dimensions.protocol),
+            "protocol dim out of range: {}",
+            card.dimensions.protocol
+        );
+        assert!(
+            (0.0..=1.0).contains(&card.dimensions.composite),
+            "composite dim out of range: {}",
+            card.dimensions.composite
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

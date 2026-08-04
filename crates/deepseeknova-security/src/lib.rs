@@ -6,6 +6,8 @@
 pub mod audit;
 pub mod capability;
 pub mod context;
+pub mod failure_pattern;
 pub mod limits;
 pub mod path;
 pub mod policy;
+pub mod quality;

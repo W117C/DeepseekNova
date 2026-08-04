@@ -10,6 +10,7 @@
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -76,6 +77,10 @@ pub struct Config {
     #[serde(default)]
     pub telemetry: TelemetryConfig,
 
+    /// 会话效能度量（SessionMetrics）落盘开关（默认 true）。
+    #[serde(default)]
+    pub metrics: MetricsConfig,
+
     /// Role-based model pointers (main/task/compact/quick).
     #[serde(default)]
     pub model_pointers: ModelPointersConfig,
@@ -92,6 +97,10 @@ pub struct Config {
     #[serde(default)]
     pub review: ReviewConfig,
 
+    /// Failure attribution (default off; opt-in, behavior-neutral when off).
+    #[serde(default)]
+    pub attribution: AttributionConfig,
+
     /// Deterministic post-write verification (default off).
     #[serde(default)]
     pub verify: VerifyConfig,
@@ -99,6 +108,16 @@ pub struct Config {
     /// 写前快照检查点（A1）。
     #[serde(default)]
     pub checkpoint: CheckpointConfig,
+
+    /// 任务质量闭环（A 阶段：ToolHook 链 + 写后策略评估）。
+    #[serde(default)]
+    pub quality: QualityConfig,
+
+    /// 协议增强能力包（`[protocol]` 段）：阶段门控、对抗审查、失败模式回灌/
+    /// 聚类、技能 fitness 记录的统一开关。`enabled` 默认 false——关闭时
+    /// Agent 行为与现状完全一致（回归防线，见协议增强设计 §3.4/§10）。
+    #[serde(default)]
+    pub protocol: ProtocolConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -407,6 +426,23 @@ pub struct MemoryConfig {
     /// 蒸馏输入的任务描述上限（字符，默认 3000）。
     #[serde(default = "default_llm_distill_max_chars")]
     pub llm_distill_max_chars: usize,
+
+    /// 自动 skill（distill draft）→ verified 的 use_count 阈值（默认 3，
+    /// 对齐 skill.rs `VERIFY_USE_THRESHOLD`）。draft 仅高匹配度试用注入，
+    /// `record_use` 达标后转正进入常规 recall 注入。
+    #[serde(default = "default_verify_use_threshold")]
+    pub verify_use_threshold: u32,
+
+    /// verified → active 的跨会话出现次数阈值（默认 3，对齐
+    /// skill.rs `ACTIVE_SESSION_THRESHOLD`）。active 长期保留、清理豁免。
+    #[serde(default = "default_active_session_threshold")]
+    pub active_session_threshold: u32,
+
+    /// 自动保留的 distill draft 数量上限（默认 20，对齐 skill.rs
+    /// `MAX_AUTO_DRAFT_SKILLS`）。超出部分在会话边界按 LRU 清理
+    /// （仅限 distill+draft；用户手写/verified/active 豁免）。
+    #[serde(default = "default_max_auto_draft_skills")]
+    pub max_auto_draft_skills: usize,
 }
 
 fn default_memory_db_path() -> String {
@@ -445,6 +481,15 @@ fn default_max_distill_session() -> u32 {
 fn default_llm_distill_max_chars() -> usize {
     3000
 }
+fn default_verify_use_threshold() -> u32 {
+    3
+}
+fn default_active_session_threshold() -> u32 {
+    3
+}
+fn default_max_auto_draft_skills() -> usize {
+    20
+}
 
 impl Default for MemoryConfig {
     fn default() -> Self {
@@ -469,6 +514,9 @@ impl Default for MemoryConfig {
             llm_distill: false,
             llm_distill_model: None,
             llm_distill_max_chars: default_llm_distill_max_chars(),
+            verify_use_threshold: default_verify_use_threshold(),
+            active_session_threshold: default_active_session_threshold(),
+            max_auto_draft_skills: default_max_auto_draft_skills(),
         }
     }
 }
@@ -502,6 +550,17 @@ pub struct DelegateAgentOverride {
     pub tools: Option<Vec<String>>,
     #[serde(default)]
     pub max_steps: Option<usize>,
+    /// 参数化任务书默认值（`${{ inputs.<name> }}` 占位符），调用方传值优先。
+    /// 仅对已声明 inputs 的预设生效，simple 预设的多余键被忽略。
+    #[serde(default)]
+    pub inputs: Option<Vec<InputOverride>>,
+}
+
+/// 单个参数化输入覆盖（名称 + 默认值）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InputOverride {
+    pub name: String,
+    pub value: String,
 }
 
 fn default_delegate_concurrency() -> usize {
@@ -852,6 +911,38 @@ pub struct TelemetryConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Metrics（会话效能度量）
+// ---------------------------------------------------------------------------
+
+/// SessionMetrics 配置：run 结束时把执行面 + 成本面报告写入
+/// `.deepseeknova/metrics/`（默认开启，用户可关）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricsConfig {
+    /// 是否在 run 结束时生成会话报告并落盘（默认 true）。
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// `.deepseeknova/metrics/` 目录保留的报告数上限（默认 100）。落盘后若
+    /// 超出上限，删除最旧的报告文件（按文件修改时间，旧者先删），防止
+    /// chat 每轮落盘导致的长期累积。
+    #[serde(default = "default_max_reports")]
+    pub max_reports: usize,
+}
+
+fn default_max_reports() -> usize {
+    100
+}
+
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_reports: default_max_reports(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Session（长任务会话持久化）
 // ---------------------------------------------------------------------------
 
@@ -959,6 +1050,51 @@ impl Default for ReviewConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Attribution（失败归因重试）
+// ---------------------------------------------------------------------------
+
+/// 失败归因配置（默认 OFF——新行为不改变既有运行语义，显式开启后生效）：
+/// 子代理失败 / verify/review 达上限 Paused 前，先由 LLM 归因
+/// （Retry/Degrade/Abort），再决定重试方式。归因受硬预算约束防烧 token。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttributionConfig {
+    /// 是否启用失败归因（默认 false，行为零变化）。
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Retry/Degrade 路径的重试次数上限（默认 1，共 2 次尝试）。
+    #[serde(default = "default_attribution_retries")]
+    pub max_retries: usize,
+
+    /// 单次 run 内归因调用次数上限（默认 3，防烧 token）。
+    #[serde(default = "default_attribution_calls")]
+    pub max_attributions: usize,
+
+    /// Degrade 降级映射（agent 名 → 目标预设名）；未映射时按 Retry 处理。
+    #[serde(default)]
+    pub degrade_map: std::collections::HashMap<String, String>,
+}
+
+fn default_attribution_retries() -> usize {
+    1
+}
+
+fn default_attribution_calls() -> usize {
+    3
+}
+
+impl Default for AttributionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_retries: default_attribution_retries(),
+            max_attributions: default_attribution_calls(),
+            degrade_map: std::collections::HashMap::new(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Verify（完成前确定性验证，P1）
 // ---------------------------------------------------------------------------
 
@@ -1043,6 +1179,52 @@ impl Default for CheckpointConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Quality（任务质量闭环 A 阶段：ToolHook 链 + 写后策略评估）
+// ---------------------------------------------------------------------------
+
+/// 任务质量闭环配置。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct QualityConfig {
+    /// 质量钩子总开关（默认 true；关闭时 agent 行为零变化）。
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for QualityConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Protocol
+// ---------------------------------------------------------------------------
+
+/// 协议增强能力包配置（`[protocol]` 段，协议增强设计 §3.4）。
+///
+/// 本阶段只解析、不消费门控相关字段：`attach_protocol_gates` 与对抗审查
+/// 接线依赖 agent 阶段3（E）的 `with_protocol_gates` / `with_adversarial_review`，
+/// 由父级在 E 落地后补接线（TODO 见 runtime）。回灌/聚类/fitness 已按
+/// `enabled` 挂载（协议增强设计 §5/§6）。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProtocolConfig {
+    /// 协议能力包总开关（默认 false；关闭时 agent 行为与现状完全一致）。
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// 门控力度表：`gates.<name> = "hard" | "soft" | "off"`（如
+    /// `plan-before-execute` / `verify-evidence` / `distill-on-complex` /
+    /// `drift-detection`）；缺省条目用内置默认表（见 agent 阶段3）。
+    /// 字符串而非枚举，便于向前兼容新增力度与未知门名（未知门 warn 忽略）。
+    #[serde(default)]
+    pub gates: HashMap<String, String>,
+
+    /// 会话结束对抗审查子代理委派开关（默认 false；触发条件见设计 §4.2）。
+    #[serde(default)]
+    pub adversarial_review: bool,
+}
+
+// ---------------------------------------------------------------------------
 // Loading & merging
 // ---------------------------------------------------------------------------
 
@@ -1111,11 +1293,14 @@ impl Config {
         self.security.merge(other.security);
         self.telemetry.merge(other.telemetry);
         self.model_pointers.merge(other.model_pointers);
+        self.memory.merge(other.memory);
         self.session = other.session;
         self.budget = other.budget;
         self.review = other.review;
         self.verify = other.verify;
         self.checkpoint = other.checkpoint;
+        self.metrics.merge(other.metrics);
+        self.attribution = other.attribution;
     }
 
     /// Apply DEEPSEEKNOVA_* environment variable overrides.
@@ -1198,6 +1383,85 @@ impl ToolsConfig {
     }
 }
 
+impl MemoryConfig {
+    /// 深度合并 `[memory]`：仅当 `other` 字段非默认值时才覆盖，避免项目层
+    /// 的缺省值清掉用户层显式配置。bool 开关按「显式 true/false 均覆盖」
+    /// 处理（默认值即 false 的开关，项目层显式 false 与默认无法区分，保持
+    /// 与 agent 同款 wholesale 语义）。
+    fn merge(&mut self, other: MemoryConfig) {
+        let d = MemoryConfig::default();
+        if other.enabled != d.enabled {
+            self.enabled = other.enabled;
+        }
+        if other.db_path != d.db_path {
+            self.db_path = other.db_path;
+        }
+        if other.auto_learn != d.auto_learn {
+            self.auto_learn = other.auto_learn;
+        }
+        if other.redact_secrets != d.redact_secrets {
+            self.redact_secrets = other.redact_secrets;
+        }
+        if other.embedder != d.embedder {
+            self.embedder = other.embedder;
+        }
+        if !other.embed_model.is_empty() {
+            self.embed_model = other.embed_model;
+        }
+        if other.recall_inject_tokens != d.recall_inject_tokens {
+            self.recall_inject_tokens = other.recall_inject_tokens;
+        }
+        if other.recall_top_k != d.recall_top_k {
+            self.recall_top_k = other.recall_top_k;
+        }
+        if other.mid_run_recall != d.mid_run_recall {
+            self.mid_run_recall = other.mid_run_recall;
+        }
+        if other.mid_run_recall_top_k != d.mid_run_recall_top_k {
+            self.mid_run_recall_top_k = other.mid_run_recall_top_k;
+        }
+        if other.mid_run_graph_top_k != d.mid_run_graph_top_k {
+            self.mid_run_graph_top_k = other.mid_run_graph_top_k;
+        }
+        if other.mid_run_inject_tokens != d.mid_run_inject_tokens {
+            self.mid_run_inject_tokens = other.mid_run_inject_tokens;
+        }
+        if other.mid_run_require_tool_turn != d.mid_run_require_tool_turn {
+            self.mid_run_require_tool_turn = other.mid_run_require_tool_turn;
+        }
+        if other.min_tool_calls != d.min_tool_calls {
+            self.min_tool_calls = other.min_tool_calls;
+        }
+        if other.min_steps != d.min_steps {
+            self.min_steps = other.min_steps;
+        }
+        if other.max_distillations_per_day != d.max_distillations_per_day {
+            self.max_distillations_per_day = other.max_distillations_per_day;
+        }
+        if other.max_distillations_per_session != d.max_distillations_per_session {
+            self.max_distillations_per_session = other.max_distillations_per_session;
+        }
+        if other.llm_distill != d.llm_distill {
+            self.llm_distill = other.llm_distill;
+        }
+        if other.llm_distill_model.is_some() {
+            self.llm_distill_model = other.llm_distill_model;
+        }
+        if other.llm_distill_max_chars != d.llm_distill_max_chars {
+            self.llm_distill_max_chars = other.llm_distill_max_chars;
+        }
+        if other.verify_use_threshold != d.verify_use_threshold {
+            self.verify_use_threshold = other.verify_use_threshold;
+        }
+        if other.active_session_threshold != d.active_session_threshold {
+            self.active_session_threshold = other.active_session_threshold;
+        }
+        if other.max_auto_draft_skills != d.max_auto_draft_skills {
+            self.max_auto_draft_skills = other.max_auto_draft_skills;
+        }
+    }
+}
+
 impl AgentConfig {
     fn merge(&mut self, other: AgentConfig) {
         if other.system_prompt.is_some() {
@@ -1234,6 +1498,21 @@ impl PermissionsConfig {
         self.default_mode = other.default_mode;
         if !other.rules.is_empty() {
             self.rules = other.rules;
+        }
+    }
+}
+
+impl MetricsConfig {
+    /// 深度合并 `[metrics]`：仅当 `other` 字段非默认值时才覆盖，避免项目层
+    /// 的缺省值清掉用户层显式配置（与 MemoryConfig 同款模式；`max_reports`
+    /// 必须走同一路径，否则项目层只写 `enabled=false` 会重置用户层上限）。
+    fn merge(&mut self, other: MetricsConfig) {
+        let d = MetricsConfig::default();
+        if other.enabled != d.enabled {
+            self.enabled = other.enabled;
+        }
+        if other.max_reports != d.max_reports {
+            self.max_reports = other.max_reports;
         }
     }
 }
@@ -1329,6 +1608,53 @@ mod tests {
         assert_eq!(cfg.agent.max_steps, 10);
         assert_eq!(cfg.permissions.default_mode, PermissionMode::Ask);
         assert!(!cfg.sandbox.enabled);
+        assert!(cfg.metrics.enabled);
+        // 协议增强：默认关闭（行为零变化回归防线）。
+        assert!(!cfg.protocol.enabled);
+        assert!(cfg.protocol.gates.is_empty());
+        assert!(!cfg.protocol.adversarial_review);
+    }
+
+    #[test]
+    fn protocol_config_defaults_when_absent() {
+        // 旧配置无 [protocol] 段 → serde default 全缺省，兼容不破坏。
+        let cfg: Config = toml::from_str(
+            r#"
+            [metrics]
+            enabled = false
+            "#,
+        )
+        .unwrap();
+        assert!(!cfg.protocol.enabled);
+        assert!(cfg.protocol.gates.is_empty());
+        assert!(!cfg.protocol.adversarial_review);
+        assert!(!cfg.metrics.enabled, "unrelated section still parses");
+    }
+
+    #[test]
+    fn protocol_config_explicit_parse() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [protocol]
+            enabled = true
+            adversarial_review = true
+
+            [protocol.gates]
+            verify-evidence = "hard"
+            plan-before-execute = "soft"
+            drift-detection = "off"
+            "#,
+        )
+        .unwrap();
+        assert!(cfg.protocol.enabled);
+        assert!(cfg.protocol.adversarial_review);
+        assert_eq!(cfg.protocol.gates.get("verify-evidence").unwrap(), "hard");
+        assert_eq!(
+            cfg.protocol.gates.get("plan-before-execute").unwrap(),
+            "soft"
+        );
+        assert_eq!(cfg.protocol.gates.get("drift-detection").unwrap(), "off");
+        assert_eq!(cfg.protocol.gates.len(), 3);
     }
 
     #[test]
@@ -1476,6 +1802,99 @@ mod tests {
     }
 
     #[test]
+    fn memory_skill_thresholds_default_and_parse() {
+        let d = Config::default();
+        assert_eq!(d.memory.verify_use_threshold, 3);
+        assert_eq!(d.memory.active_session_threshold, 3);
+        assert_eq!(d.memory.max_auto_draft_skills, 20);
+
+        let toml = "[memory]\nverify_use_threshold = 5\nactive_session_threshold = 7\nmax_auto_draft_skills = 12\n";
+        let c: Config = toml::from_str(toml).unwrap();
+        assert_eq!(c.memory.verify_use_threshold, 5);
+        assert_eq!(c.memory.active_session_threshold, 7);
+        assert_eq!(c.memory.max_auto_draft_skills, 12);
+        // 未覆盖字段仍取默认
+        assert_eq!(c.memory.min_tool_calls, 5);
+        assert_eq!(c.memory.recall_top_k, 3);
+    }
+
+    #[test]
+    fn memory_merge_preserves_user_layer_for_unset_fields() {
+        let mut base = Config::default();
+        base.memory.verify_use_threshold = 9;
+        base.memory.recall_top_k = 7;
+
+        // 项目层只显式设置 min_steps → 不覆盖用户层的阈值与 recall_top_k
+        let project = Config {
+            memory: MemoryConfig {
+                min_steps: 8,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        base.merge(project);
+        assert_eq!(
+            base.memory.verify_use_threshold, 9,
+            "未设置字段必须保留用户层值"
+        );
+        assert_eq!(base.memory.recall_top_k, 7);
+        assert_eq!(base.memory.min_steps, 8);
+
+        // 项目层显式设置阈值 → 覆盖
+        let project2 = Config {
+            memory: MemoryConfig {
+                verify_use_threshold: 11,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        base.merge(project2);
+        assert_eq!(base.memory.verify_use_threshold, 11);
+    }
+
+    #[test]
+    fn attribution_config_defaults_off_and_parses() {
+        let d = Config::default();
+        assert!(
+            !d.attribution.enabled,
+            "attribution 必须默认关闭（行为零变化）"
+        );
+        assert_eq!(d.attribution.max_retries, 1);
+        assert_eq!(d.attribution.max_attributions, 3);
+        assert!(d.attribution.degrade_map.is_empty());
+
+        let toml = "[attribution]\nenabled = true\nmax_retries = 2\nmax_attributions = 5\n\n[attribution.degrade_map]\nresearcher = \"explorer\"\n";
+        let c: Config = toml::from_str(toml).unwrap();
+        assert!(c.attribution.enabled);
+        assert_eq!(c.attribution.max_retries, 2);
+        assert_eq!(c.attribution.max_attributions, 5);
+        assert_eq!(
+            c.attribution
+                .degrade_map
+                .get("researcher")
+                .map(String::as_str),
+            Some("explorer")
+        );
+    }
+
+    #[test]
+    fn attribution_merge_propagates_through_layers() {
+        let mut base = Config::default();
+        let user = Config {
+            attribution: AttributionConfig {
+                enabled: true,
+                max_attributions: 7,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        base.merge(user);
+        assert!(base.attribution.enabled);
+        assert_eq!(base.attribution.max_attributions, 7);
+        assert_eq!(base.attribution.max_retries, 1, "未覆盖字段保持默认");
+    }
+
+    #[test]
     fn delegate_config_defaults() {
         let c = Config::default();
         assert!(c.delegate.enabled);
@@ -1486,7 +1905,7 @@ mod tests {
 
     #[test]
     fn delegate_config_parses_overrides() {
-        let toml = "[delegate]\nenabled = false\nmax_concurrent = 3\n\n[[delegate.agents]]\nname = \"coder\"\nmax_steps = 25\n";
+        let toml = "[delegate]\nenabled = false\nmax_concurrent = 3\n\n[[delegate.agents]]\nname = \"coder\"\nmax_steps = 25\n\n[[delegate.agents.inputs]]\nname = \"path\"\nvalue = \"src/lib.rs\"\n";
         let c: Config = toml::from_str(toml).unwrap();
         assert!(!c.delegate.enabled);
         assert_eq!(c.delegate.max_concurrent, 3);
@@ -1494,6 +1913,52 @@ mod tests {
         assert_eq!(c.delegate.agents.len(), 1);
         assert_eq!(c.delegate.agents[0].name, "coder");
         assert_eq!(c.delegate.agents[0].max_steps, Some(25));
+        let inputs = c.delegate.agents[0].inputs.as_ref().unwrap();
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].name, "path");
+        assert_eq!(inputs[0].value, "src/lib.rs");
+    }
+
+    #[test]
+    fn metrics_config_parses_and_defaults() {
+        let c = Config::default();
+        assert!(c.metrics.enabled);
+        assert_eq!(c.metrics.max_reports, 100, "留存上限默认 100");
+        let c: Config = toml::from_str("[metrics]\nenabled = false\n").unwrap();
+        assert!(!c.metrics.enabled);
+        assert_eq!(c.metrics.max_reports, 100, "未覆盖字段取默认");
+        let c: Config = toml::from_str("[metrics]\nmax_reports = 7\n").unwrap();
+        assert_eq!(c.metrics.max_reports, 7);
+        assert!(c.metrics.enabled, "enabled 未设置仍为默认 true");
+    }
+
+    #[test]
+    fn metrics_merge_preserves_user_layer_for_unset_fields() {
+        let mut base = Config::default();
+        base.metrics.max_reports = 50;
+
+        // 项目层只显式设置 enabled=false → 不覆盖用户层 max_reports
+        let project = Config {
+            metrics: MetricsConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        base.merge(project);
+        assert!(!base.metrics.enabled, "enabled 显式 false 必须覆盖");
+        assert_eq!(base.metrics.max_reports, 50, "未设置字段必须保留用户层值");
+
+        // 项目层显式设置 max_reports → 覆盖
+        let project2 = Config {
+            metrics: MetricsConfig {
+                enabled: false,
+                max_reports: 10,
+            },
+            ..Default::default()
+        };
+        base.merge(project2);
+        assert_eq!(base.metrics.max_reports, 10);
     }
 
     #[test]

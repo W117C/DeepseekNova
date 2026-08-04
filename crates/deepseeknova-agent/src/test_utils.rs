@@ -22,6 +22,8 @@ pub struct MockProvider {
     tools: HashMap<String, Arc<dyn deepseeknova_core::Tool>>,
     /// Total number of `generate` + `stream` invocations.
     calls: AtomicUsize,
+    /// Last user-message text seen by `stream` (for prompt-content assertions).
+    last_prompt: Mutex<Option<String>>,
 }
 
 impl MockProvider {
@@ -32,6 +34,7 @@ impl MockProvider {
             responses: Mutex::new(vec![chunks]),
             tools: HashMap::new(),
             calls: AtomicUsize::new(0),
+            last_prompt: Mutex::new(None),
         }
     }
 
@@ -42,6 +45,7 @@ impl MockProvider {
             responses: Mutex::new(responses),
             tools: HashMap::new(),
             calls: AtomicUsize::new(0),
+            last_prompt: Mutex::new(None),
         }
     }
 
@@ -55,6 +59,7 @@ impl MockProvider {
             ]]),
             tools: HashMap::new(),
             calls: AtomicUsize::new(0),
+            last_prompt: Mutex::new(None),
         }
     }
 
@@ -85,6 +90,7 @@ impl MockProvider {
             ]),
             tools: HashMap::new(),
             calls: AtomicUsize::new(0),
+            last_prompt: Mutex::new(None),
         }
     }
 
@@ -99,6 +105,11 @@ impl MockProvider {
     /// Total number of `generate` + `stream` calls made against this mock.
     pub fn call_count(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
+    }
+
+    /// Last user-message text observed by `stream` (None if never streamed).
+    pub fn last_prompt(&self) -> Option<String> {
+        self.last_prompt.lock().unwrap().clone()
     }
 }
 
@@ -118,9 +129,18 @@ impl Provider for MockProvider {
 
     async fn stream(
         &self,
-        _validated: ValidatedRequest<'_>,
+        validated: ValidatedRequest<'_>,
     ) -> anyhow::Result<deepseeknova_core::chunk::ChunkStream> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        // Record the last user message for prompt-content assertions.
+        if let Some(last) = validated
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == Role::User)
+        {
+            *self.last_prompt.lock().unwrap() = Some(last.content.clone());
+        }
         let mut lock = self.responses.lock().unwrap();
         let chunks = if lock.len() > 1 {
             lock.remove(0)

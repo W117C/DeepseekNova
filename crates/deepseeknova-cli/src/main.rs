@@ -192,6 +192,7 @@ async fn main() -> anyhow::Result<()> {
                     &config,
                     model_args.max_steps,
                     mcp_tools,
+                    &model_router,
                 )?;
 
                 let input = RunInput {
@@ -269,6 +270,7 @@ async fn main() -> anyhow::Result<()> {
                     &config,
                     5,
                     mcp_tools,
+                    &model_router,
                 )?;
                 for f in &mut findings {
                     f.verdict = deepseeknova_scanner::investigate::investigate(f, &agent).await;
@@ -354,9 +356,16 @@ async fn main() -> anyhow::Result<()> {
                     roles.task = Some(task_provider);
                     roles.compact = Some(compact_provider_for(&factory_router, &cfg)?);
                     roles.review = review_provider_for(&factory_router, &cfg)?;
-                    let agent =
-                        build_agent(provider, roles, model.as_deref(), &cfg, 0, mcp.clone())?
-                            .with_conversation_history(hist.clone());
+                    let agent = build_agent(
+                        provider,
+                        roles,
+                        model.as_deref(),
+                        &cfg,
+                        0,
+                        mcp.clone(),
+                        &factory_router,
+                    )?
+                    .with_conversation_history(hist.clone());
                     Ok(Arc::new(agent))
                 };
                 let initial = factory(Some(baseline_effort), model.clone())?;
@@ -426,6 +435,7 @@ async fn main() -> anyhow::Result<()> {
                             cfg,
                             0, // no max_steps limit in chat mode
                             mcp_tools.clone(),
+                            &router,
                         )?
                         .with_conversation_history(Arc::clone(&history_clone));
                         Ok(Box::new(agent))
@@ -466,8 +476,16 @@ async fn main() -> anyhow::Result<()> {
             roles.task = Some(task_provider);
             roles.compact = Some(compact_provider_for(&model_router, &config)?);
             roles.review = review_provider_for(&model_router, &config)?;
-            let agent = build_agent(Arc::clone(&provider), roles, None, &config, 0, mcp_tools)?
-                .with_approval_responder(responder);
+            let agent = build_agent(
+                Arc::clone(&provider),
+                roles,
+                None,
+                &config,
+                0,
+                mcp_tools,
+                &model_router,
+            )?
+            .with_approval_responder(responder);
             let runner: Arc<dyn Runner> = Arc::new(agent);
 
             let server = deepseeknova_serve::Server::with_pending(runner, pending);
@@ -686,6 +704,7 @@ async fn main() -> anyhow::Result<()> {
                             cfg,
                             0,
                             mcp_tools.clone(),
+                            &router,
                         )?
                         .with_conversation_history(Arc::clone(&history_clone));
                         Ok(Box::new(agent))
@@ -809,20 +828,67 @@ fn build_agent(
     config: &deepseeknova_config::Config,
     max_steps: usize,
     extra_tools: Vec<Arc<dyn deepseeknova_core::Tool>>,
+    router: &deepseeknova_provider::router::ModelRouter,
 ) -> anyhow::Result<deepseeknova_agent::Agent> {
     let workspace_root = std::env::current_dir().unwrap_or_default();
+    let metrics_dir = workspace_root.join(".deepseeknova").join("metrics");
     // Delegate to the shared runtime builder (security + sandbox + permission
     // gate wiring lives in one place). CLI is non-interactive, so no approval
     // responder is attached — the gate falls back to Allow on `Ask`.
-    deepseeknova_runtime::build_agent_with_role_providers(
+    let agent = deepseeknova_runtime::build_agent_with_role_providers(
         config,
-        workspace_root,
+        workspace_root.clone(),
         provider,
         roles,
         max_steps,
         None,
         extra_tools,
-    )
+    )?;
+    // 任务质量闭环装配：metrics（报告 + 评分卡落盘）、quality（ToolHook 链 +
+    // 写后策略评估，`[quality] enabled` 开关）、diagnose（失败诊断报告，与
+    // metrics 同目录 `diagnose/` 子目录）。诊断 dir 与 metrics dir 同源。
+    // 协议增强（`[protocol] enabled`）：metrics 侧顺带 fitness 记录（会话技能
+    // 名集合暂为空——recall 注入侧 record_use 尚未把技能名回传，fitness 侧
+    // 记录会 warn 跳过，见 runtime TODO）；diagnose 侧顺带失败模式聚类；
+    // 会话启动前注入历史失败模式（≤3 条）到首轮 system prompt。
+    let agent = deepseeknova_runtime::attach_metrics_hook_with_fitness(
+        agent,
+        config,
+        deepseeknova_runtime::MetricsSink {
+            ledger: router.ledger(),
+            prices: router.price_table(),
+            dir: metrics_dir.clone(),
+        },
+        &workspace_root,
+        // 会话技能名集合：技能激活（record_use）接线后由注入侧回填；当前
+        // 为空 → fitness 记录跳过并 warn（不阻断 run）。
+        Arc::new(std::sync::Mutex::new(Vec::new())),
+    );
+    let agent = deepseeknova_runtime::attach_quality_hook(agent, config);
+    let agent = deepseeknova_runtime::attach_diagnose_hook_with_ingest(
+        agent,
+        metrics_dir,
+        Some(config),
+        &workspace_root,
+    );
+    let agent =
+        deepseeknova_runtime::attach_failure_pattern_injection(agent, config, &workspace_root);
+    // 协议增强：协议门控装配（`[protocol] enabled` 时挂内置四门 + 对抗审查
+    // 开关）。置于回灌之后（回灌只改 prompt，门控挂 agent 配置，顺序无耦合）。
+    let agent = deepseeknova_runtime::attach_protocol_gates(agent, config, &workspace_root);
+    // F11：会话标注注入。Paused 事件的 session_id 与诊断报告文件名同源
+    // （agent 侧 session_label）；未标注时诊断文件名是 `diag-<uuid>` 且
+    // Paused session_id=None，serve 端点拿不到 id。label 对齐 store 的
+    // `chat-<ts>` 风格且仅含 `[A-Za-z0-9_-]`，可直接用作 serve
+    // `/v1/sessions/{id}/...` 路径 id（与 serve 的 valid_session_id 白名单一致）。
+    Ok(agent.with_session_label(cli_session_label()))
+}
+
+/// 生成 CLI run 的会话标注（`session-<ts>`）。与 store 侧 `chat-<ts>` 风格
+/// 对齐；仅含 ASCII 字母数字与 `_`/`-`（serve 端点 id 白名单），用户可直接
+/// 用它调 `/v1/sessions/{id}/scorecard` 等端点。
+fn cli_session_label() -> String {
+    format!("session-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S"))
 }
 
 /// Directory where chat sessions are persisted, driven by `[session]` config:
@@ -1200,6 +1266,20 @@ mod tests {
         c.model_pointers.compact = None;
         c.agent.compact_model.clear();
         assert_eq!(compact_override_model(&c), None);
+    }
+
+    #[test]
+    fn cli_session_label_is_serve_safe() {
+        // F11：会话标注必须是 serve 端点 id 白名单可接受的形态
+        // （`[A-Za-z0-9_-]`，否则 Paused 透出的 id 无法用于端点）。
+        let label = cli_session_label();
+        assert!(label.starts_with("session-"), "unexpected label: {label}");
+        assert!(
+            label
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+            "label must only contain [A-Za-z0-9_-] (serve path whitelist): {label}"
+        );
     }
 
     // ── resolve_scan_root（fail-closed 逃逸检查） ───────────────────────
