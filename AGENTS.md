@@ -50,12 +50,13 @@ DeepseekNova 是一个 Rust 编写的 AI Agent 框架，包含 22 个 crate。�
 ```
 crates/
 ├── deepseeknova-cli/          # CLI 入口
-├── deepseeknova-agent/        # Agent 运行时（协调器、子代理、记忆）
+├── deepseeknova-agent/        # Agent 运行时（协调器、子代理、记忆、质量钩子、失败诊断）
 ├── deepseeknova-core/         # 核心类型（事件、图谱、身份、规划器、前缀树、注册表、执行器、运行器、工具、插件）
-├── deepseeknova-config/       # 配置管理
+├── deepseeknova-config/       # 配置管理（[protocol] 段：enabled/gates/adversarial_review）
 ├── deepseeknova-provider/     # LLM 提供商（Anthropic、OpenAI）
 ├── deepseeknova-tools/        # 工具集（fs、grep、shell、memory、web_fetch、todo）
 ├── deepseeknova-mcp/          # MCP 协议客户端
+├── deepseeknova-metrics/      # 会话效能度量与评分卡（SessionMetrics / Scorecard，含 protocol/composite 协议维）
 ├── deepseeknova-context/      # 上下文管理
 ├── deepseeknova-runtime/      # 运行时编排
 ├── deepseeknova-permission/   # 权限系统
@@ -63,12 +64,12 @@ crates/
 ├── deepseeknova-graph/        # 代码图检索引擎（tree-sitter + SQLite FTS5 + PageRank + repo map）
 ├── deepseeknova-checkpoint/   # 检查点
 ├── deepseeknova-store/        # 存储层
-├── deepseeknova-security/     # 安全审计、路径检查、策略
+├── deepseeknova-security/     # 安全审计、路径检查、策略、质量规则（QualityPolicy）、失败模式库（failure_pattern）
 ├── deepseeknova-scanner/      # 安全扫描（deepsec 式静态规则 + AI 调查 + 报表）
 ├── deepseeknova-sandbox/      # 沙箱（bubblewrap、seatbelt）
-├── deepseeknova-skills/       # 技能加载
+├── deepseeknova-skills/       # 技能加载（含 fitness 生命周期：使用/成功记录、进化建议、deprecated 过滤）
 ├── deepseeknova-telemetry/    # 遥测
-├── deepseeknova-serve/        # HTTP 服务
+├── deepseeknova-serve/        # HTTP 服务（含会话诊断/评分卡端点）
 ├── deepseeknova-tui/          # TUI
 ```
 
@@ -82,10 +83,10 @@ make check          # CI 等价检查（fmt + clippy + test + doc）
 make test           # cargo test --all
 make fmt            # 格式化代码
 make clippy-fix     # clippy 自动修复
-make audit          # 安全审计（经工作区 .cargo/config.toml 的 audit 别名实际执行 cargo deny --all-features check，需预装 cargo-deny）
+make audit          # 安全审计（先检查 cargo-deny，再执行 cargo deny --all-features check）
 ```
 
-> **云端安全审查不可用时的回退验收路径**：交付/推送前若云端安全审查（如 L3 深度安全审查）因外部资源不可用（如积分耗尽）暂时无法执行，先以项目内既有手段留存验收证据：运行 `make check` 与 `make audit`，记录两者结果与待补审查项，待服务恢复后补跑云端审查，不因此新增脚本、修改 CI 或引入新工具。注意 `make audit` 配方中的 `cargo audit` 会命中工作区 `.cargo/config.toml` 的 `audit` 别名，实际执行 `cargo deny --all-features check`（与 CI `.github/workflows/security.yml` 的 cargo deny 任务对齐，本地需预装 cargo-deny，配方中的 `cargo install cargo-audit` 回退分支会被该别名遮蔽、不生效）；CI 侧另有带 RUSTSEC ignore 清单的 cargo-audit 任务，推送后由 security.yml 自动覆盖，ignore 理由见 `deny.toml` 的 `[advisories].ignore`。
+> **云端安全审查不可用时的回退验收路径**：交付/推送前若云端安全审查（如 L3 深度安全审查）因外部资源不可用（如积分耗尽）暂时无法执行，先以项目内既有手段留存验收证据：运行 `make check` 与 `make audit`，记录两者结果与待补审查项，待服务恢复后补跑云端审查，不因此新增脚本、修改 CI 或引入新工具。注意 `make audit` 配方会先检查 `cargo-deny` 是否安装，然后直接执行 `cargo deny --all-features check`（与 CI `.github/workflows/security.yml` 的 cargo deny 任务对齐；本地缺 cargo-deny 时目标会打印安装提示并退出）。CI 侧另有带 RUSTSEC ignore 清单的 cargo-audit 任务，推送后由 security.yml 自动覆盖，ignore 理由见 `deny.toml` 的 `[advisories].ignore`。
 
 > **核心变更影响分析（core-change-watch）**：本项目的核心代码边界定义在 `.better-harness/core-code`，该边界**仅在 `--languages auto` 下生效**。工具默认语言集不含 Rust，缺省运行会在边界匹配前过滤掉 `.rs` 文件，导致核心命中与 `reviewRecommended` 判定失真。因此任何核心变更审查必须使用 `core-change-watch evidence-pack --languages auto`；默认（无 `--languages` 参数）运行的结果不得作为核心审查依据。
 
@@ -105,7 +106,7 @@ make audit          # 安全审计（经工作区 .cargo/config.toml 的 audit �
 
 最小调试入口：
 
-- **CLI**：日志经 `tracing` 输出到终端（固定 INFO 级，见 `crates/deepseeknova-cli/src/main.rs`，不读 `RUST_LOG`；启用 `[telemetry] enabled=true` 时改装 OTLP 管线、日志经 OTLP 导出，终端不再打印 INFO 文本，属刻意权衡）；运行时派生数据在工作区 `.deepseeknova/`（`graph.db` 代码图索引、`memory.db` 记忆库）；配置层级为 `~/.deepseeknova/config.toml`（用户）+ `./deepseeknova.toml`（项目）；release 产物在 `target/release/deepseeknova-cli`。聚焦测试：`cargo test -p <crate> <测试名过滤词>`
+- **CLI**：日志经 `tracing` 输出到终端（固定 INFO 级，见 `crates/deepseeknova-cli/src/main.rs`，不读 `RUST_LOG`；启用 `[telemetry] enabled=true` 时改装 OTLP 管线、日志经 OTLP 导出，终端不再打印 INFO 文本，属刻意权衡）；运行时派生数据在工作区 `.deepseeknova/`（`graph.db` 代码图索引、`memory.db` 记忆库）；配置层级为 `~/.deepseeknova/config.toml`（用户）+ `./deepseeknova.toml`（项目）；release 产物在 `target/release/deepseeknova-cli`。任务质量闭环（ToolHook 链 + 写后策略评估 + 诊断/评分卡）由 `[quality] enabled`（默认 true）控制，见 GUIDE.md；评分卡与诊断报告落盘于工作区 `.deepseeknova/metrics/`。聚焦测试：`cargo test -p <crate> <测试名过滤词>`
 
 ---
 
@@ -127,6 +128,21 @@ make audit          # 安全审计（经工作区 .cargo/config.toml 的 audit �
 - [错误描述]：<具体表现>
 - [如何避免]：<可操作预防措施>
 ```
+
+已归档条目（2026-08-05 收尾）：
+
+- [worker 并发遗漏全局格式化]：多 worker 并行改代码后，未跑 `cargo fmt` 全文件的改动会导致 make check 的 fmt 阶段失败
+- [如何避免]：父级收尾验收前统一 `cargo fmt`；worker 约定"不自查格式则父级兜底"
+- [测试注入掩盖真实回归]：B 阶段为修复 A 引入的 review 短路回归，给测试注入 BlockingFindingHook 掩盖症状而非修正门条件
+- [如何避免]：发现回归先修生产代码语义；测试注入桩只能作为验证手段，不能替代修复；修复后必须留"无桩场景"回归测试
+- [决策前未核实依赖来源]：lru 升级任务假设可单独升级，实际是 ratatui 0.29 的传递依赖（^0.12 约束），升级被约束卡住
+- [如何避免]：依赖升级前先 `cargo tree -i <crate>` 核实来源与约束
+- [文档注释契约与实现漂移]：core trait 注释写 fail-open，实现改为 fail-closed，靠审查才发现契约已变更
+- [如何避免]：契约变更必须同步注释；跨 crate 契约除 core-change-watch 意识外需显式人工核对
+- [并行 worker 半成品阻塞全局]：worker 中断时可能留下编译错误的半成品文件，阻塞其他 worker 验证
+- [如何避免]：worker 提交前必须自验编译；父级发现其他 worker 阻塞时立即协调
+- [批量替换误伤上下文]：replace_all 模式替换会误伤同形不同义的调用点（如参数 vs 解引用）
+- [如何避免]：批量替换前先核对每个命中点的上下文
 
 ---
 

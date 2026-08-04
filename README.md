@@ -4,7 +4,7 @@
 
 ### DeepSeek 原生 AI 编程 Agent 框架
 
-**21 个 Rust crate · 三端覆盖（CLI / TUI / HTTP API）**
+**22 个 Rust crate · 三端覆盖（CLI / TUI / HTTP API）**
 
 Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型量身打造的原生编程助手。
 
@@ -23,8 +23,8 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 [![Release](https://github.com/W117C/DeepseekNova/actions/workflows/release.yml/badge.svg)](https://github.com/W117C/DeepseekNova/actions/workflows/release.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 [![Rust](https://img.shields.io/badge/rust-stable%201.97-orange.svg)](https://www.rust-lang.org)
-[![Crates](https://img.shields.io/badge/crates-21-green.svg)](#-21-个-crate)
-[![Tests](https://img.shields.io/badge/tests-739-brightgreen.svg)](#-技术栈)
+[![Crates](https://img.shields.io/badge/crates-22-green.svg)](#-22-个-crate)
+[![Tests](https://img.shields.io/badge/tests-994-brightgreen.svg)](#-技术栈)
 
 </div>
 
@@ -41,7 +41,7 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 
 ### 🧠 深度推理 + 工具调用
 - 流式推理输出，支持 Reasoning Effort 四级调节（low / medium / high / max）
-- 21 个内置工具实现：文件 I/O、glob、grep、shell、web fetch、任务管理、MCP 桥接、代码图、Context7 文档检索
+- 17 个内置工具实现：文件 I/O、glob、grep、shell、web fetch、任务管理、MCP 桥接、代码图、Context7 文档检索
 - 工具调用全链路流式：start → delta → end → result，前端实时渲染
 
 ### ⚡ Prefix-Cache 三层架构
@@ -79,6 +79,17 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 - **记忆蒸馏** — 跨会话记忆持久化（项目 / 用户 / 全局 / 会话四层）
 - **文件检查点** — 事务性快照 + 回滚
 
+### 🧬 协议执行引擎与自进化（`[protocol]`）
+- **DNA 五阶段门控** — Understand→Plan→Execute→Verify→Distill 运行时门控，内置
+  plan-before-execute / verify-evidence / distill-on-complex / drift-detection
+  四门，`hard|soft|off` 三力度可配，默认关闭零开销
+- **验证证据锚定** — verify 配置且零 passed → Blocking 拒绝；无证据 Complete →
+  诊断报告标注 `unverified`；对抗审查子代理按条件自动委派
+- **技能自进化** — 技能使用/成功率持久化（fitness），自动给出
+  淘汰/合并/置顶建议，deprecated 标记过滤
+- **失败模式回灌** — 历史失败聚类入库（脱敏 + 0600），每次会话 top-3 自动注入
+  首轮 system prompt，同类失败不再重犯
+
 ## 🏗️ 架构
 
 ```
@@ -107,19 +118,20 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 └─────────────────────┘ └──────────────────────────────┘
 ```
 
-## 📦 21 个 Crate
+## 📦 22 个 Crate
 
 | Crate | 职责 |
 |-------|------|
 | `deepseeknova-core` | 核心类型：Runner / Tool trait、Registry、WireEvent |
 | `deepseeknova-agent` | Agent 主循环、Coordinator、Plan-Mode Runner |
 | `deepseeknova-provider` | DeepSeek / OpenAI 兼容 / Anthropic 流式 Provider |
-| `deepseeknova-tools` | 21 个内置工具实现 |
+| `deepseeknova-tools` | 17 个内置工具实现 |
 | `deepseeknova-mcp` | MCP 协议客户端（stdio / HTTP） |
+| `deepseeknova-metrics` | 会话级效能度量 + 评分卡（四维 + protocol/composite）落盘 |
 | `deepseeknova-graph` | 代码图检索引擎（tree-sitter + SQLite FTS5 + PageRank + repo map） |
 | `deepseeknova-sandbox` | 沙箱 trait + macOS Seatbelt / Linux bubblewrap |
 | `deepseeknova-permission` | Allow / Ask / Deny 权限门控 |
-| `deepseeknova-security` | 路径限制、资源限额、审计日志 |
+| `deepseeknova-security` | 路径限制、资源限额、审计日志、质量规则、失败模式库 |
 | `deepseeknova-scanner` | deepsec 式安全扫描：规则匹配 + 可选 AI 调查（`scan` 子命令） |
 | `deepseeknova-checkpoint` | 文件系统快照 + 事务性回滚 |
 | `deepseeknova-context` | 工作区索引、项目记忆、会话状态 |
@@ -210,7 +222,7 @@ deepseeknova chat --tui
 | 后端 | Rust + SQLite FTS5 + tokio + axum |
 | 前端 | TUI (ratatui) · CLI (clap) · HTTP API (axum + SSE) |
 | 追踪 | OpenTelemetry (OTLP) |
-| 测试 | 739 tests · cargo-llvm-cov · CI 三平台 |
+| 测试 | 994 tests · cargo-llvm-cov · CI 三平台 |
 
 ## 📄 License
 

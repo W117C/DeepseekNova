@@ -4,7 +4,7 @@
 
 ### A DeepSeek-Native AI Coding Agent Framework
 
-**21 Rust crates · 3 frontends (CLI / TUI / HTTP API)**
+**22 Rust crates · 3 frontends (CLI / TUI / HTTP API)**
 
 A Rust-from-scratch AI agent framework — not a wrapper. Built specifically for DeepSeek models.
 
@@ -30,12 +30,15 @@ A Rust-from-scratch AI agent framework — not a wrapper. Built specifically for
 
 ## 🎯 Key Features
 
-- **Deep reasoning + tool calling** — streaming reasoning output, 4-level reasoning effort, 21 built-in tools
+- **Deep reasoning + tool calling** — streaming reasoning output, 4-level reasoning effort, 17 built-in tools
 - **Prefix-cache architecture** — cross-turn prompt prefix hits, real-time token tracking, budget control
 - **Sandboxed execution** — macOS Seatbelt / Linux bubblewrap isolation, 12 permission rules
 - **Multi-agent delegation** — delegate-based sub-agents (explorer / coder / tester / reviewer) with constrained tool sets, semaphore concurrency, and capped result summaries; isolated context, no recursion. Historical GOAP/Swarm/Federation experiments were removed in B0 (see DESIGN.md).
 - **MCP protocol** — stdio + HTTP dual transport, auto-discovery
 - **Project knowledge** — Wiki generation, knowledge cards, 4-layer memory distillation, file checkpoints
+- **Protocol execution engine (`[protocol]`)** — DNA five-phase gating (Understand→Plan→Execute→Verify→Distill) with built-in gates (plan-before-execute / verify-evidence / distill-on-complex / drift-detection), `hard|soft|off` levels, off by default with zero overhead; evidence-anchored verification (blocking on configured-but-unverified, `unverified` diagnose outcome); adversarial review sub-agent on trigger conditions
+- **Skill self-evolution** — usage/success tracking (fitness), deprecate / merge / promote suggestions, deprecated filtering
+- **Failure-pattern feedback** — failed sessions clustered into a redacted store, top-3 patterns auto-injected into the next session's first system prompt
 
 ## 🏗️ Architecture
 
@@ -58,8 +61,9 @@ Provider    DeepSeek V4 Pro/Flash   Tools: File · Glob · Grep · Shell
 | `deepseeknova-core` | Core types: Runner / Tool trait, Registry, WireEvent |
 | `deepseeknova-agent` | Agent loop, Coordinator, Plan-Mode Runner |
 | `deepseeknova-provider` | DeepSeek / OpenAI-compatible / Anthropic streaming |
-| `deepseeknova-tools` | 21 built-in tools |
+| `deepseeknova-tools` | 17 built-in tools |
 | `deepseeknova-mcp` | MCP protocol client (stdio / HTTP) |
+| `deepseeknova-metrics` | Session-level effectiveness metrics + JSON reports |
 | `deepseeknova-graph` | Code graph engine (tree-sitter + SQLite FTS5 + PageRank + repo map) |
 | `deepseeknova-sandbox` | Sandbox trait + macOS Seatbelt / Linux bubblewrap |
 | `deepseeknova-permission` | Allow / Ask / Deny permission gate |
@@ -125,7 +129,7 @@ model = "deepseek-chat"
 | Backend | Rust + SQLite FTS5 + tokio + axum |
 | Frontend | TUI (ratatui) · CLI (clap) · HTTP API (axum + SSE) |
 | Tracing | OpenTelemetry (OTLP) |
-| Tests | 739 tests · cargo-llvm-cov · 3-platform CI |
+| Tests | 994 tests · cargo-llvm-cov · 3-platform CI |
 
 ## 📄 License
 

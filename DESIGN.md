@@ -4,7 +4,7 @@
 
 ## 一、项目概览
 
-DeepseekNova 是一个 Rust 编写的 AI Agent 框架，包含 21 个 crate。
+DeepseekNova 是一个 Rust 编写的 AI Agent 框架，包含 22 个 crate。
 
 ### 命名现状（权威说明）
 
@@ -27,7 +27,7 @@ git config diff.renames true  # diff/log 统计启用重命名检测
 
 ### Crate 结构
 
-> **单一真相源**：21 个 crate 的权威清单以 [AGENTS.md §2「项目简介」](AGENTS.md) 为准，本文档不再重复维护 crate 列表，仅记录分层设计意图。
+> **单一真相源**：22 个 crate 的权威清单以 [AGENTS.md §2「项目简介」](AGENTS.md) 为准，本文档不再重复维护 crate 列表，仅记录分层设计意图。
 
 设计上，全部 crate 按职责分为四层：
 
@@ -509,3 +509,37 @@ Phase 5: 沉淀 (Distill) ← 这是大多数 Agent 缺失的
 | P4 | Agent 工作规范 | ✅ 部分完成（dna-spec skill 已落地；system prompt 接入待定） |
 | P5 | Agent Federation 协议 | ⏳ 待实现（跨实例通信，需先出协议设计） |
 | P6 | Windows 沙箱隔离 | ⏳ 待实现（Job Object / AppContainer） |
+
+---
+
+## 十一、任务质量闭环（2026-08-05 已实现）
+
+任务质量闭环围绕工具调用生命周期与失败路径落地，四层：治理钩子 → 写后策略评估 →
+结构化诊断 → 评分卡。与 §九 安全架构互补：permission gate 是系统级边界（是否允许
+调用），ToolHook 链是策略级可编程扩展（调用前惯例/禁行区、调用后确定性评估）。
+
+- **ToolHook 链（core）**：`core::tool_hook` 定义 `ToolHook` trait
+  （interested/before/after）、`HookVerdict` 与 `QualityFinding`。注册链与
+  permission gate 合并裁决——任一 Deny 拒绝执行、无 Deny 且任一 Ask 复用
+  approval 桥（`/v1/approval`）、全 Allow 放行；`interested`/`before` panic 按
+  fail-closed Deny 处理（安全判定不放过），`after` panic 按空 findings 处理。
+- **写后策略评估（security）**：`security::quality` 的 `QualityPolicy` 内置
+  no-commit-secret / no-forbidden-path / oversized-write 确定性规则（0 token），
+  命中 Blocking 级 finding 才短路 LLM review（降本）；`extract_shell_write_paths`
+  覆盖 bash 内联写路径；`SECRET_PATTERNS` / `redact_secrets` 供诊断脱敏复用；
+  路径规则匹配大小写归一。
+- **质量钩子（agent）**：`agent::quality` 的 `QualityHook` 实现 before/after；
+  runtime `attach_quality_hook` 装配，`[quality] enabled`（默认 true）控制。
+- **失败诊断（agent::diagnose）**：失败路径收集阶段时序/失败详情/子代理链/findings
+  生成 `DiagnoseReport`，落盘 `diagnose/<session_id>.json`（落盘前脱敏 + Unix
+  0600 权限；取消/成功路径不产报告）；serve `GET /v1/sessions/{id}/diagnose` 读取。
+- **评分卡（metrics）**：MetricsHook 签名扩展为 `Fn(SessionSnapshot, QualitySummary)`
+  （findings 为 run 级差分切片，单会话上限 10000；含 reflection/review 计数），
+  四维评分卡（governance / verification / reflection / review）落盘
+  `<session_id>.scorecard.json`；serve `GET /v1/sessions/{id}/scorecard` 与
+  `GET /v1/metrics/scorecards`（聚合）查询。
+- **会话标识**：CLI 以 `session-<ts>` 标注 session_label，serve 端点按 label
+  读取落盘文件（无认证、仅限本地、session id 白名单校验）。
+
+设计文档：`docs/superpowers/specs/2026-08-05-task-quality-loop-design.md`
+（§12 为实现偏差记录）。

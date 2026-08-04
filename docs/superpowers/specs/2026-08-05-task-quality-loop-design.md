@@ -1,7 +1,7 @@
 # 任务质量闭环设计：治理钩子 + 策略评估 + 结构化诊断 + 评分卡
 
 > 日期：2026-08-05
-> 状态：设计待用户审阅（brainstorming 流程）
+> 状态：已实现（2026-08-05 完成，make check EXIT=0；实现与设计的偏差见 §12）
 > 设计依据：harness Cursor 插件（hooks.json 的 before/after 治理模式、debug-pipeline 的 structured diagnose、scorecard-review 的评分、dora-metrics/analyze-costs 的聚合指标）
 > 触发协议：跨 crate 变更 + 架构级决策（core 公共 API 变更）→ 完整推理专家协议
 
@@ -218,3 +218,33 @@ impl Scorecard {
 4. 会话结束落 `.scorecard.json`，四维分数与公式一致，聚合端点返回趋势
 5. `make check` 通过
 6. 本设计文档随实现提交同步（如有偏差，以代码注释标注）
+
+## 12. 实现偏差记录（2026-08-05 收尾）
+
+> 本节由知识收尾（neat-freak）追加，逐条记录实现与设计的偏差；以代码为准。
+
+1. **before/interested panic 处理：fail-open → fail-closed**
+   - 设计说法：§3.2 契约注释与 §9 风险表均为 fail-open——panic/异常按 Allow 处理并记录（catch_unwind → 按 Allow 继续，对齐 harness fail-open）。
+   - 实现现状：`core/src/tool_hook.rs` 契约注释为 fail-closed——`interested()`/`before()` panic 按 `HookVerdict::Deny` 拒绝执行（warn 注明 panic 来源）；仅 `after()` panic 按空 findings 处理（fail-open，不阻断执行）。agent 主循环在 catch_unwind 内执行 interested/before，panic → Deny（F3 审查修复）。
+   - 原因：before 是拦截点，panic 时放行会绕过禁行区/质量规则；安全判定 fail-closed。
+2. **hook 决策与 gate 的合并方式**
+   - 设计说法：§3.2 "任一 Deny → 拒绝；无 Deny 且任一 Ask → Ask；全 Allow → Allow"，hook 决策与 permission gate 取交集。
+   - 实现现状：gate（系统级边界）与 tool hook 链（策略级）分别求值后合并——任一 Deny → 拒绝执行；无 Deny 且任一 Ask → 复用既有 approval 桥（`/v1/approval` / ServerApprovalResponder）等待人工裁决；全 Allow → 执行（`agent/src/agent.rs:1869-1953`）。
+   - 原因：Ask 语义复用既有审批通道，不引入第二套审批路径；Deny 优先级最高保证安全边界不被 hook 放宽。
+3. **诊断落盘细节（0600 + 脱敏 + suppress）**
+   - 设计说法：§4.2 经 runtime 装配的诊断回调写 `<metrics dir>/diagnose/<session_id>.json`，仅约定路径。
+   - 实现现状：`agent/src/diagnose.rs` 落盘前用 `redact_secrets` 脱敏（错误/命令/工具名/finding evidence 均脱敏），Unix 下 `set_permissions` 强制 0600；成功路径与取消路径调用 `suppress()` 不产报告（防止 Drop 兜底误报 outcome=failed）；未标注 session_label 时文件名为 `diag-<uuid>`（F5/F6 审查修复）。
+   - 原因：报告含命令与错误文本属敏感数据，0600 + 脱敏为审查要求；取消是正常结束，不应产出 failed 报告。
+4. **quality_findings 语义：会话累计 → run 级差分**
+   - 设计说法：§4.2 DiagnoseReport.quality 为"本会话全部 finding"（会话累计）。
+   - 实现现状：MetricsGuard 记录 run 起始时 findings 长度（start_len），emit 时只取 `[start_len..]` 差分切片作为本 run 新增（会话累计由 Agent 级 Arc<Mutex> 承载）；单会话上限 `MAX_QUALITY_FINDINGS = 10_000`，超限丢弃只发生在 start_len 之后（F4 审查修复）。
+   - 原因：并发 run 共享同一容器时会话累计会混入其他 run 的 findings；差分保证评分卡按 run 归因，上限防无界增长。
+5. **MetricsHook 签名扩展（设计未提及）**
+   - 设计说法：§5.2 仅说 metrics 扩展组装评分卡，未定义 hook 签名。
+   - 实现现状：`MetricsHook = Arc<dyn Fn(SessionSnapshot, QualitySummary) + Send + Sync>`；`QualitySummary` 含本 run findings（差分切片）、reflection_count、review_passes、review_issues（`agent/src/agent.rs:159-177`）；runtime 在 metrics hook 侧组装四维评分卡写 `<session_id>.scorecard.json`（`runtime/src/lib.rs:1159`）。
+   - 原因：评分卡需要 quality findings 与 reflection/review 计数；扩展 hook 第二参数避免参数爆炸。
+6. **审查修复项（设计未覆盖，统一列示）**
+   - bash 写路径启发式（F1）：`security::quality` 的 `extract_shell_write_paths` 解析 bash 命令内联写路径——重定向写敏感路径（如 .env）before Deny + after Warning。设计仅覆盖写类工具参数路径，未覆盖 bash 内联写。
+   - glob 大小写归一（F2）：no-forbidden-path 匹配时双方 `to_lowercase()` 归一（原模式保持原样，仅匹配时归一），防大小写变体绕过。
+   - session_label：CLI 以 `with_session_label("session-<ts>")` 标注会话 id，serve 端点按 label 读取落盘文件；未标注时诊断文件名为 `diag-<uuid>`。设计未定义会话 id 来源。
+   - 原因：均为审查阶段发现的安全/可观测性缺口。

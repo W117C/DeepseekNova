@@ -1,7 +1,7 @@
 # DeepseekNova 结构化任务书体系（TaskSpec）设计
 
 - 日期：2026-08-04
-- 状态：设计完成，待评审
+- 状态：已评审并实现（2026-08-04，工作树待提交）
 - 范围：`deepseeknova-agent`（核心类型 + 两条委派路径接入）、`deepseeknova-tools`（delegate 工具 schema）、`deepseeknova-config`（inputs 覆盖字段）、`deepseeknova-runtime`（合并逻辑）。跨 4 crate，属架构级变更，执行时需 `make check` 全绿
 - 设计依据：harness Cursor 插件 `create-agent` skill（task + inputs + RULES + allowed_tools + max_turns 五要素），映射到 DeepseekNova 现有 DelegatePreset / SubAgentConfig
 

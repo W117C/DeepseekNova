@@ -101,7 +101,7 @@ Walks through provider selection, API key configuration, and tool preferences.
 Configuration is merged from multiple sources (last wins):
 
 1. **Built-in defaults**
-2. **User config**: `~/.config/deepseeknova/config.toml`
+2. **User config**: `~/.deepseeknova/config.toml`
 3. **Project config**: `.deepseeknova/config.toml`
 4. **Environment variables**: `DEEPSEEKNOVA_PROVIDER_MODEL`, `DEEPSEEKNOVA_MAX_STEPS`, etc.
 
@@ -230,6 +230,63 @@ Coordinator 模式（`run --planner-model ...`）现在同样接入代码图索�
 （search_code / traverse_graph / retrieve_entity / trace_code / impact_code /
 explore_code）对执行器可用，只读工具对规划器开放；`[graph] enabled = false` 时自动排除。
 
+### 任务质量闭环（`[quality]`）
+
+工具调用生命周期治理与写后策略评估（默认开启）：每次工具调用前后经 ToolHook 链
+（core 定义、可注册多个）观察/建议/拦截，与 permission gate 合并裁决——任一
+Deny 拒绝执行；无 Deny 且任一 Ask 走人工审批（`/v1/approval`）；全 Allow 放行。
+写类工具执行后先跑 0 token 确定性规则（内置 no-commit-secret /
+no-forbidden-path / oversized-write，路径规则匹配时大小写归一），命中 Blocking 级
+finding 才升级 LLM 自审，否则跳过以省 token：
+
+```toml
+[quality]
+enabled = true    # 默认 true；false 时整个质量闭环（hook 链/策略评估/评分卡）关闭
+```
+
+`before`/`interested` panic 按 fail-closed 处理（拒绝执行，warn 注明 panic 来源）；
+`after` panic 按空 findings 处理（不阻断执行）。bash 写路径启发式：重定向写敏感
+路径（如 `.env`）在 before 拒绝、after 记为 Warning。诊断报告与评分卡落盘见
+「会话效能度量（SessionMetrics）」节，HTTP 查询见 HTTP API 节。
+
+### 协议增强能力包（`[protocol]`）
+
+DNA 五阶段（Understand→Plan→Execute→Verify→Distill）运行时门控与配套能力包，
+默认关闭（`enabled=false` 时行为与现状完全一致，零开销路径）：
+
+```toml
+[protocol]
+enabled = true                       # 默认 false：总开关，门控/回灌/失败聚类/fitness 均挂此键
+adversarial_review = true            # 默认 false：会话结束委派对抗审查子代理
+
+[protocol.gates]
+plan-before-execute = "soft"         # 进 Execute 前无任何计划性文本 → Warning
+verify-evidence = "hard"             # 已配置 verify 且零 passed → Blocking（默认 hard）
+distill-on-complex = "soft"          # 复杂会话（工具调用 >20）无反思记录 → Warning
+drift-detection = "soft"             # 工具族连续失败 ≥3 → DriftFinding；同会话第二次 → Warning 违规
+```
+
+- 力度语义：`hard` 把 Warning 级违规提升为 Blocking（走工具层 `gate_block` 拒绝
+  路径，工具结果回填 `blocked by protocol gate`，保住 replay 不变量）；`soft`
+  按门语义 severity 进事件流并注入下轮 prompt；`off` 完全关闭该门（drift 的
+  计数/事件/二次违规一并关闭）。缺省条目用内置默认表（前三 soft、
+  verify-evidence hard），未知门名 warn 忽略。
+- verify-evidence 判定复用 Verification 事件：未配置 verify → 通过；已配置且
+  零 Verification 事件（bash 缺失/取消）→ Info 降级；已配置、有失败且无后续
+  passed → Blocking。会话 Complete 且 verify-evidence 未通过时，诊断报告
+  `outcome` 标注 `unverified`。
+- 对抗审查子代理（任一条件触发，独立开关）：① 会话内存在 Blocking 级 finding；
+  ② 敏感工具调用叠加 marker（bash/shell 需叠加 sudo/chmod/chown 等敏感词，
+  write/edit 需叠加敏感路径，delete/move 无条件）。子代理无 Skill 可用时优雅跳过。
+- 度量：Scorecard 新增 `protocol` 维（1 − 门违规数/阶段迁移数，无数据按 1.0）
+  与 `composite` 维（五维加权均值：governance 0.30 / verification 0.25 /
+  protocol 0.20 / reflection 0.15 / review 0.10）；旧评分卡文件缺字段时反序列化
+  默认 1.0（不重算 composite）。
+- 新落盘路径：技能使用记录 `.deepseeknova/skills/fitness.json`（容量 500 LRU，
+  deprecated 标记的技能加载时过滤）；失败模式库
+  `.deepseeknova/security/failure-patterns.json`（容量 200 LRU、脱敏 + 0600，
+  每次会话 `suggest(3)` 取 top-3 注入下会话首轮 system prompt，无模式时零注入）。
+
 ### Environment Variables
 
 | Variable | Description |
@@ -357,6 +414,33 @@ deepseeknova checkpoint clear            # 丢弃快照（不恢复文件）
 ```
 
 `[checkpoint] enabled = false` 可关闭。
+
+### 会话效能度量（SessionMetrics）
+
+每次 run 结束后，把执行面指标（步数 / 工具成败 / 重试 / 验证 / outcome）与成本面
+（token 用量 + USD 估算）汇总成 JSON 报告，写入 `.deepseeknova/metrics/`
+（默认开启）：
+
+```toml
+[metrics]
+enabled = true    # 默认 true；false 时不采集、不落盘
+```
+
+报告文件名为 `<session_id>.json`，一个文件对应一次 run；写入失败仅记 warn，
+不阻断 agent 运行。会话内实时成本仍用 `/cost` 查看，metrics 报告用于离线调优分析。
+
+任务质量闭环在此基础上追加两类落盘产物（同目录）：
+
+- `<session_id>.scorecard.json` — 六维评分卡（governance / verification /
+  reflection / review / protocol / composite）+ overall，由 metrics hook 在
+  run 结束时组装（findings 按 run 级差分切片，单会话上限 10000；protocol /
+  composite 由 `[protocol]` 启用时经 `fill_protocol` 填充，见「协议增强能力包」节）。
+- `diagnose/<session_id>.json` — 失败会话的结构化诊断报告（阶段时序 / 失败详情 /
+  子代理链 / findings），落盘前脱敏（`redact_secrets`）+ Unix 0600 权限；成功或
+  取消路径不产报告。未标注会话标识时文件名为 `diag-<uuid>`。
+
+CLI 会话以 `session-<ts>` 标注标识，serve 端点按标识读取（见 HTTP API 节；
+`[metrics] enabled = false` 时诊断/评分卡均不落盘）。
 
 ### 项目后置产出（A2）
 
@@ -508,6 +592,41 @@ data: {"prompt_tokens":150,"completion_tokens":200,"total_tokens":350}
 event: done
 data: {"text":"...","tool_calls":[...],"usage":{...}}
 ```
+
+#### `GET /v1/sessions/{id}/diagnose`
+
+读取失败会话的结构化诊断报告（`diagnose/<id>.json` 落盘文件）。
+
+```bash
+curl http://localhost:3000/v1/sessions/session-1722830400/diagnose
+# {"session_id":"...","outcome":"failed","phases":[...],"failures":[...],"sub_agents":[...],"quality":[...]}
+```
+
+文件不存在 → 404。仅限本机访问（服务默认监听 127.0.0.1），session id 走白名单
+校验；无认证。
+
+#### `GET /v1/sessions/{id}/scorecard`
+
+读取单会话六维评分卡（`<id>.scorecard.json` 落盘文件；protocol/composite 为协议增强能力包新增维）。
+
+```bash
+curl http://localhost:3000/v1/sessions/session-1722830400/scorecard
+# {"session_id":"...","dimensions":{"governance":1.0,"verification":0.8,"reflection":0.5,"review":1.0,"protocol":1.0,"composite":0.86},"overall":0.86}
+```
+
+文件不存在 → 404。
+
+#### `GET /v1/metrics/scorecards`
+
+扫描 `<metrics dir>/*.scorecard.json` 返回全部评分卡与聚合（均值/趋势/最差维度）。
+
+```bash
+curl http://localhost:3000/v1/metrics/scorecards
+# {"scorecards":[...],"aggregate":{...}}
+```
+
+以上三端点由 serve 的 metrics/diagnose 输出目录配置启用（与 `[metrics] dir`
+同一目录）；未配置目录时返回 404。
 
 ### JavaScript Client Example
 

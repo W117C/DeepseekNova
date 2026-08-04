@@ -1,12 +1,44 @@
 # PROGRESS — TUI 设计功能完善（任务书执行）
 
-## TUI v2 全面重设计 — 状态（2026-08-04 补记）
-- 状态：实现完成、未提交（`feat/side-tasks` 工作树）；spec 与 plan 见
+## 当前未提交实现（2026-08-04 / 08-05 两轮迭代）
+- 08-04 迭代：DAG 接线修复、失败归因重试（`attribution.rs`）、技能热更新
+  （skills/auto/ 三态）、TaskSpec 结构化任务书（`task_spec.rs`，agent/config/runtime/tools
+  全链路）、SessionMetrics（新增 `deepseeknova-metrics` crate + agent 采集 hook +
+  runtime 装配 + CLI 接线）。make check 全绿，待提交。
+- 08-05 迭代：任务质量闭环——`core::tool_hook`（ToolHook 链 + HookVerdict + QualityFinding）、
+  `security::quality`（QualityPolicy 内置 no-commit-secret/no-forbidden-path/oversized-write +
+  extract_shell_write_paths + SECRET_PATTERNS/redact_secrets）、`agent::quality`（QualityHook）、
+  `agent::diagnose`（DiagnoseReport/DiagnoseCollector）、MetricsHook 签名扩展
+  `Fn(SessionSnapshot, QualitySummary)`、serve 新增 `GET /v1/sessions/{id}/diagnose`、
+  `GET /v1/sessions/{id}/scorecard`、`GET /v1/metrics/scorecards`（session id 白名单、
+  无认证仅限本地）、`[quality] enabled` 配置键（默认 true）、CLI 装配
+  （attach_quality_hook/attach_diagnose_hook/with_session_label `session-<ts>`）、
+  `.deepseeknova/metrics/` 下 scorecard 与 diagnose 落盘、retention 排除 .scorecard.json。
+  make check EXIT=0，待提交。
+- 08-05 迭代（协议增强能力包）：core `protocol.rs`（Phase/GateViolation/PhaseTransition/
+  DriftFinding/PhaseGate/NoopPhaseGate + RunEvent/WireEvent 3 新变体）、agent `phase_runner.rs`
+  （PhaseRunner + builtin_phase_gates 四门：plan-before-execute/verify-evidence/
+  distill-on-complex/drift-detection，前三 soft、verify-evidence hard）、验证强化
+  （verify-evidence 硬门 Blocking、无证据 Complete → DiagnoseReport outcome="unverified"、
+  对抗审查子代理两触发条件）、skills `fitness.rs`（SkillFitnessRecord/FitnessStore/
+  EvolutionSuggestion，deprecated 过滤，`.deepseeknova/skills/fitness.json`）、security
+  `failure_pattern.rs`（FailurePatternStore/cluster_key/suggest ≤3，脱敏 + 0600、容量 200 LRU，
+  `.deepseeknova/security/failure-patterns.json`，runtime 回灌首轮 system prompt）、metrics
+  Scorecard 新增 protocol/composite 维（composite_index 加权 0.30/0.25/0.20/0.15/0.10 +
+  fill_protocol，旧 scorecard 反序列化缺省 1.0）、`[protocol]` 配置段（enabled 默认 false）。
+  make check EXIT=0（994 测试通过），Bugbot 13 finding 全部修复，待提交。
+- 审查修复（08-05）：before panic → fail-closed Deny（core tool_hook 契约注释已同步）、
+  bash 写路径启发式、glob 大小写归一、诊断落盘 0600 + 脱敏、findings run 级差分 + 上限 10000。
+- 设计/计划文档已存档：`docs/superpowers/specs/2026-08-05-task-quality-loop-design.md`
+  （§12 为实现偏差记录）、`docs/superpowers/plans/2026-08-05-task-quality-loop-plan.md`。
+
+## TUI v2 全面重设计 — 状态（2026-08-04 更新）
+- 状态：已合入 main（`5cfcd19`）；spec 与 plan 见
   `docs/superpowers/specs/2026-08-03-tui-v2-design.md`、
-  `docs/superpowers/plans/2026-08-03-tui-v2.md`；待用户评审后提交推送。
+  `docs/superpowers/plans/2026-08-03-tui-v2.md`。
 - 证据：`cargo test -p deepseeknova-tui` = 89 通过；`make check` EXIT=0
-  （739 通过 / 0 失败 / 2 既有 ignored）；desktop Rust 侧 check/clippy/test
-  全绿；前端 lint/test 本机未跑（本机无 Node；Makefile 已改为动态探测 node）。
+  （当前全量 800 通过 / 0 失败 / 2 既有 ignored）；desktop 已随 `3ab55d7`
+  移除，相关前端/desktop 条目废止。
 
 ## 系统提示词体系 + 后端审计 — 开工回执（2026-08-01）
 - 理解的目标：主 agent 默认系统提示词（低成本高频决策引擎 + Observe→Plan→Tool→Verify→Reflect→Next Action，英文）默认启用且可配置覆盖；全链路子提示词统一；后端 22 crate 审计报告只报不修。

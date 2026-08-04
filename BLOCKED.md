@@ -4,7 +4,7 @@
 - ~~状态栏常驻成本显示~~（2026-08-02 已做：router ledger 每帧刷新）
 - ~~多行输入框~~（2026-08-02 已做：Shift+Enter/Ctrl+J 换行）
 - ~~MCP 实时连接状态探测~~（2026-08-02 已做：/mcp 短超时 spawn 探测）
-- 桌面端样式（领导已搁置前端）
+- ~~桌面端样式（领导已搁置前端）~~（2026-08-04：desktop crate 已随 `3ab55d7` 移除，本项废止）
 - ~~diff 高亮~~（2026-08-02 已做：行级 + 绿 / - 红 / @@ 青，未加 syntect 外部依赖）
 
 ## 执行阻塞
@@ -31,14 +31,14 @@ PROGRESS/BLOCKED），本分支已合并 main 解决冲突并重验全绿；#54�
 ## 后端审计分级清单（2026-08-01，详见 BACKEND_AUDIT.md）
 
 **建议（不阻塞）**
-- README tests 徽章 536 落后实际 638（README.md:44）
-- README「44 个 Tauri 命令」vs 实测 61 个 `#[tauri::command]` 标记
+- ~~README tests 徽章 536 落后实际 638（README.md:44）~~（2026-08-04：徽章已更新为 786）
+- ~~README「44 个 Tauri 命令」vs 实测 61 个 `#[tauri::command]` 标记~~（2026-08-04：desktop 已移除，本项废止）
 - graph `self_index` 与 provider `deepseek_reasoning_protocol` 集成测试为 ignored（既有，不在白名单）
-- desktop 不在 `make check`，本机完整校验需 `make check-desktop`（需前端产物）
+- ~~desktop 不在 `make check`，本机完整校验需 `make check-desktop`（需前端产物）~~（2026-08-04：desktop 已移除，本项废止）
 
 **顺手活（不做，待裁决）**
 - ~~verify LLM 化~~（2026-08-02 已做：`[verify] llm = true`，默认关）
-- desktop 设置页 system_prompt 入口接新默认值（前端已搁置）
+- ~~desktop 设置页 system_prompt 入口接新默认值（前端已搁置）~~（2026-08-04：desktop 已移除，本项废止）
 
 ## 长期记忆 LLM 蒸馏任务书（2026-08-02）
 

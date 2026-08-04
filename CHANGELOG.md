@@ -14,6 +14,23 @@ All notable changes to DeepseekNova will be documented in this file.
 
 ### Added
 
+- **任务质量闭环**：permission gate 升级为可编程 `ToolHook` 链（core 定义
+  trait + `HookVerdict`/`QualityFinding`，agent 主循环 before/after 挂载，
+  panic 契约：before/interested fail-closed Deny、after fail-open）；
+  写后确定性策略评估 `[quality]`（默认开，`security::quality::QualityPolicy`
+  内置 no-commit-secret / no-forbidden-path / oversized-write 三条 0-token
+  规则，Blocking 级 finding 才触发 LLM review 短路降本）；bash 写路径启发式
+  提取（重定向/tee/cp/mv/install，防禁写规则被 shell 绕过）；结构化失败诊断
+  `DiagnoseReport`（阶段分解/时序/失败详情/子代理链/findings，失败与 Paused
+  才产出、取消 suppress、0600 + 密钥脱敏落盘 `.deepseeknova/metrics/diagnose/`）；
+  四维评分卡 `Scorecard`（守规/验证/反思/审查，`<id>.scorecard.json` 独立
+  落盘 + 跨会话聚合，retention 排除误裁）；serve 新增 `GET
+  /v1/sessions/{id}/diagnose`、`/v1/sessions/{id}/scorecard`、
+  `/v1/metrics/scorecards`（session id 白名单防路径穿越，无认证仅限本地）；
+  CLI 装配 session label（`session-<ts>`）与诊断/评分落盘；TUI 渲染
+  `quality_finding` 事件；MetricsHook 扩展为
+  `Fn(SessionSnapshot, QualitySummary)`（findings run 级差分、上限 10000）。
+
 - **TUI v2 全面重设计**：`deepseeknova-tui` 从单文件拆分为
   `app/commands/input/model/render/theme` 模块，会话内容改为实时增量构建的消息树
   （Turn → Segment，推理不再被工具调用从中间拆断）；新增消息导航焦点
@@ -108,6 +125,26 @@ All notable changes to DeepseekNova will be documented in this file.
   `--severity-min high|medium|low`。
 - `read_file` 支持 `start_line`/`end_line` 区间读，只把需要的行送入上下文（省 token）。
 - `edit_file` 支持 `edits` 多块数组，一次调用原子地替换多处（全有或全无）。
+- **协议增强能力包（2026-08-05）**（`[protocol]`，默认关闭）：core 新增 `protocol.rs`
+  （Phase 五阶段 / GateViolation / PhaseTransition / DriftFinding / PhaseGate /
+  NoopPhaseGate），RunEvent/WireEvent 新增 3 变体；agent 新增 `phase_runner.rs`
+  PhaseRunner + 内置四门（plan-before-execute / verify-evidence /
+  distill-on-complex / drift-detection，前三 soft、verify-evidence hard，
+  `hard|soft|off` 三力度，off 完全关闭 drift 计数）。验证强化：verify-evidence
+  硬门（verify 配置且零 passed → Blocking，走工具层 gate_block 拒绝路径保住
+  replay 不变量）；无证据 Complete → DiagnoseReport `outcome="unverified"`；
+  对抗审查子代理（Blocking finding / 敏感工具调用+marker 叠加两触发条件，
+  `[protocol] adversarial_review` 独立开关，max_steps=3、无工具注册、输入输出
+  预算 cap，无 Skill 优雅跳过）。技能自进化：skills 新增 `fitness.rs`
+  （SkillFitnessRecord / FitnessStore 容量 500 LRU / EvolutionSuggestion
+  Deprecate/MergeCandidate/Promote，deprecated 标记过滤不删文件），落盘
+  `.deepseeknova/skills/fitness.json`。失败模式库：security 新增
+  `failure_pattern.rs`（cluster_key 归一聚类、suggest ≤3、脱敏 + 0600、容量
+  200 LRU），落盘 `.deepseeknova/security/failure-patterns.json`，runtime 每次
+  会话 `suggest(3)` 注入首轮 system prompt（无模式零注入）。度量：Scorecard
+  新增 protocol/composite 维（`composite_index` 加权 0.30/0.25/0.20/0.15/0.10，
+  `fill_protocol` 由 metrics hook 填充；旧评分卡反序列化缺省 1.0）。全部能力
+  挂 `[protocol] enabled`，默认 false 时行为与现状完全一致。
 
 ### Changed
 
