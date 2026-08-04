@@ -33,23 +33,6 @@ ignore = [
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
 
-    # RUSTSEC-2024-0411 through 0420: gtk-rs GTK3 bindings unmaintained.
-    # These come from tauri's GTK3 deps on Linux. Tauri 2.x is moving to GTK4.
-    "RUSTSEC-2024-0411",
-    "RUSTSEC-2024-0412",
-    "RUSTSEC-2024-0413",
-    "RUSTSEC-2024-0414",
-    "RUSTSEC-2024-0415",
-    "RUSTSEC-2024-0416",
-    "RUSTSEC-2024-0417",
-    "RUSTSEC-2024-0418",
-    "RUSTSEC-2024-0419",
-    "RUSTSEC-2024-0420",
-
-    # RUSTSEC-2024-0429: glib 0.18 VariantStrIter 迭代器 unsoundness — tauri GTK3
-    # Linux 桌面端传递依赖；与 CI security.yml 忽略清单保持一致。
-    "RUSTSEC-2024-0429",
-
     # RUSTSEC-2024-0436: paste 1.0.15 unmaintained — used by ratatui.
     "RUSTSEC-2024-0436",
 

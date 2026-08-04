@@ -19,7 +19,6 @@ members = [
     "crates/deepseeknova-serve",
     "crates/deepseeknova-skills",
     "crates/deepseeknova-telemetry",
-    "crates/deepseeknova-desktop",
     "crates/deepseeknova-security",
     "crates/deepseeknova-scanner",
 ]
@@ -108,7 +107,6 @@ deepseeknova-cli = { version = "0.4.0", path = "crates/deepseeknova-cli" }
 deepseeknova-config = { version = "0.4.0", path = "crates/deepseeknova-config" }
 deepseeknova-context = { version = "0.4.0", path = "crates/deepseeknova-context" }
 deepseeknova-core = { version = "0.4.0", path = "crates/deepseeknova-core" }
-deepseeknova-desktop = { path = "crates/deepseeknova-desktop" }
 deepseeknova-event = { version = "0.4.0", path = "crates/deepseeknova-event" }
 deepseeknova-graph = { version = "0.4.0", path = "crates/deepseeknova-graph" }
 deepseeknova-mcp = { version = "0.4.0", path = "crates/deepseeknova-mcp" }

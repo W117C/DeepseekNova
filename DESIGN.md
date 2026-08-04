@@ -36,7 +36,7 @@ git config diff.renames true  # diff/log 统计启用重命名检测
 | **核心层** | 类型定义、事件总线、工作区索引、持久化 |
 | **能力层** | LLM 接入、工具实现、协议桥接、安全隔离 |
 | **编排层** | Agent 主循环、多 Agent 协调、追踪、组合根 |
-| **前端层** | CLI、TUI、HTTP API、桌面应用 |
+| **前端层** | CLI、TUI、HTTP API |
 
 各 crate 与层的具体对应关系见 AGENTS.md 权威清单中每个 crate 的职责注释。
 
@@ -296,7 +296,7 @@ Swarm 成员通过 `SwarmMessage` 进行异步通信：
 
 ### 进度追踪
 
-`ProgressTracker` 是线程安全的（`Arc<RwLock<TrackerState>>`），桌面端可通过 Tauri 命令实时查询：
+`ProgressTracker` 是线程安全的（`Arc<RwLock<TrackerState>>`），前端（HTTP API / TUI）可实时查询：
 
 - `start(goal, config)` — 开始编排
 - `register_plan(plan)` — 注册动作列表

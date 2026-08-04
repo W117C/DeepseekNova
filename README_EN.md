@@ -80,18 +80,12 @@ Provider    DeepSeek V4 Pro/Flash   Tools: File · Glob · Grep · Shell
 | `deepseeknova-cli` | CLI frontend: chat / plan / scan / serve / setup |
 | `deepseeknova-tui` | ratatui terminal UI |
 | `deepseeknova-serve` | axum HTTP server + SSE streaming |
-| `deepseeknova-desktop` | Tauri 2.0 desktop app + React frontend |
 
 ## 🚀 Quick Start
 
 ```bash
 # Build CLI from source
 cargo build --release -p deepseeknova-cli
-
-# Desktop
-cd crates/deepseeknova-desktop/frontend
-npm ci && npm run build
-cargo build -p deepseeknova-desktop
 ```
 
 ### Configuration

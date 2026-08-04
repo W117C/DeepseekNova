@@ -13,10 +13,3 @@ updates:
       interval: "weekly"
     commit-message:
       prefix: "chore"
-
-  - package-ecosystem: "npm"
-    directory: "/crates/deepseeknova-desktop/frontend"
-    schedule:
-      interval: "weekly"
-    commit-message:
-      prefix: "chore"

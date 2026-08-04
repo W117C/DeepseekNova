@@ -1,8 +1,7 @@
 # Release workflow — triggered by version tags (v*)
 # Builds and publishes:
 #   1. CLI binary (deepseeknova-cli) for 3 platforms
-#   2. Desktop app (deepseeknova-desktop) for macOS + Linux
-#   3. npm package with prebuilt binaries
+#   2. npm package with prebuilt binaries
 #
 # Uses the existing cargo-dist configuration from Cargo.toml
 
@@ -10,7 +9,7 @@ name: Release
 
 on:
   push:
-    tags: ["v*", "desktop-v*"]
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       version:
@@ -72,74 +71,15 @@ jobs:
           name: deepseeknova-cli-${{ matrix.target }}
           path: ${{ env.ARTIFACT_DIR }}/deepseeknova-cli-${{ matrix.target }}.*
 
-  # ── Desktop Release (macOS + Linux) ─────────────────────────────
-  desktop-release:
-    name: Desktop release (${{ matrix.target }})
-    runs-on: ${{ matrix.os }}
-    if: startsWith(github.ref, 'refs/tags/desktop-v') || github.event_name == 'workflow_dispatch'
-    strategy:
-      matrix:
-        include:
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            binary: deepseeknova-desktop
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            binary: deepseeknova-desktop
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install native dependencies (Linux)
-        if: matrix.os == 'ubuntu-latest'
-        uses: ./.github/actions/setup-linux
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      # Install Node.js for frontend build
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
-      - name: Build frontend
-        run: |
-          cd crates/deepseeknova-desktop/frontend
-          npm ci
-          npm run build
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Build desktop app
-        run: cargo build --release -p deepseeknova-desktop
-
-      - name: Package desktop
-        shell: bash
-        run: |
-          ARTIFACT_DIR="$RUNNER_TEMP/artifacts"
-          mkdir -p "$ARTIFACT_DIR"
-          cd target/release
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            7z a -tzip "$ARTIFACT_DIR/deepseeknova-desktop-${{ matrix.target }}.zip" *.exe
-          else
-            tar czf "$ARTIFACT_DIR/deepseeknova-desktop-${{ matrix.target }}.tar.gz" ${{ matrix.binary }}
-          fi
-          echo "ARTIFACT_DIR=$ARTIFACT_DIR" >> $GITHUB_ENV
-
-      - name: Upload desktop artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: deepseeknova-desktop-${{ matrix.target }}
-          path: ${{ env.ARTIFACT_DIR }}/deepseeknova-desktop-${{ matrix.target }}.*
-
   # ── GitHub Release (publish artifacts) ──────────────────────────
   publish:
     name: Create GitHub Release
-    needs: [cli-release, desktop-release]
+    needs: [cli-release]
     runs-on: ubuntu-latest
     if: |
       always() &&
-      (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/desktop-v')) &&
-      (needs.cli-release.result == 'success') &&
-      (needs.desktop-release.result == 'success' || needs.desktop-release.result == 'skipped')
+      (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')) &&
+      (needs.cli-release.result == 'success')
     permissions:
       contents: write
     steps:

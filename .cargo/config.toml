@@ -3,10 +3,10 @@
 # Usage: cargo <alias>   (e.g. `cargo check-all`)
 
 [alias]
-check-all   = "check --workspace --exclude deepseeknova-desktop --all-targets"
-test-all    = "test --workspace --exclude deepseeknova-desktop"
-clippy-all  = "clippy --workspace --exclude deepseeknova-desktop --all-targets -- -D warnings"
-doc-all     = "doc --workspace --exclude deepseeknova-desktop --no-deps --document-private-items"
+check-all   = "check --workspace --all-targets"
+test-all    = "test --workspace"
+clippy-all  = "clippy --workspace --all-targets -- -D warnings"
+doc-all     = "doc --workspace --no-deps --document-private-items"
 quickstart  = "run --example quickstart -p deepseeknova-cli"
 audit       = "deny --all-features check"
-coverage    = "llvm-cov --workspace --exclude deepseeknova-desktop"
+coverage    = "llvm-cov --workspace"

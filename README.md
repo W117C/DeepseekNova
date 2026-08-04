@@ -4,7 +4,7 @@
 
 ### DeepSeek 原生 AI 编程 Agent 框架
 
-**22 个 Rust crate · 61 个 Tauri 命令 · 三端覆盖（CLI / TUI / Desktop）**
+**21 个 Rust crate · 三端覆盖（CLI / TUI / HTTP API）**
 
 Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型量身打造的原生编程助手。
 
@@ -90,15 +90,9 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 ```
 ┌─────────────────────────────────────────────────────┐
 │                   前端层 (Frontend)                    │
-│  Desktop (Tauri 2.0 + React 18 + TypeScript + Vite)  │
-│  TUI (ratatui)  ·  CLI (clap)                        │
+│  TUI (ratatui)  ·  CLI (clap)  ·  HTTP API (serve)  │
 └──────────────────────┬──────────────────────────────┘
-                       │ 61 Tauri Commands / IPC
-┌──────────────────────┴──────────────────────────────┐
-│                  桌面运行时 (Desktop Runtime)          │
-│  Tauri 2.0 · 61 Commands · Channel<WireEvent>        │
-└──────────────────────┬──────────────────────────────┘
-                       │
+                       │ WireEvent / SSE / CLI 输出
 ┌──────────────────────┴──────────────────────────────┐
 │                 Agent 运行时 (Runtime)                 │
 │  Agent Loop · Coordinator · Plan-Mode Runner         │
@@ -119,7 +113,7 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 └─────────────────────┘ └──────────────────────────────┘
 ```
 
-## 📦 22 个 Crate
+## 📦 21 个 Crate
 
 | Crate | 职责 |
 |-------|------|
@@ -144,7 +138,6 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 | `deepseeknova-cli` | CLI 前端：chat / plan / serve / setup |
 | `deepseeknova-tui` | ratatui 终端 UI |
 | `deepseeknova-serve` | axum HTTP 服务器 + SSE 流式 |
-| `deepseeknova-desktop` | Tauri 2.0 桌面应用 + React 前端 |
 
 ## 🖥️ 三端覆盖
 
@@ -152,15 +145,7 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 |----|------|------|
 | **CLI** | clap | 轻量，单二进制，chat / plan / scan / serve / setup |
 | **TUI** | ratatui | 全屏终端 UI，快捷键驱动 |
-| **Desktop** | Tauri 2.0 + React 18 | 原生桌面体验，61 个 IPC 命令 |
-
-### 桌面前端亮点
-
-- **三栏布局** — 会话列表 / 消息流 / 右侧面板
-- **设置面板** — 14 大分区：通用 / 外观 / 执行 / 快捷键 / 沙箱 / 网络 / 权限 / 钩子 / MCP / 子智能体 / 诊断 / 账单 / 技能 / 更新
-- **右侧面板** — 5 标签页：文件（修改/创建/读取三区） / 知识库（Wiki + 卡片 + 记忆） / 工具（MCP + 技能） / 记忆 CRUD / 权限规则
-- **流式渲染** — 文本 / 推理 / 工具调用 / 审批 全链路流式
-- **三色进度条** — 缓存命中（绿） / 未缓存（黄） / 剩余（灰）
+| **HTTP API** | axum + SSE | 无头服务，WireEvent 流式输出，可对接任意前端 |
 
 ## 🚀 快速开始
 
@@ -169,11 +154,6 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 ```bash
 # 从源码构建 CLI
 cargo build --release -p deepseeknova-cli
-
-# 桌面端
-cd crates/deepseeknova-desktop/frontend
-npm ci && npm run build
-cargo build -p deepseeknova-desktop
 ```
 
 ### 配置
