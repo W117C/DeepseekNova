@@ -9,17 +9,13 @@
 
 ## 执行阻塞
 
-### Graph Go 任务书（2026-08-05，G 域 worker 上报）
+### ~~Graph Go 任务书（2026-08-05，G 域 worker 上报）~~ 已解除
 
-- **阻塞项：`make check` 的 fmt 阶段被并行 worker（protocol 域）未 fmt 的
-  `crates/deepseeknova-runtime/src/lib.rs` 卡住**。实测重试 5+ 次（间隔 1-4 分钟轮询），
-  对方持续编辑 cli/metrics/runtime 三文件未提交，fmt diff 位置每次变化；按任务书 §7
-  「重试 3 次仍失败报告父级」上报，**未触碰对方文件**。
-- G 域证据（全部亲跑）：`cargo test --workspace --no-fail-fast` 全绿 0 failed（graph 38、
-  tools 65+12+7 在其中）；`cargo clippy -p deepseeknova-graph -p deepseeknova-tools
-  --all-targets -- -D warnings` 绿；rustfmt --check 我的三个 Rust 文件 MY_FMT_OK；
-  反向验证 parses_go_entities 改坏 1 failed → 还原 1 passed。
-- 待父级：对方 fmt/提交后补跑 `make check` 确认 EXIT=0（预期仅剩 fmt 一关）。
+- 阻塞项：`make check` 的 fmt 阶段被并行 worker（protocol 域）未 fmt 的
+  `crates/deepseeknova-runtime/src/lib.rs` 卡住，G 域按任务书 §7 上报未触碰对方文件。
+- ~~解除~~（2026-08-05）：P 域 worker 提交 95f695e 后全量 `make check` EXIT=0；
+  后续两轮修复（7f49ffc / 4d47a6a）均全绿。属并行 worker 半成品阻塞的先例，已按
+  AGENTS.md §5 归档。
 
 ## CodeGraph 增强任务书（2026-08-02）
 
@@ -35,8 +31,9 @@ PROGRESS/BLOCKED），本分支已合并 main 解决冲突并重验全绿；#54�
 
 执行阻塞：无。基线说明：书里 tools=50+12+7 以 PR #54 分支测得，main 合入 PR #55 后
 实测 59+12+7，硬指标 ≥50+12+7 满足；工作树有无关未跟踪文件 codex_desktop_ui.html
-（非本书产物，未动）。顺手活（待裁决，不做）：Go 等新语言、AST 全量持久化、MCP 外壳、
-语义检索。
+（非本书产物，未动）。顺手活（待裁决，不做）：~~Go 等新语言~~（2026-08-05 已做：
+feat/memory-lifecycle 285fe60，tree-sitter-go 解析 + go.mod 外部依赖）、AST 全量
+持久化、MCP 外壳、语义检索。
 
 ## 后端审计分级清单（2026-08-01，详见 BACKEND_AUDIT.md）
 
@@ -64,6 +61,15 @@ record_llm_knowledge 并存，合入后可统一（待裁决）。顺手活（�
 ## 记忆生命周期闭环任务书（2026-08-05）
 
 执行阻塞：无。说明：本轮单域做透=记忆生命周期，以下三域写入待裁决留待下轮：
-① protocol 增强；② graph 新语言支持；③ agent_loop 反思 UI。遗留→已修（review-fix
-C3）：runtime 起点/mid-run 召回与 tools recall 工具已全部接线
-`rank_lifecycle_weight`（见 crates/REVIEW.md 第二轮复核）。
+~~① protocol 增强~~（2026-08-05 已做：feat/memory-lifecycle 95f695e，task_rate 指标
+first_pass/retry_rounds 落地 + fitness record_use 回填接线，两未落地项收尾）；
+~~② graph 新语言支持~~（2026-08-05 已做：285fe60 Go 语言 + 7f49ffc/4d47a6a 修复轮）；
+③ agent_loop 反思 UI（待裁决）。遗留→已修（review-fix C3）：runtime 起点/mid-run
+召回与 tools recall 工具已全部接线 `rank_lifecycle_weight`（见 crates/REVIEW.md 第二轮复核）。
+
+## Protocol 增强收尾 + Graph Go 任务书（2026-08-05）
+
+执行阻塞：无。说明：protocol 域设计 §11 范围外项与偏差记录中其余未落地项写入待裁决：
+① TUI 完整协议状态面板（现为最小文本段渲染，apply.rs:141-164）；② 主循环结构化计划
+载体（drift 检测现为失败路径版）；③ 多模型反思对比；④ 记忆清理 UI（BLOCKED 蒸馏节
+遗留）。
