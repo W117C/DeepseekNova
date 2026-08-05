@@ -58,9 +58,9 @@
 - [x] P2 `cargo test -p deepseeknova-runtime`：≥ 49 条通过（record_use 回填新增；实测 51 passed）
 - [x] G1/G2 `cargo test -p deepseeknova-graph`：≥ 35 条通过（Go fixture 新增 ≥3；实测 36 passed）
 - [x] G3 `cargo test -p deepseeknova-tools`：≥ 基线（deps_code 提示语更新；实测 deps_code 5 passed 含新增 Go 项目测试）
-- [ ] `make check` EXIT=0；workspace 0 failed（G 侧被对方 runtime 未 fmt 阻塞，见 BLOCKED.md；`cargo test --workspace --no-fail-fast` 实测全绿 0 failed）
-- [ ] 反向验证：改坏 task_rate / Go fixture 断言各一次 → 真红 → 还原 → 真绿（G 侧已完：parses_go_entities 改坏 1 failed → 还原 1 passed）
-- [ ] `cargo fmt --check` 通过（G 侧我的文件 MY_FMT_OK；对方 runtime 未 fmt）；提交到 feat/memory-lifecycle 分支（不 push）
+- [x] `make check` EXIT=0；workspace 0 failed（实测 2026-08-05：对方 fmt 后补跑全绿；55 suite ok / 0 failed / 2 既有 ignored）
+- [x] 反向验证：task_rate 断言改坏 → 真红（task_rate_roundtrip_and_compute_defaults 1 failed，metrics/src/lib.rs:921）→ 还原 → 真绿（metrics 20 passed）；Go fixture 断言改坏 → 真红 → 还原 → 真绿
+- [x] `cargo fmt --check` 通过（全 workspace 零 diff）；make check EXIT=0 全绿（55 suite ok / 0 failed / 2 既有 ignored）；P 域已提交 feat/memory-lifecycle（不 push，哈希见交付汇报）
 
 ## P 域任务状态（Protocol 增强收尾，2026-08-05）
 - [x] 任务 1：task_rate 落地。metrics `Scorecard` 增 `first_pass: bool` / `retry_rounds: u32`
@@ -90,6 +90,12 @@
   备选路径 C=runtime 直接读诊断文件推导 task_rate vs D=诊断回调回填评分卡（C 在
   Paused 路径 metrics hook 先于诊断文件落盘、时序不可行）——选 D + metrics hook 对
   Completed 填首过；自检=metrics/runtime/cli 聚焦测试 + make check + 反向验证红→绿。
+- [x] 任务 4：收尾（2026-08-05 接手完成）。接手时任务 1-3 代码在**工作树未提交**
+  （PROGRESS 此前"已提交"记录失实，已修正）；逐项复核：metrics 20 / runtime 51 /
+  cli 32 / agent 231 全绿，cargo fmt --check 零 diff，make check EXIT=0（55 suite
+  ok / 0 failed / 2 既有 ignored，graph 曾因对方 worker 瞬时半成品 FAILED 1 次，
+  重试即恢复）；反向验证 task_rate 断言改坏 → 真红（1 failed）→ 还原 → 真绿；
+  已提交 feat/memory-lifecycle（含任务书 plan 文件，不 push）。
 
 ## 任务书：记忆生命周期闭环（2026-08-05，dev-loop 轮次）— 开工回执
 - 理解的目标：记忆从"写入→关键词检索"升级为完整生命周期闭环——检索排序融合生命周期

@@ -853,6 +853,11 @@ fn build_agent(
 ) -> anyhow::Result<deepseeknova_agent::Agent> {
     let workspace_root = std::env::current_dir().unwrap_or_default();
     let metrics_dir = workspace_root.join(".deepseeknova").join("metrics");
+    // 会话技能名收集器（P 任务 2，spec §13 #9）：builder 注入侧把实际注入
+    // prompt 的技能名写入，会话结束由 attach_metrics_hook_with_fitness 消费
+    // 做 fitness record_use/record_result。
+    let session_skills: Arc<std::sync::Mutex<Vec<String>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
     // Delegate to the shared runtime builder (security + sandbox + permission
     // gate wiring lives in one place). CLI is non-interactive, so no approval
     // responder is attached — the gate falls back to Allow on `Ask`.
@@ -864,14 +869,14 @@ fn build_agent(
         max_steps,
         None,
         extra_tools,
+        Some(session_skills.clone()),
     )?;
     // 任务质量闭环装配：metrics（报告 + 评分卡落盘）、quality（ToolHook 链 +
     // 写后策略评估，`[quality] enabled` 开关）、diagnose（失败诊断报告，与
     // metrics 同目录 `diagnose/` 子目录）。诊断 dir 与 metrics dir 同源。
     // 协议增强（`[protocol] enabled`）：metrics 侧顺带 fitness 记录（会话技能
-    // 名集合暂为空——recall 注入侧 record_use 尚未把技能名回传，fitness 侧
-    // 记录会 warn 跳过，见 runtime TODO）；diagnose 侧顺带失败模式聚类；
-    // 会话启动前注入历史失败模式（≤3 条）到首轮 system prompt。
+    // 名集合由注入侧回填，见上）；diagnose 侧顺带失败模式聚类；会话启动前
+    // 注入历史失败模式（≤3 条）到首轮 system prompt。
     let agent = deepseeknova_runtime::attach_metrics_hook_with_fitness(
         agent,
         config,
@@ -881,9 +886,9 @@ fn build_agent(
             dir: metrics_dir.clone(),
         },
         &workspace_root,
-        // 会话技能名集合：技能激活（record_use）接线后由注入侧回填；当前
-        // 为空 → fitness 记录跳过并 warn（不阻断 run）。
-        Arc::new(std::sync::Mutex::new(Vec::new())),
+        // 会话技能名集合：builder 注入侧已回填实际注入的技能名；空集合 =
+        // 本会话无注入技能，fitness 优雅跳过（不 warn）。
+        session_skills,
     );
     let agent = deepseeknova_runtime::attach_quality_hook(agent, config);
     let agent = deepseeknova_runtime::attach_diagnose_hook_with_ingest(

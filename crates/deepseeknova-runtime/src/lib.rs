@@ -293,6 +293,13 @@ fn derive_compaction_threshold(config: &Config) -> Option<u32> {
 /// compaction to dedicated role providers (the `task` / `compact` model
 /// pointers). Unset roles fall back to legacy behaviour.
 #[allow(clippy::too_many_arguments)]
+/// 构建装配完整的 Agent（安全双层 + 工具注册 + 记忆/技能/图检索等）。
+///
+/// `session_skills`：可选的本会话技能名收集器（`Arc<Mutex<Vec<String>>>`）。
+/// 传 `Some` 时，起点召回注入侧会把**实际注入**（进入 prompt 的）技能名写入
+/// 该集合，供调用方（CLI）在会话结束时汇入 [`attach_metrics_hook_with_fitness`]
+/// 做 fitness `record_use`/`record_result`（任务书 P 任务 2，spec §13 #9）；
+/// 传 `None` 时行为与旧版完全一致（不收集）。
 pub fn build_agent_with_role_providers(
     config: &Config,
     workspace_root: PathBuf,
@@ -301,6 +308,7 @@ pub fn build_agent_with_role_providers(
     max_steps: usize,
     gate: Option<Arc<PermissionGate>>,
     extra_tools: Vec<Arc<dyn deepseeknova_core::Tool>>,
+    session_skills: Option<Arc<std::sync::Mutex<Vec<String>>>>,
 ) -> anyhow::Result<deepseeknova_agent::Agent> {
     // 提前克隆供 P2 段使用（task/compact/review 字段在下方会被移动）。
     let step_quick = roles.step_quick.clone();
@@ -523,6 +531,8 @@ pub fn build_agent_with_role_providers(
                     deepseeknova_core::tokens::chars_for_tokens(config.memory.recall_inject_tokens);
                 if cap_chars > 0 {
                     let skills_for_recall = skill_manager.clone();
+                    // P 任务 2：技能名收集器（注入侧写入，fitness 侧消费）。
+                    let skills_sink = session_skills.clone();
                     // 设计 C 三态闭环：每次 build_agent = 新会话，recall 注入
                     // 命中即计一次 use（success=true），驱动 draft → verified
                     // → active 状态迁移（阈值来自 SkillExtractionConfig）。
@@ -587,6 +597,10 @@ pub fn build_agent_with_role_providers(
                                     }
                                     // 三态闭环：注入即计一次 use（成功语义）。
                                     // 失败仅 warn（record_use 落盘失败不阻断注入）。
+                                    // P 任务 2：把实际注入的技能名同时写入
+                                    // session_skills 收集器（去重），供会话结束
+                                    // fitness record_use/record_result（spec §13
+                                    // #9 接线；None = 不收集，行为与旧版一致）。
                                     for name in injected {
                                         if let Err(e) =
                                             sm.record_use(name, true, Some(&skill_session_id))
@@ -594,6 +608,13 @@ pub fn build_agent_with_role_providers(
                                             tracing::warn!(
                                                 "skill record_use failed for '{name}': {e}"
                                             );
+                                        }
+                                        if let Some(ref sink) = skills_sink {
+                                            if let Ok(mut guard) = sink.lock() {
+                                                if !guard.iter().any(|s| s == name) {
+                                                    guard.push(name.to_string());
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -1074,6 +1095,9 @@ pub fn build_agent_with_task_provider(
         max_steps,
         gate,
         extra_tools,
+        // 既有入口不收集技能名（无 fitness 消费方），保持签名与行为不变；
+        // 需要收集的调用方（CLI）直接调 build_agent_with_role_providers。
+        None,
     )
 }
 
@@ -1195,16 +1219,23 @@ pub fn attach_metrics_hook(
 /// [`attach_metrics_hook`] 的协议增强扩展：`[protocol] enabled=true` 且
 /// `workspace_root` 非空时，会话结束（metrics hook 内）按 outcome 对
 /// `session_skills`（本会话激活过的技能名）逐条调
+/// [`FitnessStore::record_use`](deepseeknova_skills::fitness::FitnessStore)
+/// （激活计数）与
 /// [`FitnessStore::record_result`](deepseeknova_skills::fitness::FitnessStore)
-/// 并 save 到 `<workspace_root>/.deepseeknova/skills/fitness.json`
-/// （协议增强设计 §5；失败仅 warn，不阻断 run）。
+/// （会话成败），并 save 到 `<workspace_root>/.deepseeknova/skills/fitness.json`
+/// （协议增强设计 §5 + 任务书 P 任务 2；失败仅 warn，不阻断 run）。
 ///
 /// outcome 判定：`stats.outcome == Some(Completed)` 记 success=true，其余
-/// （PausedMaxSteps/Cancelled）记 success=false。技能激活的 `record_use`
-/// 本阶段未接线（技能名集合由 CLI 持有，recall 注入侧暂未写入，集合为空时
-/// 跳过记录并仅首次会话 warn 一次——warn-once 防每会话噪音，留接口，见
-/// spec §13 #9）。`enabled=false` 或空 workspace 时
+/// （PausedMaxSteps/Cancelled）记 success=false。`session_skills` 由调用方
+/// （CLI）经 [`build_agent_with_role_providers`] 的注入侧收集器回填真实注入
+/// 的技能名（spec §13 #9 接线完成）；集合为空 = 本会话无注入技能，优雅跳过
+/// （不写文件、不 warn）。`enabled=false` 或空 workspace 时
 /// 行为与 [`attach_metrics_hook`] 完全一致。
+///
+/// task_rate（设计 §7.1 末条）：Completed 结束在评分卡落盘前按
+/// `first_pass=true` 填写；Paused/Cancelled 路径本 hook 先于诊断回调触发、
+/// 失败详情尚不可知，维持保守默认（false/0），由
+/// [`attach_diagnose_hook_with_ingest`] 的诊断回调按 failures 覆写。
 pub fn attach_metrics_hook_with_fitness(
     agent: deepseeknova_agent::Agent,
     config: &Config,
@@ -1222,10 +1253,6 @@ pub fn attach_metrics_hook_with_fitness(
         .join(".deepseeknova")
         .join("skills")
         .join("fitness.json");
-    // warn-once 标志：空技能集（record_use 未接线）时仅首次会话 warn 一次，
-    // 之后静默——避免每会话 warn 噪音；接线后（recall 注入侧回填技能名）此
-    // 分支自然消失（见 spec §13 #9）。
-    let warned_empty_skills = std::sync::atomic::AtomicBool::new(false);
     let hook: deepseeknova_agent::MetricsHook = Arc::new(move |stats, summary| {
         // 任务质量闭环 C：会话 id 两份文件共用，保证
         // `<id>.json` 与 `<id>.scorecard.json` 可对账。优先用 Agent 的
@@ -1246,6 +1273,17 @@ pub fn attach_metrics_hook_with_fitness(
         // protocol 置 1.0 占位，此处用 QualitySummary 的协议统计填真实值；
         // fill_protocol 同时重算 composite 加权均值，见 metrics 侧注释）。
         card.fill_protocol(summary.protocol_violations, summary.phase_transitions);
+        // task_rate（设计 §7.1 末条）：成功结束（Completed）无诊断报告
+        // （agent 侧 suppress），按 first_pass=true 填写；Paused/Cancelled
+        // 路径 metrics hook 先于诊断回调触发、任务失败详情尚不可知，维持
+        // compute 保守默认（false/0），由 attach_diagnose_hook_with_ingest
+        // 的诊断回调按 failures 覆写真实值。
+        if matches!(
+            stats.outcome,
+            Some(deepseeknova_metrics::RunOutcome::Completed)
+        ) {
+            card.fill_task_rate(true, 0);
+        }
         let report = deepseeknova_metrics::SessionReport {
             session_id,
             stats: stats.clone(),
@@ -1270,16 +1308,9 @@ pub fn attach_metrics_hook_with_fitness(
                 Err(_) => Vec::new(),
             };
             if skills.is_empty() {
-                // 技能激活记录（record_use）未接线，本会话无技能名——跳过。
-                // 仅首次会话 warn 一次，之后静默（warn-once 防每会话噪音）。
-                // TODO(record_use 接线)：把 recall 注入的技能名写入 session_skills
-                // 后此分支自然消失（阶段4 留接口项，非门控 TODO；见 spec §13 #9）。
-                if !warned_empty_skills.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                    tracing::warn!(
-                        "fitness record skipped: no session skill names collected \
-                         (skill record_use wiring pending)"
-                    );
-                }
+                // 本会话无注入技能（空集合 = recall 注入侧确实未注入任何
+                // skill）——优雅跳过，不写文件、不 warn（spec §13 #9 接线后
+                // 空集合即"无注入"的合法状态，warn 噪声已移除）。
             } else {
                 let success = matches!(
                     stats.outcome,
@@ -1292,6 +1323,12 @@ pub fn attach_metrics_hook_with_fitness(
                 match deepseeknova_skills::fitness::FitnessStore::load(&fitness_path) {
                     Ok(mut store) => {
                         for name in &skills {
+                            // P 任务 2：record_result（会话成败）后补 record_use
+                            // （注入激活计数）——skill 本会话被注入即计一次激活，
+                            // 与 recall 注入侧的 SkillManager::record_use（三态
+                            // 迁移）各司其职：后者驱动 draft→verified→active，
+                            // 前者驱动 fitness 库的 uses 计数（spec §13 #9）。
+                            store.record_use(name, now_ms);
                             store.record_result(name, success, now_ms);
                         }
                         if let Err(e) = store.save() {
@@ -1356,6 +1393,10 @@ pub fn attach_diagnose_hook(
 /// [`redact_secrets`] 再 ingest，防止密钥原文进模式库并被下会话回灌进
 /// system prompt（接线侧最后防线；security 侧 ingest 入口另有双保险）。
 /// 诊断钩子天然只在非 success 结束时触发，满足「仅失败会话 ingest」语义；
+/// 此外无论 `[protocol]` 开关，回调都会对同会话评分卡做 task_rate 回填
+/// （设计 §7.1 末条：按 failures 推导 `first_pass`/`retry_rounds` 覆写并
+/// 重写 `dir/<session_id>.scorecard.json`，补 Paused 路径上 metrics hook
+/// 先触发时缺失的失败信息；评分卡不存在时静默跳过）；
 /// 所有 IO 失败仅 warn，不阻断 run。`None` 配置或 disabled 时与
 /// [`attach_diagnose_hook`] 完全一致。
 pub fn attach_diagnose_hook_with_ingest(
@@ -1381,6 +1422,23 @@ pub fn attach_diagnose_hook_with_ingest(
             return;
         }
         enforce_metrics_retention(&diagnose_dir, DIAGNOSE_RETENTION_MAX);
+
+        // task_rate 回填（设计 §7.1 末条）：Paused/unverified 路径上 metrics
+        // hook 先于本回调触发（失败详情尚不可知，评分卡已按保守默认 false/0
+        // 落盘），此处按本会话 failures 推导覆写 first_pass/retry_rounds 并
+        // 重写同会话评分卡（`<dir>/<session_id>.scorecard.json`）；成功路径
+        // suppress 无本回调，metrics hook 已按 first_pass=true 填写。评分卡
+        // 缺失/不可解析时静默跳过（metrics 未启用），不 panic、不阻断。
+        let first_pass = report.failures.is_empty();
+        let retry_rounds = report.failures.len() as u32;
+        if let Err(e) = deepseeknova_metrics::update_scorecard_task_rate(
+            &dir,
+            &report.session_id,
+            first_pass,
+            retry_rounds,
+        ) {
+            tracing::warn!("scorecard task_rate update failed: {e}");
+        }
 
         // 协议增强：失败模式聚类（仅 protocol.enabled 时动作）。
         if ingest_on {
@@ -2453,6 +2511,7 @@ mod tests {
             5,
             None,
             vec![],
+            None,
         )
         .unwrap();
         let _ = agent;
@@ -2483,6 +2542,7 @@ mod tests {
             5,
             None,
             vec![],
+            None,
         )
         .unwrap();
         let _ = agent; // 注入路径构建成功；Agent 侧字段私有，行为由 agent crate 测试覆盖
@@ -2545,6 +2605,7 @@ mod tests {
             5,
             None,
             vec![],
+            None,
         )
         .unwrap();
         assert!(
@@ -2569,6 +2630,7 @@ mod tests {
             5,
             None,
             vec![],
+            None,
         )
         .unwrap();
         assert!(
@@ -3615,6 +3677,96 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// 任务书 P 任务 2（spec §13 #9 接线）：recall 注入侧收集器 → session_skills
+    /// → fitness record_use + record_result 全链路。预置技能文件，builder 传
+    /// `Some(session_skills)`，run 后：收集器含注入技能名；fitness.json 出现
+    /// 真实 use 记录（uses=1）与 result 记录（successes=1）；空集合场景（无
+    /// 注入）由 `fitness_empty_skills_skips_silently_and_writes_no_file` 覆盖。
+    #[tokio::test]
+    async fn recall_injection_collects_skills_and_fitness_records_use_and_result() {
+        use deepseeknova_core::Runner;
+        use futures::StreamExt;
+
+        let root = std::env::temp_dir().join(format!("dsn-record-use-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // 预置用户技能：name 含 "auth"（强匹配），body 弱匹配兜底。
+        let skills_dir = root.join(".deepseeknova/skills");
+        std::fs::create_dir_all(&skills_dir).unwrap();
+        std::fs::write(
+            skills_dir.join("fix-auth.md"),
+            "---\nname: fix-auth\nversion: 1.0.0\ndescription: Fix authentication flows\ntags: [auth]\n---\nValidate tokens before trusting them.\n",
+        )
+        .unwrap();
+        let fitness_path = skills_dir.join("fitness.json");
+        let metrics_dir = root.join(".deepseeknova/metrics");
+
+        let mut config = Config::default();
+        config.protocol.enabled = true;
+        config.metrics.enabled = true;
+        config.memory.enabled = true;
+        config.graph.enabled = false;
+        config.delegate.enabled = false;
+        config.verify.enabled = false;
+        config.review.enabled = false;
+
+        let session_skills: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let agent = build_agent_with_role_providers(
+            &config,
+            root.clone(),
+            Arc::new(stub_provider()),
+            AgentRoleProviders::default(),
+            5,
+            None,
+            vec![],
+            Some(session_skills.clone()),
+        )
+        .unwrap();
+        let agent = attach_metrics_hook_with_fitness(
+            agent,
+            &config,
+            MetricsSink {
+                ledger: Arc::new(deepseeknova_provider::cost::CostLedger::new()),
+                prices: Default::default(),
+                dir: metrics_dir,
+            },
+            &root,
+            session_skills.clone(),
+        );
+        // prompt 含 "auth"：起点召回（unseeded 首轮）匹配 fix-auth →
+        // 注入 prompt → 收集器写入技能名。
+        let mut stream = agent
+            .run_stream(deepseeknova_core::RunInput {
+                prompt: "auth".into(),
+                images: Vec::new(),
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+
+        // 收集器含注入技能名。
+        let collected = session_skills.lock().unwrap().clone();
+        assert!(
+            collected.iter().any(|s| s == "fix-auth"),
+            "session_skills must contain injected skill, got {collected:?}"
+        );
+        // fitness.json：真实 use + result 记录（uses=1、successes=1）。
+        assert!(
+            fitness_path.exists(),
+            "fitness.json must be written when skills were injected"
+        );
+        let store = deepseeknova_skills::fitness::FitnessStore::load(&fitness_path).unwrap();
+        let snap = store.snapshot();
+        assert_eq!(snap.len(), 1, "one skill recorded");
+        assert_eq!(snap[0].skill, "fix-auth");
+        assert_eq!(snap[0].uses, 1, "record_use must count the injection");
+        assert_eq!(snap[0].successes, 1, "completed run → success");
+        assert_eq!(snap[0].failures, 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// 协议增强 §3.4：`[protocol] enabled=false`（默认）时 attach_protocol_gates
     /// 原样返回——run 事件流中不出现任何 PhaseTransition（protocol_active =
     /// gates 非空，零成本路径）。
@@ -3790,6 +3942,146 @@ mod tests {
             "composite dim out of range: {}",
             card.dimensions.composite
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 协议增强 §7.1 末条：task_rate 双端接线之「成功端」——Completed 结束
+    /// 无诊断报告（suppress），metrics hook 落盘前按 first_pass=true 填写；
+    /// 评分卡 JSON 含 first_pass/retry_rounds 且值正确。
+    #[tokio::test]
+    async fn scorecard_task_rate_success_run_is_first_pass() {
+        use deepseeknova_core::Runner;
+        use futures::StreamExt;
+
+        let root = std::env::temp_dir().join(format!("dsn-taskrate-ok-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let metrics_dir = root.join(".deepseeknova/metrics");
+
+        let mut config = Config::default();
+        config.protocol.enabled = true;
+        config.metrics.enabled = true;
+        let agent = attach_metrics_hook_with_fitness(
+            deepseeknova_agent::Agent::new(Arc::new(stub_provider()), 3),
+            &config,
+            MetricsSink {
+                ledger: Arc::new(deepseeknova_provider::cost::CostLedger::new()),
+                prices: Default::default(),
+                dir: metrics_dir.clone(),
+            },
+            &root,
+            Arc::new(std::sync::Mutex::new(Vec::new())),
+        );
+        let mut stream = agent
+            .run_stream(deepseeknova_core::RunInput {
+                prompt: "hi".into(),
+                images: Vec::new(),
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+
+        let files: Vec<String> = std::fs::read_dir(&metrics_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".scorecard.json"))
+            .collect();
+        assert_eq!(files.len(), 1, "one scorecard written");
+        let card: deepseeknova_metrics::Scorecard =
+            serde_json::from_str(&std::fs::read_to_string(metrics_dir.join(&files[0])).unwrap())
+                .unwrap();
+        assert!(
+            card.first_pass,
+            "success run must be first_pass=true, got {card:?}"
+        );
+        assert_eq!(card.retry_rounds, 0);
+        // 无诊断报告（suppress）→ 诊断回调不触发，task_rate 不被覆写。
+        let diag_dir = metrics_dir.join("diagnose");
+        assert!(
+            !diag_dir.exists(),
+            "success run must not write diagnose dir"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 协议增强 §7.1 末条：task_rate 双端接线之「失败端」——Paused 路径
+    /// metrics hook 先触发（评分卡按保守 false/0 落盘），诊断回调随后按
+    /// failures 覆写：first_pass=false、retry_rounds=failures 条数（≥1）。
+    #[tokio::test]
+    async fn scorecard_task_rate_failed_run_backfilled_from_diagnose() {
+        use deepseeknova_core::Runner;
+        use futures::StreamExt;
+
+        let root = std::env::temp_dir().join(format!("dsn-taskrate-fail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let metrics_dir = root.join(".deepseeknova/metrics");
+
+        let mut config = Config::default();
+        config.protocol.enabled = true;
+        config.metrics.enabled = true;
+        config.graph.enabled = false;
+        config.memory.enabled = false;
+        config.delegate.enabled = false;
+        let agent = attach_metrics_hook_with_fitness(
+            deepseeknova_agent::Agent::new(Arc::new(EmptyProvider), 2),
+            &config,
+            MetricsSink {
+                ledger: Arc::new(deepseeknova_provider::cost::CostLedger::new()),
+                prices: Default::default(),
+                dir: metrics_dir.clone(),
+            },
+            &root,
+            Arc::new(std::sync::Mutex::new(Vec::new())),
+        );
+        // CLI 装配顺序：metrics → quality → diagnose → failure pattern → gates。
+        // 此处按同序挂 diagnose（task_rate 回填依赖评分卡先落盘）。
+        let agent =
+            attach_diagnose_hook_with_ingest(agent, metrics_dir.clone(), Some(&config), &root);
+        let mut stream = agent
+            .run_stream(deepseeknova_core::RunInput {
+                prompt: "hi".into(),
+                images: Vec::new(),
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+
+        // 诊断报告存在（Paused）且 failures 非空。
+        let diag_dir = metrics_dir.join("diagnose");
+        let diag_files: Vec<String> = std::fs::read_dir(&diag_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".json"))
+            .collect();
+        assert_eq!(diag_files.len(), 1, "one diagnose report written");
+        let report: deepseeknova_agent::diagnose::DiagnoseReport =
+            serde_json::from_str(&std::fs::read_to_string(diag_dir.join(&diag_files[0])).unwrap())
+                .unwrap();
+        assert!(!report.failures.is_empty(), "paused run must have failures");
+
+        // 评分卡 task_rate 被诊断回调覆写为真实值。
+        let files: Vec<String> = std::fs::read_dir(&metrics_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".scorecard.json"))
+            .collect();
+        assert_eq!(files.len(), 1, "one scorecard written");
+        let card: deepseeknova_metrics::Scorecard =
+            serde_json::from_str(&std::fs::read_to_string(metrics_dir.join(&files[0])).unwrap())
+                .unwrap();
+        assert!(!card.first_pass, "paused run must not be first_pass");
+        assert_eq!(
+            card.retry_rounds as usize,
+            report.failures.len(),
+            "retry_rounds must equal diagnose failures count"
+        );
+        assert!(card.retry_rounds >= 1);
         let _ = std::fs::remove_dir_all(&root);
     }
 }
