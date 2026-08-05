@@ -33,7 +33,8 @@ PROGRESS/BLOCKED），本分支已合并 main 解决冲突并重验全绿；#54�
 实测 59+12+7，硬指标 ≥50+12+7 满足；工作树有无关未跟踪文件 codex_desktop_ui.html
 （非本书产物，未动）。顺手活（待裁决，不做）：~~Go 等新语言~~（2026-08-05 已做：
 feat/memory-lifecycle 285fe60，tree-sitter-go 解析 + go.mod 外部依赖）、AST 全量
-持久化、MCP 外壳、语义检索。
+持久化、MCP 外壳、~~语义检索~~（2026-08-05 已做记忆侧 remote，见长期记忆 LLM
+蒸馏节；代码图侧语义检索仍待裁决）。
 
 ## 后端审计分级清单（2026-08-01，详见 BACKEND_AUDIT.md）
 
@@ -51,7 +52,9 @@ feat/memory-lifecycle 285fe60，tree-sitter-go 解析 + go.mod 外部依赖）�
 
 执行阻塞：无。说明：main 上 review::extract_json 为私有函数，改可见性不在白名单，
 按「建议有更好的路」在 memory_distill.rs 自带等价实现（已记 PROGRESS）。顺手活
-（待裁决，不做）：语义检索 embedder、记忆清理 UI、蒸馏结果写 agentskills.io skill 文件。
+（待裁决，不做）：~~语义检索 embedder~~（2026-08-05 已做记忆侧 remote：写入即嵌入 +
+`memory embed-backfill` 回填 + hybrid 检索，fail-open；local 后端仍待裁决）、记忆
+清理 UI、蒸馏结果写 agentskills.io skill 文件。
 ## 反思→修复闭环任务书（2026-08-02）
 
 执行阻塞：无。说明：main 上 review::extract_json 私有，reflection.rs 自带等价实现
@@ -73,3 +76,11 @@ first_pass/retry_rounds 落地 + fitness record_use 回填接线，两未落地�
 ① TUI 完整协议状态面板（现为最小文本段渲染，apply.rs:141-164）；② 主循环结构化计划
 载体（drift 检测现为失败路径版）；③ 多模型反思对比；④ 记忆清理 UI（BLOCKED 蒸馏节
 遗留）。
+
+## 记忆语义检索任务书（2026-08-05）
+
+执行阻塞：无。说明：记忆侧 remote 语义检索已做透（写入即嵌入 + `memory
+embed-backfill` 回填 + hybrid 检索 `0.5*bm25 + 0.5*余弦 - 生命周期惩罚`，fail-open，
+零新增依赖），审查修复后全绿。留待裁决：① local 嵌入后端（当前配置会显式 warn
+回落 FTS）；② 代码图侧语义检索（graph 向量化）；③ RemoteEmbedder 改 async trait
++ spawn_blocking（消除同步 block_on 阻塞 worker 线程，有超时兜底、非阻塞）。

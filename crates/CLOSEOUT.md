@@ -1,3 +1,36 @@
+# CLOSEOUT — 记忆语义检索（embedder）最小闭环（2026-08-05 dev-loop 轮）
+
+## 六事实面状态
+
+| 事实面 | 状态 | 证据 |
+|--------|------|------|
+| 代码 | changed-and-verified | 分支 feat/semantic-retrieval；`make check` EXIT=0、workspace 0 failed（2 既有 ignored）；core 137+2 / provider 40 / config 35+18 / runtime 53 / tools 67+12+7 / cli 32 |
+| 运行态 | verified-current | CLI 冒烟：`memory stats` 输出 `embedded=0`；`memory embed-backfill` 无 provider 时 attempted=0 ok=0 不 panic；反向验证红（1 failed）→ 绿（1 passed）；RemoteEmbedder 用真实本地 HTTP 服务端到端测（路径/Bearer/body/错误/解析） |
+| 文档 | changed-and-verified | GUIDE 记忆节补 embedder 配置/回填/CLI；CHANGELOG Added；BLOCKED 两处「语义检索」转已做（代码图侧仍待裁决）；PROGRESS 回执 + 自验收清单逐条打勾 |
+| 规则 | not-applicable | AGENTS.md 未改动（无新增约定必要） |
+| 记忆 | not-applicable | 无平台记忆写入 |
+| 工作区 | changed-and-verified | 分支工作树仅本轮 14 文件（12 修改 + 2 新增）；无未跟踪残留、无 stash |
+
+## 本轮交付物核对（dev-loop 六件证据）
+1. 任务书：docs/superpowers/plans/2026-08-05-semantic-retrieval-plan.md（六节齐全，≤4000 字符）
+2. 测试全绿：`make check` EXIT=0；core 132→137（+2 集成）、provider 35→40、
+   config 51→53、runtime 52→53、tools 66→67（另 12+7 集成不动）
+3. 审查报告：crates/REVIEW.md 本轮分节——M1/M2（锁内 HTTP + fallback 语义）已修、
+   L1（未知后端静默）已修、L2（测试替身重复）接受；修复后重审 0 新问题
+4. 收尾报告：本文件
+5. BLOCKED.md：无执行阻塞；local 后端、代码图侧语义检索、TUI 协议面板 / 计划载体 /
+   多模型反思 / 记忆清理 UI 留待裁决
+6. 提交：分支 feat/semantic-retrieval（不 push，是否提交/推送由用户决定）
+
+## 遗留（如实）
+- local embedder 未实现：配置 `embedder="local"` 会显式 warn 并回落 FTS（不会静默）。
+- 代码图侧语义检索仍未做（BLOCKED 已记）。
+- `RemoteEmbedder::embed` 是同步 trait 内 `block_on`：在 async 工具路径会阻塞一个
+  worker 线程至多一个超时（默认 30s）；有独立 runtime + 超时兜底，已在 GUIDE 记录，
+  未来可改为 async trait + spawn_blocking。
+
+---
+
 # CLOSEOUT — Protocol 增强收尾 + Graph Go 语言（2026-08-05 dev-loop 双域轮）
 
 ## 六事实面状态

@@ -378,9 +378,15 @@ pub struct MemoryConfig {
     /// 嵌入后端：none | local | remote（P1 恒为 none）。
     #[serde(default = "default_embedder")]
     pub embedder: String,
-    /// 嵌入模型名（P2 起用）。
+    /// 嵌入模型名（`embedder=remote` 时必填，如 text-embedding-3-small）。
     #[serde(default)]
     pub embed_model: String,
+    /// 嵌入服务基础 URL（`embedder=remote` 时使用；默认 OpenAI v1）。
+    #[serde(default = "default_embed_base_url")]
+    pub embed_base_url: String,
+    /// 嵌入请求超时（秒，默认 30）。
+    #[serde(default = "default_embed_timeout_secs")]
+    pub embed_timeout_secs: u64,
     /// 起点召回注入块的 token 上限。0 = 不注入，仅保留按需工具。
     #[serde(default = "default_recall_inject_tokens")]
     pub recall_inject_tokens: usize,
@@ -464,6 +470,12 @@ fn default_memory_db_path() -> String {
 fn default_embedder() -> String {
     "none".to_string()
 }
+fn default_embed_base_url() -> String {
+    "https://api.openai.com/v1".to_string()
+}
+fn default_embed_timeout_secs() -> u64 {
+    30
+}
 fn default_recall_inject_tokens() -> usize {
     200
 }
@@ -522,6 +534,8 @@ impl Default for MemoryConfig {
             redact_secrets: true,
             embedder: default_embedder(),
             embed_model: String::new(),
+            embed_base_url: default_embed_base_url(),
+            embed_timeout_secs: default_embed_timeout_secs(),
             recall_inject_tokens: 200,
             recall_top_k: 3,
             mid_run_recall: true,
@@ -1436,6 +1450,12 @@ impl MemoryConfig {
         if !other.embed_model.is_empty() {
             self.embed_model = other.embed_model;
         }
+        if other.embed_base_url != d.embed_base_url {
+            self.embed_base_url = other.embed_base_url;
+        }
+        if other.embed_timeout_secs != d.embed_timeout_secs {
+            self.embed_timeout_secs = other.embed_timeout_secs;
+        }
         if other.recall_inject_tokens != d.recall_inject_tokens {
             self.recall_inject_tokens = other.recall_inject_tokens;
         }
@@ -1878,6 +1898,8 @@ mod tests {
         assert!(c.memory.redact_secrets);
         assert_eq!(c.memory.embedder, "none");
         assert_eq!(c.memory.embed_model, "");
+        assert_eq!(c.memory.embed_base_url, "https://api.openai.com/v1");
+        assert_eq!(c.memory.embed_timeout_secs, 30);
         assert_eq!(c.memory.recall_inject_tokens, 200);
         assert_eq!(c.memory.recall_top_k, 3);
         assert_eq!(c.memory.min_tool_calls, 5);
@@ -1892,11 +1914,13 @@ mod tests {
 
     #[test]
     fn memory_config_parses_from_toml() {
-        let toml = "[memory]\nenabled = false\nauto_learn = false\nrecall_top_k = 7\nllm_distill = true\nllm_distill_model = \"deepseek-v4-flash\"\nllm_distill_max_chars = 1500\n";
+        let toml = "[memory]\nenabled = false\nauto_learn = false\nrecall_top_k = 7\nembed_base_url = \"http://localhost:1234/v1\"\nembed_timeout_secs = 5\nllm_distill = true\nllm_distill_model = \"deepseek-v4-flash\"\nllm_distill_max_chars = 1500\n";
         let c: Config = toml::from_str(toml).unwrap();
         assert!(!c.memory.enabled);
         assert!(!c.memory.auto_learn);
         assert_eq!(c.memory.recall_top_k, 7);
+        assert_eq!(c.memory.embed_base_url, "http://localhost:1234/v1");
+        assert_eq!(c.memory.embed_timeout_secs, 5);
         assert!(c.memory.llm_distill);
         assert_eq!(
             c.memory.llm_distill_model.as_deref(),
@@ -1906,6 +1930,46 @@ mod tests {
         // 未覆盖字段仍取默认
         assert!(c.memory.redact_secrets);
         assert_eq!(c.memory.recall_inject_tokens, 200);
+    }
+
+    #[test]
+    fn embed_fields_merge_preserves_user_values_when_unset() {
+        let mut base = Config::default();
+        base.memory.embed_base_url = "http://user/v1".to_string();
+        base.memory.embed_timeout_secs = 9;
+
+        // 项目层只显式设置 timeout → 不覆盖用户层的 base_url。
+        let project = Config {
+            memory: MemoryConfig {
+                embed_timeout_secs: 5,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        base.merge(project);
+        assert_eq!(
+            base.memory.embed_base_url, "http://user/v1",
+            "未设置字段必须保留"
+        );
+        assert_eq!(base.memory.embed_timeout_secs, 5, "显式字段必须覆盖");
+    }
+
+    #[test]
+    fn embed_fields_merge_overrides_when_explicit() {
+        let mut base = Config::default();
+        let project = Config {
+            memory: MemoryConfig {
+                embed_base_url: "http://project/v1".to_string(),
+                embed_timeout_secs: 7,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        base.merge(project);
+        assert_eq!(base.memory.embed_base_url, "http://project/v1");
+        assert_eq!(base.memory.embed_timeout_secs, 7);
+        // 未设置字段仍是默认（不误写）。
+        assert_eq!(base.memory.embed_model, "");
     }
 
     #[test]

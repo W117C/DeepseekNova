@@ -14,6 +14,16 @@ All notable changes to DeepseekNova will be documented in this file.
 
 ### Added
 
+- **记忆语义检索（embedder remote）**：`[memory] embedder = "remote"` 启用
+  OpenAI 兼容嵌入（`/v1/embeddings`；key 从 `DEEPSEEKNOVA_EMBED_API_KEY` 读取，
+  回落 `OPENAI_API_KEY`，不落配置/日志）。写入记忆自动生成向量；召回融合
+  `0.5*bm25 + 0.5*余弦 - rank_lifecycle_weight*生命周期惩罚`（FTS 基数改纯
+  bm25，消除双重计权），可找回无共词的同义记忆；缺 key/网络错/解析错一律
+  fail-open 回落纯 FTS。`[memory]` 新增 `embed_base_url`（默认
+  https://api.openai.com/v1）/`embed_timeout_secs`（默认 30，含分层 merge）；
+  CLI 新增 `memory embed-backfill`（跳过 archived），`memory stats` 输出
+  `embedded=N/total=M`。零新增外部依赖（复用 provider 已有 reqwest/tokio）。
+
 - **Protocol 增强收尾（task_rate + record_use 回填）**：评分卡扩展 `first_pass` /
   `retry_rounds` 字段（serde default，旧文件兼容）——成功会话按首过填写，失败/
   Paused 会话由诊断回调按 `DiagnoseReport.failures` 推导覆写；fitness 记录

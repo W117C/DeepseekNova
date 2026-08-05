@@ -133,6 +133,8 @@ pub enum MemoryAction {
     Forget { id: String },
     /// 打印统计（召回命中率、reinforce 比例、stage 分布）——P2 决策依据。
     Stats,
+    /// 为尚无向量的旧记忆生成嵌入（embedder=none/缺 key 时无操作）。
+    EmbedBackfill,
     /// 衰减 + 归档超期清理（decay_rate/archive_ttl_days 取自 \[memory\] 配置）。
     Cleanup,
 }

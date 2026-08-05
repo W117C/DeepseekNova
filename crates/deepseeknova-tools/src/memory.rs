@@ -227,4 +227,42 @@ mod tests {
         let out = RecallTool.execute(&ctx, r#"{"query":"x"}"#).await.unwrap();
         assert!(out.contains("未启用"), "should degrade: {out}");
     }
+
+    #[tokio::test]
+    async fn recall_finds_semantic_match_with_embedder() {
+        use deepseeknova_core::memory::embedding::EmbeddingProvider;
+
+        /// 确定性测试替身：语义命中不需 FTS 共词。
+        struct FakeEmbed;
+        impl EmbeddingProvider for FakeEmbed {
+            fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+                if text.contains("ferris") {
+                    Ok(vec![0.9, 0.1])
+                } else if text.contains("rust") {
+                    Ok(vec![1.0, 0.0])
+                } else {
+                    Ok(vec![0.0, 1.0])
+                }
+            }
+        }
+
+        let engine: MemoryHandle = Arc::new(
+            MemoryEngine::open_in_memory_with_embedder(
+                true,
+                Some(Arc::new(FakeEmbed)),
+                Some("test-model".to_string()),
+            )
+            .unwrap(),
+        );
+        let ctx = ToolContext::new("t").with_extension(engine);
+        RememberTool
+            .execute(&ctx, r#"{"key":"k","value":"ferris crab language"}"#)
+            .await
+            .unwrap();
+        let out = RecallTool
+            .execute(&ctx, r#"{"query":"rust","top_k":5}"#)
+            .await
+            .unwrap();
+        assert!(out.contains("k"), "语义独有命中必须被召回: {out}");
+    }
 }

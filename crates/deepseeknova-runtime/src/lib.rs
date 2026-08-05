@@ -482,9 +482,18 @@ pub fn build_agent_with_role_providers(
     // ── 记忆引擎：持久化、注入工具句柄、装配起点召回 + 结束沉淀 ──
     if config.memory.enabled {
         let db = workspace_root.join(&config.memory.db_path);
-        match deepseeknova_core::memory::engine::MemoryEngine::open(
+        // 语义嵌入装配（fail-open）：embedder=remote 且 key/model 可用时挂载，
+        // 否则 warn 回落纯 FTS（try_memory_embedder 内部处理）。
+        let memory_embedder =
+            deepseeknova_provider::embeddings::try_memory_embedder(&config.memory);
+        let memory_embed_model = memory_embedder
+            .as_ref()
+            .map(|_| config.memory.embed_model.clone());
+        match deepseeknova_core::memory::engine::MemoryEngine::open_with_embedder(
             &db,
             config.memory.redact_secrets,
+            memory_embedder,
+            memory_embed_model,
         ) {
             Ok(engine) => {
                 let handle: deepseeknova_tools::MemoryHandle = Arc::new(engine);
@@ -3042,6 +3051,63 @@ mod tests {
             Some("seed"),
         )
         .unwrap();
+    }
+
+    /// env 快照守卫：测试结束恢复变量原值（防并行测试互相污染）。
+    struct EnvRestore(Vec<(&'static str, Option<String>)>);
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            for (key, value) in &self.0 {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    /// 语义嵌入 fail-open：embedder=remote 但缺 key → 装配不炸，run 照常完成
+    /// （try_memory_embedder 返回 None，recall 回落纯 FTS）。
+    #[tokio::test]
+    async fn remote_embedder_without_key_falls_back_to_fts() {
+        use deepseeknova_core::Runner;
+        use futures::StreamExt;
+
+        let _env = EnvRestore(vec![
+            (
+                "DEEPSEEKNOVA_EMBED_API_KEY",
+                std::env::var("DEEPSEEKNOVA_EMBED_API_KEY").ok(),
+            ),
+            ("OPENAI_API_KEY", std::env::var("OPENAI_API_KEY").ok()),
+        ]);
+        std::env::remove_var("DEEPSEEKNOVA_EMBED_API_KEY");
+        std::env::remove_var("OPENAI_API_KEY");
+
+        let root = std::env::temp_dir().join(format!("dnv-embed-failopen-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut config = Config::default();
+        config.memory.enabled = true;
+        config.memory.embedder = "remote".to_string();
+        config.memory.embed_model = "text-embedding-3-small".to_string();
+        config.graph.enabled = false;
+        config.review.enabled = false;
+        config.verify.enabled = false;
+        config.delegate.enabled = false;
+        config.memory.llm_distill = false;
+        let provider: Arc<dyn deepseeknova_provider::Provider> = Arc::new(stub_provider());
+        let agent = build_agent(&config, root.clone(), provider, 5, None, vec![]).unwrap();
+        let mut stream = agent
+            .run_stream(deepseeknova_core::RunInput {
+                prompt: "auth".into(),
+                images: vec![],
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// P2 回归：超 budget 场景下只对「实际注入 prompt」的 skill 计 use。

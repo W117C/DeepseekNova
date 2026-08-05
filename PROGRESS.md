@@ -1,5 +1,43 @@
 # PROGRESS — TUI 设计功能完善（任务书执行）
 
+## 任务书：记忆语义检索（embedder）最小闭环（2026-08-05，dev-loop 轮）— 任务状态
+- [x] 任务 0：基线核验（make check EXIT=0；feat/memory-lifecycle@e941f14 干净；
+      core 132 / agent 231 / provider 35 / runtime 52 / cli 32 / config 33+18 /
+      tools 66+12+7）。
+- [x] 任务 1：store search_hybrid_with_weight（FTS 基数改纯 bm25 消除双重计权；
+      最终分 = 0.5*bm25归一 + 0.5*cosine - rank_weight*lifecycle_penalty；
+      search_hybrid 委托新方法）+ 2 测试（语义独有命中、weight=0 组合回归）。
+- [x] 任务 2：provider RemoteEmbedder（embeddings.rs：独立 tokio runtime block_on、
+      from_parts/from_memory_config、try_memory_embedder fail-open）+ 5 测试
+      （本地 HTTP 端到端 ×3、config/env 校验、try 回落）。
+- [x] 任务 3：config 增 embed_base_url / embed_timeout_secs（默认
+      https://api.openai.com/v1 / 30）+ merge + 2 测试（合并保留/显式覆盖）。
+- [x] 任务 4：engine open_with_embedder / open_in_memory_with_embedder（旧入口
+      委托 None）；remember/record_task/record_knowledge 写入即嵌入（同模型跳过）；
+      recall 有 provider 走 hybrid；backfill_embeddings（跳过 archived，返回
+      (attempted, ok)）；stats.embedded + 3 测试（写入嵌入+语义命中、fail-open、
+      回填计数+stats）。
+- [x] 任务 5：runtime/CLI 装配 try_memory_embedder（缺 key 回落 FTS，runtime 测试
+      1 条）；CLI memory stats 输出 embedded=、memory embed-backfill；tools 语义
+      命中测试 1 条。
+- [x] 任务 6：GUIDE 记忆节 + CHANGELOG Added + BLOCKED 两处语义检索转已做（代码图
+      侧留待裁决）；cargo fmt；make check EXIT=0（0 failed / 2 既有 ignored）；
+      反向验证红（1 failed）→ 绿（1 passed）；分支 feat/semantic-retrieval 待提交。
+- 跨 crate 协议记录（AGENTS.md §1 触发）：预扫描=不动 core 既有公开 API 签名
+  （新增 open_with_embedder / search_hybrid_with_weight，旧入口委托）、不改既有
+  测试断言、不加外部依赖（复用 provider reqwest/tokio）；备选路径 A=core 直接加
+  reqwest 依赖 vs B=RemoteEmbedder 放 provider（已有 reqwest）+ engine 收
+  Arc<dyn EmbeddingProvider>——选 B；自检=单 crate 聚焦测试 + make check +
+  反向验证红→绿。
+
+## CLI 冒烟证据（2026-08-05 实测）
+```
+$ deepseeknova-cli memory stats
+total=0 embedded=0 recall_hit_rate=0.00 reinforce_ratio=0.00 stages= archived=0
+$ deepseeknova-cli memory embed-backfill
+embed-backfill: attempted=0 ok=0
+```
+
 ## 任务书：Protocol 增强收尾 + Graph Go 语言（2026-08-05，dev-loop 双域并行）— 开工回执
 - 理解的目标：protocol 域=能力包（2026-08-05 已合入）仅剩 2 个未落地项收尾（task_rate
   指标 first_pass/retry_rounds、fitness record_use 回填）；graph 域=新增 Go 语言支持
@@ -318,3 +356,26 @@
 
 ## 交付
 - 分支 feat/reflect-loop，已推送 origin；PR: https://github.com/W117C/DeepseekNova/pull/59
+
+## 任务书：记忆语义检索（embedder）最小闭环（2026-08-05，dev-loop 轮）— 开工回执
+- 理解的目标：把记忆召回从关键词命中升级为语义相关——remote OpenAI 兼容嵌入后端
+  （零新增依赖）、写入即嵌入、旧记忆显式回填、hybrid 检索（bm25+余弦+生命周期权重），
+  runtime/CLI 装配 + 文档 + 审查收尾。
+- 顺序：任务 0 基线核验 → 1 store hybrid+weight → 2 provider RemoteEmbedder →
+  3 config → 4 engine 接线 → 5 runtime/CLI 装配 → 6 文档/反向验证/收尾。
+- 最大风险：hybrid 与生命周期权重双重计权（需 FTS 基数改纯 bm25）；同步 trait 内
+  做 HTTP 调用（RemoteEmbedder 持独立 tokio runtime block_on，不阻塞调用方 runtime）；
+  config merge 默认值语义；既有 52 条 runtime 测试与 35 条 provider 测试不许回退。
+
+## 自验收清单（执行者逐条打勾，命令亲跑）
+- [x] A1 `make check` EXIT=0；workspace 0 failed（2 既有 ignored）
+- [x] A2 `cargo test -p deepseeknova-core memory::` 全绿且 core 测试数 ≥ 138
+      （实测 137 单测 + 2 集成 = 139；memory:: 79 全绿）
+- [x] A3 `cargo test -p deepseeknova-provider` 全绿且 ≥ 39（实测 40）
+- [x] A4 `cargo test -p deepseeknova-config` ≥ 53（实测 35+18=53）；
+      `cargo test -p deepseeknova-runtime` ≥ 53（实测 53）
+- [x] A5 `cargo test -p deepseeknova-tools` ≥ 67（实测 67+12+7；memory 工具
+      语义命中测试新增）
+- [x] B1 temp 目录 CLI 冒烟：`memory stats` 输出含 `embedded=`；`memory
+      embed-backfill` 无 provider 不 panic 且 attempted=0（实测见下）
+- [x] B2 反向验证：改坏「语义独有命中」断言 → 真红（1 failed）→ 还原 → 真绿

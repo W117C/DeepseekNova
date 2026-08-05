@@ -512,9 +512,16 @@ async fn main() -> anyhow::Result<()> {
             let db = std::env::current_dir()
                 .unwrap_or_default()
                 .join(&config.memory.db_path);
-            let engine = deepseeknova_core::memory::engine::MemoryEngine::open(
+            let memory_embedder =
+                deepseeknova_provider::embeddings::try_memory_embedder(&config.memory);
+            let memory_embed_model = memory_embedder
+                .as_ref()
+                .map(|_| config.memory.embed_model.clone());
+            let engine = deepseeknova_core::memory::engine::MemoryEngine::open_with_embedder(
                 &db,
                 config.memory.redact_secrets,
+                memory_embedder,
+                memory_embed_model,
             )?;
             match action {
                 cli::MemoryAction::List { category, limit } => {
@@ -556,9 +563,13 @@ async fn main() -> anyhow::Result<()> {
                         .collect::<Vec<_>>()
                         .join(",");
                     println!(
-                        "total={} recall_hit_rate={:.2} reinforce_ratio={:.2} stages={} archived={}",
-                        s.total, s.recall_hit_rate, s.reinforce_ratio, stages, s.archived
+                        "total={} embedded={} recall_hit_rate={:.2} reinforce_ratio={:.2} stages={} archived={}",
+                        s.total, s.embedded, s.recall_hit_rate, s.reinforce_ratio, stages, s.archived
                     );
+                }
+                cli::MemoryAction::EmbedBackfill => {
+                    let (attempted, ok) = engine.backfill_embeddings()?;
+                    println!("embed-backfill: attempted={attempted} ok={ok}");
                 }
                 cli::MemoryAction::Cleanup => {
                     let (decayed, deleted) =

@@ -728,25 +728,34 @@ impl MemoryStore {
         }
     }
 
-    /// 混合检索：FTS（含中文路由）∪ 嵌入余弦，`0.5*bm25归一化 + 0.5*cosine`
-    /// 融合排序。provider 为 None、查询嵌入失败或库中无同模型嵌入时，
-    /// 行为与 [`Self::search`] 完全一致（纯 FTS）。
-    pub fn search_hybrid(
+    /// 混合检索（带生命周期融合权重）：FTS（含中文路由）∪ 嵌入余弦，
+    /// `0.5*bm25归一化 + 0.5*cosine - rank_weight*lifecycle_penalty` 融合排序。
+    /// lifecycle_penalty 与 [`Self::search_with_weight`] 的 SQL 因子同源
+    /// （低 importance/久未召回 = 更高惩罚），方向一致：weight=0 等价纯 0.5/0.5。
+    /// FTS 基数取**纯 bm25**（rank_weight=0），生命周期因子只按 `rank_weight`
+    /// 计入一次，避免旧实现把带生命周期分数的 FTS 再归一造成双重计权。
+    /// provider 为 None、查询嵌入失败或库中无同模型嵌入时，行为与
+    /// [`Self::search_with_weight`] 一致（纯 FTS + 生命周期权重）。
+    pub fn search_hybrid_with_weight(
         &self,
         query: &str,
         limit: usize,
         provider: Option<&dyn EmbeddingProvider>,
         model: &str,
+        rank_weight: f64,
     ) -> Result<Vec<MemorySearchResult>> {
-        let fts = self.search(query, limit.saturating_mul(2))?;
-        let Some(p) = provider else {
-            return Ok(fts.into_iter().take(limit).collect());
-        };
-        let qv = match p.embed(query) {
-            Ok(v) => v,
-            Err(_) => return Ok(fts.into_iter().take(limit).collect()),
+        // 查询向量在拿锁前计算：嵌入是潜在慢 HTTP 调用，不能持 SQLite 锁
+        // （否则其它记忆读写会被阻塞最多一个超时）。失败/缺 provider →
+        // 纯 FTS + 生命周期权重（与 search_with_weight 一致）。
+        let qv = match provider {
+            Some(p) => p.embed(query).ok(),
+            None => None,
         };
         let db = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(qv) = qv else {
+            return run_memory_search(&db, query, None, limit, rank_weight);
+        };
+        let fts = run_memory_search(&db, query, None, limit.saturating_mul(2), 0.0)?;
 
         // 1. 扫描同模型嵌入，算余弦。
         let mut emb_hits: Vec<(String, f32)> = Vec::new();
@@ -779,7 +788,7 @@ impl MemoryStore {
         }
         emb_hits.sort_by(|a, b| b.1.total_cmp(&a.1));
 
-        // 2. FTS 归一化基数。
+        // 2. FTS 归一化基数（纯 bm25）。
         let mut fts_map: HashMap<String, f64> = HashMap::new();
         let mut max_s: f64 = 0.0;
         for r in &fts {
@@ -818,6 +827,35 @@ impl MemoryStore {
             }
         }
 
+        // 4b. 生命周期因子表（与 run_memory_search 的 SQL 语义同款）。
+        let now = Utc::now().timestamp();
+        let mut lifecycle: HashMap<String, f64> = HashMap::new();
+        for chunk in ids.chunks(200) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "SELECT f.id, COALESCE(m.stage, 'candidate'), \
+                 COALESCE(m.importance, f.importance), m.last_recalled_at \
+                 FROM memory_fts f LEFT JOIN memory_meta m ON m.id = f.id \
+                 WHERE f.id IN ({placeholders})"
+            );
+            let mut stmt = db.prepare(&sql)?;
+            let refs: Vec<&str> = chunk.iter().map(|s| s.as_str()).collect();
+            let rows = stmt.query_map(rusqlite::params_from_iter(refs), |row| {
+                let id: String = row.get(0)?;
+                let stage: String = row.get(1)?;
+                let importance: f64 = row.get(2)?;
+                let last_recalled_at: Option<i64> = row.get(3)?;
+                Ok((id, stage, importance, last_recalled_at))
+            })?;
+            for row in rows {
+                let (id, stage, importance, last_recalled_at) = row?;
+                lifecycle.insert(
+                    id,
+                    lifecycle_factor(importance, &stage, last_recalled_at, now),
+                );
+            }
+        }
+
         // 5. 融合打分并排序。
         let mut out: Vec<MemorySearchResult> = ids
             .iter()
@@ -830,7 +868,8 @@ impl MemoryStore {
                 .find(|(id, _)| *id == r.entry.id)
                 .map(|(_, c)| *c as f64)
                 .unwrap_or(0.0);
-            r.score = 0.5 * (s / max_s) + 0.5 * c.max(0.0);
+            let lf = lifecycle.get(&r.entry.id).copied().unwrap_or(0.0);
+            r.score = 0.5 * (s / max_s) + 0.5 * c.max(0.0) - rank_weight * lf;
         }
         out.sort_by(|a, b| {
             b.score
@@ -840,6 +879,59 @@ impl MemoryStore {
         out.truncate(limit);
         Ok(out)
     }
+
+    /// 兼容入口：生命周期权重用默认值（对齐 [`DEFAULT_RANK_WEIGHT`]）。
+    pub fn search_hybrid(
+        &self,
+        query: &str,
+        limit: usize,
+        provider: Option<&dyn EmbeddingProvider>,
+        model: &str,
+    ) -> Result<Vec<MemorySearchResult>> {
+        self.search_hybrid_with_weight(query, limit, provider, model, DEFAULT_RANK_WEIGHT)
+    }
+
+    /// 尚无嵌入向量的条目（id + content；archived 不参与回填）。
+    pub fn entries_without_embedding(&self) -> Result<Vec<(String, String)>> {
+        let db = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = db.prepare(
+            "SELECT f.id, f.content FROM memory_fts f
+             LEFT JOIN memory_meta m ON m.id = f.id
+             WHERE m.embedding IS NULL
+               AND COALESCE(m.stage, 'candidate') != 'archived'",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// 已有嵌入向量的条目数（含 archived，供 stats 展示覆盖率）。
+    pub fn embedding_count(&self) -> Result<usize> {
+        let db = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        let n: i64 = db.query_row(
+            "SELECT COUNT(*) FROM memory_meta WHERE embedding IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(n as usize)
+    }
+}
+
+/// 生命周期排序因子（与 run_memory_search 的 SQL 表达式同款语义）：
+/// `(1-importance) * stage_mult - recency_discount`；
+/// stage_mult：permanent=1.2 / verified=1.1 / 其余 1.0；recency_discount：
+/// 7 天内召回 0.5、30 天内 0.25、否则 0。
+fn lifecycle_factor(importance: f64, stage: &str, last_recalled_at: Option<i64>, now: i64) -> f64 {
+    let stage_mult = match stage {
+        "permanent" => 1.2,
+        "verified" => 1.1,
+        _ => 1.0,
+    };
+    let recency = match last_recalled_at {
+        Some(ts) if ts >= now - 7 * 86_400 => 0.5,
+        Some(ts) if ts >= now - 30 * 86_400 => 0.25,
+        _ => 0.0,
+    };
+    (1.0 - importance) * stage_mult - recency
 }
 
 // ---------------------------------------------------------------------------
@@ -1533,6 +1625,108 @@ mod tests {
             .search_with_weight("rust borrow", 10, DEFAULT_RANK_WEIGHT)
             .unwrap();
         assert_eq!(w03[0].entry.id, high.id, "生命周期融合必须重排");
+    }
+
+    /// 确定性测试替身：含 "ferris" 的内容 → [0.9, 0.1]；查询含 "rust" → [1.0, 0.0]。
+    /// 语义命中不需要任何 FTS 共词。
+    struct FakeEmbed;
+
+    impl EmbeddingProvider for FakeEmbed {
+        fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+            if text.contains("ferris") {
+                Ok(vec![0.9, 0.1])
+            } else if text.contains("rust") {
+                Ok(vec![1.0, 0.0])
+            } else {
+                Ok(vec![0.0, 1.0])
+            }
+        }
+    }
+
+    #[test]
+    fn hybrid_finds_semantic_only_hit() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        let e = make_entry(
+            "ferris crab language",
+            MemoryCategory::Task,
+            vec![],
+            "t",
+            0.5,
+        );
+        store.store(&e).unwrap();
+        store
+            .upsert_embedding(&e.id, &[0.9, 0.1], "test-model")
+            .unwrap();
+
+        // 无 provider：纯 FTS 找不到（无共词）。
+        let fts = store.search_hybrid("rust", 10, None, "test-model").unwrap();
+        assert!(fts.is_empty(), "FTS 必须找不到语义命中: {fts:?}");
+
+        // 有 provider：语义独有命中被召回。
+        let hits = store
+            .search_hybrid_with_weight("rust", 10, Some(&FakeEmbed), "test-model", 0.0)
+            .unwrap();
+        assert_eq!(hits.len(), 1, "语义独有命中必须被召回");
+        assert_eq!(hits[0].entry.id, e.id);
+        assert!(hits[0].score > 0.0, "余弦分应大于 0");
+    }
+
+    #[test]
+    fn hybrid_fuses_lifecycle_weight_once() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        // 同文本同嵌入 → bm25 与余弦都相等；排序差异只能来自生命周期项。
+        let low = make_entry(
+            "rust borrow checker",
+            MemoryCategory::Task,
+            vec![],
+            "t",
+            0.1,
+        );
+        let high = make_entry(
+            "rust borrow checker",
+            MemoryCategory::Task,
+            vec![],
+            "t",
+            0.9,
+        );
+        store.store(&low).unwrap();
+        store.store(&high).unwrap();
+        store
+            .upsert_embedding(&low.id, &[1.0, 0.0], "test-model")
+            .unwrap();
+        store
+            .upsert_embedding(&high.id, &[1.0, 0.0], "test-model")
+            .unwrap();
+        let meta = LifecycleMeta {
+            stage: MemoryLifecycleStage::Permanent,
+            recall_count: 3,
+            last_recalled_at: None,
+            created_at: low.created_at,
+            importance: 0.9,
+        };
+        store.update_lifecycle(&high.id, &meta).unwrap();
+
+        // 组合回归：weight=0 等价纯 0.5/0.5（分数相等，只按 id 决胜）。
+        let w0 = store
+            .search_hybrid_with_weight("rust borrow", 10, Some(&FakeEmbed), "test-model", 0.0)
+            .unwrap();
+        assert_eq!(w0.len(), 2);
+        assert!(
+            (w0[0].score - w0[1].score).abs() < 1e-9,
+            "weight=0 时混合分必须相等"
+        );
+
+        // weight=0.3：permanent+高 importance 必须反超（生命周期惩罚方向与 FTS 路径一致）。
+        let w03 = store
+            .search_hybrid_with_weight(
+                "rust borrow",
+                10,
+                Some(&FakeEmbed),
+                "test-model",
+                DEFAULT_RANK_WEIGHT,
+            )
+            .unwrap();
+        assert_eq!(w03[0].entry.id, high.id, "混合检索的生命周期融合必须重排");
     }
 
     #[test]

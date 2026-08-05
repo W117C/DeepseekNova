@@ -401,6 +401,10 @@ drift-detection = "soft"             # 工具族连续失败 ≥3 → DriftFindi
 ```toml
 [memory]
 auto_learn = true                  # 回合结束自动沉淀（默认 true）
+embedder = "none"                  # 嵌入后端：none | remote（默认 none）
+embed_model = ""                   # embedder=remote 时必填（如 text-embedding-3-small）
+embed_base_url = "https://api.openai.com/v1"  # 远程嵌入服务基础 URL
+embed_timeout_secs = 30            # 嵌入请求超时（秒）
 llm_distill = false                # 默认 false：启用后用 LLM 把任务观察蒸馏成
                                    # 可复用 skill/教训（Skill 类目，去重 + 脱敏）
 llm_distill_model = "deepseek-v4-flash"  # 可选；未配置回落 main provider
@@ -420,6 +424,14 @@ permanent 豁免）并删除超期 archived（距最后召回 > `archive_ttl_day
 显示 stage 分布与 archived 计数。检索排序在 bm25 之上融合生命周期因子（importance /
 stage / recency，权重 `rank_lifecycle_weight`，=0 时与纯 bm25 等价）。记忆库带
 `meta.schema_version`（当前 "1"），版本不符走迁移表不炸，未来版本库不回写版本号。
+
+**语义检索（可选）**：`embedder = "remote"` 启用 OpenAI 兼容嵌入（协议对齐
+`/v1/embeddings`；API key 从环境变量 `DEEPSEEKNOVA_EMBED_API_KEY` 读取，回落
+`OPENAI_API_KEY`，不落配置/日志）。启用后写入记忆自动生成向量，召回按
+`0.5*bm25 + 0.5*余弦 - rank_lifecycle_weight*生命周期惩罚` 融合排序，能找回换说法
+但同义的记忆；缺 key、网络错或解析错一律 fail-open（warn 日志 + 回落纯 FTS）。
+旧记忆用 `deepseeknova memory embed-backfill` 显式回填（跳过 archived）；
+`memory stats` 输出 `embedded=N/total=M` 显示覆盖率。
 
 ### Task Management
 

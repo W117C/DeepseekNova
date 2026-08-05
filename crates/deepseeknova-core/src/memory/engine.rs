@@ -6,6 +6,7 @@
 //! - `record_task`：结束时启发式经验捕获（护栏 + 成本上限 + 脱敏 + 去重）；
 //! - `stats`：可观测性快照，驱动 P2 决策。
 
+use crate::memory::embedding::EmbeddingProvider;
 use crate::memory::redact::redact;
 use crate::memory::skill::{TaskObservation, TaskOutcome};
 use crate::memory::store::{
@@ -32,6 +33,8 @@ pub struct DistillGuards {
 #[derive(Debug, Clone)]
 pub struct MemoryStats {
     pub total: usize,
+    /// 已有嵌入向量的条目数（覆盖率；embedder=none 时恒 0）。
+    pub embedded: usize,
     pub recall_hit_rate: f64,
     pub reinforce_ratio: f64,
     /// stage 分布（真实条目；含 archived，按 stage 名排序）。
@@ -44,6 +47,8 @@ pub struct MemoryStats {
 pub struct MemoryEngine {
     store: Arc<MemoryStore>,
     redact_secrets: bool,
+    embedder: Option<Arc<dyn EmbeddingProvider>>,
+    embed_model: Option<String>,
     session_distills: AtomicU32,
 }
 
@@ -58,20 +63,81 @@ fn content_id(prefix: &str, content: &str) -> String {
 impl MemoryEngine {
     /// 打开磁盘记忆库。
     pub fn open(path: impl AsRef<Path>, redact_secrets: bool) -> Result<Self> {
+        Self::open_with_embedder(path, redact_secrets, None, None)
+    }
+
+    /// 打开磁盘记忆库并装配可选嵌入后端（embedder=remote 时由 runtime/CLI 传入）。
+    pub fn open_with_embedder(
+        path: impl AsRef<Path>,
+        redact_secrets: bool,
+        embedder: Option<Arc<dyn EmbeddingProvider>>,
+        embed_model: Option<String>,
+    ) -> Result<Self> {
         Ok(Self {
             store: Arc::new(MemoryStore::open(path.as_ref())?),
             redact_secrets,
+            embedder,
+            embed_model,
             session_distills: AtomicU32::new(0),
         })
     }
 
     /// 内存库（测试 / 降级用；非 cfg(test)，跨 crate 可用）。
     pub fn open_in_memory(redact_secrets: bool) -> Result<Self> {
+        Self::open_in_memory_with_embedder(redact_secrets, None, None)
+    }
+
+    /// 内存库 + 可选嵌入后端（测试 / 降级用）。
+    pub fn open_in_memory_with_embedder(
+        redact_secrets: bool,
+        embedder: Option<Arc<dyn EmbeddingProvider>>,
+        embed_model: Option<String>,
+    ) -> Result<Self> {
         Ok(Self {
             store: Arc::new(MemoryStore::open_in_memory()?),
             redact_secrets,
+            embedder,
+            embed_model,
             session_distills: AtomicU32::new(0),
         })
+    }
+
+    /// 尽力而为：为单条记忆生成并持久化嵌入。同模型已有向量则跳过；
+    /// provider 缺失/失败只 warn，绝不回滚写入或打断调用方（fail-open）。
+    fn embed_entry(&self, id: &str, content: &str) {
+        let (Some(p), Some(model)) = (&self.embedder, &self.embed_model) else {
+            return;
+        };
+        if let Ok(Some((_, existing))) = self.store.get_embedding(id) {
+            if existing == *model {
+                return;
+            }
+        }
+        match p.embed(content) {
+            Ok(v) => {
+                if let Err(e) = self.store.upsert_embedding(id, &v, model) {
+                    warn!(id, error = %e, "memory embedding persist failed");
+                }
+            }
+            Err(e) => warn!(id, error = %e, "memory embedding failed; FTS-only fallback"),
+        }
+    }
+
+    /// 为尚无向量的旧记忆显式回填嵌入（跳过 archived；无 provider 时无操作）。
+    /// 返回 (尝试条数, 成功条数)。
+    pub fn backfill_embeddings(&self) -> Result<(usize, usize)> {
+        if self.embedder.is_none() || self.embed_model.is_none() {
+            return Ok((0, 0));
+        }
+        let pending = self.store.entries_without_embedding()?;
+        let mut ok = 0usize;
+        for (id, content) in &pending {
+            self.embed_entry(id, content);
+            if self.store.get_embedding(id)?.is_some() {
+                ok += 1;
+            }
+        }
+        Ok((pending.len(), ok))
     }
 
     /// 召回：记命中率 + 对每条命中执行 record_recall（晋级）。
@@ -88,7 +154,16 @@ impl MemoryEngine {
         top_k: usize,
         rank_weight: f64,
     ) -> Result<Vec<MemorySearchResult>> {
-        let results = self.store.search_with_weight(query, top_k, rank_weight)?;
+        let results = match (&self.embedder, &self.embed_model) {
+            (Some(p), Some(m)) => self.store.search_hybrid_with_weight(
+                query,
+                top_k,
+                Some(p.as_ref()),
+                m,
+                rank_weight,
+            )?,
+            _ => self.store.search_with_weight(query, top_k, rank_weight)?,
+        };
         self.store.note_recall(!results.is_empty()).ok();
         for r in &results {
             self.store.record_recall(&r.entry.id).ok();
@@ -107,6 +182,7 @@ impl MemoryEngine {
         let mut entry = make_entry(content, MemoryCategory::Task, tags, "remember-tool", 0.6);
         entry.id = key.to_string();
         self.store.store(&entry)?;
+        self.embed_entry(&entry.id, &entry.content);
         Ok(existed)
     }
 
@@ -194,6 +270,7 @@ impl MemoryEngine {
         );
         e.id = content_id("task", &summary);
         self.store.store(&e)?;
+        self.embed_entry(&e.id, &e.content);
 
         // 2) 失败教训（Skill 记忆，tags=[failure,lesson]）——"自我总结错误形成经验"
         if obs.outcome == TaskOutcome::Failure {
@@ -211,6 +288,7 @@ impl MemoryEngine {
                 );
                 le.id = content_id("lesson", &lesson);
                 self.store.store(&le)?;
+                self.embed_entry(&le.id, &le.content);
             }
         }
 
@@ -231,6 +309,7 @@ impl MemoryEngine {
             );
             fe.id = content_id("file", &f);
             self.store.store(&fe)?;
+            self.embed_entry(&fe.id, &fe.content);
         }
 
         self.store.bump_distill_count()?;
@@ -249,6 +328,7 @@ impl MemoryEngine {
             .unwrap_or(0);
         Ok(MemoryStats {
             total: self.store.count()?,
+            embedded: self.store.embedding_count()?,
             recall_hit_rate: if calls == 0 {
                 0.0
             } else {
@@ -293,6 +373,7 @@ impl MemoryEngine {
             return Ok(false);
         }
         self.store.store(&e)?;
+        self.embed_entry(&e.id, &e.content);
         Ok(true)
     }
 
@@ -778,5 +859,116 @@ mod tests {
             "kind: skill\ntitle: Use serde derive\nPrefer derive"
         );
         assert!(skills2[0].tags.contains(&"llm-distill".to_string()));
+    }
+
+    /// 确定性测试替身（接口替身，非被测对象 mock）：语义命中不需 FTS 共词。
+    struct FakeEmbed;
+
+    impl EmbeddingProvider for FakeEmbed {
+        fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+            if text.contains("ferris") {
+                Ok(vec![0.9, 0.1])
+            } else if text.contains("rust") {
+                Ok(vec![1.0, 0.0])
+            } else {
+                Ok(vec![0.0, 1.0])
+            }
+        }
+    }
+
+    /// 失败替身：验证 fail-open（写入不因嵌入失败而回滚）。
+    struct FailingEmbed;
+
+    impl EmbeddingProvider for FailingEmbed {
+        fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+            anyhow::bail!("network unavailable")
+        }
+    }
+
+    #[test]
+    fn write_embeds_and_recall_finds_semantic_match() {
+        let eng = MemoryEngine::open_in_memory_with_embedder(
+            true,
+            Some(Arc::new(FakeEmbed)),
+            Some("test-model".to_string()),
+        )
+        .unwrap();
+        eng.remember("k", "ferris crab language", vec![]).unwrap();
+        assert!(
+            eng.store.get_embedding("k").unwrap().is_some(),
+            "remember 后必须自动生成嵌入"
+        );
+        let hits = eng.recall("rust", 5).unwrap();
+        assert_eq!(hits.len(), 1, "语义独有命中必须被召回");
+        assert_eq!(hits[0].entry.id, "k");
+        assert_eq!(eng.stats().unwrap().embedded, 1);
+    }
+
+    #[test]
+    fn embedder_failure_keeps_write_and_fts_recall() {
+        let eng = MemoryEngine::open_in_memory_with_embedder(
+            true,
+            Some(Arc::new(FailingEmbed)),
+            Some("test-model".to_string()),
+        )
+        .unwrap();
+        assert!(!eng.remember("k", "rust borrow checker", vec![]).unwrap());
+        assert!(
+            eng.store.get_embedding("k").unwrap().is_none(),
+            "嵌入失败不得写入向量"
+        );
+        let hits = eng.recall("rust", 5).unwrap();
+        assert_eq!(hits.len(), 1, "嵌入失败必须回落纯 FTS 召回");
+        assert_eq!(hits[0].entry.id, "k");
+    }
+
+    #[test]
+    fn backfill_embeddings_skips_archived_and_counts() {
+        use crate::memory::lifecycle::{LifecycleMeta, MemoryLifecycleStage};
+        use crate::memory::store::make_entry;
+        let eng = MemoryEngine::open_in_memory_with_embedder(
+            true,
+            Some(Arc::new(FakeEmbed)),
+            Some("test-model".to_string()),
+        )
+        .unwrap();
+        let mut e1 = make_entry(
+            "ferris crab language",
+            MemoryCategory::Task,
+            vec![],
+            "t",
+            0.5,
+        );
+        e1.id = "e1".to_string();
+        let mut e2 = make_entry(
+            "rust borrow checker",
+            MemoryCategory::Task,
+            vec![],
+            "t",
+            0.5,
+        );
+        e2.id = "e2".to_string();
+        let mut e3 = make_entry("archived legacy", MemoryCategory::Task, vec![], "t", 0.5);
+        e3.id = "e3".to_string();
+        eng.store.store(&e1).unwrap();
+        eng.store.store(&e2).unwrap();
+        eng.store.store(&e3).unwrap();
+        let _ = eng.store.update_lifecycle(
+            &e3.id,
+            &LifecycleMeta {
+                stage: MemoryLifecycleStage::Archived,
+                recall_count: 0,
+                last_recalled_at: None,
+                created_at: e3.created_at,
+                importance: 0.5,
+            },
+        );
+
+        let (attempted, ok) = eng.backfill_embeddings().unwrap();
+        assert_eq!((attempted, ok), (2, 2), "archived 必须跳过");
+        assert_eq!(eng.store.embedding_count().unwrap(), 2);
+        assert_eq!(eng.stats().unwrap().embedded, 2);
+        // 二次回填应为无操作。
+        assert_eq!(eng.backfill_embeddings().unwrap(), (0, 0));
     }
 }

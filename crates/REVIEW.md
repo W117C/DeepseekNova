@@ -286,3 +286,77 @@
 ### 4. 结论
 
 **0 critical / 0 high / 1 medium（C1，已修）**。重审 0 问题；未提交 13 文件待用户决定提交。
+
+---
+
+## 轮次：记忆语义检索（embedder）最小闭环（2026-08-05）
+
+### 1. 覆盖声明
+
+- **范围确认**：`ocr delegate preview` 工作区模式输出 9 reviewable / 14 total；
+  `BLOCKED.md` / `CHANGELOG.md` / `GUIDE.md` / `PROGRESS.md` / 计划文件被 OCR 按
+  unsupported_ext 排除，已人工审 diff；9 个代码文件全部覆盖（含新文件
+  `embeddings.rs` 全文）。文档类改动（GUIDE/CHANGELOG/BLOCKED/PROGRESS）在收尾步
+  复核。
+- **规则**：仓库根无 `ocr.rules.json`，走 system 默认规则（**/\*.rs 一组）；
+  AGENTS.md §1.1 跨 crate 变更协议已按完整路径执行（预扫描/备选路径/自检见
+  PROGRESS.md）。
+- **测试实测**：`make check` EXIT=0（fmt/clippy/全 workspace/doctest/doc 全绿）；
+  core 137 单测 + 2 集成、provider 40、config 35+18、runtime 53、tools 67+12+7、
+  cli 32；2 既有 ignored（graph self_index、provider reasoning protocol）。
+
+### ocr delegate preview 原始输出
+
+```text
+# Files (9 reviewable / 14 total)
+- mode: workspace
+- total_insertions: 1049
+- total_deletions: 17
+  - crates/deepseeknova-cli/src/cli.rs [modified] +2/-0
+  - crates/deepseeknova-cli/src/main.rs [modified] +14/-3
+  - crates/deepseeknova-config/src/lib.rs [modified] +66/-2
+  - crates/deepseeknova-core/src/memory/engine.rs [modified] +193/-1
+  - crates/deepseeknova-core/src/memory/store.rs [modified] +199/-8
+  - crates/deepseeknova-provider/src/lib.rs [modified] +1/-0
+  - crates/deepseeknova-runtime/src/lib.rs [modified] +67/-1
+  - crates/deepseeknova-tools/src/memory.rs [modified] +38/-0
+  - crates/deepseeknova-provider/src/embeddings.rs [added] +299/-0
+```
+
+### 2. 评论表（第一轮）
+
+| # | 路径 | 内容 | 起止行 | 分类 | 严重度 |
+|---|------|------|--------|------|--------|
+| M1 | crates/deepseeknova-core/src/memory/store.rs | `search_hybrid_with_weight` 先拿 SQLite 锁再调 `provider.embed(query)`——嵌入是潜在慢 HTTP 调用，持锁期间其它记忆读写会被阻塞最多一个超时（默认 30s） | 739-754（修复前 749-753） | concurrency | medium |
+| M2 | crates/deepseeknova-core/src/memory/store.rs | provider=None 或查询嵌入失败时返回「纯 bm25 未加生命周期权重」的结果，与文档承诺的 `search_with_weight` 等价不一致（文档写着等价） | 739-754（修复前 749-756） | bug | medium |
+| L1 | crates/deepseeknova-provider/src/embeddings.rs | `try_memory_embedder` 对未知 embedder 值（如文档提到的 "local"）静默返回 None，用户配置写错得不到任何提示 | 131-142（修复前） | maintainability | low |
+| L2 | core store/engine 测试 + tools memory 测试 | `FakeEmbed` 确定性向量替身在三个测试模块重复定义（各 10 行） | store.rs:1631 / engine.rs:867 / memory.rs:236 | maintainability | low |
+
+### 3. 处置与修复记录
+
+- **M1 + M2 — 已修（同一处重构）**：查询向量改为**拿锁前**计算（`provider.embed`
+  失败/缺 provider 时 `qv=None`），随后持锁路径只做纯 SQL/余弦运算；`qv` 为 None
+  时直接 `run_memory_search(..., rank_weight)` 回落纯 FTS + 生命周期权重，与文档
+  承诺一致。为何如此修：HTTP 调用与锁的先后关系是根因，两问题共享同一段代码；
+  重排后既消除锁内慢调用，也让回落路径语义闭环（store.rs:747-757）。
+- **L1 — 已修**：`try_memory_embedder` 改为显式三态匹配，`none` → None；
+  `remote` → 装配（失败 warn）；其它值 → warn「not implemented; falling back to
+  FTS-only」并返回 None（embeddings.rs:131-146）；补测试断言
+  `embedder="local"` fail-open 到 None。
+- **L2 — 不修（记录理由）**：测试替身按 crate 就地定义可保持各测试模块自包含、
+  避免为测试暴露跨 crate 公共 fixture；重复仅 3 处、每处 ~10 行，改动收益低。
+- **接受的权衡（非评论）**：`RemoteEmbedder::embed` 是同步 trait 内的 `block_on`，
+  在 async 工具路径（remember/recall）会阻塞一个 worker 线程至多一个超时。替代
+  方案（trait 改 async + spawn_blocking）需要改动 store/engine/tools 整条调用链，
+  超出本轮白名单；已有独立 runtime + 超时兜底，风险受限，已在 GUIDE 记录。
+
+### 4. 重审（修复后）
+
+`ocr delegate preview` 与人工 diff 重查两处修复：锁外嵌入、fallback 带生命周期
+权重、未知后端 warn 均有测试/代码佐证；无新问题。聚焦测试全绿（core memory 79、
+provider embeddings 5），`make check` EXIT=0。
+
+### 5. 结论
+
+**0 critical / 0 high / 2 medium（M1+M2，已修）/ 2 low（L1 已修、L2 接受）**。
+字面退出条件（无 High/Critical 且测试全绿）满足；第二轮复核无新问题。
