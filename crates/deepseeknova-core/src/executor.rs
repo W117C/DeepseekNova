@@ -270,7 +270,7 @@ impl GraphExecutor {
                     let mut delay = node.retry.backoff * attempt;
                     if node.retry.jitter {
                         let max_jitter_ms = (delay.as_millis() as u64).min(1000);
-                        let jitter_ms = rand::thread_rng().gen_range(0..=max_jitter_ms);
+                        let jitter_ms = rand::rng().random_range(0..=max_jitter_ms);
                         delay += Duration::from_millis(jitter_ms);
                     }
                     warn!(

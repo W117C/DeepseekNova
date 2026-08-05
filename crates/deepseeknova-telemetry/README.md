@@ -1,6 +1,6 @@
 # OpenTelemetry integration for deepseeknova
 
-Provides distributed tracing and metrics via the OpenTelemetry protocol (OTLP).
+Provides distributed tracing via the OpenTelemetry protocol (OTLP).
 Traces are automatically collected from existing `tracing` spans and exported
 to any OTLP-compatible backend (Jaeger, Honeycomb, Grafana Tempo, etc.).
 

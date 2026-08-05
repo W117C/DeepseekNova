@@ -1,6 +1,7 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
 use deepseeknova_core::registry::RegistryHub;
 use deepseeknova_core::{Tool, ToolContext, ToolSchema};
+use std::hint::black_box;
 use std::sync::Arc;
 
 /// Minimal tool for benchmarking.

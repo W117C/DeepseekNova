@@ -1,6 +1,6 @@
 //! OpenTelemetry integration for deepseeknova.
 //!
-//! Provides distributed tracing and metrics via the OpenTelemetry protocol (OTLP).
+//! Provides distributed tracing via the OpenTelemetry protocol (OTLP).
 //! Traces are automatically collected from existing `tracing` spans and exported
 //! to any OTLP-compatible backend (Jaeger, Honeycomb, Grafana Tempo, etc.).
 //!
@@ -35,9 +35,8 @@
 
 use anyhow::Context;
 use opentelemetry::trace::TracerProvider as _;
-use opentelemetry::KeyValue;
 use opentelemetry_otlp::WithExportConfig;
-use opentelemetry_sdk::trace::TracerProvider;
+use opentelemetry_sdk::trace::SdkTracerProvider;
 use opentelemetry_sdk::Resource;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::Registry;
@@ -50,7 +49,7 @@ use tracing_subscriber::Registry;
 /// the tracer provider.
 #[must_use = "telemetry shuts down when dropped — hold this guard for the program lifetime"]
 pub struct TelemetryGuard {
-    tracer_provider: Option<TracerProvider>,
+    tracer_provider: Option<SdkTracerProvider>,
 }
 
 impl TelemetryGuard {
@@ -67,12 +66,13 @@ impl TelemetryGuard {
             .build()
             .context("failed to create OTLP span exporter")?;
 
-        let tracer_provider = TracerProvider::builder()
-            .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
-            .with_resource(Resource::new(vec![KeyValue::new(
-                "service.name",
-                service_name.to_string(),
-            )]))
+        let tracer_provider = SdkTracerProvider::builder()
+            .with_batch_exporter(exporter)
+            .with_resource(
+                Resource::builder()
+                    .with_service_name(service_name.to_string())
+                    .build(),
+            )
             .build();
 
         let tracer = tracer_provider.tracer("deepseeknova");
@@ -106,12 +106,13 @@ impl TelemetryGuard {
     pub fn init_stdout(service_name: &str) -> anyhow::Result<Self> {
         let exporter = opentelemetry_stdout::SpanExporter::default();
 
-        let tracer_provider = TracerProvider::builder()
+        let tracer_provider = SdkTracerProvider::builder()
             .with_simple_exporter(exporter)
-            .with_resource(Resource::new(vec![KeyValue::new(
-                "service.name",
-                service_name.to_string(),
-            )]))
+            .with_resource(
+                Resource::builder()
+                    .with_service_name(service_name.to_string())
+                    .build(),
+            )
             .build();
 
         let tracer = tracer_provider.tracer("deepseeknova");

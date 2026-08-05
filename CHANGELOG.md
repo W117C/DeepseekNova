@@ -181,6 +181,15 @@ All notable changes to DeepseekNova will be documented in this file.
 
 ### Fixed
 
+- 依赖健康修复：OpenTelemetry 栈 0.27→0.32（telemetry 适配
+  `SdkTracerProvider` / `Resource::builder`，依赖特性统一收敛为 trace-only），ratatui 0.29→0.30（lru 0.12
+  unsound 与 paste unmaintained 两项豁免随之移除），crossterm 0.28→0.29，
+  rand 0.8→0.9（`rng().random_range`），thiserror 1→2，criterion 0.5→0.8
+  （bench 改用 `std::hint::black_box`）。`cargo deny` 重复依赖警告从 16 组
+  降至 0（剩余 5 组上游传递/目标平台分叉在 `deny.toml [bans].skip` 显式登记）。
+- scanner 测试临时目录改用 `tempfile::tempdir()`，消除并行测试纳秒撞名导致的
+  flaky 失败。
+
 - Graph Go 分组类型声明 `type ( A struct{}; B interface{} )` 此前只采集第一个
   type_spec（tree-sitter-go 0.25 的 type_declaration children 为 multiple），组内
   第 2+ 个类型静默丢失、引用不可解析；现遍历全部 type_spec 逐个产出实体。

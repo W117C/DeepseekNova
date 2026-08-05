@@ -24,12 +24,9 @@ jobs:
           tool: cargo-audit
       - name: Run audit
         # Ignored advisories — see deny.toml [advisories].ignore for per-item rationale.
-        # RUSTSEC-2026-0002 (lru <0.16.3): ratatui 0.29 传递依赖无法单独升级，
-        # 待升级 ratatui 0.30 后移除。其余清单同 deny.toml。
+        # 清单与 deny.toml 保持一致；ratatui 0.30 已消除 lru/paste 两项豁免。
         run: |
           cargo-audit audit \
-            --ignore RUSTSEC-2026-0002  \
-            --ignore RUSTSEC-2024-0436 \
             --ignore RUSTSEC-2025-0068
 
   deny:

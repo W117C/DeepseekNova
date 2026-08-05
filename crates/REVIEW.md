@@ -261,3 +261,28 @@
 - **R2（Go 类型 doc 丢失 + signature 变化）— 已修，选「doc 回退父节点提取 + signature 保留 type 前缀」**：doc 先取成员自身 prev_sibling 紧邻注释（分组内逐成员注释可用），取不到时回退父节点 `type_declaration` 的 prev_sibling——单声明 `// User is a user.\ntype User struct{}` 的注释在 type_declaration 之前、type_spec 的 prev_sibling 是 "type" 匿名关键字节点，回退后 doc 恢复；signature 拼 `"type "` 前缀，单声明逐字等价旧行为（"type User struct"），分组旧产物 "type ( A struct" 本身是首个成员伪影，改后为有意义的 "type A struct"。**为何如此修**：以「与旧行为尽量等价」为原则（任务指定），两处都恢复旧语义而非接受变化；父节点回退仅对 Go 成员生效（push_entity 改收预计算 sig/doc，Rust/Python/JS 路径传自身节点，行为不变）。**测试证据**：新增 `go_type_doc_and_signature_restored`——单声明 doc="User is a user."/signature="type User struct"；分组首成员 doc=组注释、各成员 signature 带 "type " 前缀（"type A struct"/"type B interface"）。
 - **测试数字变化**：graph 40 → 42（+2：R1 refs 归属、R2 doc/signature）。既有断言零改动（含 `parses_go_grouped_type_declarations` 原样保留，仅其未覆盖的 refs/doc/signature 由新测试补足）。`cargo fmt --check` 零 diff；`make check` 全绿（MAKE_CHECK_EXIT=0，55 处 test result 全 0 failed；doc 阶段仅 cli.rs:136 既有 unresolved link warning，非本轮引入）。
 - **反向验证**：`go_grouped_type_refs_attribution` 中 A refs 断言改坏（期望伪边 (B,A)）→ 真红（1 failed，parser.rs:681 panic）→ 还原 → 真绿（1 passed）。
+
+---
+
+## 轮次：工作区未提交——依赖健康修复（2026-08-05）
+
+### 1. 覆盖声明
+
+- **范围确认**：`ocr delegate preview` 工作区模式输出 10 reviewable / 13 total；`Cargo.lock`、`AGENTS.md`、`CHANGELOG.md` 被 OCR 按 unsupported_ext 排除，已人工审 diff。全部 13 个改动文件均覆盖（含 `.github/workflows/security.yml`、`Cargo.toml`、`deny.toml`、cli/executor/scanner/telemetry/bench）。
+- **规则**：仓库根无 `ocr.rules.json` / `.opencodereview/rule.json`，走 system 默认规则（workflow、Cargo.toml、Rust、default 四组）；AGENTS.md §1.1 跨 crate 变更协议已按完整路径执行。
+- **测试实测**：`make check` EXIT=0（fmt/clippy/全 workspace/doctest/doc 零警告）；`make audit` ok；`cargo audit` 仅 1 allowed warning（RUSTSEC-2025-0068 serde_yml，deny.toml 已登记）。
+
+### 2. 评论表
+
+| # | 路径 | 内容 | 起止行 | 分类 | 严重度 |
+|---|------|------|--------|------|--------|
+| C1 | Cargo.toml | `opentelemetry-otlp` 已收窄为 trace-only，但 `opentelemetry` / `opentelemetry-sdk` / `opentelemetry-stdout` 仍用默认特性（含 metrics/logs），与意图不一致；telemetry lib.rs 与 README 仍宣称 metrics。 | 98-101 | maintainability | medium |
+
+### 3. 处置
+
+- **C1 — 已修**：四个 OTel 依赖统一 `default-features = false` + `trace`（sdk 保留 `rt-tokio`）；`crates/deepseeknova-telemetry/src/lib.rs` 与 `crates/deepseeknova-telemetry/README.md` 文档改为 tracing-only。
+- **重审**：修复后再次 `ocr delegate preview` + 人工审 diff，无新问题；`make check` 重跑 EXIT=0。
+
+### 4. 结论
+
+**0 critical / 0 high / 1 medium（C1，已修）**。重审 0 问题；未提交 13 文件待用户决定提交。

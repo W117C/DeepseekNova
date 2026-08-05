@@ -133,7 +133,7 @@ pub enum MemoryAction {
     Forget { id: String },
     /// 打印统计（召回命中率、reinforce 比例、stage 分布）——P2 决策依据。
     Stats,
-    /// 衰减 + 归档超期清理（decay_rate/archive_ttl_days 取自 [memory] 配置）。
+    /// 衰减 + 归档超期清理（decay_rate/archive_ttl_days 取自 \[memory\] 配置）。
     Cleanup,
 }
 

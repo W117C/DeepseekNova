@@ -26,3 +26,29 @@
 
 ## 遗留（如实）
 - 无。已知待裁决项全部在 BLOCKED（见上），非本轮范围。
+
+---
+
+## CLOSEOUT — 依赖健康修复（2026-08-05 收尾轮）
+
+### 六事实面状态
+
+| 事实面 | 状态 | 证据 |
+|--------|------|------|
+| 代码 | changed-and-verified | 未提交工作区 13 文件；`make check` EXIT=0（fmt/clippy/全 workspace/doctest/doc 零警告）；`make audit` ok |
+| 运行态 | not-applicable | 无部署/服务面，本轮仅本地构建与测试验证 |
+| 文档 | changed-and-verified | CHANGELOG Fixed 条目；telemetry lib.rs 与 README 同步为 tracing-only；README/GUIDE/BUILDING 无版本级过期表述 |
+| 规则 | changed-and-verified | AGENTS.md §5 新增「并行测试临时目录撞名」防错条目；deny.toml skip/ignore 与 CI security.yml 同步（lru/paste 豁免移除） |
+| 记忆 | not-applicable | 无平台记忆写入 |
+| 工作区 | pending | 13 文件未提交（分支 feat/memory-lifecycle），无未跟踪残留、无 stash、无临时/备份文件；提交与否待用户决定 |
+
+### 本轮交付物核对
+
+1. 依赖升级：OTel 0.27→0.32（trace-only）、ratatui 0.29→0.30、crossterm 0.28→0.29、rand 0.8→0.9、thiserror 1→2、criterion 0.5→0.8；重复依赖警告 16 组→0（剩余 5 组上游分叉登记 skip）。
+2. 测试全绿：`make check` EXIT=0；scanner flaky（纳秒撞名）改 `tempfile::tempdir()` 后连跑 3 次全过。
+3. 审查报告：crates/REVIEW.md 本轮分节（1 medium C1 → 已修 → 重审 0 问题）。
+4. 安全：`make audit` ok；`cargo audit` 仅 1 项已登记允许警告（RUSTSEC-2025-0068）。
+
+### 遗留（如实）
+- 未提交：13 个文件（含 Cargo.lock），待用户决定 commit / push。
+- 无未消除的构建或审计 warning；BLOCKED 待裁决项均非本轮范围。
