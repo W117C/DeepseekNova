@@ -530,7 +530,9 @@ async fn main() -> anyhow::Result<()> {
                 }
                 cli::MemoryAction::Search { query } => {
                     let q = query.join(" ");
-                    for (i, r) in engine.recall(&q, 10)?.iter().enumerate() {
+                    let hits =
+                        engine.recall_with_weight(&q, 10, config.memory.rank_lifecycle_weight)?;
+                    for (i, r) in hits.iter().enumerate() {
                         let preview: String = r.entry.content.chars().take(120).collect();
                         println!("{}. [{}] {}", i + 1, r.entry.id, preview);
                     }
@@ -547,10 +549,21 @@ async fn main() -> anyhow::Result<()> {
                 }
                 cli::MemoryAction::Stats => {
                     let s = engine.stats()?;
+                    let stages = s
+                        .stage_counts
+                        .iter()
+                        .map(|(k, v)| format!("{k}:{v}"))
+                        .collect::<Vec<_>>()
+                        .join(",");
                     println!(
-                        "total={} recall_hit_rate={:.2} reinforce_ratio={:.2}",
-                        s.total, s.recall_hit_rate, s.reinforce_ratio
+                        "total={} recall_hit_rate={:.2} reinforce_ratio={:.2} stages={} archived={}",
+                        s.total, s.recall_hit_rate, s.reinforce_ratio, stages, s.archived
                     );
+                }
+                cli::MemoryAction::Cleanup => {
+                    let (decayed, deleted) =
+                        engine.cleanup(config.memory.decay_rate, config.memory.archive_ttl_days)?;
+                    println!("cleanup: decayed={decayed} deleted={deleted}");
                 }
             }
         }

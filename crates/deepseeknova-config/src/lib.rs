@@ -443,6 +443,19 @@ pub struct MemoryConfig {
     /// （仅限 distill+draft；用户手写/verified/active 豁免）。
     #[serde(default = "default_max_auto_draft_skills")]
     pub max_auto_draft_skills: usize,
+
+    /// 非 permanent 记忆的每次衰减率（默认 0.1；`memory cleanup` 触发时应用）。
+    #[serde(default = "default_decay_rate")]
+    pub decay_rate: f32,
+
+    /// archived 记忆距最后召回（无召回按创建时间）超过该天数即被
+    /// `memory cleanup` 删除（默认 30）。
+    #[serde(default = "default_archive_ttl_days")]
+    pub archive_ttl_days: u32,
+
+    /// 检索排序的生命周期融合权重（默认 0.3；0 = 纯 bm25，与旧行为等价）。
+    #[serde(default = "default_rank_lifecycle_weight")]
+    pub rank_lifecycle_weight: f64,
 }
 
 fn default_memory_db_path() -> String {
@@ -490,6 +503,15 @@ fn default_active_session_threshold() -> u32 {
 fn default_max_auto_draft_skills() -> usize {
     20
 }
+fn default_decay_rate() -> f32 {
+    0.1
+}
+fn default_archive_ttl_days() -> u32 {
+    30
+}
+fn default_rank_lifecycle_weight() -> f64 {
+    0.3
+}
 
 impl Default for MemoryConfig {
     fn default() -> Self {
@@ -517,6 +539,9 @@ impl Default for MemoryConfig {
             verify_use_threshold: default_verify_use_threshold(),
             active_session_threshold: default_active_session_threshold(),
             max_auto_draft_skills: default_max_auto_draft_skills(),
+            decay_rate: default_decay_rate(),
+            archive_ttl_days: default_archive_ttl_days(),
+            rank_lifecycle_weight: default_rank_lifecycle_weight(),
         }
     }
 }
@@ -1462,6 +1487,15 @@ impl MemoryConfig {
         if other.max_auto_draft_skills != d.max_auto_draft_skills {
             self.max_auto_draft_skills = other.max_auto_draft_skills;
         }
+        if other.decay_rate != d.decay_rate {
+            self.decay_rate = other.decay_rate;
+        }
+        if other.archive_ttl_days != d.archive_ttl_days {
+            self.archive_ttl_days = other.archive_ttl_days;
+        }
+        if other.rank_lifecycle_weight != d.rank_lifecycle_weight {
+            self.rank_lifecycle_weight = other.rank_lifecycle_weight;
+        }
     }
 }
 
@@ -1923,6 +1957,36 @@ mod tests {
         };
         base.merge(project2);
         assert_eq!(base.memory.verify_use_threshold, 11);
+    }
+
+    #[test]
+    fn memory_lifecycle_fields_defaults_and_merge() {
+        let d = Config::default();
+        assert_eq!(d.memory.decay_rate, 0.1);
+        assert_eq!(d.memory.archive_ttl_days, 30);
+        assert_eq!(d.memory.rank_lifecycle_weight, 0.3);
+
+        let toml =
+            "[memory]\ndecay_rate = 0.2\narchive_ttl_days = 7\nrank_lifecycle_weight = 0.0\n";
+        let c: Config = toml::from_str(toml).unwrap();
+        assert_eq!(c.memory.decay_rate, 0.2);
+        assert_eq!(c.memory.archive_ttl_days, 7);
+        assert_eq!(c.memory.rank_lifecycle_weight, 0.0);
+
+        // merge：项目层显式设置覆盖；未设置保留用户层值。
+        let mut base = Config::default();
+        base.memory.decay_rate = 0.05;
+        base.memory.archive_ttl_days = 60;
+        base.merge(Config {
+            memory: MemoryConfig {
+                rank_lifecycle_weight: 0.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        assert_eq!(base.memory.decay_rate, 0.05, "未设置字段必须保留用户层值");
+        assert_eq!(base.memory.archive_ttl_days, 60);
+        assert_eq!(base.memory.rank_lifecycle_weight, 0.0, "显式设置必须覆盖");
     }
 
     #[test]

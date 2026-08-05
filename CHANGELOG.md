@@ -14,6 +14,15 @@ All notable changes to DeepseekNova will be documented in this file.
 
 ### Added
 
+- **记忆生命周期闭环**：memory schema 版本机制（`meta.schema_version` 初值 "1"，
+  版本不符走迁移表——当前为空——不炸）；检索排除 archived（不参与召回），排序融合
+  生命周期因子（bm25 + importance/stage/recency，`[memory] rank_lifecycle_weight`
+  默认 0.3，0 = 纯 bm25 等价旧行为）；衰减接线（`MemoryEngine::decay`/`cleanup`，
+  非 permanent 衰减、<0.1 归档、permanent 豁免、超期 archived 删除）；`[memory]`
+  新增 `decay_rate`/`archive_ttl_days`/`rank_lifecycle_weight`（含分层 merge）；CLI
+  新增 `memory cleanup`，`memory stats` 输出 stage 分布与 archived 计数；蒸馏双轨
+  统一入口 `record_knowledge`（reflect lesson / llm-distill 同内容跨入口去重）。
+
 - **任务质量闭环**：permission gate 升级为可编程 `ToolHook` 链（core 定义
   trait + `HookVerdict`/`QualityFinding`，agent 主循环 before/after 挂载，
   panic 契约：before/interested fail-closed Deny、after fail-open）；

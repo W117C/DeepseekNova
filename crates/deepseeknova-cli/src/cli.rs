@@ -131,8 +131,10 @@ pub enum MemoryAction {
     Search { query: Vec<String> },
     /// 按 id/key 删除一条记忆。
     Forget { id: String },
-    /// 打印统计（召回命中率、reinforce 比例）——P2 决策依据。
+    /// 打印统计（召回命中率、reinforce 比例、stage 分布）——P2 决策依据。
     Stats,
+    /// 衰减 + 归档超期清理（decay_rate/archive_ttl_days 取自 [memory] 配置）。
+    Cleanup,
 }
 
 #[derive(Subcommand)]

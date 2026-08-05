@@ -107,7 +107,43 @@ const MEMORY_SCHEMA_SQL: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts U
                 importance REAL NOT NULL DEFAULT 0.5
             );
             CREATE TABLE IF NOT EXISTS counters(name TEXT PRIMARY KEY, value INTEGER NOT NULL DEFAULT 0);
-            CREATE TABLE IF NOT EXISTS distill_log(day TEXT PRIMARY KEY, count INTEGER NOT NULL DEFAULT 0);";
+            CREATE TABLE IF NOT EXISTS distill_log(day TEXT PRIMARY KEY, count INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO meta(key, value) VALUES('schema_version', '1')
+                ON CONFLICT(key) DO NOTHING;";
+
+/// 当前 memory schema 版本：初值 "1"（graph 先例 SCHEMA_VERSION=4）。
+/// 版本不符时按迁移表（当前为空）升级，无破坏性变更则只回写版本号。
+const MEMORY_SCHEMA_VERSION: &str = "1";
+
+/// 生命周期融合权重默认值（对齐配置 `[memory] rank_lifecycle_weight` 默认 0.3；
+/// 0 = 纯 bm25，与旧行为等价）。
+pub const DEFAULT_RANK_WEIGHT: f64 = 0.3;
+
+/// schema 版本核对：不符 → 走迁移（当前无迁移项，空跑）→ 回写当前版本。
+/// 旧库（无 meta 表 → 版本缺失）与未知未来版本库打开均不炸。
+fn ensure_schema_version(db: &rusqlite::Connection) -> Result<()> {
+    let version: Option<String> = db
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'schema_version'",
+            [],
+            |r| r.get(0),
+        )
+        .map(Some)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(other),
+        })?;
+    if version.as_deref() != Some(MEMORY_SCHEMA_VERSION) {
+        // 迁移表：暂无迁移（版本不符不炸）。未来破坏性 schema 变更在此追加迁移步骤。
+        db.execute(
+            "INSERT INTO meta(key, value) VALUES('schema_version', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [MEMORY_SCHEMA_VERSION],
+        )?;
+    }
+    Ok(())
+}
 
 /// 主表与 trigram 表行数不一致时对账回填（首次升级、崩溃失步均自愈）。
 fn ensure_cjk_backfill(db: &rusqlite::Connection) -> Result<()> {
@@ -139,6 +175,7 @@ impl MemoryStore {
 
         // Enable FTS5 and create tables
         db.execute_batch(MEMORY_SCHEMA_SQL)?;
+        ensure_schema_version(&db)?;
         ensure_cjk_backfill(&db)?;
 
         // FTS5 doesn't support INSERT OR REPLACE directly; use a delete-then-insert pattern.
@@ -154,6 +191,7 @@ impl MemoryStore {
         let db =
             rusqlite::Connection::open_in_memory().context("failed to open in-memory database")?;
         db.execute_batch(MEMORY_SCHEMA_SQL)?;
+        ensure_schema_version(&db)?;
         ensure_cjk_backfill(&db)?;
         Ok(Self {
             db: Arc::new(Mutex::new(db)),
@@ -212,9 +250,21 @@ impl MemoryStore {
     }
 
     /// Search memories by full-text query. Returns ranked results.
+    /// 排序融合生命周期因子，权重为 [`DEFAULT_RANK_WEIGHT`]（对齐配置默认）。
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<MemorySearchResult>> {
+        self.search_with_weight(query, limit, DEFAULT_RANK_WEIGHT)
+    }
+
+    /// 带生命周期融合权重的检索。权重 = 0 时与纯 bm25 排序等价（旧行为）。
+    /// archived 条目不参与召回。
+    pub fn search_with_weight(
+        &self,
+        query: &str,
+        limit: usize,
+        rank_weight: f64,
+    ) -> Result<Vec<MemorySearchResult>> {
         let db = self.db.lock().unwrap_or_else(|e| e.into_inner());
-        run_memory_search(&db, query, None, limit)
+        run_memory_search(&db, query, None, limit, rank_weight)
     }
 
     /// Search within a specific category.
@@ -225,7 +275,7 @@ impl MemoryStore {
         limit: usize,
     ) -> Result<Vec<MemorySearchResult>> {
         let db = self.db.lock().unwrap_or_else(|e| e.into_inner());
-        run_memory_search(&db, query, Some(category), limit)
+        run_memory_search(&db, query, Some(category), limit, DEFAULT_RANK_WEIGHT)
     }
 
     /// Delete a memory by ID.
@@ -458,6 +508,99 @@ impl MemoryStore {
         Ok(reinforced as f64 / total as f64)
     }
 
+    /// 读取全部真实条目（存在于 memory_fts）的 lifecycle 元数据，供衰减/清理遍历。
+    /// 缺失 meta 行的条目以 fts 列兜底（candidate / 0 次召回 / created_at / importance）。
+    pub fn all_lifecycle(&self) -> Result<Vec<(String, LifecycleMeta)>> {
+        let db = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = db.prepare(
+            "SELECT f.id, COALESCE(m.stage, 'candidate'), COALESCE(m.recall_count, 0), \
+             m.last_recalled_at, COALESCE(m.created_at, f.created_at), \
+             COALESCE(m.importance, f.importance) \
+             FROM memory_fts f LEFT JOIN memory_meta m ON m.id = f.id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            let id: String = r.get(0)?;
+            let stage: String = r.get(1)?;
+            let recall_count: i64 = r.get(2)?;
+            let last_recalled_at: Option<i64> = r.get(3)?;
+            let created_at: i64 = r.get(4)?;
+            let importance: f64 = r.get(5)?;
+            Ok((
+                id,
+                LifecycleMeta {
+                    stage: MemoryLifecycleStage::parse(&stage),
+                    recall_count: recall_count as u32,
+                    last_recalled_at,
+                    created_at,
+                    importance: importance as f32,
+                },
+            ))
+        })?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// 持久化一条 lifecycle 元数据（decay/晋级后写回；meta 缺失时补行）。
+    pub fn update_lifecycle(&self, id: &str, meta: &LifecycleMeta) -> Result<()> {
+        let db = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        db.execute(
+            "INSERT INTO memory_meta (id, stage, recall_count, last_recalled_at, created_at, importance)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(id) DO UPDATE SET
+                stage = excluded.stage,
+                recall_count = excluded.recall_count,
+                last_recalled_at = excluded.last_recalled_at,
+                importance = excluded.importance",
+            rusqlite::params![
+                id,
+                meta.stage.as_str(),
+                meta.recall_count as i64,
+                meta.last_recalled_at,
+                meta.created_at,
+                meta.importance as f64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// 删除 archived 且最后召回（无召回按创建时间）早于 cutoff 的记忆；
+    /// 三表原子删除。返回删除条数。
+    pub fn delete_archived_older_than(&self, cutoff_ts: i64) -> Result<usize> {
+        let mut db = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = db.transaction()?;
+        let ids: Vec<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT f.id FROM memory_fts f
+                 JOIN memory_meta m ON m.id = f.id
+                 WHERE m.stage = 'archived'
+                   AND COALESCE(m.last_recalled_at, m.created_at) < ?1",
+            )?;
+            let rows = stmt.query_map([cutoff_ts], |r| r.get::<_, String>(0))?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+        let mut deleted = 0;
+        for id in &ids {
+            deleted += tx.execute("DELETE FROM memory_fts WHERE id = ?1", [id])?;
+            tx.execute("DELETE FROM memory_fts_cjk WHERE id = ?1", [id])?;
+            tx.execute("DELETE FROM memory_meta WHERE id = ?1", [id])?;
+        }
+        tx.commit()?;
+        Ok(deleted)
+    }
+
+    /// 各 stage 的真实条目分布（archived 也计入；按 stage 名排序）。
+    pub fn stage_counts(&self) -> Result<Vec<(String, usize)>> {
+        let db = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = db.prepare(
+            "SELECT COALESCE(m.stage, 'candidate') AS stage, COUNT(*) AS n
+             FROM memory_fts f LEFT JOIN memory_meta m ON m.id = f.id
+             GROUP BY stage ORDER BY stage",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as usize))
+        })?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
     /// 写入（或覆盖）某条记忆的嵌入向量。meta 行不存在时先补占位行。
     pub fn upsert_embedding(&self, id: &str, vec: &[f32], model: &str) -> Result<()> {
         let db = self.db.lock().unwrap_or_else(|e| e.into_inner());
@@ -530,7 +673,7 @@ impl MemoryStore {
         {
             let mut stmt = db.prepare(
                 "SELECT id, embedding, embed_dim, embed_model FROM memory_meta
-                 WHERE embedding IS NOT NULL",
+                 WHERE embedding IS NOT NULL AND stage != 'archived'",
             )?;
             let rows = stmt.query_map([], |r| {
                 let id: String = r.get(0)?;
@@ -680,11 +823,16 @@ fn memory_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemorySearchResult> {
 }
 
 /// 带路由的检索：FTS（unicode61 / trigram）或 LIKE 回退。
+/// 一律排除 archived（LEFT JOIN memory_meta 过滤）；FTS 两路在 bm25 上融合
+/// 生命周期因子：`bm25 + rank_weight * ((1-importance) * stage_mult - recency_discount)`，
+/// stage_mult：permanent=1.2 / verified=1.1 / candidate=1.0；recency_discount：
+/// 7 天内召回 0.5、30 天内 0.25、否则 0（与 lifecycle::apply_decay 同款语义）。
 fn run_memory_search(
     db: &rusqlite::Connection,
     query: &str,
     category: Option<MemoryCategory>,
     limit: usize,
+    rank_weight: f64,
 ) -> Result<Vec<MemorySearchResult>> {
     let tokens = query_tokens(query);
     if tokens.is_empty() {
@@ -693,28 +841,32 @@ fn run_memory_search(
 
     if use_like_fallback(&tokens) {
         // LIKE 回退：短词（含 1-2 字中文）无法走 FTS/trigram。
+        // 排序沿用 importance DESC（生命周期信号），同时排除 archived。
         let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
         let mut where_clauses: Vec<String> = Vec::new();
         for (i, t) in tokens.iter().enumerate() {
             let n = i + 1;
             where_clauses.push(format!(
-                "(content LIKE ?{n} COLLATE NOCASE OR tags LIKE ?{n} COLLATE NOCASE \
-                     OR source LIKE ?{n} COLLATE NOCASE)"
+                "(f.content LIKE ?{n} COLLATE NOCASE OR f.tags LIKE ?{n} COLLATE NOCASE \
+                     OR f.source LIKE ?{n} COLLATE NOCASE)"
             ));
             params.push(Box::new(format!("%{t}%")));
         }
         let mut sql = format!(
-            "SELECT id, content, tags, category, source, created_at, importance, -importance AS score
-             FROM memory_fts WHERE {}",
+            "SELECT f.id, f.content, f.tags, f.category, f.source, f.created_at, \
+             COALESCE(m.importance, f.importance) AS importance, \
+             -COALESCE(m.importance, f.importance) AS score \
+             FROM memory_fts f LEFT JOIN memory_meta m ON m.id = f.id \
+             WHERE {} AND COALESCE(m.stage, 'candidate') != 'archived'",
             where_clauses.join(" OR ")
         );
         if let Some(cat) = category {
-            sql.push_str(" AND category = ?");
+            sql.push_str(" AND f.category = ?");
             params.push(Box::new(cat.as_str().to_string()));
         }
         let limit_idx = params.len() + 1;
         sql.push_str(&format!(
-            " ORDER BY importance DESC, created_at DESC LIMIT ?{limit_idx}"
+            " ORDER BY importance DESC, f.created_at DESC LIMIT ?{limit_idx}"
         ));
         params.push(Box::new(limit as i64));
 
@@ -744,15 +896,34 @@ fn run_memory_search(
     }
     let safe_query = fts_tokens.join(" OR ");
     let category_sql = if category.is_some() {
-        " AND category = ?2"
+        " AND t.category = ?2"
     } else {
         ""
     };
     let limit_idx = if category.is_some() { 3 } else { 2 };
+    // 生命周期因子在 SQL 内计算（数值常量内联，无注入面）。
+    let now = Utc::now().timestamp();
+    let lifecycle_sql = format!(
+        "(1.0 - COALESCE(m.importance, t.importance)) \
+         * CASE COALESCE(m.stage, 'candidate') \
+             WHEN 'permanent' THEN 1.2 \
+             WHEN 'verified' THEN 1.1 \
+             ELSE 1.0 END \
+         - COALESCE(CASE WHEN m.last_recalled_at >= {c7} THEN 0.5 \
+                         WHEN m.last_recalled_at >= {c30} THEN 0.25 \
+                         ELSE 0.0 END, 0.0)",
+        c7 = now - 7 * 86_400,
+        c30 = now - 30 * 86_400,
+    );
     let sql = format!(
-        "SELECT id, content, tags, category, source, created_at, importance, bm25({table}) AS score
-         FROM {table} WHERE {table} MATCH ?1{category_sql}
-         ORDER BY score LIMIT ?{limit_idx}"
+        "SELECT t.id, t.content, t.tags, t.category, t.source, t.created_at, \
+         COALESCE(m.importance, t.importance), \
+         bm25({table}) + {w} * ({lifecycle}) AS score \
+         FROM {table} t LEFT JOIN memory_meta m ON m.id = t.id \
+         WHERE {table} MATCH ?1 AND COALESCE(m.stage, 'candidate') != 'archived'{category_sql} \
+         ORDER BY score LIMIT ?{limit_idx}",
+        w = rank_weight,
+        lifecycle = lifecycle_sql,
     );
     let mut stmt = db.prepare(&sql)?;
     let results = match category {
@@ -1086,5 +1257,221 @@ mod tests {
             "reopen must reconcile the desynced trigram table"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn open_writes_schema_version() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        let db = store.db.lock().unwrap_or_else(|e| e.into_inner());
+        let v: String = db
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(v, "1", "schema_version 初值必须为 1");
+    }
+
+    #[test]
+    fn reopen_with_older_schema_version_does_not_crash() {
+        let path = std::env::temp_dir().join(format!(
+            "dnv-mem-ver-old-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        {
+            let store = MemoryStore::open(&path).unwrap();
+            let db = store.db.lock().unwrap_or_else(|e| e.into_inner());
+            db.execute(
+                "UPDATE meta SET value = '0' WHERE key = 'schema_version'",
+                [],
+            )
+            .unwrap();
+        }
+        // 旧版本库打开：迁移表为空 → 不炸，回写当前版本。
+        let reopened = MemoryStore::open(&path).unwrap();
+        let db = reopened.db.lock().unwrap_or_else(|e| e.into_inner());
+        let v: String = db
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(v, "1", "旧版本库打开后应回写当前版本");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn reopen_with_future_schema_version_does_not_crash() {
+        let path = std::env::temp_dir().join(format!(
+            "dnv-mem-ver-future-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        {
+            let store = MemoryStore::open(&path).unwrap();
+            let db = store.db.lock().unwrap_or_else(|e| e.into_inner());
+            db.execute(
+                "UPDATE meta SET value = '999' WHERE key = 'schema_version'",
+                [],
+            )
+            .unwrap();
+        }
+        // 未知未来版本库：不炸（迁移表为空 = 无操作）。
+        let reopened = MemoryStore::open(&path).unwrap();
+        let hits = reopened.search("anything", 10).unwrap();
+        assert!(hits.is_empty(), "未来版本库打开后检索可用");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn search_excludes_archived_entries() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        let keep = make_entry(
+            "rust borrow checker for memory safety",
+            MemoryCategory::Task,
+            vec![],
+            "t",
+            0.5,
+        );
+        let archive = make_entry(
+            "rust borrow legacy note superseded",
+            MemoryCategory::Task,
+            vec![],
+            "t",
+            0.5,
+        );
+        store.store(&keep).unwrap();
+        store.store(&archive).unwrap();
+        {
+            let db = store.db.lock().unwrap_or_else(|e| e.into_inner());
+            db.execute(
+                "UPDATE memory_meta SET stage = 'archived' WHERE id = ?1",
+                [&archive.id],
+            )
+            .unwrap();
+        }
+        let hits = store.search("rust borrow", 10).unwrap();
+        assert_eq!(hits.len(), 1, "archived 不参与 FTS 召回");
+        assert_eq!(hits[0].entry.id, keep.id);
+    }
+
+    #[test]
+    fn search_like_fallback_excludes_archived() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        let keep = make_entry(
+            "ai tools for parsing config",
+            MemoryCategory::Task,
+            vec![],
+            "t",
+            0.5,
+        );
+        let archive = make_entry(
+            "ai legacy experiment discarded",
+            MemoryCategory::Task,
+            vec![],
+            "t",
+            0.5,
+        );
+        store.store(&keep).unwrap();
+        store.store(&archive).unwrap();
+        {
+            let db = store.db.lock().unwrap_or_else(|e| e.into_inner());
+            db.execute(
+                "UPDATE memory_meta SET stage = 'archived' WHERE id = ?1",
+                [&archive.id],
+            )
+            .unwrap();
+        }
+        // "ai" 为 2 字符 → LIKE 回退路径。
+        let hits = store.search("ai", 10).unwrap();
+        assert_eq!(hits.len(), 1, "archived 不参与 LIKE 回退召回");
+        assert_eq!(hits[0].entry.id, keep.id);
+    }
+
+    #[test]
+    fn search_fuses_lifecycle_ranking() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        // 同文本 → bm25 分完全相等；排序差异只能来自生命周期因子。
+        let low = make_entry(
+            "rust borrow checker",
+            MemoryCategory::Task,
+            vec![],
+            "t",
+            0.1,
+        );
+        let high = make_entry(
+            "rust borrow checker",
+            MemoryCategory::Task,
+            vec![],
+            "t",
+            0.9,
+        );
+        store.store(&low).unwrap();
+        store.store(&high).unwrap();
+        // 把 high 提升到 permanent（模拟多次召回晋级后的状态）。
+        let meta = LifecycleMeta {
+            stage: MemoryLifecycleStage::Permanent,
+            recall_count: 3,
+            last_recalled_at: None,
+            created_at: low.created_at,
+            importance: 0.9,
+        };
+        store.update_lifecycle(&high.id, &meta).unwrap();
+
+        // weight=0：纯 bm25，两分相等 → 与旧行为一致（插入序 low 在前）。
+        let w0 = store.search_with_weight("rust borrow", 10, 0.0).unwrap();
+        assert_eq!(w0.len(), 2);
+        assert_eq!(w0[0].entry.id, low.id, "weight=0 必须保持纯 bm25 顺序");
+        assert_eq!(
+            w0[0].score, w0[1].score,
+            "weight=0 时同文本两条目分数必须相等（生命周期项已关闭）"
+        );
+
+        // weight=0.3：permanent+高 importance 的 high 必须反超。
+        let w03 = store
+            .search_with_weight("rust borrow", 10, DEFAULT_RANK_WEIGHT)
+            .unwrap();
+        assert_eq!(w03[0].entry.id, high.id, "生命周期融合必须重排");
+    }
+
+    #[test]
+    fn stage_counts_reports_distribution() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        let e1 = make_entry("entry one", MemoryCategory::Task, vec![], "t", 0.5);
+        let e2 = make_entry("entry two", MemoryCategory::Task, vec![], "t", 0.5);
+        let e3 = make_entry("entry three", MemoryCategory::Task, vec![], "t", 0.5);
+        store.store(&e1).unwrap();
+        store.store(&e2).unwrap();
+        store.store(&e3).unwrap();
+        store.record_recall(&e2.id).unwrap(); // verified
+        {
+            let db = store.db.lock().unwrap_or_else(|e| e.into_inner());
+            db.execute(
+                "UPDATE memory_meta SET stage = 'archived' WHERE id = ?1",
+                [&e3.id],
+            )
+            .unwrap();
+        }
+        let counts = store.stage_counts().unwrap();
+        let get = |stage: &str| {
+            counts
+                .iter()
+                .find(|(s, _)| s == stage)
+                .map(|(_, n)| *n)
+                .unwrap_or(0)
+        };
+        assert_eq!(get("candidate"), 1);
+        assert_eq!(get("verified"), 1);
+        assert_eq!(get("archived"), 1);
+        assert_eq!(get("permanent"), 0);
     }
 }

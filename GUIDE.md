@@ -399,10 +399,20 @@ llm_distill = false                # 默认 false：启用后用 LLM 把任务�
                                    # 可复用 skill/教训（Skill 类目，去重 + 脱敏）
 llm_distill_model = "deepseek-v4-flash"  # 可选；未配置回落 main provider
 llm_distill_max_chars = 3000       # 蒸馏输入的任务描述上限（字符）
+decay_rate = 0.1                   # memory cleanup 时非 permanent 记忆的衰减率
+archive_ttl_days = 30              # archived 记忆距最后召回超过该天数即被清理删除
+rank_lifecycle_weight = 0.3        # 检索排序生命周期融合权重；0 = 纯 bm25
 ```
 
 蒸馏契约：模型返回 `{"kind":"skill"|"lesson","title":"...","body":"...","tags":[...]}`；
 调用失败或响应不可解析时静默跳过（启发式沉淀仍照常兜底），不阻断运行。
+
+**记忆生命周期闭环**：每条记忆经历 candidate → verified → permanent（多次召回且
+重要）或 → archived（衰减/久不用）的晋级/归档；archived 不参与召回。`memory cleanup`
+显式触发衰减（非 permanent 记忆 importance 按 `decay_rate` 递减，<0.1 归档；
+permanent 豁免）并删除超期 archived（距最后召回 > `archive_ttl_days`）；`memory stats`
+显示 stage 分布与 archived 计数。检索排序在 bm25 之上融合生命周期因子（importance /
+stage / recency，权重 `rank_lifecycle_weight`，=0 时与纯 bm25 等价）。
 
 ### Task Management
 
