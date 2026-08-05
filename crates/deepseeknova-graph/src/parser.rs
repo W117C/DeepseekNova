@@ -133,8 +133,8 @@ fn entity_kind(lang: Lang, kind: &str, ancestors: &[&str]) -> Option<NodeKind> {
         Lang::Go => match kind {
             "function_declaration" => Some(NodeKind::Function),
             "method_declaration" => Some(NodeKind::Method),
-            // type_declaration 不在此判定实体（Go 分组声明 `type ( A ...; B ... )`
-            // 一个节点可含多个 type_spec，由 parse_source 遍历子节点逐个产出）。
+            // type_spec/type_alias 不在此判定实体（单声明与分组 `type ( ... )`
+            // 均由 parse_source 的 Go 分支在成员节点 Enter 时逐个产出，见 parse_source）。
             _ => None,
         },
     }
@@ -439,69 +439,89 @@ pub fn parse_source(lang: Lang, path: &str, src: &str) -> Result<FileParse, Grap
                     }
                 }
                 let mut pushed_def: usize = 0;
-                // 实体产出：Go 的 type_declaration（tree-sitter-go 0.25 实证
-                // children 为 multiple，分组声明 `type ( A struct{}; B ... )`
-                // 可含多个 type_spec/type_alias）遍历全部子节点逐个产出实体；
+                // 实体产出：Go 的 type_spec/type_alias 成员（单声明与分组
+                // `type ( A struct{}; B ... )` 的 tree-sitter-go 0.25 形态一致，
+                // type_declaration 下 children 为 multiple）在成员节点 Enter 时
+                // 逐个产出实体、成员子树 Exit 时出栈（pop_def 计数）——与单实体
+                // 路径一致，成员体内引用与自身 name 节点归属本成员（R1）；
                 // 其余语言经 entity_kind/entity_name 判定单一实体。
-                let mut push_entity = |nk: NodeKind, name: String, ent: TsNode| {
-                    let start_line = ent.start_position().row as u32 + 1;
-                    nodes.push(Node {
-                        id: node_id(path, &name, start_line),
-                        kind: nk,
-                        name: name.clone(),
-                        path: path.to_string(),
-                        start_line,
-                        end_line: ent.end_position().row as u32 + 1,
-                        signature: extract_signature(lang, ent, src),
-                        doc: extract_doc(ent, src),
-                        score: 0.0,
-                    });
-                    refs_stack.push(std::collections::HashSet::new());
-                    if lang == Lang::Rust && nk == NodeKind::Method {
-                        if let Some(tname) = trait_stack.last() {
-                            trait_methods.push((tname.clone(), name.clone(), start_line));
+                let mut push_entity =
+                    |nk: NodeKind, name: String, ent: TsNode, sig: String, doc: String| {
+                        let start_line = ent.start_position().row as u32 + 1;
+                        nodes.push(Node {
+                            id: node_id(path, &name, start_line),
+                            kind: nk,
+                            name: name.clone(),
+                            path: path.to_string(),
+                            start_line,
+                            end_line: ent.end_position().row as u32 + 1,
+                            signature: sig,
+                            doc,
+                            score: 0.0,
+                        });
+                        refs_stack.push(std::collections::HashSet::new());
+                        if lang == Lang::Rust && nk == NodeKind::Method {
+                            if let Some(tname) = trait_stack.last() {
+                                trait_methods.push((tname.clone(), name.clone(), start_line));
+                            }
+                            if let Some(Some((tname, itype))) = impl_trait_stack.last() {
+                                impl_trait_methods.push((
+                                    tname.clone(),
+                                    itype.clone(),
+                                    name.clone(),
+                                    start_line,
+                                ));
+                            }
                         }
-                        if let Some(Some((tname, itype))) = impl_trait_stack.last() {
-                            impl_trait_methods.push((
-                                tname.clone(),
-                                itype.clone(),
-                                name.clone(),
-                                start_line,
-                            ));
+                        if lang == Lang::Rust && nk == NodeKind::Function {
+                            if let Some(tname) = trait_stack.last() {
+                                trait_methods.push((tname.clone(), name.clone(), start_line));
+                            }
                         }
-                    }
-                    if lang == Lang::Rust && nk == NodeKind::Function {
-                        if let Some(tname) = trait_stack.last() {
-                            trait_methods.push((tname.clone(), name.clone(), start_line));
-                        }
-                    }
-                    def_stack.push(name);
-                    pushed_def += 1;
-                };
-                if lang == Lang::Go && kind == "type_declaration" {
-                    let mut cursor = node.walk();
-                    for spec in node.named_children(&mut cursor) {
-                        if !matches!(spec.kind(), "type_spec" | "type_alias") {
-                            continue;
-                        }
-                        // type_spec/type_alias 的 type 字段区分 struct/interface。
-                        let nk = match spec.child_by_field_name("type").map(|t| t.kind()) {
-                            Some("struct_type") => NodeKind::Struct,
-                            Some("interface_type") => NodeKind::Trait,
-                            _ => continue,
-                        };
-                        let Some(name) = spec
+                        def_stack.push(name);
+                        pushed_def += 1;
+                    };
+                if lang == Lang::Go && matches!(kind, "type_spec" | "type_alias") {
+                    // 单声明 `type A struct{}` 与分组 `type ( A ...; B ... )`
+                    // 均落到此：成员 Enter 时建实体、成员子树 Exit 时 pop。
+                    // type_spec/type_alias 的 type 字段区分 struct/interface。
+                    let nk = match node.child_by_field_name("type").map(|t| t.kind()) {
+                        Some("struct_type") => Some(NodeKind::Struct),
+                        Some("interface_type") => Some(NodeKind::Trait),
+                        _ => None,
+                    };
+                    if let Some(nk) = nk {
+                        if let Some(name) = node
                             .child_by_field_name("name")
                             .and_then(|n| n.utf8_text(src.as_bytes()).ok())
                             .map(str::to_string)
-                        else {
-                            continue;
-                        };
-                        push_entity(nk, name, spec);
+                        {
+                            // R2 doc：成员自身紧邻注释优先（分组内逐成员注释），
+                            // 取不到时回退父节点 type_declaration——单声明注释在
+                            // `type` 关键字之前，type_spec 的 prev_sibling 是
+                            // "type" 匿名关键字节点；signature 保留 "type " 前缀
+                            // 与 G-M1 前旧行为等价。
+                            let direct_doc = extract_doc(node, src);
+                            let doc = if direct_doc.is_empty() {
+                                node.parent()
+                                    .map(|p| extract_doc(p, src))
+                                    .unwrap_or_default()
+                            } else {
+                                direct_doc
+                            };
+                            let sig = format!("type {}", extract_signature(lang, node, src));
+                            push_entity(nk, name, node, sig, doc);
+                        }
                     }
                 } else if let Some(nk) = entity_kind(lang, kind, &ancestor_kinds) {
                     if let Some(name) = entity_name(node, src) {
-                        push_entity(nk, name, node);
+                        push_entity(
+                            nk,
+                            name,
+                            node,
+                            extract_signature(lang, node, src),
+                            extract_doc(node, src),
+                        );
                     }
                 }
                 ancestor_kinds.push(kind);
@@ -643,6 +663,86 @@ func internal() {
         let fp = parse_source(Lang::Go, "src/grouped2.go", src).unwrap();
         let names: Vec<_> = fp.nodes.iter().map(|n| (n.kind, n.name.as_str())).collect();
         assert_eq!(names, vec![(NodeKind::Struct, "B")], "{names:?}");
+    }
+
+    #[test]
+    fn go_grouped_type_refs_attribution() {
+        // R1：分组 type_declaration 成员体内引用归属各自成员。修复前全部成员在
+        // 父节点 Enter 时一次性 push（栈顶=最后成员），成员 1..n-1 的体内引用与
+        // 自身 name 全部落入最后成员 set：refs=[(B,"A"),(B,"C")] 伪边、A 无出边。
+        for src in [
+            // 单行分号分隔（第二轮审查 /tmp 实测形态）
+            "package main\n\ntype ( A struct{ next *B; ext *C }; B struct{} )\n",
+            // 多行形态
+            "package main\n\ntype (\n\tA struct{ next *B; ext *C }\n\tB struct{}\n)\n",
+        ] {
+            let fp = parse_source(Lang::Go, "src/grouped_refs.go", src).unwrap();
+            // A 的体内引用：B、C
+            assert!(
+                fp.refs.contains(&("A".into(), "B".into())),
+                "A 应引用 B：{:?}",
+                fp.refs
+            );
+            assert!(
+                fp.refs.contains(&("A".into(), "C".into())),
+                "A 应引用 C：{:?}",
+                fp.refs
+            );
+            // B 无出边（不得有伪边 B→A，也不得收走 A 的引用）
+            assert!(
+                !fp.refs.iter().any(|(from, _)| from == "B"),
+                "B 不应有出边（含伪边 B→A）：{:?}",
+                fp.refs
+            );
+        }
+        // 分组后的方法调用归属：M→helper；组内成员不残留为 caller。
+        let src = "package main\n\ntype (\n\tA struct{ next *B; ext *C }\n\tB struct{}\n)\n\nfunc (a A) M() { helper() }\n";
+        let fp = parse_source(Lang::Go, "src/grouped_refs.go", src).unwrap();
+        assert!(
+            fp.calls.contains(&("M".into(), "helper".into())),
+            "方法调用应归属 M→helper：{:?}",
+            fp.calls
+        );
+        assert!(
+            !fp.calls.iter().any(|(c, _)| c == "A" || c == "B"),
+            "组内类型不得残留为 caller：{:?}",
+            fp.calls
+        );
+    }
+
+    #[test]
+    fn go_type_doc_and_signature_restored() {
+        // R2：实体从 type_declaration 改为 type_spec 后，doc 需回退父节点提取、
+        // signature 保留 "type " 前缀（与 G-M1 前旧行为等价）。
+        // 单声明：
+        let fp = parse_source(
+            Lang::Go,
+            "src/user.go",
+            "package main\n\n// User is a user.\ntype User struct {\n\tName string\n}\n",
+        )
+        .unwrap();
+        let user = fp.nodes.iter().find(|n| n.name == "User").unwrap();
+        assert_eq!(user.doc, "User is a user.", "doc 应恢复：{:?}", user.doc);
+        assert_eq!(
+            user.signature, "type User struct",
+            "signature 应保留 type 前缀"
+        );
+        // 分组声明：组注释归属首成员；每成员 signature 均带 "type " 前缀。
+        let fp = parse_source(
+            Lang::Go,
+            "src/grouped.go",
+            "package main\n\n// Group types.\ntype (\n\tA struct{}\n\tB interface{}\n)\n",
+        )
+        .unwrap();
+        let a = fp.nodes.iter().find(|n| n.name == "A").unwrap();
+        let b = fp.nodes.iter().find(|n| n.name == "B").unwrap();
+        assert_eq!(a.doc, "Group types.", "分组首成员应取组注释：{:?}", a.doc);
+        assert_eq!(a.signature, "type A struct", "A signature: {}", a.signature);
+        assert_eq!(
+            b.signature, "type B interface",
+            "B signature: {}",
+            b.signature
+        );
     }
 
     #[test]

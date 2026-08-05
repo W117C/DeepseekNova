@@ -184,6 +184,12 @@ All notable changes to DeepseekNova will be documented in this file.
 - Graph Go 分组类型声明 `type ( A struct{}; B interface{} )` 此前只采集第一个
   type_spec（tree-sitter-go 0.25 的 type_declaration children 为 multiple），组内
   第 2+ 个类型静默丢失、引用不可解析；现遍历全部 type_spec 逐个产出实体。
+- Graph Go 分组类型声明的引用边归属：修复轮此前在 type_declaration Enter 时批量
+  push 全部成员，成员 1..n-1 的体内引用与自身 name 节点落入最后一个成员的 set
+  （`type ( A struct{next *B; ext *C}; B struct{} )` 产生伪边 B→A、A 无出边）；
+  现改为每个 type_spec 成员 Enter 时逐个建实体、成员结束时出栈，引用归属各自
+  成员。同步恢复类型实体 doc（注释在 type 关键字之前，回退父节点提取）与
+  signature 的 `type ` 前缀（单声明与旧行为逐字等价）。
 - `go.mod` 的 `require ( // 尾注释` 形态（gofmt 不产但合法）此前整块依赖静默丢失；
   现块起始容忍尾注释。replace/exclude 段确认不进依赖（负例测试固化）。
 - 评分卡 task_rate 回填：Cancelled 且零失败详情的会话此前被误标

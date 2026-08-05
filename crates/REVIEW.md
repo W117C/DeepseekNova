@@ -199,3 +199,65 @@
 - **P-L4（损坏 scorecard 静默无 warn）— 已修**：`update_scorecard_task_rate` parse 失败分支由静默 `return Ok(())` 改为 `eprintln!` warn 一次后返回 Ok——与 NotFound 静默**区分**（NotFound 属 metrics 未启用/并发清理正常路径，无 warn）；真实 IO 错误（非 NotFound）仍返回 Err，调用方 warn。**为何用 eprintln! 而非 tracing**：deepseeknova-metrics 无 tracing 依赖（Cargo.toml 仅 serde/serde_json/provider/core），白名单不含其 Cargo.toml，且库函数无 Logger 注入点；工作区已有 eprintln! warn 先例（cli main.rs:25、runtime [diag]）。**测试证据**：新增 `update_scorecard_task_rate_propagates_real_io_errors`——路径为目录（真实 IO 错误非 NotFound）必须 Err 传播；既有「损坏文件 → 静默 Ok」测试不改（语义保持，仅内部多一次 warn），metrics 21 passed 全绿。
 - **测试数字变化**：graph 38 → 40（+2：G-M1 分组、G-L4 尾注释+负例）；metrics 20 → 21（+1：P-L4 IO 错误传播）；runtime 51 → 52（+1：P-L2 零失败不覆写）。`cargo fmt --check` 零 diff；`make check` 全绿（workspace 0 failed）。
 - **反向验证**：G-M1 新断言改坏 → `parses_go_grouped_type_declarations` 真红（1 failed，parser.rs:635 panic）→ 还原 → 真绿（1 passed）；P-L2 新断言改坏 → `diagnose_backfill_keeps_first_pass_for_zero_failure_reports` 真红（1 failed，lib.rs:4135 panic）→ 还原 → 真绿（1 passed）。
+
+---
+
+## 第二轮审查（修复轮复核）：95f695e..7f49ffc（2026-08-05）
+
+### 1. 覆盖声明
+
+- **范围确认**：`ocr delegate preview` 工作区模式 0 reviewable（工作树干净属预期）；改用 `--from 95f695e --to 7f49ffc` 后输出 4 文件可审（parser.rs / store.rs / metrics lib.rs / runtime lib.rs）+ 3 md 排除（CHANGELOG.md / PROGRESS.md / REVIEW.md，已人工审 diff）。与任务声明（4 代码文件 +354/−83）一致。
+- **规则**：仓库根无 `ocr.rules.json`，`ocr delegate rule` 使用 system 默认规则（Rust 组 + default 组），与既往轮次一致。
+- **人工审 diff**：`git diff 95f695e..7f49ffc` 覆盖全部 7 个改动文件；辅助阅读：parse_source 全文（parser.rs:270-530，含 Exit pop_def 循环、push_entity 闭包、Go 特殊分支、refs/calls 采集）、extract_doc/extract_signature（parser.rs:194-240）、parse_go_mod_deps 全文（store.rs:1136-1180）、update_scorecard_task_rate（metrics lib.rs:374-405）、runtime metrics hook first_pass 填写条件（runtime lib.rs:1275-1283）、attach_diagnose_hook_with_ingest 回填调用点（runtime lib.rs:1450-1461）、旧版 95f695e parser.rs Exit 处理（`git show` 对比 def_stack.pop 语义）。**只审本轮 diff + 支撑上下文。**
+- **实证验证（/tmp 临时工程引用 graph crate，未改仓库代码）**：分组 Go 源码实测 refs/doc/signature 输出（见 R1/R2 证据）；旧版路径经代码走查确认。
+- **测试实测**：`cargo test -p deepseeknova-graph` **40 passed / 0 failed**、`-p deepseeknova-metrics` **21 passed / 0 failed**、`-p deepseeknova-runtime` **52 passed / 0 failed**，与修复者声明完全一致。未跑全量 make check。
+
+### 2. 评论表
+
+| # | 路径 | 内容 | 起止行 | 分类 | 严重度 |
+|---|------|------|--------|------|--------|
+| R1 | crates/deepseeknova-graph/src/parser.rs | Go 分组 type_declaration 的 **refs 归属错误**：全部成员实体在父节点 Enter 时一次性 push（refs_stack 按序入栈、最后一个成员在栈顶），而成员子节点（结构体体、成员自身 name 节点）在**之后**才被遍历，其 identifier/type_identifier 引用全部落入**最后一个成员的 set**。实测（/tmp 工程）：`type ( A struct{ next *B; ext *C }; B struct{} )` 输出 refs=[(B,"A"),(B,"C")]——正确应为 A→B、A→C；实际 A 完全无出边，且 A 自身的 name 节点进入 B 的 set 未被 self 过滤产生**伪边 B→A**。修复者声称「遍历产出才能保持 refs/calls 归属正确」，实现恰相反。影响：分组类型声明的引用边系统性错误（find_references/impact 分析失真），无声无测试覆盖（新增 fixture `parses_go_grouped_type_declarations` 只断言实体名/kind，不查 refs）。修复方向：type_spec 子节点 Enter 时逐个建实体（而非父节点 Enter 时批量），或按成员分别入栈后再遍历。 | 446-493（push_entity 闭包 446-470、Go 分支 481-493） | bug | medium |
+| R2 | crates/deepseeknova-graph/src/parser.rs | Go 类型实体 **doc 注释丢失 + signature 变化**（单声明与分组均受影响）：实体节点从 type_declaration 改为 type_spec 后，extract_doc 的 `node.prev_sibling()` 在 type_spec 上取不到声明前的注释（其前一 sibling 为 "type" 关键字或无），实测 `// User is a user.\ntype User struct{...}` 实体 doc=""（旧路径 type_declaration.prev_sibling=注释可提取）；signature 由 "type User struct" 变为 "User struct"。修复者声称单声明「行为与旧逻辑等价」不成立；GO_SRC fixture 未断言类型实体的 doc/signature，无测试暴露。 | 446-456（push_entity 内 signature/doc 构造） | bug（回归） | low |
+
+### 3. 逐条复核（修复是否真修对）
+
+- **G-M1 实体产出 — 部分修对，refs 归属错误（R1）**：① type_alias 跳过正确——`type A = int` 的 type 字段非 struct_type/interface_type → `continue`，fixture（grouped2）断言恰 1 实体实证；② pop_def bool→usize **无回归**——Rust/Python/JS 既有路径 pushed_def ∈ {0,1}，Exit 循环逐次弹出与旧 `if pop_def` 语义逐一等价（git show 95f695e 实证旧 def_stack.pop() 在 if 内、新在循环内，1 次时行为一致；0 次均不弹）；③ fixture 覆盖单行分号（`type ( A struct{}; B interface{} )`）与多行两形态 + 别名跳过形态，覆盖齐全；④ 实体 id/行号——node_id=path#name#start_line，组内同名（非法 Go）才会碰撞，正常不冲突；但组内实体 refs 归属（R1）与 doc（R2）均无断言。
+- **G-L4 — 修对，无新问题**：块起始 `strip_prefix("require (")` + trim 后为空或以 `//` 开头即块首；`require ( v1`（无效语法）落单行分支且 `(` 前缀过滤不误入 deps；块内 `// indirect` 行过滤仍在（`!path.starts_with("//")`）；replace/exclude 段 in_require_block 恒 false 整段跳过；负例断言 `deps.len()==3` 精确（既防漏也防多），`old`/`new`/`skip` 子串检查与长度断言双重保证。
+- **P-L2 — 修对，无新问题**：metrics hook 仅 `outcome==Completed` 填 first_pass=true（runtime lib.rs:1275-1283 实证），Paused/Cancelled 保持 compute 保守默认 false/0；回填 `failures.is_empty()` 直接 return 保持该值——非 Completed 零失败会话保持 false/0 是**正确保守语义**（Cancelled 不算「一次通过」），无漏标路径（outcome 非失败型但确有失败 ⇒ 非 Completed ⇒ metrics 已填 false ⇒ 回填覆写 false/条数，语义仍对）；失败型覆写 false + failures.len() 条数正确。测试覆盖 Cancelled 零失败保持 false/0 与失败型覆写 1 条。
+- **P-L4 — 修对，无新问题**：metrics Cargo.toml 核实**确无 tracing 依赖**（仅 serde/serde_json/provider/core），eprintln! 与仓库先例风格一致（cli main.rs:25 `eprintln!("warning: failed to load config...")` 同 "warning:" 前缀；修复者所述 runtime [diag] 先例未单独核实，cli 先例已足够）；IO 错误测试**真实**——路径为目录时 `fs::read_to_string` 返回 IsADirectory（非 NotFound）→ Err 传播，测试实证绿；损坏文件 → warn 后 Ok 与既有「静默 Ok」测试兼容（内部多一次 warn，断言未放宽）。
+- **文档**：CHANGELOG +9 / PROGRESS +1 条目与实现一致，无夸大（G-M1 条目措辞「逐个产出实体」属实，但未提 refs 归属问题）。
+
+### 4. 新引入问题排查（除 R1/R2 外均无）
+
+- **SQL 注入面**：本轮无新 SQL（go.mod 解析纯文本行级；metrics/runtime 改动不触 SQL）。
+- **panic 路径**：新增代码无 unwrap/expect/panic（parse_source 用 `let Some(...) else { continue }`，backfill_scorecard_task_rate 全 Option/Result 处理）；无新增 unsafe。
+- **并发**：无新共享状态、无锁新增；metrics/runtime 改动为既有同步文件 IO 路径。
+- **性能**：分组遍历 O(组内成员) 单次，refs set 有 MAX_REFS_PER_DEF 上限，无新热点。
+
+### 5. 按严重度分组
+
+- **critical**：无。**high**：无。**medium**：1 条（R1 分组 refs 归属错误 + 伪边）。**low**：1 条（R2 doc/signature 回归）。
+- 仅 2 条评论的原因：G-L4 / P-L2 / P-L4 三条修复逐条核对均「修对且无新问题」（含负例断言精度、metrics 侧先填值语义、eprintln! 先例与 IO 测试真实性核实）；G-M1 实体产出主诉求达成（组内每类型建实体、alias 跳过、pop_def 无回归、fixture 形态齐全），但 refs 归属与修复者声明的「保持归属正确」相反（R1，/tmp 实测铁证），单声明 doc/signature 语义变化未被声明且无测试覆盖（R2）。
+
+### 6. 结论
+
+**0 critical / 0 high / 1 medium（R1）/ 1 low（R2）**。聚焦测试实测 graph 40 / metrics 21 / runtime 52 全绿，与修复者声明一致。**字面退出条件（0 critical/high 且测试全绿）满足**，但 R1 是 G-M1 修复引入的真实新缺陷（分组类型声明的引用边系统性错误，附伪边），不修则本轮「修复轮」目标未完全达成：**建议再修 R1**（refs 归属改按成员逐个入栈，补 refs 断言测试；R2 doc 可顺手——extract_doc 改回在 type_declaration 上提取）。R1 修复并测试全绿后再收尾；若接受 R1 作为已披露遗留（需在 PROGRESS/BLOCKED 记录），也可进入收尾。
+
+---
+
+## 修复轮 2：R1/R2（2026-08-05）
+
+**修复计划（≤10 行）：**
+1. R1：Go 实体产出从「type_declaration Enter 批量 push 全部成员」改为「type_spec/type_alias 成员 Enter 时逐个 push_entity、成员子树 Exit 时 pop（复用 pop_def 计数）」——成员体内引用与自身 name 归属本成员，type_declaration 不再产出实体；grammar 实证 type_spec 仅在 type_declaration 下（node-types.json 2271-2288），改判据安全。
+2. R1 测试（新 `go_grouped_type_refs_attribution`）：单行/多行两形态断言 A refs ⊇ {B,C}、B 无出边（无伪边 B→A）；方法调用归属 M→helper 且无组内残留 caller。
+3. R2：signature 保留 "type " 前缀（成员签名前拼 "type "，单声明与旧行为逐字等价；分组旧产物 "type ( A struct" 本身是伪影，改后为有意义的 "type A struct"）。
+4. R2 doc：成员自身 prev_sibling 取不到注释（单声明 type_spec 前一 sibling 是 "type" 关键字匿名节点）时回退父节点 type_declaration 的 prev_sibling——单声明 doc 恢复、分组成员内逐成员注释优先。
+5. R2 测试（新 `go_type_doc_and_signature_restored`）：单声明 doc="User is a user."/signature="type User struct"；分组首成员 doc=组注释、各成员 signature 带 "type " 前缀。
+6. 验证：cargo fmt --check + `cargo test -p deepseeknova-graph` + make check 全绿；反向验证 R1 断言改坏→真红→还原→真绿。
+
+### 修复轮 2 执行记录
+
+- **R1（分组 Go type_declaration refs 归属错误）— 已修，选「成员节点 Enter 逐个产出、Exit 逐个出栈」**：Go 实体产出判据由 `type_declaration`（Enter 时批量 push 全部成员，栈顶=最后成员，成员 1..n-1 的体内引用/自身 name 全部落最后成员 set，产生伪边）改为 `type_spec`/`type_alias` 成员节点 Enter 时逐个 `push_entity`、成员子树遍历完 Exit 时经 `pop_def` 计数逐个出栈——与单实体路径完全一致，成员体内引用与自身 name 节点归属本成员；`type_declaration` 不再产出实体。**为何如此修**：grammar 实证（node-types.json 2271-2288）`type_spec`/`type_alias` 仅作为 `type_declaration` 的 named children 出现（`type_declaration` 仅出现在 source_file），成员判据在单声明/分组两形态下语义一致，且复用既有 push_entity/pop_def 机制无需新状态。**测试证据**：新增 `go_grouped_type_refs_attribution`——单行分号与多行两形态断言 refs 含 (A,B)、(A,C)，B 无任何出边（无伪边 B→A）；追加分组后方法调用归属 (M,helper) 且组内类型不残留为 caller。graph 40 → 42 passed。
+- **R2（Go 类型 doc 丢失 + signature 变化）— 已修，选「doc 回退父节点提取 + signature 保留 type 前缀」**：doc 先取成员自身 prev_sibling 紧邻注释（分组内逐成员注释可用），取不到时回退父节点 `type_declaration` 的 prev_sibling——单声明 `// User is a user.\ntype User struct{}` 的注释在 type_declaration 之前、type_spec 的 prev_sibling 是 "type" 匿名关键字节点，回退后 doc 恢复；signature 拼 `"type "` 前缀，单声明逐字等价旧行为（"type User struct"），分组旧产物 "type ( A struct" 本身是首个成员伪影，改后为有意义的 "type A struct"。**为何如此修**：以「与旧行为尽量等价」为原则（任务指定），两处都恢复旧语义而非接受变化；父节点回退仅对 Go 成员生效（push_entity 改收预计算 sig/doc，Rust/Python/JS 路径传自身节点，行为不变）。**测试证据**：新增 `go_type_doc_and_signature_restored`——单声明 doc="User is a user."/signature="type User struct"；分组首成员 doc=组注释、各成员 signature 带 "type " 前缀（"type A struct"/"type B interface"）。
+- **测试数字变化**：graph 40 → 42（+2：R1 refs 归属、R2 doc/signature）。既有断言零改动（含 `parses_go_grouped_type_declarations` 原样保留，仅其未覆盖的 refs/doc/signature 由新测试补足）。`cargo fmt --check` 零 diff；`make check` 全绿（MAKE_CHECK_EXIT=0，55 处 test result 全 0 failed；doc 阶段仅 cli.rs:136 既有 unresolved link warning，非本轮引入）。
+- **反向验证**：`go_grouped_type_refs_attribution` 中 A refs 断言改坏（期望伪边 (B,A)）→ 真红（1 failed，parser.rs:681 panic）→ 还原 → 真绿（1 passed）。
