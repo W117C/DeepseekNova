@@ -480,7 +480,12 @@ pub fn build_agent_with_role_providers(
         ) {
             Ok(engine) => {
                 let handle: deepseeknova_tools::MemoryHandle = Arc::new(engine);
+                // C3：注入召回排序权重扩展（tools recall 工具读取），
+                // 与起点/mid-run 召回共用 `[memory] rank_lifecycle_weight`。
                 agent = agent.with_extension(handle.clone());
+                agent = agent.with_extension(deepseeknova_tools::MemoryRankWeight(
+                    config.memory.rank_lifecycle_weight,
+                ));
                 memory_ext = Some(handle.clone());
 
                 // 设计 C：技能热更新——SkillManager 装配（skill 即记忆上下文）。
@@ -512,6 +517,8 @@ pub fn build_agent_with_role_providers(
                 // 起点召回注入（token 预算内的极简块）。
                 let rp = handle.clone();
                 let top_k = config.memory.recall_top_k;
+                // C3：起点召回接 `[memory] rank_lifecycle_weight`（此前硬编码默认 0.3）。
+                let rank_weight = config.memory.rank_lifecycle_weight;
                 let cap_chars =
                     deepseeknova_core::tokens::chars_for_tokens(config.memory.recall_inject_tokens);
                 if cap_chars > 0 {
@@ -526,7 +533,10 @@ pub fn build_agent_with_role_providers(
                     );
                     let recall: deepseeknova_agent::RecallProvider =
                         Arc::new(move |query: &str| {
-                            let hits = rp.recall(query, top_k).ok().unwrap_or_default();
+                            let hits = rp
+                                .recall_with_weight(query, top_k, rank_weight)
+                                .ok()
+                                .unwrap_or_default();
                             let mut block = String::new();
                             let mut budget = cap_chars;
                             if !hits.is_empty() {
@@ -605,6 +615,8 @@ pub fn build_agent_with_role_providers(
                         let mid_graph = graph_ext.clone();
                         let mid_top_k = config.memory.mid_run_recall_top_k;
                         let mid_graph_top_k = config.memory.mid_run_graph_top_k;
+                        // C3：mid-run 召回同样接 `[memory] rank_lifecycle_weight`。
+                        let mid_rank_weight = config.memory.rank_lifecycle_weight;
                         let mid_cap = deepseeknova_core::tokens::chars_for_tokens(
                             config.memory.mid_run_inject_tokens,
                         );
@@ -615,7 +627,9 @@ pub fn build_agent_with_role_providers(
                                 }
                                 let mut block = String::new();
                                 let mut budget = mid_cap;
-                                if let Ok(hits) = mid_mem.recall(query, mid_top_k) {
+                                if let Ok(hits) =
+                                    mid_mem.recall_with_weight(query, mid_top_k, mid_rank_weight)
+                                {
                                     let mut lines: Vec<String> = Vec::new();
                                     for h in hits {
                                         let snippet: String =

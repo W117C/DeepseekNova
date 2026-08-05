@@ -6,7 +6,6 @@
 //! - `record_task`：结束时启发式经验捕获（护栏 + 成本上限 + 脱敏 + 去重）；
 //! - `stats`：可观测性快照，驱动 P2 决策。
 
-use crate::memory::lifecycle::MemoryLifecycleStage;
 use crate::memory::redact::redact;
 use crate::memory::skill::{TaskObservation, TaskOutcome};
 use crate::memory::store::{
@@ -132,20 +131,10 @@ impl MemoryEngine {
     /// 衰减一轮：非 permanent 记忆 importance -= decay_rate * recency_bonus，
     /// importance < 0.1 → archived；permanent 豁免。返回发生衰减的条数。
     /// 由 `memory cleanup` 显式触发（不自动跑，避免运行期不可预期写放大）。
+    /// 实现走 store 层事务化批量衰减（单一事务内读-算-写，防并发 record_recall
+    /// 增量被覆盖写回冲掉）；decay_rate 在 store 入口 clamp 到 0.0..=1.0。
     pub fn decay(&self, decay_rate: f32) -> Result<usize> {
-        let mut decayed = 0;
-        for (id, mut meta) in self.store.all_lifecycle()? {
-            if meta.stage == MemoryLifecycleStage::Permanent {
-                continue;
-            }
-            let before = meta.importance;
-            meta.apply_decay(decay_rate);
-            if meta.importance < before {
-                self.store.update_lifecycle(&id, &meta)?;
-                decayed += 1;
-            }
-        }
-        Ok(decayed)
+        self.store.decay_all(decay_rate)
     }
 
     /// 清理闭环：先衰减一轮（decay_rate），再删除 archived 且距最后召回
@@ -295,7 +284,10 @@ impl MemoryEngine {
         };
         let mut e = make_entry(content.clone(), MemoryCategory::Skill, tags, source, 0.8);
         e.id = content_id("distill", &content);
-        let existed = self.store.meta(&e.id)?.is_some();
+        // 去重同时查新旧两个候选 id：旧库（前缀统一前）的 reflect-<hash> 条目
+        // 与新 distill-<hash> 同内容不再互相去重，命中任一即视为已存在。
+        let existed = self.store.meta(&e.id)?.is_some()
+            || self.store.meta(&content_id("reflect", &content))?.is_some();
         if existed {
             // 同内容去重：不重复写入，保留首次入库的 tags/source。
             return Ok(false);
@@ -339,7 +331,7 @@ impl MemoryEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::lifecycle::LifecycleMeta;
+    use crate::memory::lifecycle::{LifecycleMeta, MemoryLifecycleStage};
 
     fn obs(
         tools: usize,
@@ -694,6 +686,64 @@ mod tests {
         assert_eq!(get("verified"), 1);
         assert_eq!(get("archived"), 1);
         assert_eq!(s.archived, 1);
+    }
+
+    #[test]
+    fn knowledge_dedupes_against_legacy_reflect_prefix() {
+        // C2：旧库（前缀统一前）中 reflect-<hash> 条目存在时，新 distill-<hash>
+        // 同内容写入必须被去重（不写、返回 false）。
+        let eng = MemoryEngine::open_in_memory(true).unwrap();
+        let content = "kind: lesson\nalways escape user input";
+        let legacy_id = content_id("reflect", content);
+        let mut legacy = make_entry(
+            content.to_string(),
+            MemoryCategory::Skill,
+            vec!["reflect".into(), "lesson".into()],
+            "reflect-loop",
+            0.8,
+        );
+        legacy.id = legacy_id.clone();
+        eng.store.store(&legacy).unwrap();
+        assert!(
+            eng.store.meta(&legacy_id).unwrap().is_some(),
+            "旧前缀条目已就位"
+        );
+
+        // 新入口写入同内容 → 命中旧前缀候选 id → 去重
+        assert!(
+            !eng.record_reflection_lesson("always escape user input")
+                .unwrap(),
+            "旧前缀 reflect-* 存在时新写入必须被去重"
+        );
+        let skills = eng.list(MemoryCategory::Skill).unwrap();
+        assert_eq!(skills.len(), 1, "不得产生重复条目");
+        assert_eq!(skills[0].id, legacy_id, "保留首次入库的旧前缀条目");
+
+        // llm 入口同内容同样去重
+        assert!(!eng
+            .record_llm_knowledge("lesson", "", "always escape user input", vec![])
+            .unwrap());
+        assert_eq!(eng.list(MemoryCategory::Skill).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn decay_clamps_rate_to_valid_range() {
+        // C6：decay_rate 越界（负值 / >1）必须被 clamp，不得使 importance 上升或超量清零。
+        let eng = MemoryEngine::open_in_memory(true).unwrap();
+        eng.remember("n1", "negative decay note", vec![]).unwrap();
+        // 负值 → clamp 为 0 → 不衰减（importance 不上升、不算 decayed）。
+        let decayed = eng.decay(-0.5).unwrap();
+        assert_eq!(decayed, 0, "负 decay_rate 不得使 importance 上升");
+        let lc: Vec<_> = eng.store.all_lifecycle().unwrap();
+        let n1 = lc.iter().find(|(id, _)| id == "n1").unwrap();
+        assert_eq!(n1.1.importance, 0.6, "clamp 后 importance 保持不变");
+
+        // >1 → clamp 为 1 → 一次清零（与 1.0 行为一致）。
+        let decayed_big = eng.decay(5.0).unwrap();
+        assert_eq!(decayed_big, 1);
+        let lc: Vec<_> = eng.store.all_lifecycle().unwrap();
+        let n1 = lc.iter().find(|(id, _)| id == "n1").unwrap();
+        assert_eq!(n1.1.importance, 0.0, ">1 与 1.0 等价：一次清零");
     }
 
     #[test]

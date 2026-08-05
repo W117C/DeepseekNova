@@ -23,15 +23,16 @@
 - [x] `cargo fmt --check` 通过；提交到分支 feat/memory-lifecycle（不 push）
 
 ## 任务状态（记忆生命周期闭环 2026-08-05）
+- **review-fix 轮（2026-08-05，ddfd4b4 之上，6/6 全修）**：C1 store 事务化批量衰减 `decay_all`（单事务读-算-写，防并发 record_recall 丢失更新）；C2 蒸馏去重双前缀检查（distill-/reflect- 任一命中即已存在）；C3 runtime 起点/mid-run 召回 + tools recall 工具全部接 `rank_lifecycle_weight`（新增 `MemoryRankWeight` 扩展，缺失回落 0.3 默认）；C4 未来版本库保持原版本号不回写（收紧测试断言）；C5 PROGRESS 措辞修正；C6 decay_rate 入口 clamp(0,1) + 测试。workspace 1016 → 1018 passed / 0 failed。详见 crates/REVIEW.md 修复轮分节。
 - [x] 任务 1：schema 版本机制（`meta.schema_version` 初值 "1"，open 读/写，版本不符走空迁移表不炸，graph 先例同款）+ 核验 archived 排除（原 search **未**排除 → 已补：三路检索 LEFT JOIN memory_meta 过滤 stage='archived'，search_hybrid 嵌入扫描同步排除）。测试 +3（版本写入/旧版本不炸/未来版本不炸）+2（FTS 与 LIKE 路径 archived 不召回）。
-- [x] 任务 2：检索排序融合生命周期因子（SQL 内：`bm25 + rank_weight * ((1-importance)*stage_mult - recency_discount)`，stage_mult permanent=1.2/verified=1.1/candidate=1.0，recency 7 天内 0.5/30 天内 0.25）。入口：store.search_with_weight + engine.recall_with_weight（CLI 传 `[memory] rank_lifecycle_weight`；默认入口 recall/search 用 0.3 = 配置默认）。测试 +1：同文本双条目 weight=0 保持纯 bm25（分数相等=生命周期项关闭）vs weight=0.3 重排（组合回归锚点）。
+- [x] 任务 2：检索排序融合生命周期因子（SQL 内：`bm25 + rank_weight * ((1-importance)*stage_mult - recency_discount)`，stage_mult permanent=1.2/verified=1.1/candidate=1.0，recency 7 天内 0.5/30 天内 0.25）。入口：store.search_with_weight + engine.recall_with_weight（CLI 传 `[memory] rank_lifecycle_weight`；默认入口 recall/search 用 0.3 = 配置默认——**签名不变、行为变**：既有调用方排序从纯 bm25 变为 0.3 融合，weight=0 才等价旧行为）。测试 +1：同文本双条目 weight=0 保持纯 bm25（分数相等=生命周期项关闭）vs weight=0.3 重排（组合回归锚点）。
 - [x] 任务 3：衰减接线（engine.decay：非 permanent 衰减、<0.1→archived、permanent 豁免；engine.cleanup：decay + 删除 archived 且距最后召回 > archive_ttl_days，返回 (decayed, deleted)）；store 增 all_lifecycle/update_lifecycle/delete_archived_older_than/stage_counts；MemoryConfig 增 decay_rate=0.1/archive_ttl_days=30/rank_lifecycle_weight=0.3（含分层 merge + 测试）；CLI 增 `memory cleanup`、`memory stats` 输出 stage 分布 + archived 计数。测试 +4（衰减计数+permanent 豁免/超阈值归档/cleanup 只删超期/stats 分布）。
 - [x] 任务 4：蒸馏入口统一（engine.record_knowledge(kind,title,body,tags,source)：title 空则省略 title 行，id 前缀统一 "distill"，已存在则跳过写入保留首次 tags/source；record_reflection_lesson/record_llm_knowledge 变薄封装，签名不变）。测试 +1（reflect 写入后 llm-distill 同内容去重、两入口同格式）。
 - [x] 任务 5 前半：GUIDE 记忆节补 cleanup/衰减/排序权重说明 + `[memory]` 新字段；CHANGELOG Added 条目。
 - [x] 收尾：cargo fmt + make check EXIT=0（1016 通过 / 0 failed / 2 既有 ignored）；反向验证红（1 failed）→ 绿（1 passed）；CLI 冒烟 stats/cleanup 空库+有数据；分支 feat/memory-lifecycle 提交（不 push）。
 - 测试计数变化：core lib 118→130（memory 60→72：engine 13→18、store 15→22、lifecycle 7、skill 9、embedding 3、redact 6、recall 2、profile 5；基线书"memory 61/skill 10"实测为 60/9，未动 skill.rs）；config 32→33；cli 32 不变；workspace 998→1016。
-- 跨 crate 协议记录（AGENTS.md §1 触发）：预扫描=engine.recall/store.search/open 签名均不可变（runtime/tools 白名单外调用方），权重改走新增方法 `search_with_weight`/`recall_with_weight`（旧签名与默认行为不变）；备选路径 A=store 内部可变字段存权重（需 interior mutability）vs B=新方法传参（选 B，零状态、weight=0 等价可直测）；自检=core/config/cli 聚焦测试 + make check 全绿 + 反向验证红→绿 + CLI 冒烟。
-- 遗留：runtime 侧召回未接 rank_lifecycle_weight（runtime 不在白名单；运行时沿用默认 0.3，与配置默认一致，自定义值仅 CLI 生效——需 runtime 接线留待后续轮次）。
+- 跨 crate 协议记录（AGENTS.md §1 触发）：预扫描=engine.recall/store.search/open 签名均不可变（runtime/tools 白名单外调用方），权重改走新增方法 `search_with_weight`/`recall_with_weight`（旧签名不变；默认行为从纯 bm25 变为 0.3 融合，属有意变更，0 才等价旧行为）；备选路径 A=store 内部可变字段存权重（需 interior mutability）vs B=新方法传参（选 B，零状态、weight=0 等价可直测）；自检=core/config/cli 聚焦测试 + make check 全绿 + 反向验证红→绿 + CLI 冒烟。
+- 遗留→已修（2026-08-05 review-fix 轮）：runtime 侧召回未接 rank_lifecycle_weight（起点召回 + mid-run 召回 + tools recall 工具已全部接线，见 crates/REVIEW.md 本轮 C3 处置）。
 
 ## 已提交并推送（2026-08-05 审查修复轮）
 - 审查修复（main@b312715 之上，6 项 review finding 全部修复）：

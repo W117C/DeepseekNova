@@ -12,6 +12,11 @@ use std::sync::Arc;
 /// 共享持久记忆引擎句柄（runtime 注入，对称于 GraphHandle）。
 pub type MemoryHandle = Arc<MemoryEngine>;
 
+/// 召回排序生命周期权重扩展（runtime 注入，RecallTool 读取；
+/// 缺失时回落引擎默认 0.3，行为不变）。
+#[derive(Debug, Clone, Copy)]
+pub struct MemoryRankWeight(pub f64);
+
 /// 引擎未装配时的降级提示（不打断 run）。
 const NO_MEMORY_MSG: &str = "记忆引擎未启用（[memory] enabled=false 或未装配），无法读写记忆。";
 
@@ -158,7 +163,12 @@ impl Tool for RecallTool {
             Some(h) => h,
             None => return Ok(NO_MEMORY_MSG.to_string()),
         };
-        let results = h.recall(&parsed.query, parsed.top_k)?;
+        // C3：工具侧接 `[memory] rank_lifecycle_weight`（runtime 装配时经
+        // MemoryRankWeight 扩展注入）；缺失时回落引擎默认权重 0.3，行为不变。
+        let results = match ctx.extensions.get::<MemoryRankWeight>() {
+            Some(w) => h.recall_with_weight(&parsed.query, parsed.top_k, w.0)?,
+            None => h.recall(&parsed.query, parsed.top_k)?,
+        };
         if results.is_empty() {
             return Ok(format!("no matches for '{}'", parsed.query));
         }

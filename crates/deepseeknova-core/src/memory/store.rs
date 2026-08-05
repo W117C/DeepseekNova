@@ -120,8 +120,12 @@ const MEMORY_SCHEMA_VERSION: &str = "1";
 /// 0 = 纯 bm25，与旧行为等价）。
 pub const DEFAULT_RANK_WEIGHT: f64 = 0.3;
 
-/// schema 版本核对：不符 → 走迁移（当前无迁移项，空跑）→ 回写当前版本。
-/// 旧库（无 meta 表 → 版本缺失）与未知未来版本库打开均不炸。
+/// schema 版本核对：
+/// - 库内版本 == 当前版本：无操作；
+/// - 库内版本为**已知旧版本**（可解析为数字且 < 当前版本）：走迁移表（当前为空，空跑）并回写当前版本；
+/// - 库内版本 **> 当前版本**（如 '999'，未来版本）：**不回写**，保持原版本号、只读可用
+///   （避免旧二进制打开未来库后把版本标记降级抹除，破坏版本簿记）；
+/// - 无法解析的未知版本：同样不回写（保守只读）。
 fn ensure_schema_version(db: &rusqlite::Connection) -> Result<()> {
     let version: Option<String> = db
         .query_row(
@@ -134,7 +138,15 @@ fn ensure_schema_version(db: &rusqlite::Connection) -> Result<()> {
             rusqlite::Error::QueryReturnedNoRows => Ok(None),
             other => Err(other),
         })?;
-    if version.as_deref() != Some(MEMORY_SCHEMA_VERSION) {
+    let downgrade_ok = match version.as_deref() {
+        None => true, // 无版本标记（旧库升级路径）→ 写当前版本
+        Some(v) => match v.parse::<i64>() {
+            // 仅已知旧版本（可解析且 < 当前）走迁移回写
+            Ok(n) => n < MEMORY_SCHEMA_VERSION.parse::<i64>().unwrap_or(1),
+            Err(_) => false, // 未知/不可解析版本：保守不回写
+        },
+    };
+    if downgrade_ok {
         // 迁移表：暂无迁移（版本不符不炸）。未来破坏性 schema 变更在此追加迁移步骤。
         db.execute(
             "INSERT INTO meta(key, value) VALUES('schema_version', ?1)
@@ -560,6 +572,74 @@ impl MemoryStore {
             ],
         )?;
         Ok(())
+    }
+
+    /// 事务化批量衰减：在**单一 SQLite 事务**内完成读-算-写，
+    /// 消除 `all_lifecycle()` + 逐条 `update_lifecycle()` 的跨锁 read-modify-write
+    /// （并发 `record_recall` 的 recall_count/last_recalled_at 增量不再被覆盖写回冲掉）。
+    /// `decay_rate` 在入口 clamp 到 `0.0..=1.0`（负数会使 importance 上升，>1 一次清零）。
+    /// 返回发生衰减（importance 实际下降）的条数。permanent 豁免。
+    pub fn decay_all(&self, decay_rate: f32) -> Result<usize> {
+        let decay_rate = decay_rate.clamp(0.0, 1.0);
+        let mut db = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = db.transaction()?;
+        // 事务内读快照：与 all_lifecycle 同款 LEFT JOIN（meta 缺失兜底 fts 列）。
+        let mut stmt = tx.prepare(
+            "SELECT f.id, COALESCE(m.stage, 'candidate'), COALESCE(m.recall_count, 0), \
+             m.last_recalled_at, COALESCE(m.created_at, f.created_at), \
+             COALESCE(m.importance, f.importance) \
+             FROM memory_fts f LEFT JOIN memory_meta m ON m.id = f.id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            let id: String = r.get(0)?;
+            let stage: String = r.get(1)?;
+            let recall_count: i64 = r.get(2)?;
+            let last_recalled_at: Option<i64> = r.get(3)?;
+            let created_at: i64 = r.get(4)?;
+            let importance: f64 = r.get(5)?;
+            Ok((
+                id,
+                LifecycleMeta {
+                    stage: MemoryLifecycleStage::parse(&stage),
+                    recall_count: recall_count as u32,
+                    last_recalled_at,
+                    created_at,
+                    importance: importance as f32,
+                },
+            ))
+        })?;
+        let mut decayed = 0;
+        for row in rows {
+            let (id, mut meta) = row?;
+            if meta.stage == MemoryLifecycleStage::Permanent {
+                continue;
+            }
+            let before = meta.importance;
+            meta.apply_decay(decay_rate);
+            if meta.importance < before {
+                tx.execute(
+                    "INSERT INTO memory_meta (id, stage, recall_count, last_recalled_at, created_at, importance)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                     ON CONFLICT(id) DO UPDATE SET
+                        stage = excluded.stage,
+                        recall_count = excluded.recall_count,
+                        last_recalled_at = excluded.last_recalled_at,
+                        importance = excluded.importance",
+                    rusqlite::params![
+                        id,
+                        meta.stage.as_str(),
+                        meta.recall_count as i64,
+                        meta.last_recalled_at,
+                        meta.created_at,
+                        meta.importance as f64,
+                    ],
+                )?;
+                decayed += 1;
+            }
+        }
+        drop(stmt); // 释放对 tx 的借用后再 commit
+        tx.commit()?;
+        Ok(decayed)
     }
 
     /// 删除 archived 且最后召回（无召回按创建时间）早于 cutoff 的记忆；
@@ -1325,10 +1405,22 @@ mod tests {
             )
             .unwrap();
         }
-        // 未知未来版本库：不炸（迁移表为空 = 无操作）。
+        // 未知未来版本库：不炸（迁移表为空 = 无操作），且**不回写降级**版本号。
         let reopened = MemoryStore::open(&path).unwrap();
         let hits = reopened.search("anything", 10).unwrap();
         assert!(hits.is_empty(), "未来版本库打开后检索可用");
+        let db = reopened.db.lock().unwrap_or_else(|e| e.into_inner());
+        let v: String = db
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            v, "999",
+            "未来版本库打开后必须保持原版本号（收紧：修正此前静默降级回写的 bug 行为断言）"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
