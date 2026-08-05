@@ -412,7 +412,8 @@ rank_lifecycle_weight = 0.3        # 检索排序生命周期融合权重；0 = 
 显式触发衰减（非 permanent 记忆 importance 按 `decay_rate` 递减，<0.1 归档；
 permanent 豁免）并删除超期 archived（距最后召回 > `archive_ttl_days`）；`memory stats`
 显示 stage 分布与 archived 计数。检索排序在 bm25 之上融合生命周期因子（importance /
-stage / recency，权重 `rank_lifecycle_weight`，=0 时与纯 bm25 等价）。
+stage / recency，权重 `rank_lifecycle_weight`，=0 时与纯 bm25 等价）。记忆库带
+`meta.schema_version`（当前 "1"），版本不符走迁移表不炸，未来版本库不回写版本号。
 
 ### Task Management
 

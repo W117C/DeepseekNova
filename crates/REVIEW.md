@@ -63,3 +63,45 @@
 - **C5（PROGRESS 自相矛盾）— 已修**：任务 2 条目措辞改为明确「**签名不变、行为变**：既有调用方排序从纯 bm25 变为 0.3 融合，weight=0 才等价旧行为」；遗留段更新为「遗留→已修（runtime/tools 已全部接线）」。
 - **C6（decay_rate 无范围校验）— 已修，选「engine/decay 入口 clamp」**：`MemoryStore::decay_all` 入口 `decay_rate.clamp(0.0, 1.0)`（engine.decay 是唯一入口，cleanup 亦经其消费；config 侧不动以免破坏既有配置解析）。**为何选 clamp 而非报错**：`memory cleanup` 为运维命令，clamp 保证命令永不因配置值失败；负数 clamp 为 0 = 不衰减（不上升），>1 clamp 为 1 = 一次清零，均落在语义界内。**新增测试** `decay_clamps_rate_to_valid_range`：`decay(-0.5)` → decayed==0 且 importance 保持 0.6；`decay(5.0)` → 一次清零（importance==0）。**证据**：core memory 74 passed。
 - **测试数字变化**：core lib memory 72 → 74（+2：C2 旧前缀去重、C6 clamp）；runtime 48 不变（装配路径已有覆盖）；workspace 计数以 make check 输出为准。
+
+---
+
+## 第二轮审查：修复 diff ddfd4b4..c65b0e0（2026-08-05）
+
+### 1. 覆盖声明
+
+- **范围确认**：`ocr delegate preview` 工作区模式 0 reviewable（工作树干净属预期）；改用 `--from ddfd4b4 --to c65b0e0` 后输出 4 文件可审（engine.rs / store.rs / runtime lib.rs / tools memory.rs）+ 2 md 排除（PROGRESS.md / REVIEW.md，已人工审 diff）。与任务声明（6 文件 +258/−26）一致。
+- **规则**：仓库根无 `ocr.rules.json`（`ls` 确认），`ocr delegate rule` 使用 system 默认规则（Rust 组 + default 组），与第一轮一致。
+- **人工审 diff**：`git diff ddfd4b4..c65b0e0` 覆盖全部 6 个改动文件；辅助阅读未改动但相关的源码：content_id（engine.rs:51）、apply_decay（lifecycle.rs:124-152）、all_lifecycle（store.rs:525-550，与 decay_all 内联 SQL 逐列比对）、update_lifecycle（store.rs:555-571，与 decay_all UPSERT 列集比对）、record_recall（store.rs:390，锁同一 `self.db`）、MemoryStore::open 建表顺序（store.rs:180-206）、config rank_lifecycle_weight 类型（config lib.rs:457-458，f64）。**只审本轮 diff + 支撑上下文，未审范围外代码。**
+- **测试**：`cargo test -p deepseeknova-core memory` → **74 passed / 0 failed**（lib）+ 1 集成通过（memory_persists_across_reopen），与修复者声明一致（基线 72 → 74，+2 为 C2/C6 新增测试）；`cargo check -p deepseeknova-runtime -p deepseeknova-tools` 编译通过（C3 改动）。未跑全量 make check。
+
+### 2. 评论表
+
+| # | 路径 | 内容 | 起止行 | 分类 | 严重度 |
+|---|------|------|--------|------|--------|
+| （无） | — | 本轮未发现缺陷，见下方逐条复核与已核实无问题项。 | — | — | — |
+
+### 3. 逐条复核（修复是否真修对）
+
+- **C1（事务化衰减）— 修对，无新问题**：`decay_all`（store.rs:582-646）单一事务内完成读-算-写：`db.transaction()`（DEFERRED）→ 事务内 `tx.prepare` SELECT（SQL 与 all_lifecycle 逐列一致：LEFT JOIN + COALESCE stage/recall_count/created_at/importance 兜底）→ 逐条 `apply_decay` → `tx.execute` UPSERT（与 update_lifecycle 列集一致，含 created_at 兜底）→ `drop(stmt)` 后 `tx.commit()`。**事务边界正确**：锁一次（`self.db` 单 Mutex，record_recall store.rs:390 同锁 → 串行化，丢失更新消除）；无死锁（单锁无嵌套获取）；写放大反而减少（N 个 autocommit → 1 事务 N 条语句）；游标迭代中写 memory_meta 在 SQLite 事务快照语义下安全（测试实证绿）。**语义无丢失**：permanent 豁免（decay_all 前置跳过 + apply_decay 内双保险）、<0.1→archived（apply_decay 内改 stage，UPSERT 写回）、decayed 计数与旧逻辑逐条等价（`meta.importance < before`）。engine.decay（engine.rs:136-138）为纯薄封装，签名与返回语义不变。锁持有时间随条目数 O(n) 线性增长，但对显式运维命令（cleanup）属可接受设计权衡。
+- **C2（双候选 id 去重）— 修对，无新问题**：`content_id`（engine.rs:51-57）= `format!("{prefix}-{:016x}", hash(content))`，hash **只吃 content**，prefix 仅是 format 字符串 → `distill-<hash>` 与 `reflect-<hash>` 两 id 均可算出且 hash 后缀一致。旧库条目核实：git show 8c7c450 的 `record_reflection_lesson`（engine.rs:99-113）用 `format!("kind: lesson\n{lesson}")` + redact + `content_id("reflect", content)`，与现 record_knowledge 的 content 构造**完全一致** → reflect 候选 id 真能命中旧库条目（同 redact 配置下）。命中任一即 `return Ok(false)` 不写、保留首次条目（engine.rs:288-290），返回语义与既有 distill 命中一致。测试 `knowledge_dedupes_against_legacy_reflect_prefix`（engine.rs:693-723）覆盖 reflect 与 llm 两个入口。成本：每次写入多一次 meta 查询，可忽略。
+- **C3（runtime/tools 权重接线）— 修对，无新问题**：config `rank_lifecycle_weight: f64`（config lib.rs:458）与 `MemoryRankWeight(pub f64)`（tools memory.rs:18）类型一致；runtime 装配处注入扩展（runtime lib.rs:484-488，全仓唯一构造点）；起点召回（runtime lib.rs:533-539）与 mid-run 召回（runtime lib.rs:627-633）均改 `recall_with_weight(query, top_k, weight)` 且取同一配置值；`recall()` 委托 `recall_with_weight(..., DEFAULT_RANK_WEIGHT=0.3)`（engine.rs:79-83）默认一致性成立；tools 侧缺失扩展回落 `h.recall()`（tools memory.rs:166-171）= 0.3，与配置默认一致，无 panic 路径（`extensions.get` 返回 Option）。闭环：CLI `memory search`（main.rs:534，第一轮已接线）与 runtime/tools 全部接同一配置源。
+- **C4（三态版本核对）— 修对，且确为收紧**：`ensure_schema_version`（store.rs:129-158）三态：None（旧库，open 先 `execute_batch(MEMORY_SCHEMA_SQL)` 建 meta 表 store.rs:190 → 无版本行）→ 写当前版本；可解析且 < 当前 → 迁移空跑 + 回写；> 当前（'999'）或不可解析 → **不回写**。测试断言（store.rs:1405-1422）从"未断言版本（固化降级回写）"改为"断言保持 '999' 且可检索"——**确为收紧**（加强不变式，非放宽）；旧版本库测试（'0' → 回写 '1'）未改且随 74 passed 保持绿。已知旧版本迁移路径完好。
+- **C6（clamp 语义）— 修对，无新问题**：`decay_all` 入口 `decay_rate.clamp(0.0, 1.0)`（store.rs:583），所有调用路径（engine.decay、cleanup → decay → decay_all）均过此入口；负值 → 0 = 不衰减（apply_decay(0) 数值不变，测试断言 decayed==0 且 importance 保持 0.6）、>1 → 1 = 一次清零（0.6-1.0 → max(0.0) = 0.0，测试断言 importance==0.0）；两边界均有测试覆盖（engine.rs:727-746 `decay_clamps_rate_to_valid_range`）；clamp 而非报错符合"运维命令不因配置失败"意图。
+- **C5（文档）**：PROGRESS.md 任务 2 措辞与遗留段均修正，与实现一致。
+
+### 4. 新引入问题排查（均无）
+
+- **SQL 注入面**：无新输入拼接，decay_all 全部参数化（id/stage/recall_count/last_recalled_at/created_at/importance）；版本核对 SQL 无用户输入。
+- **事务锁持有时间**：单 Mutex 串行 + 单连接，无死锁可能；O(n) 锁持有属 cleanup 运维命令可接受权衡（已在 C1 注明）。
+- **扩展读取 panic 路径**：`extensions.get::<MemoryRankWeight>()` Option 回落，无 unwrap；`with_extension` 无 panic 路径；MemoryRankWeight 为 Copy f64，无生命周期问题。
+- 无 unsafe 新增；无性能热点（双前缀去重多一次 meta 查询、clamp 零成本）。
+
+### 5. 按严重度分组
+
+- **critical**：无。**high**：无。**medium**：无。**low**：无。
+- 本轮 0 条评论原因：6 条修复逐条核对均"修对且无新问题"——C1 事务边界/语义/并发均核实（含与 all_lifecycle/update_lifecycle 的 SQL 逐列比对与 record_recall 同锁确认）；C2 的 hash 机制与旧格式（git 历史 8c7c450 实证）核实为真能命中；C3 类型/注入/回落/默认一致性核实；C4 收紧方向核实（断言加强）；C6 两边界测试实证；新增测试 74 passed 全绿。未发现需修复的缺陷，故评论表为空。
+
+### 6. 结论
+
+**0 critical / 0 high / 0 medium / 0 low**。聚焦测试 `cargo test -p deepseeknova-core memory` 74 passed + 1 集成通过，runtime/tools 编译通过。**满足退出条件，可进入收尾**（建议收尾时按仓库惯例跑一次全量 `make check` 作最终确认）。

@@ -54,7 +54,6 @@ record_llm_knowledge 并存，合入后可统一（待裁决）。顺手活（�
 ## 记忆生命周期闭环任务书（2026-08-05）
 
 执行阻塞：无。说明：本轮单域做透=记忆生命周期，以下三域写入待裁决留待下轮：
-① protocol 增强；② graph 新语言支持；③ agent_loop 反思 UI。遗留（待裁决）：
-runtime 侧召回未接 `[memory] rank_lifecycle_weight`（runtime 不在白名单，运行时
-沿用默认 0.3=配置默认，自定义值仅 CLI `memory search` 生效；接线需改 runtime
-装配，留待后续轮次）。
+① protocol 增强；② graph 新语言支持；③ agent_loop 反思 UI。遗留→已修（review-fix
+C3）：runtime 起点/mid-run 召回与 tools recall 工具已全部接线
+`rank_lifecycle_weight`（见 crates/REVIEW.md 第二轮复核）。

@@ -14,8 +14,8 @@
   config 32+18。
 
 ## 自验收清单（执行者逐条打勾，命令亲跑）
-- [x] `cargo test --workspace --no-fail-fast`：通过数 ≥ 998 / 0 failed（实测 make check 内 1016 通过 / 0 failed / 2 既有 ignored）
-- [x] `cargo test -p deepseeknova-core memory`：≥ 70 条通过（实测 memory:: 72 条；core 全量 130 lib + 2 集成 + 1 doctest）
+- [x] `cargo test --workspace --no-fail-fast`：通过数 ≥ 1018 / 0 failed（实测 make check 内 1018 通过 / 0 failed / 2 既有 ignored）
+- [x] `cargo test -p deepseeknova-core memory`：≥ 74 条通过（实测 memory:: 74 条；core 全量 132 lib + 2 集成 + 1 doctest）
 - [x] `make check` EXIT=0（fmt + clippy + 全 workspace 测试 + doc 全绿）
 - [x] CLI 冒烟：`memory stats` 输出含 stage 分布（实测 `stages=archived:1,candidate:1,verified:1 archived=1`）
 - [x] CLI 冒烟：`memory cleanup` 空库与有数据均不 panic、输出报告（实测 decayed=3 deleted=1 / 空库 decayed=0 deleted=0）
