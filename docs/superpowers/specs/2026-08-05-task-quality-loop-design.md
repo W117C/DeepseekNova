@@ -233,11 +233,11 @@ impl Scorecard {
    - 原因：Ask 语义复用既有审批通道，不引入第二套审批路径；Deny 优先级最高保证安全边界不被 hook 放宽。
 3. **诊断落盘细节（0600 + 脱敏 + suppress）**
    - 设计说法：§4.2 经 runtime 装配的诊断回调写 `<metrics dir>/diagnose/<session_id>.json`，仅约定路径。
-   - 实现现状：`agent/src/diagnose.rs` 落盘前用 `redact_secrets` 脱敏（错误/命令/工具名/finding evidence 均脱敏），Unix 下 `set_permissions` 强制 0600；成功路径与取消路径调用 `suppress()` 不产报告（防止 Drop 兜底误报 outcome=failed）；未标注 session_label 时文件名为 `diag-<uuid>`（F5/F6 审查修复）。
+   - 实现现状：`agent/src/diagnose.rs` 落盘前用 `redact_secrets` 脱敏（错误/命令/工具名/finding evidence 均脱敏），Unix 下 `set_permissions` 强制 0600；成功路径与取消路径调用 `suppress()` 不产报告（防止 Drop 兜底误报 outcome=failed）；未标注 session_label 时由每次 run 生成唯一 `session-<ms>-<seq>` 标注（F5/F6/F11 审查修复；`diag-<uuid>` 兜底仅保留在守卫内部，主循环路径不可达）。
    - 原因：报告含命令与错误文本属敏感数据，0600 + 脱敏为审查要求；取消是正常结束，不应产出 failed 报告。
 4. **quality_findings 语义：会话累计 → run 级差分**
    - 设计说法：§4.2 DiagnoseReport.quality 为"本会话全部 finding"（会话累计）。
-   - 实现现状：MetricsGuard 记录 run 起始时 findings 长度（start_len），emit 时只取 `[start_len..]` 差分切片作为本 run 新增（会话累计由 Agent 级 Arc<Mutex> 承载）；单会话上限 `MAX_QUALITY_FINDINGS = 10_000`，超限丢弃只发生在 start_len 之后（F4 审查修复）。
+   - 实现现状：MetricsGuard 记录 run 起始时 findings 长度（start_len），emit 时只取 `[start_len..]` 差分切片作为本 run 新增（会话累计由 Agent 级 Arc<Mutex> 承载）；单会话上限 `MAX_QUALITY_FINDINGS = 10_000`，超限丢弃只发生在 start_len 之后（F4 审查修复）。DiagnoseGuard 与对抗审查同样按 run 起始长度切片，诊断报告/审查证据不再混入其他 run 的 findings（审查修复轮补充）。
    - 原因：并发 run 共享同一容器时会话累计会混入其他 run 的 findings；差分保证评分卡按 run 归因，上限防无界增长。
 5. **MetricsHook 签名扩展（设计未提及）**
    - 设计说法：§5.2 仅说 metrics 扩展组装评分卡，未定义 hook 签名。
@@ -246,5 +246,5 @@ impl Scorecard {
 6. **审查修复项（设计未覆盖，统一列示）**
    - bash 写路径启发式（F1）：`security::quality` 的 `extract_shell_write_paths` 解析 bash 命令内联写路径——重定向写敏感路径（如 .env）before Deny + after Warning。设计仅覆盖写类工具参数路径，未覆盖 bash 内联写。
    - glob 大小写归一（F2）：no-forbidden-path 匹配时双方 `to_lowercase()` 归一（原模式保持原样，仅匹配时归一），防大小写变体绕过。
-   - session_label：CLI 以 `with_session_label("session-<ts>")` 标注会话 id，serve 端点按 label 读取落盘文件；未标注时诊断文件名为 `diag-<uuid>`。设计未定义会话 id 来源。
+   - session_label：CLI 以 `with_session_label("session-<ts>-<seq>")` 标注会话 id；serve 未显式标注时由 Agent 每次 run 生成唯一 `session-<ms>-<seq>`，评分卡/诊断/Paused 共用同一 id，serve 端点按 label 读取落盘文件（F11 + 审查修复轮；`diag-<uuid>` 兜底仅保留在守卫内部，主循环路径不可达）。设计未定义会话 id 来源。
    - 原因：均为审查阶段发现的安全/可观测性缺口。

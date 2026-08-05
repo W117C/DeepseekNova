@@ -1202,10 +1202,10 @@ impl Default for QualityConfig {
 
 /// 协议增强能力包配置（`[protocol]` 段，协议增强设计 §3.4）。
 ///
-/// 本阶段只解析、不消费门控相关字段：`attach_protocol_gates` 与对抗审查
-/// 接线依赖 agent 阶段3（E）的 `with_protocol_gates` / `with_adversarial_review`，
-/// 由父级在 E 落地后补接线（TODO 见 runtime）。回灌/聚类/fitness 已按
-/// `enabled` 挂载（协议增强设计 §5/§6）。
+/// `enabled` 为总开关：门控（runtime `attach_protocol_gates` 解析 `gates`
+/// 力度表并装配 `Agent::with_protocol_gates`）、对抗审查（`adversarial_review`
+/// → `Agent::with_adversarial_review`）、失败模式回灌/聚类与技能 fitness 记录
+/// （runtime 装配，见协议增强设计 §5/§6）均挂此键。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProtocolConfig {
     /// 协议能力包总开关（默认 false；关闭时 agent 行为与现状完全一致）。
@@ -1294,13 +1294,16 @@ impl Config {
         self.telemetry.merge(other.telemetry);
         self.model_pointers.merge(other.model_pointers);
         self.memory.merge(other.memory);
+        self.delegate.merge(other.delegate);
         self.session = other.session;
         self.budget = other.budget;
         self.review = other.review;
         self.verify = other.verify;
         self.checkpoint = other.checkpoint;
         self.metrics.merge(other.metrics);
-        self.attribution = other.attribution;
+        self.attribution.merge(other.attribution);
+        self.quality.merge(other.quality);
+        self.protocol.merge(other.protocol);
     }
 
     /// Apply DEEPSEEKNOVA_* environment variable overrides.
@@ -1513,6 +1516,76 @@ impl MetricsConfig {
         }
         if other.max_reports != d.max_reports {
             self.max_reports = other.max_reports;
+        }
+    }
+}
+
+impl DelegateConfig {
+    /// 深度合并 `[delegate]`：字段非默认值才覆盖；`agents` 仅当项目层显式
+    /// 提供覆盖/新增时整体替换（与 providers/models 的“显式列表替换”语义
+    /// 一致），避免项目层缺省空列表清掉用户层预设。
+    fn merge(&mut self, other: DelegateConfig) {
+        let d = DelegateConfig::default();
+        if other.enabled != d.enabled {
+            self.enabled = other.enabled;
+        }
+        if other.max_concurrent != d.max_concurrent {
+            self.max_concurrent = other.max_concurrent;
+        }
+        if other.output_cap_tokens != d.output_cap_tokens {
+            self.output_cap_tokens = other.output_cap_tokens;
+        }
+        if !other.agents.is_empty() {
+            self.agents = other.agents;
+        }
+    }
+}
+
+impl AttributionConfig {
+    /// 深度合并 `[attribution]`：与 MetricsConfig 同款非默认值覆盖模式。
+    /// 不能用整体赋值——项目层存在但未写 `[attribution]` 时，缺省
+    /// `enabled=false` 会把用户层显式开启重置掉。
+    fn merge(&mut self, other: AttributionConfig) {
+        let d = AttributionConfig::default();
+        if other.enabled != d.enabled {
+            self.enabled = other.enabled;
+        }
+        if other.max_retries != d.max_retries {
+            self.max_retries = other.max_retries;
+        }
+        if other.max_attributions != d.max_attributions {
+            self.max_attributions = other.max_attributions;
+        }
+        if !other.degrade_map.is_empty() {
+            self.degrade_map.extend(other.degrade_map);
+        }
+    }
+}
+
+impl QualityConfig {
+    /// 深度合并 `[quality]`：非默认值才覆盖（默认 true），项目层缺省不能
+    /// 重置用户层显式关闭。
+    fn merge(&mut self, other: QualityConfig) {
+        let d = QualityConfig::default();
+        if other.enabled != d.enabled {
+            self.enabled = other.enabled;
+        }
+    }
+}
+
+impl ProtocolConfig {
+    /// 深度合并 `[protocol]`：开关非默认值才覆盖；gates 按门名逐项叠加
+    /// （项目层覆盖同名门，用户层未提及的门保留）。
+    fn merge(&mut self, other: ProtocolConfig) {
+        let d = ProtocolConfig::default();
+        if other.enabled != d.enabled {
+            self.enabled = other.enabled;
+        }
+        if !other.gates.is_empty() {
+            self.gates.extend(other.gates);
+        }
+        if other.adversarial_review != d.adversarial_review {
+            self.adversarial_review = other.adversarial_review;
         }
     }
 }
@@ -1892,6 +1965,157 @@ mod tests {
         assert!(base.attribution.enabled);
         assert_eq!(base.attribution.max_attributions, 7);
         assert_eq!(base.attribution.max_retries, 1, "未覆盖字段保持默认");
+    }
+
+    #[test]
+    fn attribution_merge_keeps_user_enable_when_project_lacks_section() {
+        // 项目层存在但未写 [attribution]：整体赋值会把用户层 enabled=true
+        // 重置为默认 false；字段级非默认覆盖必须保留用户显式开启。
+        let mut base = Config::default();
+        base.merge(Config {
+            attribution: AttributionConfig {
+                enabled: true,
+                max_attributions: 7,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let project = Config {
+            memory: MemoryConfig {
+                min_steps: 8,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        base.merge(project);
+        assert!(base.attribution.enabled, "项目层缺省不得清掉用户显式开启");
+        assert_eq!(base.attribution.max_attributions, 7);
+        assert_eq!(base.attribution.max_retries, 1);
+    }
+
+    #[test]
+    fn protocol_and_quality_merge_through_layers() {
+        // 用户层开启协议 + 关闭质量；项目层只改门力度，不得重置开关。
+        let mut base = Config::default();
+        let user = Config {
+            protocol: ProtocolConfig {
+                enabled: true,
+                gates: HashMap::from([
+                    ("verify-evidence".to_string(), "soft".to_string()),
+                    ("drift-detection".to_string(), "off".to_string()),
+                ]),
+                adversarial_review: true,
+            },
+            quality: QualityConfig { enabled: false },
+            ..Default::default()
+        };
+        base.merge(user);
+        assert!(base.protocol.enabled);
+        assert!(base.protocol.adversarial_review);
+        assert!(!base.quality.enabled);
+
+        // 项目层显式改 verify-evidence 为 hard：同名门覆盖，其余门保留。
+        let project = Config {
+            protocol: ProtocolConfig {
+                enabled: false, // 未显式开启（默认值）→ 不得覆盖用户层 true
+                gates: HashMap::from([("verify-evidence".to_string(), "hard".to_string())]),
+                adversarial_review: false, // 默认值 → 不得覆盖用户层 true
+            },
+            ..Default::default()
+        };
+        base.merge(project);
+        assert!(
+            base.protocol.enabled,
+            "项目层缺省 enabled=false 不得覆盖用户层 true"
+        );
+        assert!(base.protocol.adversarial_review);
+        assert_eq!(
+            base.protocol
+                .gates
+                .get("verify-evidence")
+                .map(String::as_str),
+            Some("hard")
+        );
+        assert_eq!(
+            base.protocol
+                .gates
+                .get("drift-detection")
+                .map(String::as_str),
+            Some("off")
+        );
+
+        // 项目层显式 enabled=true / 用户层未设 → 覆盖为 true。
+        let mut base2 = Config::default();
+        let project2 = Config {
+            protocol: ProtocolConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        base2.merge(project2);
+        assert!(base2.protocol.enabled);
+    }
+
+    #[test]
+    fn delegate_merge_keeps_user_agents_when_project_lacks_agents() {
+        let mut base = Config::default();
+        let user = Config {
+            delegate: DelegateConfig {
+                enabled: true,
+                max_concurrent: 5,
+                output_cap_tokens: 2000,
+                agents: vec![DelegateAgentOverride {
+                    name: "coder".into(),
+                    system_prompt: None,
+                    tools: None,
+                    max_steps: None,
+                    inputs: Some(vec![InputOverride {
+                        name: "path".into(),
+                        value: "src/lib.rs".into(),
+                    }]),
+                }],
+            },
+            ..Default::default()
+        };
+        base.merge(user);
+        assert_eq!(base.delegate.max_concurrent, 5);
+        assert_eq!(base.delegate.agents.len(), 1);
+
+        // 项目层缺省 [delegate] → 用户层预设保留（enabled/max_concurrent 默认不覆盖）。
+        let project = Config {
+            memory: MemoryConfig {
+                min_steps: 8,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        base.merge(project);
+        assert!(base.delegate.enabled);
+        assert_eq!(base.delegate.max_concurrent, 5);
+        assert_eq!(base.delegate.agents.len(), 1);
+
+        // 项目层显式提供 agents → 整体替换。
+        let project2 = Config {
+            delegate: DelegateConfig {
+                enabled: false,
+                max_concurrent: 3,
+                output_cap_tokens: 2000,
+                agents: vec![DelegateAgentOverride {
+                    name: "reviewer".into(),
+                    system_prompt: None,
+                    tools: None,
+                    max_steps: None,
+                    inputs: None,
+                }],
+            },
+            ..Default::default()
+        };
+        base.merge(project2);
+        assert!(!base.delegate.enabled);
+        assert_eq!(base.delegate.max_concurrent, 3);
+        assert_eq!(base.delegate.agents.len(), 1);
+        assert_eq!(base.delegate.agents[0].name, "reviewer");
     }
 
     #[test]

@@ -79,13 +79,13 @@ The binary is at `target/release/deepseeknova`.
 deepseeknova init
 ```
 
-This creates a `.deepseeknova/` directory with:
+`deepseeknova init` 会在当前目录创建：
 ```
-.deepseeknova/
-├── config.toml        # Project configuration
-├── skills/            # Custom skills (markdown + frontmatter)
-├── commands/          # Custom slash commands
-└── sessions/          # Session persistence (JSONL)
+├── DEEPSEEKNOVA.md      # 项目上下文模板
+├── deepseeknova.toml    # 项目配置（Config::load 项目层）
+└── .deepseeknova/
+    ├── commands/        # 自定义斜杠命令（含 build.md 示例）
+    └── memory/          # 记忆库目录
 ```
 
 ### Setup Wizard
@@ -102,13 +102,13 @@ Configuration is merged from multiple sources (last wins):
 
 1. **Built-in defaults**
 2. **User config**: `~/.deepseeknova/config.toml`
-3. **Project config**: `.deepseeknova/config.toml`
+3. **Project config**: `./deepseeknova.toml`（项目根，覆盖用户层非默认字段）
 4. **Environment variables**: `DEEPSEEKNOVA_PROVIDER_MODEL`, `DEEPSEEKNOVA_MAX_STEPS`, etc.
 
 ### Full Configuration Reference
 
 ```toml
-# .deepseeknova/config.toml
+# deepseeknova.toml（项目根）或 ~/.deepseeknova/config.toml（用户层）
 
 [default_provider]
 kind = "openai"                    # openai | anthropic | ollama
@@ -230,6 +230,42 @@ Coordinator 模式（`run --planner-model ...`）现在同样接入代码图索�
 （search_code / traverse_graph / retrieve_entity / trace_code / impact_code /
 explore_code）对执行器可用，只读工具对规划器开放；`[graph] enabled = false` 时自动排除。
 
+### 委派子代理（`[delegate]`）
+
+内置 explorer / coder / tester / reviewer 四类预设可经配置覆盖或新增；`inputs`
+为参数化任务书默认值（`${{ inputs.<name> }}` 占位符），调用方传值优先：
+
+```toml
+[delegate]
+enabled = true                     # false = 不注册 delegate 工具
+max_concurrent = 2                 # 并发子代理上限，满员排队
+output_cap_tokens = 2000           # 回传摘要 token 上限
+
+[[delegate.agents]]
+name = "coder"
+max_steps = 25
+tools = ["read_file", "write_file", "edit_file", "bash"]
+
+[[delegate.agents.inputs]]
+name = "path"
+value = "src/lib.rs"
+```
+
+### 失败归因重试（`[attribution]`）
+
+子代理失败 / verify / review 达上限 Paused 前，可选 LLM 归因（Retry / Degrade /
+Abort）后再决定重试；默认关闭，开启后受硬预算约束防烧 token：
+
+```toml
+[attribution]
+enabled = false                    # 默认 false：关闭时失败直接上抛
+max_retries = 1                    # Retry/Degrade 重试次数上限（共 2 次尝试）
+max_attributions = 3               # 单次 run 内归因调用次数上限
+
+[attribution.degrade_map]
+researcher = "explorer"            # Degrade 时换用目标预设；未映射按 Retry 处理
+```
+
 ### 任务质量闭环（`[quality]`）
 
 工具调用生命周期治理与写后策略评估（默认开启）：每次工具调用前后经 ToolHook 链
@@ -241,7 +277,7 @@ finding 才升级 LLM 自审，否则跳过以省 token：
 
 ```toml
 [quality]
-enabled = true    # 默认 true；false 时整个质量闭环（hook 链/策略评估/评分卡）关闭
+enabled = true    # 默认 true；false 时质量钩子关闭（写后策略评估与 Blocking 短路自审不生效），metrics/评分卡仍由 [metrics] 开关控制
 ```
 
 `before`/`interested` panic 按 fail-closed 处理（拒绝执行，warn 注明 panic 来源）；
@@ -437,10 +473,13 @@ enabled = true    # 默认 true；false 时不采集、不落盘
   composite 由 `[protocol]` 启用时经 `fill_protocol` 填充，见「协议增强能力包」节）。
 - `diagnose/<session_id>.json` — 失败会话的结构化诊断报告（阶段时序 / 失败详情 /
   子代理链 / findings），落盘前脱敏（`redact_secrets`）+ Unix 0600 权限；成功或
-  取消路径不产报告。未标注会话标识时文件名为 `diag-<uuid>`。
+  取消路径不产报告。
 
-CLI 会话以 `session-<ts>` 标注标识，serve 端点按标识读取（见 HTTP API 节；
-`[metrics] enabled = false` 时诊断/评分卡均不落盘）。
+会话 id 三处同源：`<session_id>.json` 报告、`<session_id>.scorecard.json` 评分卡
+与 `diagnose/<session_id>.json` 诊断使用同一标识。CLI 单次 run 标注为
+`session-<ts>-<seq>`；serve 未显式标注时由 Agent 每次 run 生成唯一
+`session-<ms>-<seq>`，避免多会话互相覆盖。serve 端点按该标识读取（见 HTTP API
+节；`[metrics] enabled = false` 时诊断/评分卡均不落盘）。
 
 ### 项目后置产出（A2）
 
@@ -598,7 +637,7 @@ data: {"text":"...","tool_calls":[...],"usage":{...}}
 读取失败会话的结构化诊断报告（`diagnose/<id>.json` 落盘文件）。
 
 ```bash
-curl http://localhost:3000/v1/sessions/session-1722830400/diagnose
+curl http://localhost:3000/v1/sessions/session-1722830400-0/diagnose
 # {"session_id":"...","outcome":"failed","phases":[...],"failures":[...],"sub_agents":[...],"quality":[...]}
 ```
 
@@ -610,7 +649,7 @@ curl http://localhost:3000/v1/sessions/session-1722830400/diagnose
 读取单会话六维评分卡（`<id>.scorecard.json` 落盘文件；protocol/composite 为协议增强能力包新增维）。
 
 ```bash
-curl http://localhost:3000/v1/sessions/session-1722830400/scorecard
+curl http://localhost:3000/v1/sessions/session-1722830400-0/scorecard
 # {"session_id":"...","dimensions":{"governance":1.0,"verification":0.8,"reflection":0.5,"review":1.0,"protocol":1.0,"composite":0.86},"overall":0.86}
 ```
 

@@ -324,10 +324,20 @@ impl GraphExecutor {
                     // back to the top-level outputs map.
                     let shared_result: Option<String> = shared.as_ref().and_then(|lock| {
                         let guard = lock.read().unwrap_or_else(|e| e.into_inner());
-                        guard.values().find_map(|o| match o {
-                            NodeOutput::ToolResult(r) => Some(r.clone()),
-                            _ => None,
-                        })
+                        // 兄弟 ToolResult 优先；无 ToolResult 时退而看 Error
+                        // （失败子节点也写回共享容器，Observe 可见失败产出）。
+                        guard
+                            .values()
+                            .find_map(|o| match o {
+                                NodeOutput::ToolResult(r) => Some(r.clone()),
+                                _ => None,
+                            })
+                            .or_else(|| {
+                                guard.values().find_map(|o| match o {
+                                    NodeOutput::Error(e) => Some(format!("error: {e}")),
+                                    _ => None,
+                                })
+                            })
                     });
                     let result = shared_result
                         .or_else(|| {
@@ -370,8 +380,8 @@ impl GraphExecutor {
                     // aborted. A bare JoinSet would leave already-spawned
                     // children running detached past the node's timeout.
                     //
-                    // 子节点共享输出容器：完成即写回（含失败），同层 Observe
-                    // 可见兄弟产出。仅作用域于本次 Parallel 执行。
+                    // 子节点共享输出容器：完成即写回（成功与失败都写），同层
+                    // Observe 可见兄弟产出。仅作用域于本次 Parallel 执行。
                     let shared_lock = Arc::new(RwLock::new(HashMap::new()));
                     let mut set = JoinSetAbortGuard(JoinSet::new());
                     for (idx, child) in nodes.iter().enumerate() {
@@ -383,12 +393,14 @@ impl GraphExecutor {
                             let result = this
                                 .execute_action(&child.action, &outputs, &Some(shared_lock.clone()))
                                 .await;
-                            if let Ok(output) = &result {
-                                shared_lock
-                                    .write()
-                                    .unwrap_or_else(|e| e.into_inner())
-                                    .insert(child.id.clone(), output.clone());
-                            }
+                            let output = match &result {
+                                Ok(output) => output.clone(),
+                                Err(e) => NodeOutput::Error(format!("{e}")),
+                            };
+                            shared_lock
+                                .write()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .insert(child.id.clone(), output);
                             (idx, result)
                         });
                     }

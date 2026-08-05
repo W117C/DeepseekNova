@@ -309,6 +309,9 @@ pub struct DiagnoseGuard {
     hook: Option<DiagnoseHook>,
     session_id: Option<String>,
     quality_findings: Arc<tokio::sync::Mutex<Vec<QualityFinding>>>,
+    /// F4：本 run 起始时会话 findings 长度。emit/Drop 只取 `[start_len..]`
+    /// 差分切片，避免并发 run 或历史 run 的 findings 污染本 run 诊断报告。
+    quality_start_len: usize,
     /// 对抗审查产出（会话收尾注入；emit 时写入报告）。
     adversarial_review: Option<String>,
     emitted: bool,
@@ -321,12 +324,14 @@ impl DiagnoseGuard {
         hook: Option<DiagnoseHook>,
         session_id: Option<String>,
         quality_findings: Arc<tokio::sync::Mutex<Vec<QualityFinding>>>,
+        quality_start_len: usize,
     ) -> Self {
         Self {
             collector: DiagnoseCollector::new(),
             hook,
             session_id,
             quality_findings,
+            quality_start_len,
             adversarial_review: None,
             emitted: false,
         }
@@ -373,7 +378,14 @@ impl DiagnoseGuard {
         let Some(hook) = self.hook.clone() else {
             return;
         };
-        let quality = self.quality_findings.lock().await.clone();
+        let quality: Vec<QualityFinding> = self
+            .quality_findings
+            .lock()
+            .await
+            .iter()
+            .skip(self.quality_start_len)
+            .cloned()
+            .collect();
         let mut failures = collect_tool_failures(messages);
         failures.extend(std::mem::take(&mut self.collector.failures));
         self.collector.failures = failures;
@@ -406,11 +418,15 @@ impl Drop for DiagnoseGuard {
         }
         self.emitted = true;
         // 同步 Drop 无法 await：try_lock 失败则跳过 quality 快照。
-        let quality = self
+        let quality_all = self
             .quality_findings
             .try_lock()
             .map(|g| g.clone())
             .unwrap_or_default();
+        let quality: Vec<QualityFinding> = quality_all
+            .into_iter()
+            .skip(self.quality_start_len)
+            .collect();
         // F7：兜底失败相位不再硬编码 `plan`——用收集器状态推导（已进入过
         // tool 相位 → `tool`；当前为 reflect/review 则如实填写）。
         let phase = self.collector.fallback_failure_phase();

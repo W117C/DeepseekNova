@@ -690,10 +690,15 @@ fn parse_plan(plan_text: &str, goal: &str, max_nodes: usize, goal_mode: bool) ->
             let entry = plan.nodes.first().map(|n| n.id.clone()).unwrap_or_default();
             let mut graph = ExecutionGraph::new(entry);
 
+            // 先加全部节点，再统一补边：depends_on 引用的目标节点可能排在
+            // 当前节点之后，若边在节点循环内即时添加，add_edge 会对尚不存在
+            // 的目标 fail-soft 丢弃，依赖关系静默丢失。
             for node in plan.nodes.iter().take(max_nodes) {
                 let action = parse_plan_node_action(node);
                 graph.add_node(ExecutionNode::new(&node.id, action));
+            }
 
+            for node in plan.nodes.iter().take(max_nodes) {
                 // Backwards-compatible node-level dependency hints: convert to
                 // default Success-conditioned edges when no explicit edge
                 // already wires this dependency.
@@ -1196,6 +1201,26 @@ mod tests {
             tool_call_edge.condition,
             Some(EdgeCondition::ToolCall(ref id)) if id == "abc"
         ));
+    }
+
+    #[test]
+    fn parse_plan_depends_on_target_appearing_later_is_kept() {
+        // 依赖目标 `a` 排在 `b` 之后：depends_on 边必须在全部节点加入后再
+        // 添加，否则 add_edge 的未知节点 fail-soft 会丢弃依赖。
+        let json = r#"{
+            "nodes": [
+                {"id": "b", "action": "think", "prompt": "second", "depends_on": ["a"]},
+                {"id": "a", "action": "think", "prompt": "first"}
+            ],
+            "edges": []
+        }"#;
+        let graph = parse_plan(json, "goal", 20, false);
+        assert_eq!(graph.nodes.len(), 2);
+        assert!(
+            graph.edges.iter().any(|e| e.from == "a" && e.to == "b"),
+            "depends_on edge a→b must survive, got {:?}",
+            graph.edges
+        );
     }
 
     #[test]

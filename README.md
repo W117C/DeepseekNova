@@ -24,7 +24,7 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 [![Rust](https://img.shields.io/badge/rust-stable%201.97-orange.svg)](https://www.rust-lang.org)
 [![Crates](https://img.shields.io/badge/crates-22-green.svg)](#-22-个-crate)
-[![Tests](https://img.shields.io/badge/tests-994-brightgreen.svg)](#-技术栈)
+[![Tests](https://img.shields.io/badge/tests-1003-brightgreen.svg)](#-技术栈)
 
 </div>
 
@@ -222,7 +222,7 @@ deepseeknova chat --tui
 | 后端 | Rust + SQLite FTS5 + tokio + axum |
 | 前端 | TUI (ratatui) · CLI (clap) · HTTP API (axum + SSE) |
 | 追踪 | OpenTelemetry (OTLP) |
-| 测试 | 994 tests · cargo-llvm-cov · CI 三平台 |
+| 测试 | 1003 tests · cargo-llvm-cov · CI 三平台 |
 
 ## 📄 License
 

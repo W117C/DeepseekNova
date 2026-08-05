@@ -1214,8 +1214,12 @@ pub fn attach_metrics_hook_with_fitness(
     let warned_empty_skills = std::sync::atomic::AtomicBool::new(false);
     let hook: deepseeknova_agent::MetricsHook = Arc::new(move |stats, summary| {
         // 任务质量闭环 C：会话 id 两份文件共用，保证
-        // `<id>.json` 与 `<id>.scorecard.json` 可对账。
-        let session_id = deepseeknova_metrics::new_session_id();
+        // `<id>.json` 与 `<id>.scorecard.json` 可对账。优先用 Agent 的
+        // 会话标注（Paused 事件/诊断报告同源），未标注时回退生成唯一 id。
+        let session_id = summary
+            .session_id
+            .clone()
+            .unwrap_or_else(deepseeknova_metrics::new_session_id);
         let mut card = deepseeknova_metrics::Scorecard::compute(
             &session_id,
             &stats,

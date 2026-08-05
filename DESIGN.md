@@ -538,8 +538,10 @@ Phase 5: 沉淀 (Distill) ← 这是大多数 Agent 缺失的
   四维评分卡（governance / verification / reflection / review）落盘
   `<session_id>.scorecard.json`；serve `GET /v1/sessions/{id}/scorecard` 与
   `GET /v1/metrics/scorecards`（聚合）查询。
-- **会话标识**：CLI 以 `session-<ts>` 标注 session_label，serve 端点按 label
-  读取落盘文件（无认证、仅限本地、session id 白名单校验）。
+- **会话标识**：CLI 以 `session-<ts>-<seq>` 标注 session_label，serve 未显式
+  标注时由 Agent 每次 run 生成唯一 `session-<ms>-<seq>`；评分卡/诊断报告/Paused
+  事件共用同一 id，serve 端点按 label 读取落盘文件（无认证、仅限本地、session
+  id 白名单校验）。
 
 设计文档：`docs/superpowers/specs/2026-08-05-task-quality-loop-design.md`
 （§12 为实现偏差记录）。

@@ -193,6 +193,7 @@ async fn main() -> anyhow::Result<()> {
                     model_args.max_steps,
                     mcp_tools,
                     &model_router,
+                    Some(cli_session_label()),
                 )?;
 
                 let input = RunInput {
@@ -271,6 +272,7 @@ async fn main() -> anyhow::Result<()> {
                     5,
                     mcp_tools,
                     &model_router,
+                    Some(cli_session_label()),
                 )?;
                 for f in &mut findings {
                     f.verdict = deepseeknova_scanner::investigate::investigate(f, &agent).await;
@@ -364,6 +366,7 @@ async fn main() -> anyhow::Result<()> {
                         0,
                         mcp.clone(),
                         &factory_router,
+                        Some(cli_session_label()),
                     )?
                     .with_conversation_history(hist.clone());
                     Ok(Arc::new(agent))
@@ -436,6 +439,7 @@ async fn main() -> anyhow::Result<()> {
                             0, // no max_steps limit in chat mode
                             mcp_tools.clone(),
                             &router,
+                            Some(cli_session_label()),
                         )?
                         .with_conversation_history(Arc::clone(&history_clone));
                         Ok(Box::new(agent))
@@ -484,6 +488,7 @@ async fn main() -> anyhow::Result<()> {
                 0,
                 mcp_tools,
                 &model_router,
+                None, // serve：每次 run 由 Agent 生成唯一会话标注
             )?
             .with_approval_responder(responder);
             let runner: Arc<dyn Runner> = Arc::new(agent);
@@ -705,6 +710,7 @@ async fn main() -> anyhow::Result<()> {
                             0,
                             mcp_tools.clone(),
                             &router,
+                            Some(cli_session_label()),
                         )?
                         .with_conversation_history(Arc::clone(&history_clone));
                         Ok(Box::new(agent))
@@ -821,6 +827,7 @@ fn review_provider_for(
 /// `roles` routes the delegation engine (sub-agents) to the Task-role model
 /// and Agent L3 compaction to the Compact-role model when supplied; unset
 /// roles fall back to the main provider.
+#[allow(clippy::too_many_arguments)]
 fn build_agent(
     provider: Arc<dyn deepseeknova_provider::Provider>,
     roles: deepseeknova_runtime::AgentRoleProviders,
@@ -829,6 +836,7 @@ fn build_agent(
     max_steps: usize,
     extra_tools: Vec<Arc<dyn deepseeknova_core::Tool>>,
     router: &deepseeknova_provider::router::ModelRouter,
+    session_label: Option<String>,
 ) -> anyhow::Result<deepseeknova_agent::Agent> {
     let workspace_root = std::env::current_dir().unwrap_or_default();
     let metrics_dir = workspace_root.join(".deepseeknova").join("metrics");
@@ -876,19 +884,26 @@ fn build_agent(
     // 协议增强：协议门控装配（`[protocol] enabled` 时挂内置四门 + 对抗审查
     // 开关）。置于回灌之后（回灌只改 prompt，门控挂 agent 配置，顺序无耦合）。
     let agent = deepseeknova_runtime::attach_protocol_gates(agent, config, &workspace_root);
-    // F11：会话标注注入。Paused 事件的 session_id 与诊断报告文件名同源
-    // （agent 侧 session_label）；未标注时诊断文件名是 `diag-<uuid>` 且
-    // Paused session_id=None，serve 端点拿不到 id。label 对齐 store 的
-    // `chat-<ts>` 风格且仅含 `[A-Za-z0-9_-]`，可直接用作 serve
-    // `/v1/sessions/{id}/...` 路径 id（与 serve 的 valid_session_id 白名单一致）。
-    Ok(agent.with_session_label(cli_session_label()))
+    // F11：会话标注注入（仅单次 run 模式）。Paused 事件的 session_id 与
+    // 诊断报告/评分卡文件名同源；label 仅含 `[A-Za-z0-9_-]`，可直接用作
+    // serve `/v1/sessions/{id}/...` 路径 id。serve 模式传 None，由 Agent
+    // 每次 run 生成唯一标注，避免多会话共用同一 id 互相覆盖。
+    Ok(match session_label {
+        Some(label) => agent.with_session_label(label),
+        None => agent,
+    })
 }
 
-/// 生成 CLI run 的会话标注（`session-<ts>`）。与 store 侧 `chat-<ts>` 风格
-/// 对齐；仅含 ASCII 字母数字与 `_`/`-`（serve 端点 id 白名单），用户可直接
-/// 用它调 `/v1/sessions/{id}/scorecard` 等端点。
+/// 生成 CLI run 的会话标注（`session-<ts>-<seq>`）。与 store 侧 `chat-<ts>`
+/// 风格对齐；仅含 ASCII 字母数字与 `_`/`-`（serve 端点 id 白名单）。序号
+/// 保证同一秒内多次 build_agent（chat 模式每轮重建）也拿到唯一 id。
 fn cli_session_label() -> String {
-    format!("session-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S"))
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    format!(
+        "session-{}-{}",
+        chrono::Utc::now().format("%Y%m%d-%H%M%S"),
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )
 }
 
 /// Directory where chat sessions are persisted, driven by `[session]` config:

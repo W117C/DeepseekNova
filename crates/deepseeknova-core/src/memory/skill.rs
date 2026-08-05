@@ -372,8 +372,10 @@ impl SkillManager {
             anyhow::bail!("distilled skill title is empty");
         }
         let now = chrono::Utc::now().to_rfc3339();
-        // slug 白名单化：LLM 蒸馏产出的 title 不可信，只保留 [a-z0-9-]；
-        // 含路径分隔符/.. 的 title 直接拒绝，防目录逃逸写入（审查 HIGH-1）。
+        // slug 白名单化：LLM 蒸馏产出的 title 不可信，含路径分隔符/.. 的
+        // title 直接拒绝，防目录逃逸写入（审查 HIGH-1）。其余字符中保留
+        // Unicode 字母数字（含 CJK，中文标题蒸馏产物很常见）与 `-`，其余
+        // 映射为 `-`；纯标点/空白标题仍会产出空 slug 并拒绝。
         if title.contains('/') || title.contains('\\') || title.contains("..") {
             anyhow::bail!("distilled skill title contains path separators: {title:?}");
         }
@@ -381,7 +383,7 @@ impl SkillManager {
             .to_lowercase()
             .chars()
             .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '-' {
+                if c.is_alphanumeric() || c == '-' {
                     c
                 } else {
                     '-'
@@ -392,6 +394,10 @@ impl SkillManager {
             .to_string();
         if name.is_empty() {
             anyhow::bail!("distilled skill title produced an empty slug: {title:?}");
+        }
+        // 标点类标题可能缩成 "." / ".."（如 `。.`），会生成隐藏/危险文件名。
+        if name == "." || name == ".." {
+            anyhow::bail!("distilled skill title produced a dot-only slug: {title:?}");
         }
         let skill = Skill {
             frontmatter: SkillFrontmatter {
@@ -892,6 +898,35 @@ mod tests {
         assert!(!std::fs::read_to_string(dir.path().join("manual.md"))
             .unwrap()
             .contains("source:"));
+    }
+
+    #[test]
+    fn test_distilled_skill_accepts_cjk_titles() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut m = manager_in(dir.path());
+        // 中文标题必须能落盘（Unicode 字母数字保留，不能整体变成空 slug）。
+        m.create_distilled_skill("修复登录流程", "校验 token 后再路由", vec![], Some("s1"))
+            .unwrap();
+        let path = dir.path().join("auto/修复登录流程.md");
+        assert!(
+            path.exists(),
+            "CJK distilled skill must be written to auto/"
+        );
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("source: distill"));
+        assert_eq!(m.skill_state("修复登录流程"), Some(SkillState::Draft));
+        // 混合中英文标题：非字母数字（空格等）映射为 '-'。
+        m.create_distilled_skill("Fix Auth 登录", "b", vec![], Some("s1"))
+            .unwrap();
+        assert!(dir.path().join("auto/fix-auth-登录.md").exists());
+        // 纯标点标题仍拒绝（空 slug）。
+        assert!(m
+            .create_distilled_skill("!!!", "b", vec![], Some("s1"))
+            .is_err());
+        // 点状标题缩成 "." / ".." 同样拒绝（防隐藏/危险文件名）。
+        assert!(m
+            .create_distilled_skill("。.", "b", vec![], Some("s1"))
+            .is_err());
     }
 
     #[test]

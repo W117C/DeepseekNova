@@ -1,34 +1,20 @@
 # PROGRESS — TUI 设计功能完善（任务书执行）
 
-## 当前未提交实现（2026-08-04 / 08-05 两轮迭代）
-- 08-04 迭代：DAG 接线修复、失败归因重试（`attribution.rs`）、技能热更新
-  （skills/auto/ 三态）、TaskSpec 结构化任务书（`task_spec.rs`，agent/config/runtime/tools
-  全链路）、SessionMetrics（新增 `deepseeknova-metrics` crate + agent 采集 hook +
-  runtime 装配 + CLI 接线）。make check 全绿，待提交。
-- 08-05 迭代：任务质量闭环——`core::tool_hook`（ToolHook 链 + HookVerdict + QualityFinding）、
-  `security::quality`（QualityPolicy 内置 no-commit-secret/no-forbidden-path/oversized-write +
-  extract_shell_write_paths + SECRET_PATTERNS/redact_secrets）、`agent::quality`（QualityHook）、
-  `agent::diagnose`（DiagnoseReport/DiagnoseCollector）、MetricsHook 签名扩展
-  `Fn(SessionSnapshot, QualitySummary)`、serve 新增 `GET /v1/sessions/{id}/diagnose`、
-  `GET /v1/sessions/{id}/scorecard`、`GET /v1/metrics/scorecards`（session id 白名单、
-  无认证仅限本地）、`[quality] enabled` 配置键（默认 true）、CLI 装配
-  （attach_quality_hook/attach_diagnose_hook/with_session_label `session-<ts>`）、
-  `.deepseeknova/metrics/` 下 scorecard 与 diagnose 落盘、retention 排除 .scorecard.json。
-  make check EXIT=0，待提交。
-- 08-05 迭代（协议增强能力包）：core `protocol.rs`（Phase/GateViolation/PhaseTransition/
-  DriftFinding/PhaseGate/NoopPhaseGate + RunEvent/WireEvent 3 新变体）、agent `phase_runner.rs`
-  （PhaseRunner + builtin_phase_gates 四门：plan-before-execute/verify-evidence/
-  distill-on-complex/drift-detection，前三 soft、verify-evidence hard）、验证强化
-  （verify-evidence 硬门 Blocking、无证据 Complete → DiagnoseReport outcome="unverified"、
-  对抗审查子代理两触发条件）、skills `fitness.rs`（SkillFitnessRecord/FitnessStore/
-  EvolutionSuggestion，deprecated 过滤，`.deepseeknova/skills/fitness.json`）、security
-  `failure_pattern.rs`（FailurePatternStore/cluster_key/suggest ≤3，脱敏 + 0600、容量 200 LRU，
-  `.deepseeknova/security/failure-patterns.json`，runtime 回灌首轮 system prompt）、metrics
-  Scorecard 新增 protocol/composite 维（composite_index 加权 0.30/0.25/0.20/0.15/0.10 +
-  fill_protocol，旧 scorecard 反序列化缺省 1.0）、`[protocol]` 配置段（enabled 默认 false）。
-  make check EXIT=0（994 测试通过），Bugbot 13 finding 全部修复，待提交。
-- 审查修复（08-05）：before panic → fail-closed Deny（core tool_hook 契约注释已同步）、
-  bash 写路径启发式、glob 大小写归一、诊断落盘 0600 + 脱敏、findings run 级差分 + 上限 10000。
+## 当前未提交实现（2026-08-05 审查修复轮）
+- 审查修复（main@b312715 之上，6 项 review finding 全部修复）：
+  ① `Config::merge` 补 `quality`/`protocol`/`delegate`/`attribution` 分层合并
+  （各段配置真正生效，attribution 不再被项目层缺省覆盖）；
+  ② coordinator `depends_on` 目标节点后置时依赖边不再被丢弃（先加节点再补边）；
+  ③ serve 每次 run 生成唯一会话标注（未标注时 `session-<ms>-<seq>`），评分卡/
+  诊断/Paused 共用同一 id，不再互相覆盖；
+  ④ DiagnoseGuard/对抗审查按 run 起点差分切片，findings 不跨 run 污染；
+  ⑤ 蒸馏 skill 中文标题可落盘（Unicode slug，拒绝缩成 `.`/`..` 的标题）；
+  ⑥ Parallel 失败子节点写回共享容器，Observe 可见失败产出。
+  验证：cargo fmt/clippy/check 全绿；cargo test --workspace = 1003 通过 / 0 失败
+  / 2 ignored（含 serve 集成与 tools 本地 HTTP 测试）。待提交。
+- 08-04/08-05 迭代（DAG 接线、失败归因重试、技能热更新、TaskSpec、SessionMetrics、
+  任务质量闭环、协议增强能力包、安全审查修复）已合入 main：ca814c1 / 2bb9909 /
+  b312715。
 - 设计/计划文档已存档：`docs/superpowers/specs/2026-08-05-task-quality-loop-design.md`
   （§12 为实现偏差记录）、`docs/superpowers/plans/2026-08-05-task-quality-loop-plan.md`。
 

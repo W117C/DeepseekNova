@@ -158,6 +158,23 @@ All notable changes to DeepseekNova will be documented in this file.
   让无损的 L1 结果截断默认生效；显式配置与 `[budget] enabled=false` 时行为不变。
 - 内置工具 schema 文案精简 41%（7819→4613 字符），降低每次缓存未命中的固定 token 开销。
 
+### Fixed
+
+- 配置分层：`[quality]` / `[protocol]` / `[delegate]`（含新增 `inputs`）此前未进入
+  `Config::merge`，在用户/项目配置文件中不生效；`[attribution]` 整体赋值会被项目层
+  缺省覆盖。现改为字段级非默认值合并，各段配置真正生效。
+- Coordinator `parse_plan`：`depends_on` 引用的目标节点排在数组后面时，依赖边会被
+  `add_edge` 的未知节点校验静默丢弃；改为先加全部节点再统一补边。
+- serve 多会话此前共用固定 `session-<ts>` 标注，诊断报告互相覆盖，且评分卡文件名
+  与 Paused/诊断 id 不同源；现未标注时每次 run 生成唯一 id，评分卡/诊断/Paused
+  共用同一 session id。
+- 共享 Agent 的 quality findings 跨 run 污染诊断报告与对抗审查触发条件；诊断与
+  对抗审查现按 run 起始长度差分切片（与 MetricsGuard 的 F4 语义一致）。
+- 蒸馏 skill 标题此前仅保留 ASCII，中文标题生成空 slug 导致落盘失败；现保留
+  Unicode 字母数字（含 CJK），并拒绝缩成 `.`/`..` 的标点标题。
+- Parallel 子节点失败时不写回共享容器，兄弟 Observe 看不到失败产出；现失败也
+  写回 Error，Observe 在无 ToolResult 时可见失败输出。
+
 ## [0.4.0] — 2026-07-19
 
 ### 桌面前端完善

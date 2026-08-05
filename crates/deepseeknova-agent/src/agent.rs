@@ -172,6 +172,9 @@ pub type MetricsHook = Arc<dyn Fn(SessionSnapshot, QualitySummary) + Send + Sync
 /// 定义为 agent 侧私有载体，避免 hook 参数爆炸；runtime 仅消费字段。
 #[derive(Debug, Clone, Default)]
 pub struct QualitySummary {
+    /// 本 run 的会话标注（来自 `with_session_label`；未标注时由 run 生成
+    /// 唯一 id）。metrics 落盘与诊断报告共用此 id，保证评分卡/诊断可对账。
+    pub session_id: Option<String>,
     /// 本 run 新增的 quality findings（F4 run 级差分切片：run 开始时已存在
     /// 的历史 findings 不计入；跨 run 累计语义由会话级 `Arc\<Mutex\>` 承载）。
     pub findings: Vec<QualityFinding>,
@@ -223,6 +226,8 @@ struct MetricsGuard {
     tracker: SessionTracker,
     hook: Option<MetricsHook>,
     emitted: bool,
+    /// 本 run 的会话标注（透传进 QualitySummary，供 metrics 落盘命名）。
+    session_label: Option<String>,
     /// 会话累计 findings 的 Arc 引用（emit 时快照进 QualitySummary）。
     quality_findings: Option<Arc<tokio::sync::Mutex<Vec<QualityFinding>>>>,
     /// F4：本 run 起始时会话 findings 长度。emit 时只取 `[start_len..]` 差分
@@ -244,11 +249,13 @@ impl MetricsGuard {
     fn new(
         hook: Option<MetricsHook>,
         quality_findings: &Arc<tokio::sync::Mutex<Vec<QualityFinding>>>,
+        session_label: Option<String>,
     ) -> Self {
         Self {
             tracker: SessionTracker::new(),
             hook,
             emitted: false,
+            session_label,
             quality_findings: Some(quality_findings.clone()),
             start_len: quality_findings.try_lock().map(|g| g.len()).unwrap_or(0),
             reflection_count: 0,
@@ -303,6 +310,7 @@ impl MetricsGuard {
                 }
             };
             let summary = QualitySummary {
+                session_id: self.session_label.clone(),
                 findings,
                 reflection_count: self.reflection_count,
                 review_passes: self.review_passes,
@@ -1183,11 +1191,20 @@ async fn wire_session_adversarial_review(
     task: &str,
     memory: &Memory,
     quality_findings: &Arc<tokio::sync::Mutex<Vec<QualityFinding>>>,
+    start_len: usize,
 ) {
     if !enabled {
         return;
     }
-    let findings = quality_findings.lock().await.clone();
+    // F4：只取本 run 新增的 findings `[start_len..]`——共享 Agent 下并发/
+    // 历史 run 的 findings 不得触发或进入本 run 的对抗审查证据。
+    let findings: Vec<QualityFinding> = quality_findings
+        .lock()
+        .await
+        .iter()
+        .skip(start_len)
+        .cloned()
+        .collect();
     let msgs = memory.get_all();
     let review = maybe_spawn_adversarial_review(provider, task, &findings, &msgs, true).await;
     diagnose.set_adversarial_review(review);
@@ -1267,6 +1284,22 @@ async fn attribute_pause_reason(
     }
 }
 
+/// 生成 run 级唯一会话标注（`session-<epoch毫秒>-<进程内序号>`，仅含
+/// `[A-Za-z0-9_-]`，serve 路径白名单安全）。serve 多会话共享同一 Agent
+/// 且未显式标注时，每次 run 必须拿到独立 id，否则 Paused 事件的
+/// `session_id` 与诊断报告文件名会互相覆盖。
+fn unique_run_label() -> String {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    format!(
+        "session-{ms}-{}",
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )
+}
+
 async fn run_agent_loop(
     provider: Arc<dyn Provider>,
     tools: Vec<Arc<dyn Tool>>,
@@ -1306,6 +1339,10 @@ async fn run_agent_loop(
     protocol_gates: Vec<Arc<dyn PhaseGate>>,
     adversarial_review_enabled: bool,
 ) -> anyhow::Result<()> {
+    // serve 等共享 Agent 场景未配置会话标注：每次 run 生成唯一 id，避免
+    // 多会话共用同一 Paused session_id / 诊断报告文件名互相覆盖。
+    let session_label = session_label.or_else(|| Some(unique_run_label()));
+
     // Add user prompt
     memory.add_message(Message {
         role: Role::User,
@@ -1335,13 +1372,18 @@ async fn run_agent_loop(
     // P2.3 会话内只读工具结果缓存（写执行后整体失效）。
     let mut tool_cache_map: HashMap<u64, String> = HashMap::new();
     // 会话效能采集（局部 tracker，run 隔离）。
-    let mut metrics = MetricsGuard::new(metrics_hook, quality_findings);
+    let mut metrics = MetricsGuard::new(metrics_hook, quality_findings, session_label.clone());
+    // F4：本 run 起始时会话 findings 长度。DiagnoseGuard 与对抗审查同样
+    // 按此起点切片，保证诊断报告/审查只含本 run 新增，不被并发 run 或
+    // 历史 run 的 findings 污染（MetricsGuard 内部也按同一时刻切片）。
+    let quality_start_len = quality_findings.lock().await.len();
     // 任务质量闭环 B：失败诊断采集（Paused/failed 结束路径产出报告；
     // 成功路径 suppress 关闭；Drop 兜底异常路径）。
     let mut diagnose = DiagnoseGuard::new(
         diagnose_hook,
         session_label.clone(),
         Arc::clone(quality_findings),
+        quality_start_len,
     );
     diagnose.phase_enter("plan");
     // 协议门控（阶段3）：会话级阶段运行器；门集合为空时走零成本路径。
@@ -1425,6 +1467,7 @@ async fn run_agent_loop(
                         &input.prompt,
                         memory,
                         quality_findings,
+                        quality_start_len,
                     )
                     .await;
                     diagnose.emit("paused", &memory.get_all()).await;
@@ -1718,6 +1761,7 @@ async fn run_agent_loop(
                                     &input.prompt,
                                     memory,
                                     quality_findings,
+                                    quality_start_len,
                                 )
                                 .await;
                                 diagnose.emit("paused", &memory.get_all()).await;
@@ -1796,6 +1840,7 @@ async fn run_agent_loop(
                                         &input.prompt,
                                         memory,
                                         quality_findings,
+                                        quality_start_len,
                                     )
                                     .await;
                                     diagnose.emit("paused", &memory.get_all()).await;
@@ -1965,6 +2010,7 @@ async fn run_agent_loop(
                     &input.prompt,
                     memory,
                     quality_findings,
+                    quality_start_len,
                 )
                 .await;
                 if unverified {
@@ -2004,6 +2050,7 @@ async fn run_agent_loop(
                         &input.prompt,
                         memory,
                         quality_findings,
+                        quality_start_len,
                     )
                     .await;
                     diagnose.emit("paused", &memory.get_all()).await;
@@ -2040,6 +2087,7 @@ async fn run_agent_loop(
             &input.prompt,
             memory,
             quality_findings,
+            quality_start_len,
         )
         .await;
         diagnose.emit("paused", &memory.get_all()).await;
@@ -5560,6 +5608,87 @@ mod tests {
             "run 2 summary must contain exactly its own finding (no cross-run pollution), got {}",
             summaries[1].findings.len()
         );
+    }
+
+    #[test]
+    fn unique_run_label_is_unique_and_serve_safe() {
+        let a = unique_run_label();
+        let b = unique_run_label();
+        assert_ne!(a, b, "每次 run 必须拿到唯一标注");
+        for label in [&a, &b] {
+            assert!(label.starts_with("session-"), "unexpected label: {label}");
+            assert!(
+                label
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+                "label must only contain [A-Za-z0-9_-]: {label}"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // F4：DiagnoseGuard / Paused session_id 同样按 run 切片 + 每次 run 唯一
+    // -----------------------------------------------------------------------
+
+    /// 同一 agent 连续两次 Paused run：诊断报告的 quality 只含本 run 新增的
+    /// findings（不被历史 run 污染），且未标注时的 session_id 每次 run 唯一。
+    #[tokio::test]
+    async fn diagnose_reports_are_run_scoped_with_unique_session_ids() {
+        use crate::diagnose::DiagnoseReport;
+        let captured = Arc::new(std::sync::Mutex::new(Vec::<DiagnoseReport>::new()));
+        let cap = captured.clone();
+        let hook: DiagnoseHook = Arc::new(move |report| {
+            cap.lock().unwrap_or_else(|e| e.into_inner()).push(report);
+        });
+        let agent = looping_agent(2)
+            .with_on_max_steps("pause")
+            .with_tool_hook(Arc::new(BlockingFindingHook))
+            .with_diagnose_hook(hook);
+
+        for _ in 0..2 {
+            let mut stream = agent
+                .run_stream(RunInput {
+                    prompt: "write a file".into(),
+                    images: vec![],
+                    model_override: None,
+                })
+                .await
+                .unwrap();
+            while let Some(ev) = stream.next().await {
+                let _ = ev.unwrap();
+            }
+            for _ in 0..50 {
+                if captured.lock().unwrap_or_else(|e| e.into_inner()).len() >= 2 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+
+        let reports = captured.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(reports.len(), 2, "two runs must emit two diagnose reports");
+        // 每个 run 的 max-steps=2 → 每轮工具调用产 1 条 Blocking finding，
+        // 报告只应含本 run 的 2 条，而非会话累计的 2/4 条。
+        for (i, report) in reports.iter().enumerate() {
+            assert_eq!(
+                report.quality.len(),
+                2,
+                "report {i} must contain exactly its own findings, got {}",
+                report.quality.len()
+            );
+        }
+        // 未显式标注：session_id 每次 run 唯一且 serve 路径安全。
+        assert_ne!(reports[0].session_id, reports[1].session_id);
+        for report in reports.iter() {
+            assert!(
+                report
+                    .session_id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+                "report session_id must be serve-path safe: {}",
+                report.session_id
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
