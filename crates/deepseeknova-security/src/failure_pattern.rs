@@ -22,6 +22,8 @@ const NORMALIZE_MAX_CHARS: usize = 64;
 /// Maximum number of characters kept for the error-summary fallback in
 /// [`FailurePatternStore::suggest`] output.
 const SUMMARY_MAX_CHARS: usize = 120;
+/// 回灌单条 detail 的最大字符数（lesson 为 LLM 全文，截断到该上限防 prompt 膨胀）。
+const DETAIL_MAX_CHARS: usize = 200;
 /// Maximum number of patterns kept in the store; beyond this the
 /// lowest-count patterns are evicted.
 const MAX_PATTERNS: usize = 200;
@@ -90,7 +92,26 @@ impl FailurePatternStore {
         }
         match std::fs::read_to_string(path) {
             Ok(contents) => match serde_json::from_str::<FailurePatternFile>(&contents) {
-                Ok(file) => {
+                Ok(mut file) => {
+                    // load 二次脱敏 + summaries 键对齐（安全审查 S4）：
+                    // 脱敏只发生在 ingest 入口，文件被篡改/旧版本工具写入时
+                    // 可能含密钥原文——suggest 输出会进下会话 system prompt，
+                    // 这里对 lesson/summary 全部值再次脱敏，并按 patterns 键
+                    // 对齐裁剪 summaries（孤儿条目既占内存又可能被顶进 top-3）。
+                    for p in file.patterns.values_mut() {
+                        if let Some(lesson) = p.lesson.take() {
+                            p.lesson = Some(redact_secrets(&lesson));
+                        }
+                    }
+                    let pattern_keys: std::collections::HashSet<&String> =
+                        file.patterns.keys().collect();
+                    file.summaries.retain(|k, v| {
+                        if !pattern_keys.contains(k) {
+                            return false; // 孤儿条目：键不在 patterns 中，裁剪
+                        }
+                        *v = redact_secrets(v);
+                        true
+                    });
                     store.patterns = file.patterns;
                     store.summaries = file.summaries;
                     store.evict();
@@ -196,6 +217,18 @@ impl FailurePatternStore {
                     .clone()
                     .or_else(|| self.summaries.get(&pattern.key).cloned())
                     .unwrap_or_else(|| "no lesson recorded".to_string());
+                // 单行化 + 截断（安全审查 S1）：detail 可能含换行/控制字符，
+                // 原样进下会话 system prompt 可被构造为跳出 bullet 块的指令
+                // 注入；lesson 为 LLM 全文（不截断），一并收敛。
+                let detail: String = detail
+                    .chars()
+                    .take(DETAIL_MAX_CHARS)
+                    .map(|c| if c.is_control() && c != '\t' { ' ' } else { c })
+                    .collect::<String>()
+                    .lines()
+                    .map(str::trim)
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 format!("[失败模式] {}/{}: {}", pattern.phase, tool, detail)
             })
             .collect()
@@ -233,7 +266,27 @@ impl FailurePatternStore {
             std::process::id(),
             nanos
         ));
-        std::fs::write(&tmp, json).with_context(|| format!("failed to write {}", tmp.display()))?;
+        // tmp 创建即 0600（安全审查 S3）：`std::fs::write` 按默认 umask
+        // （典型 0644）创建，rename→chmod 之间最终路径文件可被同机其他
+        // 用户读取，崩溃还会遗留 0644 的 tmp。OpenOptions.mode(0o600) 在
+        // 创建时收敛，rename 前即已 0600，窗口消除（对齐 diagnose.rs 先例）。
+        #[cfg(unix)]
+        {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create_new(true).mode(0o600);
+            let mut f = opts
+                .open(&tmp)
+                .with_context(|| format!("failed to create {}", tmp.display()))?;
+            f.write_all(json.as_bytes())
+                .with_context(|| format!("failed to write {}", tmp.display()))?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(&tmp, &json)
+                .with_context(|| format!("failed to write {}", tmp.display()))?;
+        }
         std::fs::rename(&tmp, &self.path).with_context(|| {
             format!(
                 "failed to rename {} to {}",
@@ -244,7 +297,7 @@ impl FailurePatternStore {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            // 显式收敛 0600：默认 umask 可能放宽（对齐 diagnose.rs 先例）。
+            // rename 后显式收敛（create_new 已 0600，此处为对既有文件覆盖后的兜底）。
             std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600))
                 .with_context(|| format!("failed to chmod 0600 {}", self.path.display()))?;
         }
@@ -580,12 +633,12 @@ mod tests {
         // 落盘内容都不含密钥原文（spec §6.2；sk- 前缀 API key）。
         let mut store =
             FailurePatternStore::load(Path::new("/nonexistent/failure-patterns.json")).unwrap();
-        let err = "api failed with key sk-abcdef123456";
+        let err = "api failed with key sk-abcdef12345678901234";
         store.ingest(
             "execute",
             Some("bash"),
             err,
-            Some("rotate key sk-abcdef123456 and retry"),
+            Some("rotate key sk-abcdef12345678901234 and retry"),
             100,
         );
         // 簇键基于脱敏后的 error 计算（不同密钥文本归一为同一簇）。
@@ -597,12 +650,12 @@ mod tests {
                 .lesson
                 .as_deref()
                 .unwrap()
-                .contains("sk-abcdef123456"),
+                .contains("sk-abcdef12345678901234"),
             "lesson must be redacted"
         );
         for suggestion in store.suggest(3) {
             assert!(
-                !suggestion.contains("sk-abcdef123456"),
+                !suggestion.contains("sk-abcdef12345678901234"),
                 "suggest output must not leak the key: {suggestion}"
             );
         }
@@ -610,7 +663,7 @@ mod tests {
         store.ingest(
             "execute",
             Some("bash"),
-            "api failed with key sk-xyz987654321",
+            "api failed with key sk-xyz98765432109876",
             None,
             200,
         );

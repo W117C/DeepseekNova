@@ -11,12 +11,25 @@ use std::path::{Path, PathBuf};
 
 /// 内置密钥检测正则模式（`no-commit-secret` 规则与诊断报告落盘脱敏共用，
 /// 单一事实来源：内置规则按 `(|)` 拼接，diagnose 落盘逐条替换）。
+/// 安全审查 S4 扩展：覆盖 PKCS#8 加密私钥、PGP 私钥块、GitHub PAT、
+/// Slack token、AWS 临时凭据、Anthropic sk-ant 格式；`sk-` 收紧到 16+
+/// 字符（真实 key 一般 20+，短串如 `sk-20240805` 多为版本号/序列号，避免
+/// 误伤合法文本）。
 pub const SECRET_PATTERNS: &[&str] = &[
-    r"-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----",
-    r"AKIA[0-9A-Z]{16}",
-    // API key（OpenAI/Anthropic 风格 `sk-` 前缀，如 sk-abcdef123456；与
-    // deepseeknova-scanner 的 hardcoded-secret 规则口径一致）。
-    r"\bsk-[A-Za-z0-9]{8,}\b",
+    r"-----BEGIN (RSA |EC |OPENSSH |ENCRYPTED )?PRIVATE KEY-----",
+    r"-----BEGIN PGP PRIVATE KEY BLOCK-----",
+    r"\bAKIA[0-9A-Z]{16}\b",
+    // AWS 临时凭据（STS 颁发的 ASIA 前缀）。
+    r"\bASIA[0-9A-Z]{16}\b",
+    // GitHub Personal Access Token。
+    r"\bghp_[A-Za-z0-9]{36}\b",
+    // Slack token（xoxb/xoxp/xoxa/xoxr/xoxs 前缀）。
+    r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b",
+    // Anthropic API key（sk-ant- 前缀）。
+    r"\bsk-ant-[A-Za-z0-9-]{16,}\b",
+    // OpenAI 风格 API key（与 deepseeknova-scanner 的 hardcoded-secret
+    // 规则同源；scanner 规则更激进，此处收敛下限避免误伤）。
+    r"\bsk-[A-Za-z0-9]{16,}\b",
 ];
 
 /// 把文本中的密钥/凭据串替换为 `[REDACTED]`（诊断报告落盘脱敏用；
@@ -608,10 +621,29 @@ mod tests {
             redact_secrets("creds = AKIAIOSFODNN7EXAMPLE"),
             "creds = [REDACTED]"
         );
-        // sk- 前缀 API key（OpenAI/Anthropic 风格）。
+        // sk- 前缀 API key（OpenAI/Anthropic 风格；16+ 字符才命中，避免
+        // 误伤 `sk-20240805` 这类短串）。
         assert_eq!(
-            redact_secrets("api key sk-abcdef123456 leaked"),
+            redact_secrets("api key sk-abcdef12345678901234 leaked"),
             "api key [REDACTED] leaked"
+        );
+        // 短串不误伤。
+        assert_eq!(
+            redact_secrets("version sk-20240805 ready"),
+            "version sk-20240805 ready"
+        );
+        // 新增格式：GitHub PAT / Anthropic sk-ant / 加密私钥。
+        assert_eq!(
+            redact_secrets("token ghp_abcdefghijklmnopqrstuvwxyz0123456789 here"),
+            "token [REDACTED] here"
+        );
+        assert_eq!(
+            redact_secrets("key sk-ant-api03-abcdefghijklmnopqrstuvwxyz123456"),
+            "key [REDACTED]"
+        );
+        assert_eq!(
+            redact_secrets("-----BEGIN ENCRYPTED PRIVATE KEY-----"),
+            "[REDACTED]"
         );
         // 明文保留。
         assert_eq!(redact_secrets("plain text"), "plain text");

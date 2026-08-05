@@ -1056,7 +1056,11 @@ fn tool_call_touches_sensitive_path(name: &str, args: &str) -> bool {
     const UNCONDITIONALLY_SENSITIVE: [&str; 2] = ["delete_file", "move_file"];
     /// 需叠加 marker 才敏感的工具。
     const MARKER_GATED_TOOLS: [&str; 4] = ["bash", "shell", "write_file", "edit_file"];
-    const SENSITIVE_MARKERS: [&str; 7] = [
+    // marker 小写匹配（安全审查 S2）：args 与 marker 都 to_lowercase 后匹配，
+    // 防 `Sudo -n`、`Chmod 777`、`/Etc/Passwd` 等大小写变体绕过。
+    // 补充常见敏感路径变体：~/.ssh、authorized_keys、crontab、/private/
+    // （macOS 上 /etc 为符号链接，真实路径是 /private/etc）、passwd/shadow。
+    const SENSITIVE_MARKERS: [&str; 12] = [
         "security",
         "sandbox",
         "permission",
@@ -1064,14 +1068,21 @@ fn tool_call_touches_sensitive_path(name: &str, args: &str) -> bool {
         "chmod",
         "chown",
         "/etc/",
+        "/private/",
+        "~/.ssh",
+        "authorized_keys",
+        "crontab",
+        "passwd",
     ];
     if UNCONDITIONALLY_SENSITIVE.contains(&name) {
         return true;
     }
+    let lowered = args.to_lowercase();
+    let hit = |m: &str| lowered.contains(m);
     if MARKER_GATED_TOOLS.contains(&name) {
-        return SENSITIVE_MARKERS.iter().any(|m| args.contains(m));
+        return SENSITIVE_MARKERS.iter().any(|m| hit(m));
     }
-    SENSITIVE_MARKERS.iter().any(|m| args.contains(m))
+    SENSITIVE_MARKERS.iter().any(|m| hit(m))
 }
 
 /// 渲染审查输入证据（任务 + findings + 工具调用摘要，字符预算截断）。

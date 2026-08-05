@@ -175,8 +175,26 @@ impl FitnessStore {
             std::process::id(),
             nanos
         ));
-        std::fs::write(&tmp_path, &json)
-            .with_context(|| format!("failed to write {}", tmp_path.display()))?;
+        // tmp 创建即 0600 + rename 后收敛（对齐 diagnose/failure-patterns 先例：
+        // 技能名为蒸馏产物，可能含会话内容信息；`std::fs::write` 默认 umask
+        // 会留 0644 权限窗口）。
+        #[cfg(unix)]
+        {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create_new(true).mode(0o600);
+            let mut f = opts
+                .open(&tmp_path)
+                .with_context(|| format!("failed to create {}", tmp_path.display()))?;
+            f.write_all(json.as_bytes())
+                .with_context(|| format!("failed to write {}", tmp_path.display()))?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(&tmp_path, &json)
+                .with_context(|| format!("failed to write {}", tmp_path.display()))?;
+        }
         std::fs::rename(&tmp_path, &self.path).with_context(|| {
             format!(
                 "failed to rename {} to {}",
@@ -184,6 +202,12 @@ impl FitnessStore {
                 self.path.display()
             )
         })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600))
+                .with_context(|| format!("failed to chmod 0600 {}", self.path.display()))?;
+        }
         Ok(())
     }
 
