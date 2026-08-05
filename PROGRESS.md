@@ -1,5 +1,96 @@
 # PROGRESS — TUI 设计功能完善（任务书执行）
 
+## 任务书：Protocol 增强收尾 + Graph Go 语言（2026-08-05，dev-loop 双域并行）— 开工回执
+- 理解的目标：protocol 域=能力包（2026-08-05 已合入）仅剩 2 个未落地项收尾（task_rate
+  指标 first_pass/retry_rounds、fitness record_use 回填）；graph 域=新增 Go 语言支持
+  （tree-sitter-go 0.25.0，5 个分派点分支 + go.mod 外部依赖识别）。
+- 顺序：两域并行（地界零重叠）；每域 任务 1→n 独立推进，父级统一收尾。
+- 最大风险：protocol 域跨 agent+metrics+runtime+cli 四 crate（AGENTS.md §1.1 触发，按
+  推理专家协议记录）；graph 域 tree-sitter-go 0.25 grammar 节点名需实测（Go 的
+  function_declaration/method_declaration/import_spec 等）。
+- 基线证据（2026-08-05 实测）：feat/memory-lifecycle@68fb094 工作区干净；workspace 全绿
+  0 failed（2 既有 ignored：graph self_index、provider reasoning protocol）；核心测试数
+  agent 231、core 132、graph 32、runtime 48、config 33、metrics 17、skills 24、cli 32。
+
+### G 域回执（graph worker，2026-08-05）
+- 理解：graph 新增 Go 语言支持——Lang::Go + tree-sitter-go 0.25.0（书内唯一新依赖），
+  五个分派点分支 + GO_SRC fixture + go.mod 外部依赖 + deps_code 提示语 + 文档。
+- 顺序：任务 1 grammar 实测→解析接入 → 2 Go fixture → 3 go.mod → 4 文档/收尾/提交。
+- 最大风险：tree-sitter-go 0.25 节点名/字段名凭猜出错（必须先探测实测）；SCHEMA_VERSION
+  =4 保持不动；`fn go(&self)` 与 search("go") 既有语义测试不得误改。
+- 基线证据：graph 32 unittests 全绿；Cargo.lock 无 tree-sitter-go；工作区干净。
+- grammar 实测（tree-sitter-go 0.25.0，探测测试实测，已删）：
+  function_declaration(name=identifier)/method_declaration(name=field_identifier,
+  receiver=parameter_list)/type_declaration>type_spec(name+type 字段)/struct_type>
+  field_declaration_list/interface_type>method_elem（**非 method_spec**，无 body 字段）/
+  import_declaration>import_spec_list>import_spec(path=interpreted_string_literal)/
+  call_expression(function=identifier 或 selector_expression(field=field_identifier))/
+  单行 import "fmt" 也是 import_declaration>import_spec。据此：Go 实体=function/
+  method/type_declaration（判 type 字段→Struct 或 Trait），import 三态=本地相对
+  →File、stdlib/第三方→External（grammar 无法区分后两者，fixture 三态都覆盖）。
+- 任务 1/2/3 已完：Lang::Go + from_path(".go") + language() 映射；entity_kind 加 node
+  参数（Go type_declaration 判 struct/interface）、is_import(import_declaration/
+  import_spec)、callee_name 加 selector_expression、extract_signature 沿用 "{"（Go 同
+  Rust/JS 风格，实测 func 签名到 { 截断正确）；import 分支 Go 三态（相对→File、
+  其余→External）；GO_SRC fixture + 4 测试（entities/calls+imports/三态/refs）；
+  store：is_manifest 加 go.mod、parse_go_mod_deps（块式+单行 require）、2 测试
+  （解析 + Go 项目端到端 external_deps）；tools deps_code 提示语补 go.mod + 1 测试。
+  graph 32→38、tools deps_code 3→5；cargo fmt 我的文件全过（对方 runtime 未 fmt）。
+- 阻塞观察：make check 首跑被对方 metrics 半成品 E0063 卡住（对方已修）；二跑 metrics
+  过了但轮到 tools 缺 #[tokio::test]（我修了）；现剩 runtime fmt diff（对方文件，等待
+  对方 fmt 后重试 make check）。
+
+### P 域开工回执（Protocol 增强收尾，执行者 2026-08-05）
+- 理解的目标：task_rate（Scorecard 扩展 first_pass/retry_rounds，从 DiagnoseReport.failures
+  推导，serde default 向后兼容）+ record_use 回填（recall 注入技能名汇入 session_skills →
+  CLI 传集合 → fitness 记 use+result，清掉 warn 噪声）。
+- 顺序：任务 1 task_rate（metrics+runtime）→ 任务 2 record_use（runtime+cli）→ 任务 3 文档 →
+  任务 4 收尾（fmt/make check/反向验证/提交 feat/memory-lifecycle 不 push）。
+- 最大风险：metrics hook 与 diagnose hook 触发顺序在 MaxSteps/Paused 路径上 metrics 先于
+  diagnose（agent.rs:2037 vs 2056）→ task_rate 双端接线（metrics 读报告兜底 + diagnose 补写
+  评分卡）；record_use 集合只能从 recall 注入侧收集（builder 加可选参数，闭包内 3 行加法）。
+- 基线证据（2026-08-05 实测）：feat/memory-lifecycle@68fb094 干净；metrics 17 / runtime 48 /
+  agent 231 / cli 32 / workspace 0 failed（2 既有 ignored）。
+
+## 自验收清单（双域，执行者逐条打勾，命令亲跑）
+- [x] P1 `cargo test -p deepseeknova-metrics`：≥ 18 条通过（task_rate 新增；实测 20 passed）
+- [x] P1 `cargo test -p deepseeknova-agent diagnose`：≥ 基线（diagnose 改动不回退；实测见 make check）
+- [x] P2 `cargo test -p deepseeknova-runtime`：≥ 49 条通过（record_use 回填新增；实测 51 passed）
+- [x] G1/G2 `cargo test -p deepseeknova-graph`：≥ 35 条通过（Go fixture 新增 ≥3；实测 36 passed）
+- [x] G3 `cargo test -p deepseeknova-tools`：≥ 基线（deps_code 提示语更新；实测 deps_code 5 passed 含新增 Go 项目测试）
+- [ ] `make check` EXIT=0；workspace 0 failed（G 侧被对方 runtime 未 fmt 阻塞，见 BLOCKED.md；`cargo test --workspace --no-fail-fast` 实测全绿 0 failed）
+- [ ] 反向验证：改坏 task_rate / Go fixture 断言各一次 → 真红 → 还原 → 真绿（G 侧已完：parses_go_entities 改坏 1 failed → 还原 1 passed）
+- [ ] `cargo fmt --check` 通过（G 侧我的文件 MY_FMT_OK；对方 runtime 未 fmt）；提交到 feat/memory-lifecycle 分支（不 push）
+
+## P 域任务状态（Protocol 增强收尾，2026-08-05）
+- [x] 任务 1：task_rate 落地。metrics `Scorecard` 增 `first_pass: bool` / `retry_rounds: u32`
+  （serde default，旧卡兼容）+ `fill_task_rate(first_pass, retry_rounds)` + 文件级辅助
+  `update_scorecard_task_rate(dir, session_id, ...)`（读-改-写，缺失/损坏静默跳过，避免
+  runtime 引入 serde_json 依赖）。runtime 双端接线：metrics hook 对 Completed 落盘前填
+  `first_pass=true`（成功路径无诊断报告，agent suppress）；`attach_diagnose_hook_with_ingest`
+  回调在报告落盘后按 `report.failures` 推导覆写（Paused/unverified 路径 metrics hook 先
+  触发、失败详情此时才可知）。测试 +3（metrics：roundtrip+compute 默认、旧卡兼容、
+  update 辅助）、+2（runtime：成功 run first_pass=true 且无 diagnose 目录、Paused run
+  retry_rounds=failures 条数）。
+- [x] 任务 2：record_use 回填。`build_agent_with_role_providers` 增可选参
+  `session_skills: Option<Arc<Mutex<Vec<String>>>>`（None = 旧行为；`build_agent` /
+  `build_agent_with_task_provider` 透传 None 签名不变）；起点召回注入侧在 P2 修复的
+  `injected` 循环内把真实注入技能名去重写入收集器。CLI `build_agent` 创建共享 Arc 同时
+  传给 builder（Some）与 `attach_metrics_hook_with_fitness`。fitness hook：record_result
+  前补 `record_use`（激活计数，spec §13 #9 闭合）；空集合优雅跳过、移除 warn-once 噪声
+  与 TODO。测试 +1（runtime E2E：预置技能 → 注入收集 → fitness.json uses=1/successes=1）。
+- [x] 任务 3：文档。GUIDE 协议节补 task_rate 扩展字段与 fitness use+result 一行；
+  CHANGELOG Added 条目；BLOCKED 无本域遗留（TUI 面板/计划载体/多模型反思属任务书 §2
+  范围外）。
+- 跨 crate 协议记录（AGENTS.md §1 触发）：预扫描=不动 core 公开 API（SkillManager /
+  FitnessStore 零改动）、不改既有测试断言（runtime 4 处 builder 调用仅补 None 实参）、
+  runtime memory 装配区 480-635 仅加 3 行收集（不动既有逻辑）；备选路径 A=改
+  `build_agent_with_task_provider`/`build_agent` 签名（破坏 20+ 测试调用点）vs B=仅扩
+  `build_agent_with_role_providers` 可选参（CLI 直调，其余入口 None 透传）——选 B；
+  备选路径 C=runtime 直接读诊断文件推导 task_rate vs D=诊断回调回填评分卡（C 在
+  Paused 路径 metrics hook 先于诊断文件落盘、时序不可行）——选 D + metrics hook 对
+  Completed 填首过；自检=metrics/runtime/cli 聚焦测试 + make check + 反向验证红→绿。
+
 ## 任务书：记忆生命周期闭环（2026-08-05，dev-loop 轮次）— 开工回执
 - 理解的目标：记忆从"写入→关键词检索"升级为完整生命周期闭环——检索排序融合生命周期
   信号（importance/stage/recency）、衰减接线（apply_decay 死代码复活）、归档超期清理、

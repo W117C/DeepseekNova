@@ -318,8 +318,14 @@ drift-detection = "soft"             # 工具族连续失败 ≥3 → DriftFindi
   与 `composite` 维（五维加权均值：governance 0.30 / verification 0.25 /
   protocol 0.20 / reflection 0.15 / review 0.10）；旧评分卡文件缺字段时反序列化
   默认 1.0（不重算 composite）。
+- task_rate 指标：评分卡扩展字段 `first_pass: bool` / `retry_rounds: u32`
+  （serde default，旧文件兼容）——成功会话按 `first_pass=true` 填写；失败/
+  Paused 会话由诊断回调按 `DiagnoseReport.failures` 推导覆写（无失败=首过；
+  有失败=重试轮次=failures 条数）。
 - 新落盘路径：技能使用记录 `.deepseeknova/skills/fitness.json`（容量 500 LRU，
-  deprecated 标记的技能加载时过滤）；失败模式库
+  deprecated 标记的技能加载时过滤；会话注入的技能记 `use`+`result`——激活
+  计数与会话成败，注入技能名由 recall 注入侧收集回填，无注入时优雅跳过）；
+  失败模式库
   `.deepseeknova/security/failure-patterns.json`（容量 200 LRU、脱敏 + 0600，
   每次会话 `suggest(3)` 取 top-3 注入下会话首轮 system prompt，无模式时零注入）。
 
@@ -522,13 +528,19 @@ seeds（去停用词、去重、上限 8），让地图优先展示任务相关�
 - **References 边**：每个定义体引用的标识符按名称级解析到索引符号，回答
   「谁引用了 X」（`traverse_graph` 传 `edge_kinds=["references"]`）；同一对
   实体已有 Calls 边时不重复计，递归等 callee 不产生自引用。
-- **结构化依赖图**：Rust `use`、Python `import/from`、JS/TS `import/require`
-  按语言解析——本地符号按名匹配成 文件→符号 Imports 边，JS 相对路径解析成
-  文件→文件边，裸包名记入外部依赖。
+- **结构化依赖图**：Rust `use`、Python `import/from`、JS/TS `import/require`、
+  Go `import` 按语言解析——本地符号按名匹配成 文件→符号 Imports 边，JS 相对
+  路径解析成文件→文件边，裸包名记入外部依赖（Go 相对路径 import 同样解析成
+  文件→文件边）。
 - **清单依赖**：`Cargo.toml`（dependencies/dev-dependencies/build-dependencies）、
   `package.json`（dependencies/devDependencies/peerDependencies/optionalDependencies）、
-  `pyproject.toml`（[project] dependencies / [tool.poetry.dependencies]）在
-  refresh 时解析进外部依赖表；`deps_code` 按文件归属最近清单展示。
+  `pyproject.toml`（[project] dependencies / [tool.poetry.dependencies]）、
+  `go.mod`（require 段，含块式与单行）在 refresh 时解析进外部依赖表；
+  `deps_code` 按文件归属最近清单展示。
+
+代码图语言支持：Rust / Python / JavaScript / TypeScript / Go（tree-sitter 解析，
+Go 覆盖函数/方法/struct/interface 实体、调用、import 三态：stdlib/第三方路径记
+外部依赖、相对路径记本地文件）。
 
 Rust trait 多态由「Dispatch 边」桥接：`impl Trait for Type` 中的同名方法会连到
 trait 声明方法上，`dyn Trait` / 泛型调用点因此能列出全部候选实现（名称级匹配，

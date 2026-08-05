@@ -9,7 +9,17 @@
 
 ## 执行阻塞
 
-无
+### Graph Go 任务书（2026-08-05，G 域 worker 上报）
+
+- **阻塞项：`make check` 的 fmt 阶段被并行 worker（protocol 域）未 fmt 的
+  `crates/deepseeknova-runtime/src/lib.rs` 卡住**。实测重试 5+ 次（间隔 1-4 分钟轮询），
+  对方持续编辑 cli/metrics/runtime 三文件未提交，fmt diff 位置每次变化；按任务书 §7
+  「重试 3 次仍失败报告父级」上报，**未触碰对方文件**。
+- G 域证据（全部亲跑）：`cargo test --workspace --no-fail-fast` 全绿 0 failed（graph 38、
+  tools 65+12+7 在其中）；`cargo clippy -p deepseeknova-graph -p deepseeknova-tools
+  --all-targets -- -D warnings` 绿；rustfmt --check 我的三个 Rust 文件 MY_FMT_OK；
+  反向验证 parses_go_entities 改坏 1 failed → 还原 1 passed。
+- 待父级：对方 fmt/提交后补跑 `make check` 确认 EXIT=0（预期仅剩 fmt 一关）。
 
 ## CodeGraph 增强任务书（2026-08-02）
 

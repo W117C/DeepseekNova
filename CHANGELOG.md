@@ -14,6 +14,18 @@ All notable changes to DeepseekNova will be documented in this file.
 
 ### Added
 
+- **Protocol 增强收尾（task_rate + record_use 回填）**：评分卡扩展 `first_pass` /
+  `retry_rounds` 字段（serde default，旧文件兼容）——成功会话按首过填写，失败/
+  Paused 会话由诊断回调按 `DiagnoseReport.failures` 推导覆写；fitness 记录
+  `record_use` 接线（recall 注入侧收集实际注入的技能名 → 会话结束记 `use` +
+  `result`，空集合优雅跳过、不再 warn）。
+
+- **Graph Go 语言支持**：代码图引擎新增 Go（tree-sitter-go 0.25，新依赖仅此一个）——
+  解析包级函数 / 方法（receiver）/ `type_declaration`（struct→Struct、
+  interface→Trait）实体、名称级调用（含 `pkg.Func`/`recv.Method` 取末段）、
+  import 三态（stdlib/第三方裸路径记外部依赖、相对路径记本地文件）；`go.mod`
+  require 段（块式与单行）解析进外部依赖表，`deps_code` 支持 Go 项目。
+
 - **记忆生命周期闭环**：memory schema 版本机制（`meta.schema_version` 初值 "1"，
   版本不符走迁移表——当前为空——不炸）；检索排除 archived（不参与召回），排序融合
   生命周期因子（bm25 + importance/stage/recency，`[memory] rank_lifecycle_weight`
