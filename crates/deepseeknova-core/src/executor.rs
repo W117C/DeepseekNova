@@ -5,11 +5,16 @@ use crate::graph::{
 use rand::Rng;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::{Deref, DerefMut};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::task::JoinSet;
 use tokio::time::sleep;
 use tracing::{debug, warn};
+
+/// Parallel 作用域内的共享输出容器：子节点完成后把自身结果写回，
+/// 同层 `Observe` 可读到兄弟产出（此前各子任务只持有进入 Parallel 前的
+/// 快照，Observe 看不到兄弟结果）。`None` = 非 Parallel 路径（行为不变）。
+type SharedOutputs = Option<Arc<RwLock<HashMap<NodeId, NodeOutput>>>>;
 
 // ---------------------------------------------------------------------------
 // Callbacks — injected by Runtime to execute actions
@@ -164,7 +169,7 @@ impl GraphExecutor {
                     continue;
                 }
 
-                match self.clone().execute_node(node, &outputs).await {
+                match self.clone().execute_node(node, &outputs, &None).await {
                     Ok(output) => {
                         outputs.insert(node.id.clone(), output);
                     }
@@ -195,7 +200,7 @@ impl GraphExecutor {
                     set.spawn(async move {
                         (
                             node.id.clone(),
-                            this.execute_node(&node, &outputs_snapshot).await,
+                            this.execute_node(&node, &outputs_snapshot, &None).await,
                         )
                     });
                 }
@@ -235,6 +240,7 @@ impl GraphExecutor {
         self: Arc<Self>,
         node: &ExecutionNode,
         outputs: &HashMap<NodeId, NodeOutput>,
+        shared: &SharedOutputs,
     ) -> anyhow::Result<NodeOutput> {
         let mut attempt = 0u32;
         loop {
@@ -242,7 +248,11 @@ impl GraphExecutor {
             let action_result = match node.timeout {
                 Some(d) => {
                     let this = Arc::clone(&self);
-                    match tokio::time::timeout(d, this.execute_action(&node.action, outputs)).await
+                    match tokio::time::timeout(
+                        d,
+                        this.execute_action(&node.action, outputs, shared),
+                    )
+                    .await
                     {
                         Ok(Ok(output)) => Ok(output),
                         Ok(Err(e)) => Err(e),
@@ -251,7 +261,7 @@ impl GraphExecutor {
                 }
                 None => {
                     let this = Arc::clone(&self);
-                    this.execute_action(&node.action, outputs).await
+                    this.execute_action(&node.action, outputs, shared).await
                 }
             };
             match action_result {
@@ -293,6 +303,7 @@ impl GraphExecutor {
         self: Arc<Self>,
         action: &'a Action,
         outputs: &'a HashMap<NodeId, NodeOutput>,
+        shared: &'a SharedOutputs,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<NodeOutput>> + Send + 'a>>
     {
         Box::pin(async move {
@@ -306,12 +317,24 @@ impl GraphExecutor {
                     Ok(NodeOutput::ToolResult(result))
                 }
                 Action::Observe { tool_call_id: _ } => {
-                    // Find the tool result from a preceding node
-                    let result = outputs
-                        .values()
-                        .find_map(|o| match o {
+                    // Find the tool result from a preceding node. In a
+                    // Parallel scope (`shared`), sibling results written back
+                    // by already-completed children take priority (they are
+                    // fresher than the pre-Parallel snapshot); otherwise fall
+                    // back to the top-level outputs map.
+                    let shared_result: Option<String> = shared.as_ref().and_then(|lock| {
+                        let guard = lock.read().unwrap_or_else(|e| e.into_inner());
+                        guard.values().find_map(|o| match o {
                             NodeOutput::ToolResult(r) => Some(r.clone()),
                             _ => None,
+                        })
+                    });
+                    let result = shared_result
+                        .or_else(|| {
+                            outputs.values().find_map(|o| match o {
+                                NodeOutput::ToolResult(r) => Some(r.clone()),
+                                _ => None,
+                            })
                         })
                         .unwrap_or_default();
                     Ok(NodeOutput::ToolResult(result))
@@ -346,13 +369,27 @@ impl GraphExecutor {
                     // early bail on a join error) every spawned child is
                     // aborted. A bare JoinSet would leave already-spawned
                     // children running detached past the node's timeout.
+                    //
+                    // 子节点共享输出容器：完成即写回（含失败），同层 Observe
+                    // 可见兄弟产出。仅作用域于本次 Parallel 执行。
+                    let shared_lock = Arc::new(RwLock::new(HashMap::new()));
                     let mut set = JoinSetAbortGuard(JoinSet::new());
                     for (idx, child) in nodes.iter().enumerate() {
                         let child = child.clone();
                         let outputs = outputs.clone();
+                        let shared_lock = shared_lock.clone();
                         let this = Arc::clone(&self);
                         set.spawn(async move {
-                            (idx, this.execute_action(&child.action, &outputs).await)
+                            let result = this
+                                .execute_action(&child.action, &outputs, &Some(shared_lock.clone()))
+                                .await;
+                            if let Ok(output) = &result {
+                                shared_lock
+                                    .write()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .insert(child.id.clone(), output.clone());
+                            }
+                            (idx, result)
                         });
                     }
                     let mut results: Vec<Option<anyhow::Result<NodeOutput>>> =
@@ -395,7 +432,7 @@ impl GraphExecutor {
                     condition: _,
                     then,
                     r#else: _,
-                } => self.execute_action(&then.action, outputs).await,
+                } => self.execute_action(&then.action, outputs, shared).await,
             }
         })
     }
@@ -1103,6 +1140,93 @@ mod tests {
             "Parallel children did not overlap: took {elapsed:?}"
         );
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn parallel_observe_sees_sibling_tool_result() {
+        // Parallel 子节点结果共享：先完成的 CallTool 兄弟写回共享容器，
+        // 同层 Observe 可读到其 ToolResult（此前只读进入 Parallel 前的快照，
+        // 读到空串——新语义验证）。
+        let exec = Arc::new(GraphExecutor::new(
+            Arc::new(MockThink),
+            Arc::new(MockTool),
+            Arc::new(MockReflect),
+        ));
+
+        let mut g = ExecutionGraph::new("p".into());
+        let mut node = ExecutionNode::new(
+            "p",
+            Action::Parallel(vec![
+                ExecutionNode::new(
+                    "producer",
+                    Action::CallTool {
+                        tool: "read_file".into(),
+                        args: serde_json::json!({"path": "x"}),
+                    },
+                ),
+                ExecutionNode::new(
+                    "observer",
+                    Action::Observe {
+                        tool_call_id: String::new(),
+                    },
+                ),
+            ]),
+        );
+        node.retry = RetryPolicy {
+            max_attempts: 1,
+            backoff: Duration::ZERO,
+            jitter: false,
+        };
+        g.add_node(node);
+
+        let result = exec.execute(&g).await.unwrap();
+        assert!(result.completed);
+        // MockTool 返回 "tool read_file done"——Observe 应从共享容器读到它，
+        // 而非空串。
+        match result.node_outputs.get("p") {
+            Some(NodeOutput::Text(t)) => assert!(
+                t.contains("tool read_file done"),
+                "observer did not see sibling result: {t}"
+            ),
+            other => panic!("expected Parallel Text output, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn observe_outside_parallel_unaffected() {
+        // 非 Parallel 路径（顶层 sequential 节点）：Observe 只读顶层 outputs
+        // map，行为与改动前一致（shared=None 分支）。
+        let exec = Arc::new(GraphExecutor::new(
+            Arc::new(MockThink),
+            Arc::new(MockTool),
+            Arc::new(MockReflect),
+        ));
+
+        let mut g = ExecutionGraph::new("g".into());
+        g.add_node(ExecutionNode::new(
+            "prod",
+            Action::CallTool {
+                tool: "read_file".into(),
+                args: serde_json::json!({"path": "x"}),
+            },
+        ));
+        g.add_node(ExecutionNode::new(
+            "obs",
+            Action::Observe {
+                tool_call_id: String::new(),
+            },
+        ));
+        // 注意：add_edge 对未知节点 fail-soft（丢弃边），必须先 add_node。
+        g.add_edge("prod".into(), "obs".into(), Some(EdgeCondition::Success));
+
+        let result = exec.execute(&g).await.unwrap();
+        assert!(result.completed);
+        match result.node_outputs.get("obs") {
+            Some(NodeOutput::ToolResult(r)) => {
+                assert!(r.contains("tool read_file done"), "got: {r}")
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
     }
 
     struct MockHeartbeatThink {
