@@ -1,7 +1,7 @@
 # 协议增强能力包设计：协议执行引擎 + 验证强化 + 技能进化 + 失败模式库 + 度量扩展
 
 > 日期：2026-08-05
-> 状态：设计已批准（brainstorming 流程完成，用户授权直接进入多子代理并行实现）
+> 状态：已实现并合入 main（ca814c1 / 2bb9909 / b312715；后续审查修复 5d009f4）
 > 设计依据：harness Cursor 插件治理模式（hooks.json before/after、check-templates 模板目录、validate-policies 策略评估）、superpowers 技能链（brainstorming → writing-plans → TDD → systematic-debugging → verification-before-completion）、DNA 五阶段工作规范（dna-spec）
 > 触发协议：跨 crate 变更 + 架构级决策（core 公共 API 变更）→ 完整推理专家协议
 

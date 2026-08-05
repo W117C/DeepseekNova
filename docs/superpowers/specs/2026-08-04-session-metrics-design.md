@@ -1,7 +1,7 @@
 # DeepseekNova Agent 效能度量（SessionMetrics）设计
 
 - 日期：2026-08-04
-- 状态：已实现（2026-08-04，工作树待提交）
+- 状态：已实现并合入 main（实现 ca814c1；设计文档 0d87d0a）
 - 范围：新增 `deepseeknova-metrics` crate（数据模型 + 采集聚合 + 落盘），`deepseeknova-agent`（MetricsHook 注入 + 事件采集点），`deepseeknova-runtime`（装配 collector + 组装报告落盘）。跨 3 crate + 1 新 crate，属架构级变更，实现需 `make check` 全绿
 - 设计依据：harness Cursor 插件 `dora-metrics` skill（效能指标 + 报表），映射到 DeepseekNova 现有数据面
 

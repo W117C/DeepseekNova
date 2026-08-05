@@ -1,7 +1,7 @@
 # Agent 执行增强设计：DAG 接线修复 + 失败归因重试 + 技能热更新
 
 > 日期：2026-08-04
-> 状态：设计已批准（brainstorming 流程），待实现
+> 状态：已实现并合入 main（实现 ca814c1；设计文档 a6743b8）
 > 设计依据：harness Cursor 插件（create-pipeline-v1 的 parallel/on-failure 语义、run-pipeline 的"先归因再重试"、create-agent 的自定义 Skill 注入模式）
 > 触发协议：跨 crate 变更 + 架构级决策 → 完整推理专家协议
 

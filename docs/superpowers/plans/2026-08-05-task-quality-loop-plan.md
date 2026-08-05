@@ -3,6 +3,8 @@
 > 依据：`docs/superpowers/specs/2026-08-05-task-quality-loop-design.md`（已批准）
 > 执行模式：worker A（阶段 1+2 治理层）先行 → 完成后 worker B（阶段 3 诊断）+ worker C（阶段 4 评分卡）并行 → 父级收尾 + `make check` 强制验收
 > 约定：worker 只编辑自己分配的文件；工作区存在他人未提交改动（08-04 迭代实现），不得回退，须在其基础上工作
+> 状态（2026-08-05 补记）：计划已执行完毕，实现合入 main（ca814c1 / 2bb9909）；
+> 审查修复轮 5d009f4
 
 ---
 

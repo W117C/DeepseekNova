@@ -1,6 +1,6 @@
 # PROGRESS — TUI 设计功能完善（任务书执行）
 
-## 当前未提交实现（2026-08-05 审查修复轮）
+## 已提交并推送（2026-08-05 审查修复轮）
 - 审查修复（main@b312715 之上，6 项 review finding 全部修复）：
   ① `Config::merge` 补 `quality`/`protocol`/`delegate`/`attribution` 分层合并
   （各段配置真正生效，attribution 不再被项目层缺省覆盖）；
@@ -11,7 +11,9 @@
   ⑤ 蒸馏 skill 中文标题可落盘（Unicode slug，拒绝缩成 `.`/`..` 的标题）；
   ⑥ Parallel 失败子节点写回共享容器，Observe 可见失败产出。
   验证：cargo fmt/clippy/check 全绿；cargo test --workspace = 1003 通过 / 0 失败
-  / 2 ignored（含 serve 集成与 tools 本地 HTTP 测试）。待提交。
+  / 2 ignored（含 serve 集成与 tools 本地 HTTP 测试）；cargo deny --all-features
+  check 通过（unsound 公告已纳入评估）。
+  已提交并推送：`5d009f4`（origin/main）。
 - 08-04/08-05 迭代（DAG 接线、失败归因重试、技能热更新、TaskSpec、SessionMetrics、
   任务质量闭环、协议增强能力包、安全审查修复）已合入 main：ca814c1 / 2bb9909 /
   b312715。

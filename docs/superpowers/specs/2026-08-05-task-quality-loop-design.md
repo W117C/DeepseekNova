@@ -1,7 +1,8 @@
 # 任务质量闭环设计：治理钩子 + 策略评估 + 结构化诊断 + 评分卡
 
 > 日期：2026-08-05
-> 状态：已实现（2026-08-05 完成，make check EXIT=0；实现与设计的偏差见 §12）
+> 状态：已实现并合入 main（ca814c1 / 2bb9909；审查修复轮 5d009f4 补充 run 级
+> 差分与 session id 同源，见 §12）
 > 设计依据：harness Cursor 插件（hooks.json 的 before/after 治理模式、debug-pipeline 的 structured diagnose、scorecard-review 的评分、dora-metrics/analyze-costs 的聚合指标）
 > 触发协议：跨 crate 变更 + 架构级决策（core 公共 API 变更）→ 完整推理专家协议
 

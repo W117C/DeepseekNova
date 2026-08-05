@@ -3,6 +3,7 @@
 > 依据：`docs/superpowers/specs/2026-08-04-agent-execution-design.md`（已批准）
 > 执行模式：3 个并行 worker（文件所有权零重叠）+ 父级收尾接线 + `make check` 强制验收
 > 约定：worker 只编辑自己分配的文件；工作区存在他人未提交改动（TaskSpec/SessionMetrics 实现），不得回退，须在其基础上工作
+> 状态（2026-08-05 补记）：计划已执行完毕，实现合入 main（ca814c1）
 
 ---
 
