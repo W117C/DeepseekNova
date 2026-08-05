@@ -181,6 +181,15 @@ All notable changes to DeepseekNova will be documented in this file.
 
 ### Fixed
 
+- Graph Go 分组类型声明 `type ( A struct{}; B interface{} )` 此前只采集第一个
+  type_spec（tree-sitter-go 0.25 的 type_declaration children 为 multiple），组内
+  第 2+ 个类型静默丢失、引用不可解析；现遍历全部 type_spec 逐个产出实体。
+- `go.mod` 的 `require ( // 尾注释` 形态（gofmt 不产但合法）此前整块依赖静默丢失；
+  现块起始容忍尾注释。replace/exclude 段确认不进依赖（负例测试固化）。
+- 评分卡 task_rate 回填：Cancelled 且零失败详情的会话此前被误标
+  `first_pass=true`；现回填仅覆盖失败型会话（failures 非空），其余保持 metrics
+  侧已填值。损坏 scorecard JSON 解析失败此前静默 Ok 无告警；现 warn 一次后返回
+  Ok（与 NotFound 静默区分），真实 IO 错误仍 Err 传播。
 - 配置分层：`[quality]` / `[protocol]` / `[delegate]`（含新增 `inputs`）此前未进入
   `Config::merge`，在用户/项目配置文件中不生效；`[attribution]` 整体赋值会被项目层
   缺省覆盖。现改为字段级非默认值合并，各段配置真正生效。

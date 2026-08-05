@@ -1381,6 +1381,30 @@ pub fn attach_diagnose_hook(
     attach_diagnose_hook_with_ingest(agent, dir, None, std::path::Path::new(""))
 }
 
+/// task_rate 回填决策（设计 §7.1 末条 + P-L2）：仅当诊断报告 `failures`
+/// **非空**（失败型会话）时覆写评分卡 `first_pass=false` 与
+/// `retry_rounds=失败条数`；零失败报告（如 Cancelled/unverified 无工具失败
+/// 详情）**不覆写**，保持 metrics hook 已填的值（非 Completed 的保守
+/// false/0），避免零失败会话被误标 first_pass=true。评分卡缺失/不可解析时
+/// 静默跳过（metrics 未启用属正常路径）；IO 失败仅 warn，不阻断 run。
+fn backfill_scorecard_task_rate(
+    dir: &std::path::Path,
+    report: &deepseeknova_agent::diagnose::DiagnoseReport,
+) {
+    if report.failures.is_empty() {
+        return;
+    }
+    let retry_rounds = report.failures.len() as u32;
+    if let Err(e) = deepseeknova_metrics::update_scorecard_task_rate(
+        dir,
+        &report.session_id,
+        false,
+        retry_rounds,
+    ) {
+        tracing::warn!("scorecard task_rate update failed: {e}");
+    }
+}
+
 /// [`attach_diagnose_hook`] 的协议增强扩展：`[protocol] enabled=true` 且
 /// `workspace_root` 非空时，除原落盘/留存逻辑外，把本会话
 /// [`DiagnoseReport`](deepseeknova_agent::diagnose::DiagnoseReport) 的
@@ -1396,7 +1420,8 @@ pub fn attach_diagnose_hook(
 /// 此外无论 `[protocol]` 开关，回调都会对同会话评分卡做 task_rate 回填
 /// （设计 §7.1 末条：按 failures 推导 `first_pass`/`retry_rounds` 覆写并
 /// 重写 `dir/<session_id>.scorecard.json`，补 Paused 路径上 metrics hook
-/// 先触发时缺失的失败信息；评分卡不存在时静默跳过）；
+/// 先触发时缺失的失败信息；**仅 failures 非空时覆写**，零失败报告保持
+/// metrics 侧已填值，见 P-L2；评分卡不存在时静默跳过）；
 /// 所有 IO 失败仅 warn，不阻断 run。`None` 配置或 disabled 时与
 /// [`attach_diagnose_hook`] 完全一致。
 pub fn attach_diagnose_hook_with_ingest(
@@ -1425,20 +1450,12 @@ pub fn attach_diagnose_hook_with_ingest(
 
         // task_rate 回填（设计 §7.1 末条）：Paused/unverified 路径上 metrics
         // hook 先于本回调触发（失败详情尚不可知，评分卡已按保守默认 false/0
-        // 落盘），此处按本会话 failures 推导覆写 first_pass/retry_rounds 并
-        // 重写同会话评分卡（`<dir>/<session_id>.scorecard.json`）；成功路径
-        // suppress 无本回调，metrics hook 已按 first_pass=true 填写。评分卡
-        // 缺失/不可解析时静默跳过（metrics 未启用），不 panic、不阻断。
-        let first_pass = report.failures.is_empty();
-        let retry_rounds = report.failures.len() as u32;
-        if let Err(e) = deepseeknova_metrics::update_scorecard_task_rate(
-            &dir,
-            &report.session_id,
-            first_pass,
-            retry_rounds,
-        ) {
-            tracing::warn!("scorecard task_rate update failed: {e}");
-        }
+        // 落盘），此处按本会话 failures 覆写并重写同会话评分卡
+        // （`<dir>/<session_id>.scorecard.json`）。零失败（Cancelled/unverified
+        // 无工具失败详情）**不覆写**，保持 metrics hook 已填的值，避免零失败
+        // 会话被误标 first_pass=true（P-L2）。评分卡缺失/不可解析时静默跳过
+        // （metrics 未启用），不 panic、不阻断。
+        backfill_scorecard_task_rate(&dir, &report);
 
         // 协议增强：失败模式聚类（仅 protocol.enabled 时动作）。
         if ingest_on {
@@ -4082,6 +4099,63 @@ mod tests {
             "retry_rounds must equal diagnose failures count"
         );
         assert!(card.retry_rounds >= 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// P-L2：task_rate 回填仅限失败型会话——Cancelled 且零失败详情的会话
+    /// 不得被诊断回填覆写为 first_pass=true，保持 metrics hook 已填的保守
+    /// false/0（非 Completed 路径）；失败型会话（failures 非空）仍覆写。
+    #[test]
+    fn diagnose_backfill_keeps_first_pass_for_zero_failure_reports() {
+        let root = std::env::temp_dir().join(format!("dsn-taskrate-zero-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let write_card = |session_id: &str| {
+            let stats = deepseeknova_metrics::SessionStats {
+                tool_calls: 1,
+                ..Default::default()
+            };
+            let card = deepseeknova_metrics::Scorecard::compute(session_id, &stats, &[], 0, 0, 0);
+            deepseeknova_metrics::write_scorecard(&card, &root).unwrap();
+        };
+        let read_card = |session_id: &str| -> deepseeknova_metrics::Scorecard {
+            serde_json::from_str(
+                &std::fs::read_to_string(root.join(format!("{session_id}.scorecard.json")))
+                    .unwrap(),
+            )
+            .unwrap()
+        };
+
+        // Cancelled 零失败会话：metrics hook 已落保守 false/0，回填不得覆写。
+        write_card("s-cancelled");
+        let cancelled =
+            deepseeknova_agent::diagnose::DiagnoseReport::new("s-cancelled", "cancelled");
+        backfill_scorecard_task_rate(&root, &cancelled);
+        assert!(
+            !read_card("s-cancelled").first_pass,
+            "Cancelled 零失败会话不得被标 first_pass=true"
+        );
+        assert_eq!(read_card("s-cancelled").retry_rounds, 0);
+
+        // 失败型会话（failures 非空）仍覆写 first_pass=false + 条数。
+        write_card("s-fail");
+        let mut failed = deepseeknova_agent::diagnose::DiagnoseReport::new("s-fail", "paused");
+        failed
+            .failures
+            .push(deepseeknova_agent::diagnose::FailureDetail {
+                phase: "tool".into(),
+                tool: None,
+                command: None,
+                error: "boom".into(),
+                root_cause: None,
+                fix_plan: None,
+            });
+        backfill_scorecard_task_rate(&root, &failed);
+        let back = read_card("s-fail");
+        assert!(!back.first_pass);
+        assert_eq!(back.retry_rounds, 1);
+
         let _ = std::fs::remove_dir_all(&root);
     }
 }

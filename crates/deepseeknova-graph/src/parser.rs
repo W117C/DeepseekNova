@@ -99,8 +99,8 @@ fn parse_err(path: &str, lang: Lang) -> GraphError {
 }
 
 /// 判定定义实体的 NodeKind；非实体返回 None。
-/// `node` 仅 Go 的 type_declaration 使用（据 type 字段区分 struct/interface）。
-fn entity_kind(lang: Lang, kind: &str, node: TsNode, ancestors: &[&str]) -> Option<NodeKind> {
+/// Go 的 type_declaration 不在此判定（分组声明需遍历子节点，见 parse_source）。
+fn entity_kind(lang: Lang, kind: &str, ancestors: &[&str]) -> Option<NodeKind> {
     match lang {
         Lang::Rust => match kind {
             "struct_item" => Some(NodeKind::Struct),
@@ -133,19 +133,8 @@ fn entity_kind(lang: Lang, kind: &str, node: TsNode, ancestors: &[&str]) -> Opti
         Lang::Go => match kind {
             "function_declaration" => Some(NodeKind::Function),
             "method_declaration" => Some(NodeKind::Method),
-            // type_declaration > type_spec(type=struct_type|interface_type|...)
-            "type_declaration" => {
-                let t = node
-                    .named_child(0)
-                    .and_then(|spec| spec.child_by_field_name("type"))
-                    .map(|t| t.kind());
-                match t {
-                    Some("struct_type") => Some(NodeKind::Struct),
-                    Some("interface_type") => Some(NodeKind::Trait),
-                    _ => None,
-                }
-            }
-            // struct_type/interface_type/type_spec 非实体（父 type_declaration 已建）
+            // type_declaration 不在此判定实体（Go 分组声明 `type ( A ...; B ... )`
+            // 一个节点可含多个 type_spec，由 parse_source 遍历子节点逐个产出）。
             _ => None,
         },
     }
@@ -187,14 +176,6 @@ fn strip_quotes(text: &str) -> &str {
 fn entity_name(node: TsNode, src: &str) -> Option<String> {
     if let Some(n) = node.child_by_field_name("name") {
         return n.utf8_text(src.as_bytes()).ok().map(str::to_string);
-    }
-    // Go：type_declaration 的名字位于子节点 type_spec 的 name 字段。
-    if node.kind() == "type_declaration" {
-        if let Some(spec) = node.named_child(0) {
-            if let Some(n) = spec.child_by_field_name("name") {
-                return n.utf8_text(src.as_bytes()).ok().map(str::to_string);
-            }
-        }
     }
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
@@ -276,7 +257,8 @@ fn callee_name(call: TsNode, src: &str) -> Option<String> {
 enum Step<'t> {
     Enter(TsNode<'t>),
     Exit {
-        pop_def: bool,
+        /// 本节点产出的实体数（Go 分组 type 声明可为多个），Exit 时逐个出栈。
+        pop_def: usize,
         pop_trait: bool,
         pop_impl: bool,
     },
@@ -323,7 +305,7 @@ pub fn parse_source(lang: Lang, path: &str, src: &str) -> Result<FileParse, Grap
                 if pop_impl {
                     impl_trait_stack.pop();
                 }
-                if pop_def {
+                for _ in 0..pop_def {
                     if let (Some(name), Some(set)) = (def_stack.last(), refs_stack.pop()) {
                         for ref_name in set {
                             if ref_name != *name {
@@ -456,42 +438,70 @@ pub fn parse_source(lang: Lang, path: &str, src: &str) -> Result<FileParse, Grap
                         }
                     }
                 }
-                let mut pushed_def = false;
-                if let Some(nk) = entity_kind(lang, kind, node, &ancestor_kinds) {
+                let mut pushed_def: usize = 0;
+                // 实体产出：Go 的 type_declaration（tree-sitter-go 0.25 实证
+                // children 为 multiple，分组声明 `type ( A struct{}; B ... )`
+                // 可含多个 type_spec/type_alias）遍历全部子节点逐个产出实体；
+                // 其余语言经 entity_kind/entity_name 判定单一实体。
+                let mut push_entity = |nk: NodeKind, name: String, ent: TsNode| {
+                    let start_line = ent.start_position().row as u32 + 1;
+                    nodes.push(Node {
+                        id: node_id(path, &name, start_line),
+                        kind: nk,
+                        name: name.clone(),
+                        path: path.to_string(),
+                        start_line,
+                        end_line: ent.end_position().row as u32 + 1,
+                        signature: extract_signature(lang, ent, src),
+                        doc: extract_doc(ent, src),
+                        score: 0.0,
+                    });
+                    refs_stack.push(std::collections::HashSet::new());
+                    if lang == Lang::Rust && nk == NodeKind::Method {
+                        if let Some(tname) = trait_stack.last() {
+                            trait_methods.push((tname.clone(), name.clone(), start_line));
+                        }
+                        if let Some(Some((tname, itype))) = impl_trait_stack.last() {
+                            impl_trait_methods.push((
+                                tname.clone(),
+                                itype.clone(),
+                                name.clone(),
+                                start_line,
+                            ));
+                        }
+                    }
+                    if lang == Lang::Rust && nk == NodeKind::Function {
+                        if let Some(tname) = trait_stack.last() {
+                            trait_methods.push((tname.clone(), name.clone(), start_line));
+                        }
+                    }
+                    def_stack.push(name);
+                    pushed_def += 1;
+                };
+                if lang == Lang::Go && kind == "type_declaration" {
+                    let mut cursor = node.walk();
+                    for spec in node.named_children(&mut cursor) {
+                        if !matches!(spec.kind(), "type_spec" | "type_alias") {
+                            continue;
+                        }
+                        // type_spec/type_alias 的 type 字段区分 struct/interface。
+                        let nk = match spec.child_by_field_name("type").map(|t| t.kind()) {
+                            Some("struct_type") => NodeKind::Struct,
+                            Some("interface_type") => NodeKind::Trait,
+                            _ => continue,
+                        };
+                        let Some(name) = spec
+                            .child_by_field_name("name")
+                            .and_then(|n| n.utf8_text(src.as_bytes()).ok())
+                            .map(str::to_string)
+                        else {
+                            continue;
+                        };
+                        push_entity(nk, name, spec);
+                    }
+                } else if let Some(nk) = entity_kind(lang, kind, &ancestor_kinds) {
                     if let Some(name) = entity_name(node, src) {
-                        let start_line = node.start_position().row as u32 + 1;
-                        nodes.push(Node {
-                            id: node_id(path, &name, start_line),
-                            kind: nk,
-                            name: name.clone(),
-                            path: path.to_string(),
-                            start_line,
-                            end_line: node.end_position().row as u32 + 1,
-                            signature: extract_signature(lang, node, src),
-                            doc: extract_doc(node, src),
-                            score: 0.0,
-                        });
-                        refs_stack.push(std::collections::HashSet::new());
-                        if lang == Lang::Rust && nk == NodeKind::Method {
-                            if let Some(tname) = trait_stack.last() {
-                                trait_methods.push((tname.clone(), name.clone(), start_line));
-                            }
-                            if let Some(Some((tname, itype))) = impl_trait_stack.last() {
-                                impl_trait_methods.push((
-                                    tname.clone(),
-                                    itype.clone(),
-                                    name.clone(),
-                                    start_line,
-                                ));
-                            }
-                        }
-                        if lang == Lang::Rust && nk == NodeKind::Function {
-                            if let Some(tname) = trait_stack.last() {
-                                trait_methods.push((tname.clone(), name.clone(), start_line));
-                            }
-                        }
-                        def_stack.push(name);
-                        pushed_def = true;
+                        push_entity(nk, name, node);
                     }
                 }
                 ancestor_kinds.push(kind);
@@ -605,6 +615,34 @@ func internal() {
         assert_eq!(Lang::from_path("a.tsx"), Some(Lang::TypeScript));
         assert_eq!(Lang::from_path("a.go"), Some(Lang::Go));
         assert_eq!(Lang::from_path("a.md"), None);
+    }
+
+    #[test]
+    fn parses_go_grouped_type_declarations() {
+        // 分组类型声明：一个 type_declaration 含多个 type_spec（tree-sitter-go
+        // 0.25 children 为 multiple），组内每个类型都要产出实体（G-M1）。
+        // 单行分号分隔与多行两个形态都覆盖。
+        for src in [
+            "package main\n\ntype ( A struct{}; B interface{} )\n",
+            "package main\n\ntype (\n\tA struct{}\n\tB interface{}\n)\n",
+        ] {
+            let fp = parse_source(Lang::Go, "src/grouped.go", src).unwrap();
+            let names: Vec<_> = fp.nodes.iter().map(|n| (n.kind, n.name.as_str())).collect();
+            assert!(
+                names.contains(&(NodeKind::Struct, "A")),
+                "分组内 A 应产出 Struct 实体：{names:?}"
+            );
+            assert!(
+                names.contains(&(NodeKind::Trait, "B")),
+                "分组内 B 应产出 Trait 实体：{names:?}"
+            );
+            assert_eq!(fp.nodes.len(), 2, "分组声明应恰好 2 个实体：{names:?}");
+        }
+        // 分组内不含实体的 type_spec（如 type 别名到非 struct/interface）不产出。
+        let src = "package main\n\ntype (\n\tA = int\n\tB struct{}\n)\n";
+        let fp = parse_source(Lang::Go, "src/grouped2.go", src).unwrap();
+        let names: Vec<_> = fp.nodes.iter().map(|n| (n.kind, n.name.as_str())).collect();
+        assert_eq!(names, vec![(NodeKind::Struct, "B")], "{names:?}");
     }
 
     #[test]

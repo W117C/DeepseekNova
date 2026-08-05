@@ -1140,9 +1140,14 @@ fn parse_go_mod_deps(src: &str) -> Vec<String> {
     let mut in_require_block = false;
     for line in src.lines() {
         let t = line.trim();
-        if t == "require (" {
-            in_require_block = true;
-            continue;
+        // 块起始：`require (` 或其行尾注释形态（gofmt 不产但合法，G-L4），
+        // trim 后为空或以 `//` 开头即视为块首。
+        if let Some(tail) = t.strip_prefix("require (") {
+            let tail = tail.trim();
+            if tail.is_empty() || tail.starts_with("//") {
+                in_require_block = true;
+                continue;
+            }
         }
         if in_require_block {
             if t == ")" {
@@ -1507,6 +1512,39 @@ require github.com/single/dep v1.0.0\n\
             "{deps:?}"
         );
         assert_eq!(deps.len(), 3, "注释/module/go 行不解析为依赖：{deps:?}");
+    }
+
+    #[test]
+    fn go_mod_block_with_trailing_comment_and_negative_blocks() {
+        // G-L4：`require ( // 尾注释` 形态（gofmt 不产但人可能写）必须识别为
+        // 块起始，块内依赖不静默丢失。
+        let src = "module example.com/app\n\n\
+require ( // 依赖块\n\
+\tgithub.com/foo/bar v1.2.3\n\
+\tgolang.org/x/sync v0.1.0\n\
+)\n\n\
+replace (\n\
+\texample.com/old => example.com/new v1.0.0\n\
+)\n\n\
+exclude (\n\
+\tgithub.com/skip/me v1.0.0\n\
+)\n\n\
+require github.com/single/dep v1.0.0\n";
+        let deps = parse_go_mod_deps(src);
+        assert!(deps.contains(&"github.com/foo/bar".to_string()), "{deps:?}");
+        assert!(deps.contains(&"golang.org/x/sync".to_string()), "{deps:?}");
+        assert!(
+            deps.contains(&"github.com/single/dep".to_string()),
+            "{deps:?}"
+        );
+        // 负例：replace/exclude 段不进入依赖。
+        assert!(
+            !deps
+                .iter()
+                .any(|d| { d.contains("old") || d.contains("new") || d.contains("skip") }),
+            "replace/exclude 段不得解析为依赖：{deps:?}"
+        );
+        assert_eq!(deps.len(), 3, "{deps:?}");
     }
 
     #[test]

@@ -105,3 +105,97 @@
 ### 6. 结论
 
 **0 critical / 0 high / 0 medium / 0 low**。聚焦测试 `cargo test -p deepseeknova-core memory` 74 passed + 1 集成通过，runtime/tools 编译通过。**满足退出条件，可进入收尾**（建议收尾时按仓库惯例跑一次全量 `make check` 作最终确认）。
+## 第四轮审查（P 域 protocol-followup）：285fe60..95f695e（2026-08-05）
+
+### 1. 覆盖声明
+
+- **范围**：285fe60..95f695e（单提交 95f695e feat(protocol): task_rate 指标落地 + fitness record_use 回填接线）。仅审该 diff；285fe60（graph 域）未审（另一 worker 负责）。
+- **流程**：`ocr delegate preview`（3 reviewable：cli/metrics/runtime；PROGRESS.md 与 plan 为 unsupported_ext 排除）→ `ocr delegate rule`（仓库无 ocr.rules.json，用 system 默认）→ `git diff 285fe60..95f695e` 全量 + 现行文件精读（runtime :515-740 注入区、:1240-1340 metrics hook、:1395-1445 diagnose hook；agent.rs diagnose hook 触发条件测试；diagnose.rs failures 构造；cli/main.rs :850-915 装配）。
+- **测试实测**：`cargo test -p deepseeknova-metrics` 20 passed 0 failed；`cargo test -p deepseeknova-runtime` 51 passed 0 failed（与提交声明一致；未跑全量 make check）。
+
+### 2. 评论表
+
+| # | 路径 | 内容 | 起止行 | 分类 | 严重度 |
+|---|------|------|--------|------|--------|
+| L1 | crates/deepseeknova-metrics/src/lib.rs | retry_rounds 语义=失败详情条数而非真实重试轮次：DiagnoseReport.failures 每条=一次失败详情（工具失败/阶段失败），同一重试轮内可含多条，故 retry_rounds 是失败详情的计数代理。代码注释与设计文档已明示该近似（"每条失败详情记一轮重试"），且报告无显式轮次结构可数。语义偏差、有文档、非缺陷。 | 341-350（fill_task_rate 文档） | 指标语义 | low |
+| L2 | crates/deepseeknova-runtime/src/lib.rs | diagnose 回填 `first_pass = failures.is_empty()` 不看 outcome：非 Completed 且零失败详情的会话（如 Cancelled 用户中断无工具失败）会被标 first_pass=true（"一次通过"）。Completed 路径不受影响（metrics hook 已填 true 且 diagnose 被 suppress）。窄路径，建议回填仅覆盖 failures 非空场景或排除非失败型 outcome。 | 1431-1435 | 指标语义 | low |
+| L3 | crates/deepseeknova-runtime/src/lib.rs | session_skills 去重跨整个 agent 生命周期：同一 agent 复跑多会话时，第二会话注入同名技能因集合已含该名不再写入 → fitness uses 少计（仍为 1）。当前 CLI 每进程单 run、serve/TUI 不走此 builder，实际不可达；若未来复用 agent 多 run 需按会话清空或分桶。 | 609-615 + 1316-1336 | 计数正确性 | low |
+| L4 | crates/deepseeknova-metrics/src/lib.rs | update_scorecard_task_rate 对损坏文件静默 Ok（与 list_scorecards 同口径，设计如此），但解析失败连 warn 都没有（诊断回调仅对 Err 分支 warn）——真实损坏时 task_rate 回填静默丢失。诊断报告本身仍在可对账，可接受；建议 parse 失败 warn 一次、与 NotFound 静默区分。 | 376-402 | 错误处理 | low |
+| L5 | docs/superpowers/plans/2026-08-05-protocol-followup-plan.md | 计划白名单自相矛盾：§3 声明"memory 装配区 :480-635 只读"，但任务 2 要求改注入侧，提交实际在该区内插入 sink 代码（:531-533、:609-615）。改动为 None 时零行为变化的纯增量，无实质风险；属计划表述问题。 | 白名单段（计划 §3） | 流程/文档 | low |
+
+### 3. 重点复核逐条结论
+
+- **task_rate 推导正确性**：无冲突。Completed → metrics hook 在 write_scorecard（:1291）**前**填 first_pass=true（:1273-1284）；diagnose 仅非 success 触发（agent.rs:3456 测试实证 success suppress）→ 无覆写路径。Paused/error/unverified → metrics hook 先落保守 false/0，诊断回调随后按 failures 回填；CLI 挂载序 metrics→quality→diagnose（main.rs:880-898）与测试 `scorecard_task_rate_failed_run_backfilled_from_diagnose` 均实证。retry_rounds 计数来源真实（DiagnoseReport.failures 条数），但语义是"失败详情数"而非"轮次"（见 L1）。
+- **旧 scorecard 兼容**：`#[serde(default)]` false/0 正确（保守口径），旧 JSON 测试覆盖；update 辅助对缺字段旧卡同样可覆写（测试覆盖）。读-改-写对缺失→Ok（metrics 未启用必需）、损坏→Ok（与 list_scorecards 同口径）合理；真实 IO 错误（非 NotFound）仍返回 Err 并 warn，未吞（见 L4 建议）。
+- **session_skills 可选参设计**：None=旧行为成立（build_agent_with_task_provider 透传 None，签名不变；全仓生产调用方仅 CLI 传 Some）。注入路径覆盖完整：**技能注入仅存在于起点召回**（mid-run 召回 :640-700 只注入 memory+graph 命中，无技能）→ sink 覆盖全部技能注入路径。去重防重复。fitness hook 在 record_result 前补 record_use（:1331-1332），每次会话 hook 仅触发一次 → 幂等；SkillManager::record_use（三态迁移）与 FitnessStore::record_use（uses 计数）各司其职，无双写冲突（见 L3 多 run 边界）。
+- **并发安全**：无死锁。注入侧在持有 SkillManager 锁期间获取 session_skills 锁（:604-615），hook 侧仅单独获取 session_skills（:1316-1318）→ 单向锁序；两处均无 await 持锁（hook 为同步闭包）；`if let Ok` 静默吞 poison 可接受。
+- **既有行为保护**：warn-once 移除后空集合静默跳过、不写文件不 warn；既有测试 `fitness_empty_skills_skips_silently_and_writes_no_file` 未改动、仍绿。memory 装配区未误动（仅插入 None 时零行为的增量 sink 代码）。
+- **测试质量**：成功（first_pass=true 无 diagnose 目录）、Paused 失败（回填=条数）、空集合（既有测试）、旧卡兼容、update 辅助五态全覆盖；Cancelled 路径未单独测（回填逻辑 outcome-agnostic，Paused 已覆盖同代码路径）。既有断言无放宽——metrics 既有测试仅因新字段补结构体初始化（first_pass/retry_rounds），runtime 既有测试仅加 `None` 参数；均非削弱。
+
+### 4. 按严重度分组
+
+- **critical**：无。**high**：无。**medium**：无。**low**：5 条（L1-L5，见上表）。
+- 本轮无 critical/high 的原因：task_rate 双端接线经 agent 侧 suppress 测试实证无冲突路径、时序（metrics 先于 diagnose）与落盘顺序（fill 先于 write）均正确；注入收集覆盖唯一技能注入路径；旧卡兼容与静默跳过策略与既有 list_scorecards 口径一致；并发无死锁（单向锁序、无 await 持锁）。
+
+### 5. 结论
+
+**0 critical / 0 high / 5 low**。核心闭环（task_rate 双端 + record_use 回填 + 旧卡兼容）正确，测试实测 metrics 20 / runtime 51 全绿。L1-L4 为可择机处理的语义/边界项，L5 为计划表述问题，均不阻塞。**建议进入修复轮**（可选：修复 L2 的 Cancelled 零失败误标 first_pass=true 与 L4 的损坏文件 warn 区分，其余记录即可）。
+
+## 第三轮审查（G 域 graph-go）：68fb094..285fe60（2026-08-05）
+
+### 1. 覆盖声明
+
+- **范围**：68fb094..285fe60（单提交 285fe60 feat(graph): Go 语言支持——tree-sitter-go 解析 + go.mod 外部依赖）。仅审该 diff；95f695e（protocol 域）未审（另一 worker 负责）。新文件 docs/superpowers/plans/2026-08-05-graph-go-plan.md 读全文；其余按 diff 审。
+- **流程**：`ocr delegate preview`（workspace 模式 0 文件 → 按任务书用 `--from 68fb094 --to 285fe60`，4 reviewable：Cargo.toml/parser.rs/store.rs/graph_tools.rs，其余 7 个 .md/.lock 为 unsupported_ext 排除）→ `ocr delegate rule`（仓库根无 ocr.rules.json，用 system 默认两组规则）→ `git diff` 全量 + 现行文件精读（parser.rs extract_signature/entity_name/callee_name、store.rs collect_files/refresh 循环/node_id/find_by_name）。
+- **grammar 实证**：对照 ~/.cargo/registry 内 tree-sitter-go-0.25.0/src/node-types.json 逐节点核对——type_declaration（children **multiple**: type_spec|type_alias）、type_spec(name+type 字段)、type_alias(name+type)、method_declaration(name=field_identifier、receiver=parameter_list)、import_spec(path=interpreted/raw_string_literal)、selector_expression(field=field_identifier)、call_expression(function)、interface_type(method_elem)——与 PROGRESS.md 实测记录一致。
+- **测试实测**：`cargo test -p deepseeknova-graph` 38 passed 0 failed（unit 38 + self_index 1 ignored 既有），与提交声明一致；未跑全量 make check。
+
+### 2. 评论表
+
+| # | 路径 | 内容 | 起止行 | 分类 | 严重度 |
+|---|------|------|--------|------|--------|
+| M1 | crates/deepseeknova-graph/src/parser.rs | Go 分组类型声明 `type ( A struct{...}; B interface{...} )` 只采集第一个 type_spec：entity_kind 与 entity_name 均只取 `named_child(0)`，而 grammar 实证 type_declaration 的 children 是 **multiple**（type_spec|type_alias）——同一节点可含多个 type_spec，遍历时子 type_spec 命中 `_ => None` 不建实体 → 组内第 2+ 个类型静默丢失（无错误无警告），其引用不可解析。分组声明在真实 Go 代码（含生成代码）常见。修复方向：entity_kind/entity_name 对 Go type_declaration 遍历全部 named children 逐个产出实体。fixture 未覆盖该形态。 | entity_kind ~138-150、entity_name ~191-199 | bug | medium |
+| L1 | crates/deepseeknova-graph/src/parser.rs | Go import 分支注释只写"相对路径=File，其余=External"，未注明 grammar 无法区分 stdlib 与第三方（该限制仅记录于 PROGRESS.md）；GUIDE 表述"stdlib/第三方路径记外部依赖"与实现一致。建议代码注释补一句限制说明，避免后续误读为可区分。 | import 分支 ~364-388 | documentation | low |
+| L2 | crates/deepseeknova-graph/src/parser.rs | method_declaration 实体（如 Greet）只归属文件/包（path），与接收者类型（User）无任何图边/字段关联——receiver 仅出现在 signature 文本中。与既有"名称级"设计一致（Rust impl 方法同层级），但 struct→method 归属关系在图结构中不可见，影响按类型聚合的 impact 分析。非回归，属新功能设计边界，建议文档注明或后续按 receiver 建 contains 边。 | method_declaration 分支 ~131-132 + Node 构造 ~457-470 | maintainability | low |
+| L3 | GUIDE.md / CHANGELOG.md | 285fe60（graph 提交）内混入 protocol 域文档条目（task_rate first_pass/retry_rounds、fitness record_use 回填，GUIDE :321-330、CHANGELOG Added 首条）——实测 95f695e 未触碰这两个文件，protocol 域代码在 95f695e、其文档却落在 graph 提交。功能无影响，但提交归属不纯，回滚/二分/归因时易混淆。 | GUIDE.md Added 段（protocol 条目）、CHANGELOG.md Added 首条 | other | low |
+| L4 | crates/deepseeknova-graph/src/store.rs | parse_go_mod_deps 对 `require ( // 行尾注释` 形态失效：块检测用精确相等 `t == "require ("`，带尾注释时整块依赖静默丢失（后续裸 module 行无 "require " 前缀全被跳过）。gofmt 正常输出不带此形态（注释独立成行），属畸形但合法的 go.mod；建议块检测改 strip_prefix 容忍尾注释。另无 replace/exclude 段负例测试（逻辑分析确认正确跳过，属测试覆盖缺口）。 | parse_go_mod_deps ~1136-1165 | bug（边界） | low |
+
+### 3. 重点复核逐条结论
+
+- **grammar 节点名实测**：38 passed 强证据；node-types.json 逐项核对与 PROGRESS 记录及实现完全一致（function_declaration/method_declaration/type_declaration>type_spec/interface_type>method_elem/selector_expression(field)/import_spec(path)），无凭猜错误。唯一偏离 grammar 能力之处见 M1（multiple children 只取首个子节点）。
+- **Go 语义**：import 三态实现如实（相对→File、其余→External），stdlib/第三方不可分限制在 PROGRESS 有说明、代码注释缺（L1）；callee_name selector_expression 取 field 末段正确（node-types 实证 field=field_identifier）；method_declaration 归属=包/文件级，receiver 不建边（L2）；extract_signature 沿用 "{" 正确——Go 函数体一律 `{`，单行 func main() { ... } 也在 `{` 处截断，fixture 断言 `func MakeUser(name string) *User` 且不含 `{` 实证。
+- **go.mod 解析**：块式+单行+注释过滤+`// indirect` 行（split_whitespace 取首段天然剥离尾注释）均正确；go 指令行、toolchain、replace/exclude 段经逻辑分析确认跳过（无 "require " 前缀/非 `require (` 块首）；唯一漏洞见 L4（`require (` 行尾注释）。
+- **既有语义保护**：parser.rs `fn go(&self)` 动态分发测试（records_dyn_call_site_as_regular_call，:773-781）与 store.rs search("go") 短词 LIKE 测试（fts_search_short_english_falls_back_to_like，:1450-1465）均原样未动，38 passed 含两者。
+- **SCHEMA_VERSION=4 合理性**：未加列/无 language 字段成立——node_id=path#name#start_line（model.rs:102）路径作用域，Go 与 Rust 同名实体（如 "New"/"new"）按 path 区分、find_by_name 精确匹配返回多行按 path 排序，跨语言同名共存为既有设计，无新冲突。Go 实体入库不需要 schema 变更，v4 不动合理。
+- **依赖与文档**：新依赖仅 tree-sitter-go 0.25.0（Cargo.toml +1，Cargo.lock 新增其条目，传递依赖 tree-sitter-language/cc 均为既有 crate 版本）；README/GUIDE/CHANGELOG 语言列表均含 Go 且描述与实现一致；graph_tools.rs deps_code 提示语补 go.mod 同步。文档与实现一致（除 L3 提交归属问题）。
+
+### 4. 按严重度分组
+
+- **critical**：无。**high**：无。**medium**：1 条（M1 分组类型声明丢实体）。**low**：4 条（L1-L4）。
+- 无 critical/high 的原因：核心分派点（实体/调用/import/签名）经 38 passed 测试与 node-types.json 实证双重验证正确；go.mod 解析主路径（块式/单行/注释/indirect）正确且 replace/exclude 跳过经逻辑分析确认；既有语义测试未被误改；SCHEMA 未动无兼容风险；新依赖单一。
+
+### 5. 结论
+
+**0 critical / 0 high / 1 medium（M1）/ 4 low**。聚焦测试 `cargo test -p deepseeknova-graph` 38 passed 0 failed 实测通过。M1（分组 type 声明丢实体）为新功能真实缺陷，建议修复轮处理（遍历全部 type_spec 子节点建实体 + 补分组 fixture 测试）；L4 的 `require (` 尾注释容错可一并加固；L1-L3 记录即可。**建议进入修复轮**。
+
+---
+
+## 修复轮：95f695e 之上（G/P 域 review-fix，2026-08-05）
+
+### 修复计划（≤10 行）
+
+1. **G-M1**：parser.rs 的 Go type_declaration 移入 parse_source 特殊分支——遍历全部 type_spec/type_alias 子节点逐个产出实体（单声明走同一路径）；Step::Exit `pop_def` 改计数以匹配多实体出栈；entity_kind/entity_name 删除 Go type_declaration 分支（不再可达）。
+2. **G-L4**：store.rs `parse_go_mod_deps` 块起始检测改 `strip_prefix("require (")` + 尾注释容忍（trim 后为空或以 `//` 开头即块首）；replace/exclude 段负例测试。
+3. **P-L2**：runtime 诊断回调 task_rate 回填仅在 `failures` 非空时覆写 `first_pass=false`/`retry_rounds`；零失败（Cancelled/unverified）不覆写、保持 metrics 侧已填值；抽 `backfill_scorecard_task_rate` 辅助函数便于单测。
+4. **P-L4**：metrics `update_scorecard_task_rate` parse 失败 `eprintln!` warn 一次后返回 Ok（metrics 无 tracing 依赖且白名单不含其 Cargo.toml）；真实 IO 错误仍 Err。
+5. 测试：G-M1 分组 fixture（A/B 两实体）、G-L4 尾注释块 + replace/exclude 负例、P-L2 Cancelled 零失败不被标 first_pass=true、P-L4 目录路径 Err 传播。
+6. 验证：cargo fmt --check + 三 crate 聚焦测试 + `make check` 全绿；反向验证 G-M1/P-L2 新断言红→绿；提交含 "review-fix"。
+
+### 逐条处置记录
+
+- **G-M1（Go 分组类型声明丢实体）— 已修，选「parse_source 内遍历子节点逐个产出」**：Go `type_declaration` 移入 parse_source 的实体产出特殊分支——遍历全部 `type_spec`/`type_alias` named children，按 `type` 字段（struct_type→Struct、interface_type→Trait）逐个 `push_entity`；单声明（`type A struct{}`）走同一路径，行为与旧逻辑等价（旧路径也只认 named_child(0) 即第一个 type_spec）。`Step::Exit.pop_def` 由 bool 改 usize 计数，多实体时逐个出栈（def_stack/refs_stack 对齐）。entity_kind/entity_name 删除 Go type_declaration 分支（不再可达），entity_kind 移除未再使用的 `node` 参数。**为何选遍历产出而非取子节点集合**：refs 归属按「节点=一个定义体」建模，分组节点内多个 type_spec 各是独立定义体，遍历产出才能保持 refs/calls 归属正确。**测试证据**：新增 `parses_go_grouped_type_declarations`——单行分号分隔（`type ( A struct{}; B interface{} )`）与多行两形态均断言 A=Struct、B=Trait 恰 2 实体；type 别名到非 struct/interface（`A = int`）不产出。graph 38 → 40 passed。反向验证：断言改坏（B 不产出）→ 真红 1 failed → 还原 → 真绿。
+- **G-L4（go.mod `require (` 尾注释整块丢失）— 已修**：块起始检测由精确相等 `t == "require ("` 改为 `strip_prefix("require (")` 后 trim，尾部为空或以 `//` 开头即视为块首（gofmt 不产但合法的畸形形态）；尾随版本等非注释内容（如 `require ( v1` 无效语法）不会误判。**测试证据**：新增 `go_mod_block_with_trailing_comment_and_negative_blocks`——`require ( // 依赖块` 形态 3 个依赖全解析；**replace/exclude 负例**：`replace ( old => new )` 与 `exclude ( ... )` 段内路径（含 `old`/`new`/`skip` 子串）均不进 deps，deps.len()==3 精确断言。graph 40 passed 含此测试。
+- **P-L2（Cancelled 零失败误标 first_pass=true）— 已修，选「仅失败型覆写」**：抽 `backfill_scorecard_task_rate(dir, report)` 辅助函数——`failures.is_empty()` 直接 return（不覆写，保持 metrics hook 已填的值：Completed 的 true/0、非 Completed 的保守 false/0）；非空时覆写 `first_pass=false` + `retry_rounds=条数`（与旧行为一致）。**为何选「零失败不覆写」而非「outcome 白名单」**：outcome 是自由字符串（paused/unverified/failed/cancelled），白名单易漏且未来新增 outcome 需同步；failures 非空即「确有失败详情」是回填唯一合法依据，且 Paused 失败路径（既有 E2E 测试覆盖）不受影响。**测试证据**：新增 `diagnose_backfill_keeps_first_pass_for_zero_failure_reports`——Cancelled 零失败报告回填后评分卡 first_pass 保持 false、retry_rounds 0；失败型报告（failures 1 条）仍覆写 false/1。既有 `scorecard_task_rate_failed_run_backfilled_from_diagnose`（Paused 失败回填）未改、仍绿。runtime 51 → 52 passed。反向验证：断言改坏（期望被标 true）→ 真红 1 failed → 还原 → 真绿。
+- **P-L4（损坏 scorecard 静默无 warn）— 已修**：`update_scorecard_task_rate` parse 失败分支由静默 `return Ok(())` 改为 `eprintln!` warn 一次后返回 Ok——与 NotFound 静默**区分**（NotFound 属 metrics 未启用/并发清理正常路径，无 warn）；真实 IO 错误（非 NotFound）仍返回 Err，调用方 warn。**为何用 eprintln! 而非 tracing**：deepseeknova-metrics 无 tracing 依赖（Cargo.toml 仅 serde/serde_json/provider/core），白名单不含其 Cargo.toml，且库函数无 Logger 注入点；工作区已有 eprintln! warn 先例（cli main.rs:25、runtime [diag]）。**测试证据**：新增 `update_scorecard_task_rate_propagates_real_io_errors`——路径为目录（真实 IO 错误非 NotFound）必须 Err 传播；既有「损坏文件 → 静默 Ok」测试不改（语义保持，仅内部多一次 warn），metrics 21 passed 全绿。
+- **测试数字变化**：graph 38 → 40（+2：G-M1 分组、G-L4 尾注释+负例）；metrics 20 → 21（+1：P-L4 IO 错误传播）；runtime 51 → 52（+1：P-L2 零失败不覆写）。`cargo fmt --check` 零 diff；`make check` 全绿（workspace 0 failed）。
+- **反向验证**：G-M1 新断言改坏 → `parses_go_grouped_type_declarations` 真红（1 failed，parser.rs:635 panic）→ 还原 → 真绿（1 passed）；P-L2 新断言改坏 → `diagnose_backfill_keeps_first_pass_for_zero_failure_reports` 真红（1 failed，lib.rs:4135 panic）→ 还原 → 真绿（1 passed）。

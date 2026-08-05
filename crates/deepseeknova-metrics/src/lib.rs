@@ -374,10 +374,11 @@ pub fn write_scorecard(card: &Scorecard, dir: &Path) -> std::io::Result<std::pat
 }
 
 /// 读取 `dir/<session_id>.scorecard.json`，按 task_rate 覆写（[`Scorecard::fill_task_rate`]）
-/// 后重写同路径。评分卡不存在或内容不可解析时静默返回 `Ok(())`（与
-/// [`list_scorecards`] 跳过损坏文件的同口径：metrics 未启用或文件被并发清理
-/// 均属正常路径，不阻断调用方）。供 runtime 诊断回调在报告落盘后回填
-/// task_rate 使用（设计 §7.1 末条）。
+/// 后重写同路径。评分卡不存在时静默返回 `Ok(())`（metrics 未启用或文件被并发清理
+/// 属正常路径）；文件存在但内容不可解析时 **warn 一次后返回 `Ok(())`**（与
+/// [`list_scorecards`] 跳过损坏文件的同口径，P-L4：真实损坏不得无声吞掉，也不得
+/// 阻断调用方）；真实 IO 错误（非 NotFound）仍返回 `Err` 不吞。供 runtime 诊断
+/// 回调在报告落盘后回填 task_rate 使用（设计 §7.1 末条）。
 pub fn update_scorecard_task_rate(
     dir: &Path,
     session_id: &str,
@@ -391,6 +392,10 @@ pub fn update_scorecard_task_rate(
         Err(e) => return Err(e),
     };
     let Ok(mut card) = serde_json::from_str::<Scorecard>(&text) else {
+        eprintln!(
+            "warning: scorecard {} parse failed, task_rate backfill skipped",
+            path.display()
+        );
         return Ok(());
     };
     card.fill_task_rate(first_pass, retry_rounds);
@@ -992,8 +997,20 @@ mod tests {
         assert_eq!(back.retry_rounds, 0);
         // 不存在的评分卡 → 静默 Ok（metrics 未启用路径）。
         update_scorecard_task_rate(dir.path(), "missing", true, 0).unwrap();
-        // 损坏文件 → 静默 Ok（与 list_scorecards 同口径）。
+        // 损坏文件 → 静默 Ok（与 list_scorecards 同口径；P-L4 起内部 warn）。
         std::fs::write(dir.path().join("bad.scorecard.json"), "{not json").unwrap();
         update_scorecard_task_rate(dir.path(), "bad", true, 0).unwrap();
+    }
+
+    #[test]
+    fn update_scorecard_task_rate_propagates_real_io_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        // P-L4：真实 IO 错误（路径是目录，非 NotFound）必须传播 Err，不吞。
+        std::fs::create_dir_all(dir.path().join("isdir.scorecard.json")).unwrap();
+        let err = update_scorecard_task_rate(dir.path(), "isdir", true, 0);
+        assert!(
+            err.is_err(),
+            "真实 IO 错误必须 Err 传播，不得与损坏文件同口径静默 Ok"
+        );
     }
 }
