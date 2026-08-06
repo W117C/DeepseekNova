@@ -117,6 +117,10 @@ pub struct AssistantTurn {
     pub segments: Vec<Segment>,
     pub pending_reasoning: String,
     pub pending_text: String,
+    /// 本回合是否收到过正文 delta。`Done` 事件的 `output.text` 是流式
+    /// 全文的汇总（provider 会重复），已流式过正文就不再追加，否则消息
+    /// 内容翻倍（曾导致 TUI 块高膨胀、后续消息被挤出视口）。
+    pub text_delta_seen: bool,
 }
 
 impl AssistantTurn {

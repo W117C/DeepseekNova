@@ -31,8 +31,20 @@ A Rust-from-scratch AI agent framework — not a wrapper. Built specifically for
 ## 🎯 Key Features
 
 - **Deep reasoning + tool calling** — streaming reasoning output, 4-level reasoning effort, 17 built-in tools
+- **Daily experience** — `web_search` (DuckDuckGo / Tavily / Bing / SearXNG),
+  `lsp_diagnostics` (auto-injected into tool results after write/edit/move),
+  auto model+thinking routing (`[agent] auto_route = true`), and durable
+  serve runs (`GET /v1/runs` / `POST /v1/runs/{id}/resume`)
 - **Prefix-cache architecture** — cross-turn prompt prefix hits, real-time token tracking, budget control
-- **Sandboxed execution** — macOS Seatbelt / Linux bubblewrap isolation, 12 permission rules
+- **Sandboxed execution** — macOS Seatbelt / Linux bubblewrap isolation;
+  allow/ask/deny rule gating (`deny > ask > allow > default mode`) with session
+  caching and optional rate limiting; a four-layer read-only shell command
+  classifier (arbitrary-args / zero-args / exact form / subcommand flag
+  allowlists) skips prompts, while ordinary shell composition (command
+  substitution, chaining, redirection) is treated as non-read-only and flows
+  through the permission gate (ask/allow rules can approve it); tool-level
+  injection surfaces (`git -c`/`--config-env`, format-string injection,
+  UNC/URL/SMB path forms) are hard-denied and cannot be overridden by rules
 - **Multi-agent delegation** — delegate-based sub-agents (explorer / coder / tester / reviewer) with constrained tool sets, semaphore concurrency, and capped result summaries; isolated context, no recursion. Historical GOAP/Swarm/Federation experiments were removed in B0 (see DESIGN.md).
 - **MCP protocol** — stdio + HTTP dual transport, auto-discovery
 - **Project knowledge** — Wiki generation, knowledge cards, 4-layer memory distillation, file checkpoints
@@ -51,7 +63,7 @@ Runtime     Agent Loop · Coordinator · Plan-Mode Runner
 Core        Runner Trait · Tool Trait · Registry · WireEvent
                │                    │
 Provider    DeepSeek V4 Pro/Flash   Tools: File · Glob · Grep · Shell
-            Streaming + Tools       WebFetch · Task · MCP Bridge · 21
+            Streaming + Tools       WebFetch · Task · MCP Bridge · 17
 ```
 
 ## 📦 Crates
@@ -61,7 +73,7 @@ Provider    DeepSeek V4 Pro/Flash   Tools: File · Glob · Grep · Shell
 | `deepseeknova-core` | Core types: Runner / Tool trait, Registry, WireEvent |
 | `deepseeknova-agent` | Agent loop, Coordinator, Plan-Mode Runner |
 | `deepseeknova-provider` | DeepSeek / OpenAI-compatible / Anthropic streaming |
-| `deepseeknova-tools` | 17 built-in tools |
+| `deepseeknova-tools` | 17 built-in tools + web search + LSP diagnostics + Context7 docs |
 | `deepseeknova-mcp` | MCP protocol client (stdio / HTTP) |
 | `deepseeknova-metrics` | Session-level effectiveness metrics + JSON reports |
 | `deepseeknova-graph` | Code graph engine (tree-sitter + SQLite FTS5 + PageRank + repo map) |
@@ -109,6 +121,8 @@ model = "deepseek-chat"
 ```
 
 > ⚠️ **Windows sandbox**: Shell tool sandboxing is only available on macOS (Seatbelt) and Linux (bubblewrap). Windows uses `NoOpSandbox` (no isolation). Configure `allowed_commands` and path policies carefully on Windows.
+> The CLI prints an explicit runtime warning on Windows because no OS-level
+> sandbox backend is available there.
 
 ## 📊 CI
 
@@ -129,7 +143,7 @@ model = "deepseek-chat"
 | Backend | Rust + SQLite FTS5 + tokio + axum |
 | Frontend | TUI (ratatui) · CLI (clap) · HTTP API (axum + SSE) |
 | Tracing | OpenTelemetry (OTLP) |
-| Tests | 1003 tests · cargo-llvm-cov · 3-platform CI |
+| Tests | 1108 tests · cargo-llvm-cov · 3-platform CI |
 
 ## 📄 License
 

@@ -67,19 +67,19 @@ When the context approaches token limits, older messages are summarized to make 
 
 ```bash
 git clone https://github.com/W117C/DeepseekNova.git
-cd deepseeknova-rs
+cd deepseeknova
 cargo build --release
 ```
 
-The binary is at `target/release/deepseeknova`.
+The binary is at `target/release/deepseeknova-cli`.
 
 ### Initialize a Project
 
 ```bash
-deepseeknova init
+deepseeknova-cli init
 ```
 
-`deepseeknova init` 会在当前目录创建：
+`deepseeknova-cli init` 会在当前目录创建：
 ```
 ├── DEEPSEEKNOVA.md      # 项目上下文模板
 ├── deepseeknova.toml    # 项目配置（Config::load 项目层）
@@ -91,7 +91,7 @@ deepseeknova init
 ### Setup Wizard
 
 ```bash
-deepseeknova setup
+deepseeknova-cli setup
 ```
 
 Walks through provider selection, API key configuration, and tool preferences.
@@ -110,13 +110,24 @@ Configuration is merged from multiple sources (last wins):
 ```toml
 # deepseeknova.toml（项目根）或 ~/.deepseeknova/config.toml（用户层）
 
-[default_provider]
-kind = "openai"                    # openai | anthropic | ollama
+[[providers]]                     # 注意：是 providers 列表，不是 [default_provider]
+name = "openai"                   # 唯一名，被 [[models]] 的 provider 字段引用
+kind = "openai"                   # openai | anthropic | ollama | deepseek-anthropic
 base_url = "https://api.openai.com/v1"
 model = "gpt-4o"
 api_key_env = "OPENAI_API_KEY"
-max_tokens = 4096
-temperature = 0.7
+timeout_secs = 120
+max_retries = 3
+reasoning_effort = "high"         # disabled | low | medium | high | max（DeepSeek 系）
+context_window = 128000
+
+# 命名模型与成本分账（可选）：被 model_pointers 与 /model 引用
+[[models]]
+name = "gpt-4o"
+provider = "openai"
+context_window = 128000
+input_price_per_mtok = 2.5
+output_price_per_mtok = 10.0
 
 [agent]
 max_steps = 25                     # Max tool-calling iterations per turn
@@ -124,19 +135,53 @@ system_prompt = "You are a helpful software engineer."
 compaction_threshold = 32000       # Tokens before memory compaction
 concurrent_tools = true            # 同批读类工具并发、写类保序串行（P1）
 # step_effort_routing = true       # 每步在 quick（thinking off）/ high 间切换（P2）
+# auto_route = true                # Auto 模型+思考路由：每轮先由廉价模型决定
+#                                   # flash/pro 与 thinking off/high/max（默认关）
+# auto_router_model = "deepseek-v4-flash"   # 路由决策用模型（默认 quick 指针）
+# auto_router_max_chars = 6000     # 路由调用送入的最新用户消息上限字符数
 # observe_compress = true          # 超阈值工具输出由廉价模型摘要后入历史（P2）
 # observe_compress_threshold_chars = 12000
 # observe_compress_max_chars = 4000
 # tool_cache = true                # 会话内只读工具结果缓存，写后失效（P2）
 
-[tools]
-sandbox = true                     # Enable sandbox for shell commands
-allowed_dirs = ["src/", "tests/"]  # Restrict file access
-read_only = false                  # Allow write/edit tools
+[tools]                            # 按工具名覆盖（name/disabled/timeout_secs/max_file_size）
+[[tools.overrides]]
+name = "bash"
+timeout_secs = 120
+# [[tools.overrides]]
+# name = "read_file"
+# max_file_size = 1048576
+
+# [tools.web_search]               # web 搜索工具（web_search）
+# provider = "ddg"                 # ddg（默认，免 key）| tavily | bing | searxng
+# base_url = "http://localhost:8888"   # searxng 必填；其它 provider 留空用官方端点
+# api_key_env = "TAVILY_API_KEY"   # tavily/bing 需要
+# max_results = 5
+# timeout_secs = 30
+
+# [tools.lsp]                      # LSP 编辑后诊断（lsp_diagnostics）
+# enabled = true                   # 写文件后自动诊断（默认开）
+# timeout_secs = 8                 # 等待诊断的超时
+# max_file_bytes = 1048576
+# [tools.lsp.servers]              # 语言 → 服务器覆盖
+# rust = "rust-analyzer"
+
+[sandbox]                          # shell 命令 OS 级沙箱（档位在运行时按平台选择）
+enabled = false                    # 默认关闭；开启后后端缺失（macOS sandbox-exec /
+                                   # Linux bwrap）时 shell 执行 fail-closed 拒绝
+writable_paths = []                # 额外可写根（工作区默认可写）
+allow_network = false              # 默认禁网（ReadOnly/WorkspaceWrite 档强制）
 
 [permissions]
-default_policy = "ask"             # ask | allow | deny
-auto_allow_tools = ["read_file", "grep", "glob", "ls"]
+enabled = true                     # false（默认）时工具不经过 allow/ask/deny 门控
+default_mode = "ask"               # 无规则命中时写工具的默认行为：ask | allow | deny
+# rate_limit_per_minute = 30       # 可选：滚动 60s 窗口内的门控调用上限
+
+# 规则按顺序匹配，deny > ask > allow > default_mode（subject 可省略，见下文
+# "Permission Policies" 节完整示例）
+[[permissions.rules]]
+tool = "bash"
+mode = "ask"
 
 mcp_servers = [
   { name = "filesystem", command = "npx", args = ["-y", "@modelcontextprotocol/server-filesystem", "."] }
@@ -318,8 +363,14 @@ drift-detection = "soft"             # 工具族连续失败 ≥3 → DriftFindi
   与 `composite` 维（五维加权均值：governance 0.30 / verification 0.25 /
   protocol 0.20 / reflection 0.15 / review 0.10）；旧评分卡文件缺字段时反序列化
   默认 1.0（不重算 composite）。
+- task_rate 指标：评分卡扩展字段 `first_pass: bool` / `retry_rounds: u32`
+  （serde default，旧文件兼容）——成功会话按 `first_pass=true` 填写；失败/
+  Paused 会话由诊断回调按 `DiagnoseReport.failures` 推导覆写（无失败=首过；
+  有失败=重试轮次=failures 条数）。
 - 新落盘路径：技能使用记录 `.deepseeknova/skills/fitness.json`（容量 500 LRU，
-  deprecated 标记的技能加载时过滤）；失败模式库
+  deprecated 标记的技能加载时过滤；会话注入的技能记 `use`+`result`——激活
+  计数与会话成败，注入技能名由 recall 注入侧收集回填，无注入时优雅跳过）；
+  失败模式库
   `.deepseeknova/security/failure-patterns.json`（容量 200 LRU、脱敏 + 0600，
   每次会话 `suggest(3)` 取 top-3 注入下会话首轮 system prompt，无模式时零注入）。
 
@@ -357,13 +408,25 @@ drift-detection = "soft"             # 工具族连续失败 ≥3 → DriftFindi
 
 | Tool | Description | Read-only |
 |---|---|---|
-| `shell` | Execute a shell command | No |
+| `bash` | Execute a shell command | No |
 
 ### Web
 
 | Tool | Description | Read-only |
 |---|---|---|
 | `web_fetch` | Fetch and parse a URL | Yes |
+| `web_search` | Search the web (DuckDuckGo / Tavily / Bing / SearXNG) | Yes |
+
+### Diagnostics
+
+| Tool | Description | Read-only |
+|---|---|---|
+| `lsp_diagnostics` | Run the language server on a file and return diagnostics | Yes |
+
+`lsp_diagnostics` 支持 `rust-analyzer` / `pyright-langserver` / `gopls` /
+`typescript-language-server` / `clangd`，语言按扩展名自动识别（可用
+`language` 参数覆盖）。write/edit/move 执行成功后 Agent 会自动调用并把结果
+注入工具输出；服务器未安装时静默跳过（不会报错打断）。
 
 ### Library Docs
 
@@ -395,14 +458,37 @@ drift-detection = "soft"             # 工具族连续失败 ≥3 → DriftFindi
 ```toml
 [memory]
 auto_learn = true                  # 回合结束自动沉淀（默认 true）
+embedder = "none"                  # 嵌入后端：none | remote（默认 none）
+embed_model = ""                   # embedder=remote 时必填（如 text-embedding-3-small）
+embed_base_url = "https://api.openai.com/v1"  # 远程嵌入服务基础 URL
+embed_timeout_secs = 30            # 嵌入请求超时（秒）
 llm_distill = false                # 默认 false：启用后用 LLM 把任务观察蒸馏成
                                    # 可复用 skill/教训（Skill 类目，去重 + 脱敏）
 llm_distill_model = "deepseek-v4-flash"  # 可选；未配置回落 main provider
 llm_distill_max_chars = 3000       # 蒸馏输入的任务描述上限（字符）
+decay_rate = 0.1                   # memory cleanup 时非 permanent 记忆的衰减率
+archive_ttl_days = 30              # archived 记忆距最后召回超过该天数即被清理删除
+rank_lifecycle_weight = 0.3        # 检索排序生命周期融合权重；0 = 纯 bm25
 ```
 
 蒸馏契约：模型返回 `{"kind":"skill"|"lesson","title":"...","body":"...","tags":[...]}`；
 调用失败或响应不可解析时静默跳过（启发式沉淀仍照常兜底），不阻断运行。
+
+**记忆生命周期闭环**：每条记忆经历 candidate → verified → permanent（多次召回且
+重要）或 → archived（衰减/久不用）的晋级/归档；archived 不参与召回。`memory cleanup`
+显式触发衰减（非 permanent 记忆 importance 按 `decay_rate` 递减，<0.1 归档；
+permanent 豁免）并删除超期 archived（距最后召回 > `archive_ttl_days`）；`memory stats`
+显示 stage 分布与 archived 计数。检索排序在 bm25 之上融合生命周期因子（importance /
+stage / recency，权重 `rank_lifecycle_weight`，=0 时与纯 bm25 等价）。记忆库带
+`meta.schema_version`（当前 "1"），版本不符走迁移表不炸，未来版本库不回写版本号。
+
+**语义检索（可选）**：`embedder = "remote"` 启用 OpenAI 兼容嵌入（协议对齐
+`/v1/embeddings`；API key 从环境变量 `DEEPSEEKNOVA_EMBED_API_KEY` 读取，回落
+`OPENAI_API_KEY`，不落配置/日志）。启用后写入记忆自动生成向量，召回按
+`0.5*bm25 + 0.5*余弦 - rank_lifecycle_weight*生命周期惩罚` 融合排序，能找回换说法
+但同义的记忆；缺 key、网络错或解析错一律 fail-open（warn 日志 + 回落纯 FTS）。
+旧记忆用 `deepseeknova-cli memory embed-backfill` 显式回填（跳过 archived）；
+`memory stats` 输出 `embedded=N/total=M` 显示覆盖率。
 
 ### Task Management
 
@@ -418,7 +504,7 @@ llm_distill_max_chars = 3000       # 蒸馏输入的任务描述上限（字符�
 
 ## Security Scan (CLI)
 
-`deepseeknova scan`（deepsec 式，P1）：内置正则 matcher 零 AI 定位候选点
+`deepseeknova-cli scan`（deepsec 式，P1）：内置正则 matcher 零 AI 定位候选点
 （硬编码密钥、SQL 拼接、命令注入面、Rust panic 面），再对每个 finding 起
 一次性 agent（`task` 指针）调查判真伪，token 计入 Task 角色；命中结果按
 severity 分组输出，`--no-ai` 跳过 AI 调查只出 matcher 结果。
@@ -433,9 +519,33 @@ severity 分组输出，`--no-ai` 跳过 AI 调查只出 matcher 结果。
 示例：
 
 ```bash
-deepseeknova scan --format json --no-ai
-deepseeknova scan --path crates/deepseeknova-cli --severity-min high
+deepseeknova-cli scan --format json --no-ai
+deepseeknova-cli scan --path crates/deepseeknova-cli --severity-min high
 ```
+
+## Eval (CLI)
+
+`deepseeknova-cli eval` 用真实主 provider 逐条跑一个最小评估集，检查输出是否
+包含要求的关键内容，适合在迭代后快速回归「还做得到」的能力：
+
+```bash
+deepseeknova-cli eval evals.jsonl            # 默认输出 Markdown
+deepseeknova-cli eval --path evals.jsonl --format json
+```
+
+每条用例是一行 JSON（支持 `#` 注释与空行）：
+
+```json
+{"prompt": "用一句话解释 Rust 的 Ownership", "must_contain": ["所有权", "move"]}
+```
+
+| 参数 | 说明 |
+|---|---|
+| `--path <file>` | JSONL 文件路径，默认 `evals.jsonl` |
+| `--format md\|json` | 报告格式，默认 `md` |
+
+结果按用例逐一列出 pass/fail 与缺失子串；JSON 报告包含总览与逐条明细，方便
+后续接入 CI 或脚本判定。
 
 ### 检查点（A1）
 
@@ -443,10 +553,10 @@ deepseeknova scan --path crates/deepseeknova-cli --severity-min high
 `[checkpoint] path`（默认 `.deepseeknova/checkpoints.json`）：
 
 ```bash
-deepseeknova checkpoint list             # 查看快照与文件状态（unchanged/modified）
-deepseeknova checkpoint rollback         # 回滚最近一个快照
-deepseeknova checkpoint rollback --all   # 回滚全部
-deepseeknova checkpoint clear            # 丢弃快照（不恢复文件）
+deepseeknova-cli checkpoint list             # 查看快照与文件状态（unchanged/modified）
+deepseeknova-cli checkpoint rollback         # 回滚最近一个快照
+deepseeknova-cli checkpoint rollback --all   # 回滚全部
+deepseeknova-cli checkpoint clear            # 丢弃快照（不恢复文件）
 ```
 
 `[checkpoint] enabled = false` 可关闭。
@@ -484,8 +594,8 @@ enabled = true    # 默认 true；false 时不采集、不落盘
 ### 项目后置产出（A2）
 
 ```bash
-deepseeknova artifacts wiki --project <name> --summary "<描述>"  # 生成 wiki/ 目录
-deepseeknova artifacts cards --title "..." --insight "..." --tags a --tags b  # 生成 cards/ 目录
+deepseeknova-cli artifacts wiki --project <name> --summary "<描述>"  # 生成 wiki/ 目录
+deepseeknova-cli artifacts cards --title "..." --insight "..." --tags a --tags b  # 生成 cards/ 目录
 ```
 
 ### 代码图个性化（A3）
@@ -511,13 +621,19 @@ seeds（去停用词、去重、上限 8），让地图优先展示任务相关�
 - **References 边**：每个定义体引用的标识符按名称级解析到索引符号，回答
   「谁引用了 X」（`traverse_graph` 传 `edge_kinds=["references"]`）；同一对
   实体已有 Calls 边时不重复计，递归等 callee 不产生自引用。
-- **结构化依赖图**：Rust `use`、Python `import/from`、JS/TS `import/require`
-  按语言解析——本地符号按名匹配成 文件→符号 Imports 边，JS 相对路径解析成
-  文件→文件边，裸包名记入外部依赖。
+- **结构化依赖图**：Rust `use`、Python `import/from`、JS/TS `import/require`、
+  Go `import` 按语言解析——本地符号按名匹配成 文件→符号 Imports 边，JS 相对
+  路径解析成文件→文件边，裸包名记入外部依赖（Go 相对路径 import 同样解析成
+  文件→文件边）。
 - **清单依赖**：`Cargo.toml`（dependencies/dev-dependencies/build-dependencies）、
   `package.json`（dependencies/devDependencies/peerDependencies/optionalDependencies）、
-  `pyproject.toml`（[project] dependencies / [tool.poetry.dependencies]）在
-  refresh 时解析进外部依赖表；`deps_code` 按文件归属最近清单展示。
+  `pyproject.toml`（[project] dependencies / [tool.poetry.dependencies]）、
+  `go.mod`（require 段，含块式与单行）在 refresh 时解析进外部依赖表；
+  `deps_code` 按文件归属最近清单展示。
+
+代码图语言支持：Rust / Python / JavaScript / TypeScript / Go（tree-sitter 解析，
+Go 覆盖函数/方法/struct/interface 实体、调用、import 三态：stdlib/第三方路径记
+外部依赖、相对路径记本地文件）。
 
 Rust trait 多态由「Dispatch 边」桥接：`impl Trait for Type` 中的同名方法会连到
 trait 声明方法上，`dyn Trait` / 泛型调用点因此能列出全部候选实现（名称级匹配，
@@ -584,8 +700,24 @@ Check for:
 Start the server:
 
 ```bash
-deepseeknova serve --port 3000 --host 127.0.0.1
+deepseeknova-cli serve --addr 127.0.0.1:3000
 ```
+
+### ACP stdio 模式
+
+`deepseeknova-cli serve --acp` 将进程切换为 Agent Client Protocol v1 的
+stdio 服务器（换行分隔 JSON-RPC 2.0），供支持 ACP 的客户端直接拉起：
+
+```bash
+deepseeknova-cli serve --acp
+```
+
+支持的方法：`initialize`（协议版本协商 + 能力声明）、`session/new`（以请求的
+`cwd` 作为工作区边界重建 agent）、`session/prompt`（流式输出
+`agent_message_chunk` / `agent_thought_chunk` / 工具调用更新，结束返回
+`stopReason`）、`session/cancel` 与 `session/close`。每个会话持有独立的多轮
+历史，连续 prompt 会延续上下文。权限 `Ask` 因尚无 `session/request_permission`
+RPC 而 fail-closed 拒绝；`mcpServers` 暂不连接（启动时告警并忽略）。
 
 ### Endpoints
 
@@ -632,6 +764,25 @@ event: done
 data: {"text":"...","tool_calls":[...],"usage":{...}}
 ```
 
+#### `GET /v1/runs`
+
+列出持久化 run（新→旧）。服务启动时会把上次进程遗留的 `running` 任务标记为
+`interrupted`。
+
+```bash
+curl http://localhost:3000/v1/runs
+# [{"id":"<uuid>","prompt":"...","model":null,"created_at_ms":...,"status":"done",...}]
+```
+
+#### `POST /v1/runs/{id}/resume`
+
+用保存的 prompt/model 重新执行一次 run，SSE 事件格式与 `/v1/chat` 相同。
+`running` 状态返回 409；任务不存在返回 404。
+
+```bash
+curl -X POST http://localhost:3000/v1/runs/<id>/resume
+```
+
 #### `GET /v1/sessions/{id}/diagnose`
 
 读取失败会话的结构化诊断报告（`diagnose/<id>.json` 落盘文件）。
@@ -664,8 +815,8 @@ curl http://localhost:3000/v1/metrics/scorecards
 # {"scorecards":[...],"aggregate":{...}}
 ```
 
-以上三端点由 serve 的 metrics/diagnose 输出目录配置启用（与 `[metrics] dir`
-同一目录）；未配置目录时返回 404。
+以上三端点由 CLI `serve` 自动接入工作区 `.deepseeknova/metrics/`（与运行时
+落盘目录同一处），无需额外配置；`[metrics]` 段不提供 `dir` 字段。
 
 ### JavaScript Client Example
 
@@ -693,7 +844,7 @@ while (true) {
 Launch the interactive terminal UI:
 
 ```bash
-deepseeknova chat --tui
+deepseeknova-cli chat --tui
 ```
 
 ### Layout
@@ -714,14 +865,15 @@ deepseeknova chat --tui
 │ 第二行输入（Shift+Enter 换行）                      │ │                        │
 │                                                    │ │                        │
 └────────────────────────────────────────────────────┘ └────────────────────────┘
-Ctrl+U 清行 · Ctrl+W 删词 · Shift+Enter 换行 · /help · Esc 退出
+Ctrl+U 清行 · Ctrl+W 删词 · Shift+Enter 换行 · /help · Esc 取消/再按退出
 ```
 
 ### 消息树与折叠
 
 会话内容以**消息树**（Turn → Segment）实时增量构建：推理整段提交（不再被工具调用
-从中间拆断），工具调用含参数与截断结果。推理默认折叠显示摘要头（`[推理 ▸ 折叠 N 字符]`），
-工具调用默认展开、成功结果截断、失败醒目展开。
+从中间拆断），工具调用含参数与截断结果。推理与工具调用默认折叠显示摘要头
+（`[推理 ▸ …]` / `[工具 ▸ …]`），`Enter` 展开查看参数与结果；成功结果截断、
+失败醒目展开。
 
 - `Tab` 循环焦点：输入 → 消息导航 → 侧边栏
 - 消息导航焦点下：`j`/`k` 上移/下移选中消息，`Enter` 切换折叠，`y` 复制当前消息
@@ -730,7 +882,21 @@ Ctrl+U 清行 · Ctrl+W 删词 · Shift+Enter 换行 · /help · Esc 退出
 ### 命令面板
 
 `Ctrl+K` 打开命令面板：模糊搜索全部命令（名称/描述/关键词），有参数的命令进入
-内联参数输入后执行。与斜杠命令共用同一注册表。
+内联参数输入后执行。与斜杠命令共用同一注册表；输入 `/` 时也会弹出命令模糊候选
+（`↑`/`↓`/`j`/`k` 选择、`Enter` 执行、`Tab` 填入命令名），已输入参数
+（如 `/fold `）时切换为枚举候选。候选超过 8 条时列表跟随选中项滚动，
+高亮不会“滚出视野”。
+
+侧边栏“会话”面板列出磁盘保存的会话（最新优先，含“当前”标记）：
+`↑`/`↓`（或 `j`/`k`）选择，`Enter` 恢复选中会话；恢复内容进入对话面板
+（可滚动/折叠），不再是临时回显。`/new` 后列表自动刷新。
+
+首次启动（尚无对话）显示欢迎卡片：命令提示、快捷键说明与最近会话数；
+提交第一个问题后自动消失。等待 agent 回复时，对话面板的 agent 位置
+显示转圈动画（`⠋ 正在思考…`），首批内容到达后自动替换。
+
+工具调用需要权限审批时，顶部弹出确认浮层：`y` / `Enter` 允许，`n` / `Esc` 拒绝
+（拒绝结果回填 agent，行为与 deny 一致）。
 
 ### 配色与主题
 
@@ -746,8 +912,8 @@ Ctrl+U 清行 · Ctrl+W 删词 · Shift+Enter 换行 · /help · Esc 退出
 主题经环境变量切换（默认 `codex`）：
 
 ```bash
-DEEPSEEKNOVA_THEME=dark   deepseeknova chat --tui   # 深色终端强调版
-DEEPSEEKNOVA_THEME=light  deepseeknova chat --tui   # 浅色终端深前景版
+DEEPSEEKNOVA_THEME=dark   deepseeknova-cli chat --tui   # 深色终端强调版
+DEEPSEEKNOVA_THEME=light  deepseeknova-cli chat --tui   # 浅色终端深前景版
 ```
 
 未知值回退 `codex` 并在会话内提示。
@@ -764,6 +930,8 @@ DEEPSEEKNOVA_THEME=light  deepseeknova chat --tui   # 浅色终端深前景版
 - 多行编辑 + 可见光标（←/→/Home/End、Shift+Enter 换行、Ctrl+U/W）
 - markdown 行级着色（标题/列表/引用/代码围栏，仅影响显示）
 - `@` 触发文件补全（候选清单由 CLI 注入工作区文件；↑↓ 选择、Enter 插入、Esc 关闭）
+- 键位可经 `keybindings.json` 自定义（启动加载、改动热重载）；
+  `Ctrl+X Ctrl+E` 用 `$EDITOR` 编辑当前输入（无 `$EDITOR` 时回退 vim）
 
 ### 按键
 
@@ -772,8 +940,9 @@ DEEPSEEKNOVA_THEME=light  deepseeknova chat --tui   # 浅色终端深前景版
 | `Enter` | 提交输入 |
 | `Shift+Enter` / `Ctrl+J` | 输入内换行（多行输入） |
 | `Tab` | 焦点循环：输入 → 消息导航 → 侧边栏 |
-| `Esc` | 空闲时退出 TUI / 关闭模态面板 |
-| `Ctrl+C` | 取消当前运行 |
+| `Esc` | 生成中取消；空闲时首次提示“再按 Esc 退出”（3 秒内再按退出）/ 关闭模态面板 |
+| `Ctrl+C` | 生成中取消（空闲无操作） |
+| `Ctrl+X Ctrl+E` | 用 `$EDITOR` 外部编辑当前输入 |
 | `Ctrl+K` | 命令面板 |
 | `Ctrl+\` | 侧边栏开合 |
 | `↑` / `↓` | 输入历史（多行输入时移动光标行） |
@@ -782,9 +951,12 @@ DEEPSEEKNOVA_THEME=light  deepseeknova chat --tui   # 浅色终端深前景版
 | `Backspace` / `Delete` | 删除光标前/后字符 |
 | `Ctrl+U` / `Ctrl+W` | 清空输入 / 删前一词 |
 | `PageUp` / `PageDown` | 对话面板滚动回看 |
+| `鼠标滚轮` | 滚动对话历史（滚到最新后自动恢复跟随） |
 | `j` / `k` | 消息导航焦点：上下移动选中消息 |
 | `Enter`（消息焦点） | 切换当前消息折叠 |
 | `y`（消息焦点） | 复制当前消息（剪贴板不可用时降级回显） |
+| `↑`/`↓`（侧边栏会话面板） | 选择保存的会话 |
+| `Enter`（侧边栏会话面板） | 恢复选中会话 |
 
 ### 斜杠命令
 
@@ -794,7 +966,7 @@ DEEPSEEKNOVA_THEME=light  deepseeknova chat --tui   # 浅色终端深前景版
 | `/clear` | 清空对话面板 |
 | `/new` | 开始新会话（更换 session id） |
 | `/sessions` | 列出已保存会话 |
-| `/resume <id>` | 恢复指定会话并渲染历史 |
+| `/resume <id>` | 恢复指定会话并渲染进对话面板 |
 | `/model` | 显示模型与指针；`/model effort <level>`、`/model thinking`、`/model switch <name>`、`/model use <role> <name>` |
 | `/cost` | 按模型×角色输出 token 用量与美元估算 |
 | `/skills` | 列出 `.deepseeknova/skills` 与 `.agents/skills` 中的技能 |
@@ -848,7 +1020,7 @@ Plan mode separates thinking from doing:
 
 ```bash
 # Enable plan mode
-deepseeknova run --plan "Refactor the auth module to use JWT"
+deepseeknova-cli run "Refactor the auth module to use JWT"
 ```
 
 ### Execution Graph Nodes
@@ -868,7 +1040,7 @@ deepseeknova run --plan "Refactor the auth module to use JWT"
 For complex tasks, the agent can delegate to sub-agents with isolated contexts:
 
 ```bash
-deepseeknova run "Audit the entire codebase for security issues"
+deepseeknova-cli run "Audit the entire codebase for security issues"
 ```
 
 The coordinator agent spawns sub-agents for independent work (e.g., one per module) and
@@ -876,11 +1048,13 @@ synthesizes their results.
 
 ## Sandbox
 
-When `tools.sandbox = true`, shell commands run in an OS-level sandbox:
+When `[sandbox] enabled = true`, shell commands run in an OS-level sandbox
+(runtime 按平台选择三档中的 `WorkspaceWrite`：工作区默认可写，网络按
+`allow_network` 配置，默认禁网):
 
 - **macOS**: Seatbelt (Apple Sandbox)
 - **Linux**: bubblewrap (bwrap)
-- **Windows**: Restricted token (planned)
+- **Windows**: `NoOpSandbox`（无隔离，待实现 Job Object / AppContainer）
 
 Read-only tools (`read_file`, `grep`, `glob`, `ls`) are unaffected by sandbox settings.
 
@@ -939,25 +1113,24 @@ pinned_messages = 4            # Keep the N most recent messages unsummarized
 
 ```toml
 [permissions]
-default_policy = "ask"
+enabled = true                  # 总开关：false（默认）时工具不经过 allow/ask/deny 门控
+default_mode = "ask"            # 无规则命中时写工具的默认行为：ask | allow | deny
+# rate_limit_per_minute = 30    # 可选：滚动 60s 窗口内的门控调用上限
 
-# Auto-allow safe tools
-auto_allow_tools = ["read_file", "ls", "glob", "grep"]
-
-# Always require confirmation for destructive tools
+# 规则按顺序匹配，deny > ask > allow > default_mode 优先级（subject 可省略）
 [[permissions.rules]]
-tool = "shell"
-policy = "ask"
-require_confirmation = true
+tool = "bash"
+mode = "ask"
 
 [[permissions.rules]]
-tool = "write_file"
-policy = "ask"
-allowed_dirs = ["src/", "tests/", "docs/"]
+tool = "bash"
+subject = "rm *"
+mode = "deny"
 
-# Deny by path pattern
 [[permissions.rules]]
 tool = "read_file"
-policy = "deny"
-path_pattern = "*.env"
+subject = "*.env"
+mode = "deny"
 ```
+
+普通 shell 组合（链式/重定向/命令替换等）按非只读走权限审批/规则，可由 allow 规则覆盖；工具级注入面（`git -c`/`--config-env`、格式串注入、UNC/URL 路径形态等）直接硬拒，不可通过规则覆盖。

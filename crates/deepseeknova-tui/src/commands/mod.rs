@@ -24,6 +24,39 @@ pub enum ArgsSpec {
     Enum(&'static [&'static str]),
 }
 
+/// 斜杠命令行内候选状态（输入 `/` 开头时展示，纯 `/` 触发）。
+#[derive(Clone, Default, PartialEq)]
+pub struct CommandHintState {
+    /// 模糊匹配候选（复用 CommandRegistry::search）。
+    pub candidates: Vec<&'static Command>,
+    /// 当前选中项。
+    pub selected: usize,
+    /// 参数模式：已输入 `/<cmd> <前缀>` 时，展示该命令的枚举参数候选
+    /// （如 `/fold ` → all|none|reset），Enter 选中执行。
+    pub arg_options: Option<Vec<&'static str>>,
+}
+
+impl CommandHintState {
+    /// 浮层实际渲染的候选行数（参数模式按 arg_options，否则按命令数；上限 8）。
+    /// 渲染端与高度估算共用，保证与 message.rs 的 hint_area 高度一致。
+    pub fn visible_rows(&self) -> usize {
+        match &self.arg_options {
+            Some(opts) => opts.len().min(8),
+            None => self.candidates.len().min(8),
+        }
+    }
+}
+
+impl std::fmt::Debug for CommandHintState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let names: Vec<&str> = self.candidates.iter().map(|c| c.name).collect();
+        f.debug_struct("CommandHintState")
+            .field("candidates", &names)
+            .field("selected", &self.selected)
+            .field("arg_options", &self.arg_options)
+            .finish()
+    }
+}
 /// 命令执行结果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandOutcome {
@@ -85,6 +118,8 @@ pub struct TuiCaps {
     /// 主模型上下文窗口上限（tokens），由 CLI 从 config 注入；
     /// `None` 时状态行与 `/cost` 不显示占用率百分比。
     pub context_window: Option<u32>,
+    /// 权限审批请求接收端（CLI 注入 agent 的 responder 通道）。
+    pub approval_rx: Option<tokio::sync::mpsc::Receiver<crate::approval::ApprovalRequest>>,
 }
 
 /// 命令执行上下文：AppState（渲染/回显/折叠）+ 注入能力。
@@ -106,7 +141,16 @@ pub struct Command {
     /// Ctrl+K 模糊搜索的附加关键词。
     pub keywords: &'static [&'static str],
     pub args_spec: ArgsSpec,
+    /// 参数模式候选提示（`/cmd ` 已输入时展示）；None 表示无参数提示。
+    /// 与 `ArgsSpec` 搭配：Enum 给出各枚举项，FreeText 给出用法串。
+    pub args_hint: Option<&'static [&'static str]>,
     pub handler: &'static dyn CommandHandler,
+}
+
+impl PartialEq for Command {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+    }
 }
 
 /// 命令注册表：内建命令的静态集合。
@@ -165,4 +209,3 @@ mod tests {
 }
 
 pub mod builtin;
-pub mod palette;

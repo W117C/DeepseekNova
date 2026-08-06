@@ -928,6 +928,19 @@ impl Store {
         Ok(out)
     }
 
+    /// Contains 入边指向的直接父节点（类型/模块归属）。
+    pub fn parents(&self, id: &str) -> Result<Vec<Node>, GraphError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT n.id, n.kind, n.name, n.path, n.start_line, n.end_line,\n                    n.signature, n.doc, n.score\n             FROM edges e JOIN nodes n ON n.id = e.src\n             WHERE e.dst = ?1 AND e.kind = 'contains'\n             ORDER BY n.start_line",
+        )?;
+        let rows = stmt.query_map([id], node_from_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     /// 按相对路径取文件节点 id（依赖图文件→文件边用）。
     pub fn file_node(&self, path: &str) -> Result<Option<String>, GraphError> {
         let result = self.conn.query_row(
@@ -1116,7 +1129,10 @@ fn collect_files(
 /// 清单文件名（外部依赖来源）。
 fn is_manifest(path: &str) -> bool {
     let name = path.rsplit('/').next().unwrap_or(path);
-    matches!(name, "Cargo.toml" | "package.json" | "pyproject.toml")
+    matches!(
+        name,
+        "Cargo.toml" | "package.json" | "pyproject.toml" | "go.mod"
+    )
 }
 
 /// 解析清单文件的外部依赖名（轻量行级/serde_json，不引入新依赖）。
@@ -1126,8 +1142,48 @@ fn parse_manifest_deps(path: &str, src: &str) -> Vec<String> {
         "Cargo.toml" => parse_cargo_deps(src),
         "package.json" => parse_package_json_deps(src),
         "pyproject.toml" => parse_pyproject_deps(src),
+        "go.mod" => parse_go_mod_deps(src),
         _ => Vec::new(),
     }
+}
+
+/// go.mod：require 段的 module path（支持块式与单行 require）。
+fn parse_go_mod_deps(src: &str) -> Vec<String> {
+    let mut deps = Vec::new();
+    let mut in_require_block = false;
+    for line in src.lines() {
+        let t = line.trim();
+        // 块起始：`require (` 或其行尾注释形态（gofmt 不产但合法，G-L4），
+        // trim 后为空或以 `//` 开头即视为块首。
+        if let Some(tail) = t.strip_prefix("require (") {
+            let tail = tail.trim();
+            if tail.is_empty() || tail.starts_with("//") {
+                in_require_block = true;
+                continue;
+            }
+        }
+        if in_require_block {
+            if t == ")" {
+                in_require_block = false;
+                continue;
+            }
+            if let Some(path) = t.split_whitespace().next() {
+                if !path.is_empty() && !path.starts_with("//") {
+                    deps.push(path.to_string());
+                }
+            }
+            continue;
+        }
+        // 单行 require：require module version
+        if let Some(rest) = t.strip_prefix("require ") {
+            if let Some(path) = rest.split_whitespace().next() {
+                if !path.is_empty() && !path.starts_with('(') {
+                    deps.push(path.to_string());
+                }
+            }
+        }
+    }
+    deps
 }
 
 fn parse_cargo_deps(src: &str) -> Vec<String> {
@@ -1446,5 +1502,89 @@ mod tests {
             hits.iter().any(|n| n.name == "verify_timeout"),
             "中文短词 LIKE 回退应命中"
         );
+    }
+
+    #[test]
+    fn parses_go_mod_deps_block_and_single_line() {
+        let src = "module example.com/app\n\
+\ngo 1.21\n\
+\n\
+require (\n\
+\tgithub.com/foo/bar v1.2.3\n\
+\tgolang.org/x/sync v0.1.0\n\
+)\n\
+\n\
+require github.com/single/dep v1.0.0\n\
+\n\
+// 注释行不产生依赖\n";
+        let deps = parse_go_mod_deps(src);
+        assert!(deps.contains(&"github.com/foo/bar".to_string()), "{deps:?}");
+        assert!(deps.contains(&"golang.org/x/sync".to_string()), "{deps:?}");
+        assert!(
+            deps.contains(&"github.com/single/dep".to_string()),
+            "{deps:?}"
+        );
+        assert_eq!(deps.len(), 3, "注释/module/go 行不解析为依赖：{deps:?}");
+    }
+
+    #[test]
+    fn go_mod_block_with_trailing_comment_and_negative_blocks() {
+        // G-L4：`require ( // 尾注释` 形态（gofmt 不产但人可能写）必须识别为
+        // 块起始，块内依赖不静默丢失。
+        let src = "module example.com/app\n\n\
+require ( // 依赖块\n\
+\tgithub.com/foo/bar v1.2.3\n\
+\tgolang.org/x/sync v0.1.0\n\
+)\n\n\
+replace (\n\
+\texample.com/old => example.com/new v1.0.0\n\
+)\n\n\
+exclude (\n\
+\tgithub.com/skip/me v1.0.0\n\
+)\n\n\
+require github.com/single/dep v1.0.0\n";
+        let deps = parse_go_mod_deps(src);
+        assert!(deps.contains(&"github.com/foo/bar".to_string()), "{deps:?}");
+        assert!(deps.contains(&"golang.org/x/sync".to_string()), "{deps:?}");
+        assert!(
+            deps.contains(&"github.com/single/dep".to_string()),
+            "{deps:?}"
+        );
+        // 负例：replace/exclude 段不进入依赖。
+        assert!(
+            !deps
+                .iter()
+                .any(|d| { d.contains("old") || d.contains("new") || d.contains("skip") }),
+            "replace/exclude 段不得解析为依赖：{deps:?}"
+        );
+        assert_eq!(deps.len(), 3, "{deps:?}");
+    }
+
+    #[test]
+    fn go_project_indexes_external_deps_from_go_mod() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "go.mod",
+            "module example.com/app\n\ngo 1.21\n\nrequire (\n\tgithub.com/foo/bar v1.2.3\n)\n",
+        );
+        write(
+            root,
+            "main.go",
+            "package main\n\nimport \"fmt\"\n\nfunc main() { fmt.Println(\"hi\") }\n",
+        );
+        let mut store = Store::open(&root.join(".deepseeknova/graph.db")).unwrap();
+        store.refresh(root, 1_048_576).unwrap();
+
+        let deps = store.external_deps().unwrap();
+        assert!(
+            deps.iter()
+                .any(|(path, dep)| dep == "github.com/foo/bar" && path.ends_with("go.mod")),
+            "{deps:?}"
+        );
+        // main.go 的实体应被索引
+        let hits = store.find_by_name("main").unwrap();
+        assert!(!hits.is_empty());
     }
 }

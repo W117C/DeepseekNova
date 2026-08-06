@@ -173,16 +173,63 @@ impl GraphIndex {
         Ok(repomap::render_repo_map(&nodes, token_budget))
     }
 
-    /// entity 支持 `id`（含 `#`）或 `path:name` 或裸 `name`。
+    /// entity 支持 `id`（含 `#`）、`path:name`、裸 `name`，以及
+    /// `Type::method` 限定名（按 Contains 祖先链过滤同名候选）。
     fn resolve(&self, entity: &str) -> Result<String, GraphError> {
         if entity.contains('#') {
             return Ok(entity.to_string());
         }
-        let (name, path_hint) = match entity.split_once(':') {
-            Some((p, n)) => (n, Some(p)),
-            None => (entity, None),
+        let qualified = entity.contains("::");
+        let (name, path_hint) = if qualified {
+            (entity.rsplit("::").next().unwrap_or(entity), None)
+        } else {
+            match entity.split_once(':') {
+                Some((p, n)) => (n, Some(p)),
+                None => (entity, None),
+            }
         };
         let hits = self.store.find_by_name(name)?;
+        let hits = if qualified {
+            let qualifiers: Vec<String> = entity.split("::").map(|s| s.to_string()).collect();
+            let mut filtered = Vec::new();
+            for n in hits {
+                // (a) 祖先链匹配（Python 类 / Go / JS 类等有 Contains 边）。
+                let mut cur = n.id.clone();
+                let mut hops = 0;
+                let mut found = false;
+                while let Some(parent) = self.store.parents(&cur)?.into_iter().next() {
+                    hops += 1;
+                    if hops > 32 {
+                        break;
+                    }
+                    if qualifiers.contains(&parent.name) {
+                        found = true;
+                        break;
+                    }
+                    cur = parent.id;
+                }
+                // (b) 引用/调用/实现目标匹配：Rust 固有 impl 方法没有
+                // Contains 归属边，但方法体引用/调用/实现类型名（如
+                // `GraphIndex {}` → References GraphIndex）。
+                if !found {
+                    for kind in [EdgeKind::References, EdgeKind::Calls, EdgeKind::Implements] {
+                        let neighbors =
+                            self.store
+                                .neighbors(&n.id, &[kind], Direction::Callees, 1)?;
+                        if neighbors.iter().any(|nb| qualifiers.contains(&nb.name)) {
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+                if found {
+                    filtered.push(n);
+                }
+            }
+            filtered
+        } else {
+            hits
+        };
         let pick = match path_hint {
             Some(p) => hits.into_iter().find(|n| n.path.contains(p)),
             None => hits.into_iter().max_by(|a, b| {
@@ -242,6 +289,40 @@ mod tests {
 
         // 不存在实体报错
         assert!(idx.skeleton("no_such_symbol").is_err());
+    }
+
+    #[test]
+    fn resolve_qualified_type_method() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/lib.rs"),
+            "struct GraphIndex {}\nimpl GraphIndex {\n    fn open() -> GraphIndex { GraphIndex {} }\n}\n",
+        )
+        .unwrap();
+        let mut idx = GraphIndex::open(root, 1_048_576).unwrap();
+        idx.refresh().unwrap();
+
+        // 裸方法名可解析。
+        assert!(!idx.store.find_by_name("open").unwrap().is_empty());
+
+        // 限定名 GraphIndex::open 必须解析到该方法（此前直接 EntityNotFound）。
+        let sk = idx.skeleton("GraphIndex::open").unwrap();
+        assert!(
+            sk.contains("fn open") || sk.contains("open"),
+            "限定名应解析到 open 方法骨架: {sk}"
+        );
+        assert!(
+            idx.trace(
+                "GraphIndex::open",
+                &[EdgeKind::Calls],
+                Direction::Callers,
+                6
+            )
+            .is_ok(),
+            "限定名 trace 不得 EntityNotFound"
+        );
     }
 
     #[test]

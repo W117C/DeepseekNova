@@ -237,12 +237,26 @@ pub fn composite_index(dims: &ScoreDimensions) -> f32 {
     COMPOSITE_WEIGHTS.iter().map(|(dim, w)| dim(dims) * w).sum()
 }
 
-/// 单会话四维评分卡（独立于 [`SessionReport`] 落盘，不破坏既有格式）。
+/// 单会话评分卡（独立于 [`SessionReport`] 落盘，不破坏既有格式）。
+///
+/// 除四维（governance/verification/reflection/review）+ 协议维扩展
+/// （protocol/composite，见 [`ScoreDimensions`]）外，还含 task_rate 扩展字段
+/// （[`Scorecard::first_pass`] / [`Scorecard::retry_rounds`]，设计 §7.1 末条），
+/// 由 runtime 从本会话诊断报告（agent `DiagnoseReport`）的 `failures` 推导后经
+/// [`Scorecard::fill_task_rate`] 写入；serde default 保证旧评分卡文件兼容。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Scorecard {
     pub session_id: String,
     pub started_at_ms: u64,
     pub dimensions: ScoreDimensions,
+    /// task_rate 指标：本会话是否一次通过（DiagnoseReport.failures 为空）。
+    /// serde default false（旧评分卡缺字段按 false = 保守口径：无数据不宣称首过）。
+    #[serde(default)]
+    pub first_pass: bool,
+    /// task_rate 指标：失败重试轮次（DiagnoseReport.failures 条数，
+    /// 每条失败详情记一轮重试）。serde default 0。
+    #[serde(default)]
+    pub retry_rounds: u32,
 }
 
 impl Scorecard {
@@ -309,6 +323,10 @@ impl Scorecard {
             session_id: session_id.to_string(),
             started_at_ms: stats.started_at_ms,
             dimensions: dims,
+            // task_rate：compute 无诊断输入，按保守 false/0 初始化，由 runtime
+            // 经 fill_task_rate 覆写（设计 §7.1 末条）。
+            first_pass: false,
+            retry_rounds: 0,
         }
     }
 }
@@ -320,6 +338,16 @@ impl Scorecard {
     pub fn fill_protocol(&mut self, violations: u32, transitions: u32) {
         self.dimensions.protocol = protocol_dim(violations, transitions);
         self.dimensions.composite = composite_index(&self.dimensions);
+    }
+
+    /// 写入 task_rate 扩展字段（设计 §7.1 末条）：`first_pass` 与 `retry_rounds`
+    /// 由调用方（runtime）从本会话诊断报告（agent `DiagnoseReport`）的
+    /// `failures` 推导——failures 为空 → `first_pass=true`；有 failures →
+    /// `first_pass=false` 且 `retry_rounds=failures` 条数。字段 serde default，
+    /// 旧评分卡文件兼容。
+    pub fn fill_task_rate(&mut self, first_pass: bool, retry_rounds: u32) {
+        self.first_pass = first_pass;
+        self.retry_rounds = retry_rounds;
     }
 }
 
@@ -343,6 +371,35 @@ pub fn write_scorecard(card: &Scorecard, dir: &Path) -> std::io::Result<std::pat
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     std::fs::write(&path, bytes)?;
     Ok(path)
+}
+
+/// 读取 `dir/<session_id>.scorecard.json`，按 task_rate 覆写（[`Scorecard::fill_task_rate`]）
+/// 后重写同路径。评分卡不存在时静默返回 `Ok(())`（metrics 未启用或文件被并发清理
+/// 属正常路径）；文件存在但内容不可解析时 **warn 一次后返回 `Ok(())`**（与
+/// [`list_scorecards`] 跳过损坏文件的同口径，P-L4：真实损坏不得无声吞掉，也不得
+/// 阻断调用方）；真实 IO 错误（非 NotFound）仍返回 `Err` 不吞。供 runtime 诊断
+/// 回调在报告落盘后回填 task_rate 使用（设计 §7.1 末条）。
+pub fn update_scorecard_task_rate(
+    dir: &Path,
+    session_id: &str,
+    first_pass: bool,
+    retry_rounds: u32,
+) -> std::io::Result<()> {
+    let path = dir.join(format!("{session_id}.scorecard.json"));
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let Ok(mut card) = serde_json::from_str::<Scorecard>(&text) else {
+        eprintln!(
+            "warning: scorecard {} parse failed, task_rate backfill skipped",
+            path.display()
+        );
+        return Ok(());
+    };
+    card.fill_task_rate(first_pass, retry_rounds);
+    write_scorecard(&card, dir).map(|_| ())
 }
 
 /// 扫描目录下全部 `*.scorecard.json` 并解析；解析失败或非评分卡文件跳过。
@@ -655,6 +712,8 @@ mod tests {
                 protocol: 1.0,
                 composite: 1.0,
             },
+            first_pass: true,
+            retry_rounds: 0,
         };
         write_scorecard(&mk("a", 0.5), dir.path()).unwrap();
         write_scorecard(&mk("b", 1.0), dir.path()).unwrap();
@@ -675,6 +734,8 @@ mod tests {
             session_id: id.to_string(),
             started_at_ms: 1,
             dimensions: dims,
+            first_pass: true,
+            retry_rounds: 0,
         };
         let cards = vec![
             mk(
@@ -852,5 +913,104 @@ mod tests {
         let agg = aggregate_scorecards(&[computed.clone(), legacy.clone()]);
         assert!((agg.avg.protocol - 1.0).abs() < 1e-6);
         assert!((agg.avg.composite - 0.925).abs() < 1e-6);
+    }
+
+    #[test]
+    fn task_rate_roundtrip_and_compute_defaults() {
+        // compute 无诊断输入 → first_pass=false / retry_rounds=0（保守口径）。
+        let stats = SessionStats {
+            tool_calls: 2,
+            ..Default::default()
+        };
+        let card = Scorecard::compute("t1", &stats, &[], 0, 0, 0);
+        assert!(!card.first_pass);
+        assert_eq!(card.retry_rounds, 0);
+        // fill_task_rate：无失败 → first_pass=true。
+        let mut card = card;
+        card.fill_task_rate(true, 0);
+        assert!(card.first_pass);
+        assert_eq!(card.retry_rounds, 0);
+        // 有失败 → first_pass=false + retry_rounds=失败条数。
+        card.fill_task_rate(false, 3);
+        assert!(!card.first_pass);
+        assert_eq!(card.retry_rounds, 3);
+        // JSON 往返保留 task_rate 字段。
+        let json = serde_json::to_string(&card).unwrap();
+        assert!(json.contains("\"first_pass\":false"));
+        assert!(json.contains("\"retry_rounds\":3"));
+        let back: Scorecard = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, card);
+    }
+
+    #[test]
+    fn old_scorecard_json_without_task_rate_fields_deserializes() {
+        // 旧评分卡 JSON（无 first_pass/retry_rounds）→ 反序列化兼容，缺省
+        // false/0（保守口径：无数据不宣称首过），与 compute 初始化一致。
+        let old = r#"{
+            "session_id": "legacy-task-rate",
+            "started_at_ms": 1,
+            "dimensions": {
+                "governance": 0.9,
+                "verification": 0.8,
+                "reflection": 0.5,
+                "review": 1.0,
+                "protocol": 1.0,
+                "composite": 1.0
+            }
+        }"#;
+        let card: Scorecard = serde_json::from_str(old).unwrap();
+        assert!(!card.first_pass);
+        assert_eq!(card.retry_rounds, 0);
+        assert_eq!(card.dimensions.governance, 0.9);
+    }
+
+    #[test]
+    fn update_scorecard_task_rate_rewrites_matching_card() {
+        let dir = tempfile::tempdir().unwrap();
+        let stats = SessionStats {
+            tool_calls: 2,
+            ..Default::default()
+        };
+        let card = Scorecard::compute("tr-1", &stats, &[], 0, 0, 0);
+        write_scorecard(&card, dir.path()).unwrap();
+        // 覆写后重读：first_pass/retry_rounds 更新，其余字段保持。
+        update_scorecard_task_rate(dir.path(), "tr-1", false, 3).unwrap();
+        let back: Scorecard = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("tr-1.scorecard.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(!back.first_pass);
+        assert_eq!(back.retry_rounds, 3);
+        assert_eq!(back.dimensions, card.dimensions);
+        // 缺字段的旧卡也可被覆写（serde default 兼容）。
+        std::fs::write(
+            dir.path().join("legacy.scorecard.json"),
+            r#"{"session_id":"legacy","started_at_ms":1,"dimensions":{"governance":1.0,"verification":1.0,"reflection":0.0,"review":1.0,"protocol":1.0,"composite":1.0}}"#,
+        )
+        .unwrap();
+        update_scorecard_task_rate(dir.path(), "legacy", true, 0).unwrap();
+        let back: Scorecard = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("legacy.scorecard.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(back.first_pass);
+        assert_eq!(back.retry_rounds, 0);
+        // 不存在的评分卡 → 静默 Ok（metrics 未启用路径）。
+        update_scorecard_task_rate(dir.path(), "missing", true, 0).unwrap();
+        // 损坏文件 → 静默 Ok（与 list_scorecards 同口径；P-L4 起内部 warn）。
+        std::fs::write(dir.path().join("bad.scorecard.json"), "{not json").unwrap();
+        update_scorecard_task_rate(dir.path(), "bad", true, 0).unwrap();
+    }
+
+    #[test]
+    fn update_scorecard_task_rate_propagates_real_io_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        // P-L4：真实 IO 错误（路径是目录，非 NotFound）必须传播 Err，不吞。
+        std::fs::create_dir_all(dir.path().join("isdir.scorecard.json")).unwrap();
+        let err = update_scorecard_task_rate(dir.path(), "isdir", true, 0);
+        assert!(
+            err.is_err(),
+            "真实 IO 错误必须 Err 传播，不得与损坏文件同口径静默 Ok"
+        );
     }
 }

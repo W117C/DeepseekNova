@@ -4,7 +4,7 @@
 
 ```bash
 git clone https://github.com/W117C/DeepseekNova.git
-cd deepseeknova-rs
+cd deepseeknova
 cargo build
 ```
 

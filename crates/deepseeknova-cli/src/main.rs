@@ -1,23 +1,32 @@
 mod chat;
 mod cli;
+mod eval;
 mod init;
 mod mcp_probe;
 mod setup;
 mod tui_undo;
 
+use async_trait::async_trait;
 use clap::Parser;
 use cli::{Cli, Commands};
 use deepseeknova_agent::{CoordinatorRunner, PlanModeRunner};
 use deepseeknova_core::planner::SimplePlanner;
-use deepseeknova_core::runner::{RunInput, Runner};
+use deepseeknova_core::runner::{RunEventStream, RunInput, Runner};
+use deepseeknova_core::RunEvent;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio_stream::StreamExt;
-use tracing::{info, Level};
+use tracing::info;
+use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::FmtSubscriber;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+
+    // TUI 全屏模式（alternate screen）下 stdout 被 ratatui 独占，任何
+    // tracing 输出都会直接打进画面破坏布局，必须在安装 subscriber 前判定。
+    let tui_mode = matches!(&cli.command, Some(Commands::Chat { tui: true, .. }));
 
     // Config is loaded before any subscriber exists, so load-time diagnostics
     // go to stderr directly.
@@ -25,6 +34,16 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("warning: failed to load config, using defaults: {e}");
         deepseeknova_config::Config::default()
     });
+
+    // Windows 上当前没有 OS 级沙箱后端（seatbelt/bubblewrap 均不可用），
+    // `platform_sandbox*` 会回落 NoOpSandbox。即使 [sandbox] enabled=true，
+    // shell 工具仍无隔离——这里必须运行时显式警告，而不是只写在 README。
+    #[cfg(target_os = "windows")]
+    eprintln!(
+        "warning: no OS-level sandbox backend is available on Windows; \
+         shell commands run without sandbox isolation. Keep permission rules \
+         strict or run inside a trusted environment."
+    );
 
     // Role-pointer routing + cost accounting. The router owns its ledger
     // (retrievable via `router.ledger()`), so no separate binding is needed.
@@ -49,8 +68,21 @@ async fn main() -> anyhow::Result<()> {
             config.telemetry.otlp_endpoint.as_deref(),
         )?)
     } else {
+        // TUI 模式下全静默：stdout 被 ratatui 独占，任何日志都破坏画面；
+        // 普通 chat 模式下 INFO 级 agent/provider 日志（step、POST 等）
+        // 会直接刷进对话区，降为 WARN 只保留真正需要关注的问题。
+        let max_level = if tui_mode {
+            LevelFilter::OFF
+        } else if matches!(&cli.command, Some(Commands::Chat { tui: false, .. })) {
+            LevelFilter::WARN
+        } else {
+            LevelFilter::INFO
+        };
+        // 日志一律走 stderr：stdout 保留给业务输出（chat 对话、scan 的
+        // JSON 报表等），否则 `--format json` 会被 INFO 行污染无法解析。
         let subscriber = FmtSubscriber::builder()
-            .with_max_level(Level::INFO)
+            .with_max_level(max_level)
+            .with_writer(std::io::stderr)
             .finish();
         tracing::subscriber::set_global_default(subscriber)
             .expect("setting default subscriber failed");
@@ -92,11 +124,11 @@ async fn main() -> anyhow::Result<()> {
                 let mut runner = CoordinatorRunner::new(planner_provider, executor_provider)
                     .with_max_graph_nodes(max_nodes)
                     .with_workspace_root(workspace_root.clone())
-                    .with_security(security);
-                if let Some(gate) =
-                    deepseeknova_runtime::permission_gate_for(&config, &workspace_root)
-                {
-                    runner = runner.with_permission_gate(gate);
+                    .with_security(security.clone());
+                let permission_gate =
+                    deepseeknova_runtime::permission_gate_for(&config, &workspace_root);
+                if let Some(g) = &permission_gate {
+                    runner = runner.with_permission_gate(g.clone());
                 }
 
                 // Delegate 动作路由：子代理走 task 指针，压缩走 compact 指针。
@@ -112,6 +144,13 @@ async fn main() -> anyhow::Result<()> {
                             &config,
                             task_provider,
                             Some(compact_provider),
+                            permission_gate
+                                .as_ref()
+                                .map(|g| g.deny_rules())
+                                .unwrap_or(&[]),
+                            permission_gate.clone(),
+                            Some(security.clone()),
+                            &workspace_root,
                         ));
                 }
 
@@ -153,6 +192,17 @@ async fn main() -> anyhow::Result<()> {
                         runner.register_tool(tool);
                     }
                 }
+                // 日常体验工具：web 搜索 / LSP 诊断（coordinator 下同样可用）。
+                for tool in deepseeknova_tools::web_search_tools(&config.tools)
+                    .into_iter()
+                    .chain(deepseeknova_tools::lsp_diagnostics_tools(&config.tools))
+                {
+                    if tool.read_only() {
+                        runner.register_read_only_tool(tool);
+                    } else {
+                        runner.register_tool(tool);
+                    }
+                }
 
                 // MCP 工具：与单 Agent 路径一致，从 config.mcp_servers 发现并注册到
                 // 执行器 Runner（子代理按设计不接 MCP）。graph 工具仍受上面的排除
@@ -166,7 +216,17 @@ async fn main() -> anyhow::Result<()> {
                     images: Vec::new(),
                     model_override: model_args.model.clone(),
                 };
-                stream_coordinator(&runner, input).await?;
+                let runner: Box<dyn Runner + Send> = if config.metrics.enabled {
+                    Box::new(MetricsRunner::new(
+                        Box::new(runner),
+                        model_router.ledger(),
+                        model_router.price_table(),
+                        workspace_root.join(".deepseeknova").join("metrics"),
+                    ))
+                } else {
+                    Box::new(runner)
+                };
+                stream_coordinator(&*runner, input).await?;
             } else {
                 // ── Single-agent mode ─────────────────────────────────────
                 use deepseeknova_provider::cost::ModelRole;
@@ -195,6 +255,16 @@ async fn main() -> anyhow::Result<()> {
                     &model_router,
                     Some(cli_session_label()),
                 )?;
+                let agent = if let Some(decider) =
+                    maybe_auto_router(&model_router, &config, model_args.model.is_some())
+                {
+                    agent.with_auto_router(decider)
+                } else {
+                    agent
+                };
+                let agent = agent
+                    // 非交互 run：Ask 无人工应答，fail-closed 拒绝而非静默放行。
+                    .with_approval_responder(Arc::new(DenyApprovalResponder));
 
                 let input = RunInput {
                     prompt: prompt_str,
@@ -273,7 +343,8 @@ async fn main() -> anyhow::Result<()> {
                     mcp_tools,
                     &model_router,
                     Some(cli_session_label()),
-                )?;
+                )?
+                .with_approval_responder(Arc::new(DenyApprovalResponder));
                 for f in &mut findings {
                     f.verdict = deepseeknova_scanner::investigate::investigate(f, &agent).await;
                 }
@@ -283,6 +354,38 @@ async fn main() -> anyhow::Result<()> {
             match format.as_str() {
                 "json" => println!("{}", report.to_json()?),
                 _ => println!("{}", report.to_markdown()),
+            }
+        }
+
+        // ── Eval ─────────────────────────────────────────────────────────
+        Some(Commands::Eval { path, format }) => {
+            use deepseeknova_provider::cost::ModelRole;
+            let cases = eval::load_cases(path)?;
+            let provider = model_router.provider_for(ModelRole::Main, None)?;
+            let mcp_tools = deepseeknova_runtime::discover_mcp_tools(&config).await;
+            let agent = build_agent(
+                Arc::clone(&provider),
+                deepseeknova_runtime::AgentRoleProviders::default(),
+                None,
+                &config,
+                0,
+                mcp_tools,
+                &model_router,
+                None,
+            )?;
+
+            let mut results = Vec::new();
+            for case in cases {
+                let output = run_eval_case(&agent, case.prompt.clone()).await?;
+                results.push(eval::EvalResult {
+                    passed: eval::case_passes(&case, &output),
+                    case,
+                    output,
+                });
+            }
+            match format.as_str() {
+                "json" => println!("{}", eval::render_json(&results)),
+                _ => println!("{}", eval::render_markdown(&results)),
             }
         }
 
@@ -336,13 +439,24 @@ async fn main() -> anyhow::Result<()> {
                         });
                 let factory_router = Arc::clone(&model_router);
                 let cfg = config.clone();
-                // 上下文占用率分母：主模型 context_window（未配置则 TUI 不显示）。
-                let context_window = model
-                    .as_deref()
-                    .and_then(|m| cfg.find_model(m))
-                    .and_then(|mc| mc.context_window);
+                // 生效模型名：--model 显式覆盖，否则回落配置 default_model。
+                // 界面 label 与上下文分母都按它解析（曾因回落缺失显示
+                // "default" 且 token 预算条永远不出现）。
+                let effective_model = model.clone().or_else(|| cfg.default_model.clone());
+                let context_window = resolve_provider_cfg(&cfg, effective_model.as_deref())
+                    .context_window
+                    .or_else(|| {
+                        effective_model
+                            .as_deref()
+                            .and_then(|m| cfg.find_model(m))
+                            .and_then(|mc| mc.context_window)
+                    });
                 let hist = history.clone();
                 let mcp = mcp_tools;
+                // 权限审批：responder 注入每次重建的 agent（/model 热切换
+                // 也生效），请求接收端注入 TUI 显示确认浮层（y/n）。
+                let (approval_responder, approval_rx) =
+                    deepseeknova_tui::approval::approval_channel();
                 let factory = move |effort: Option<ReasoningEffort>,
                                     model: Option<String>|
                       -> anyhow::Result<
@@ -368,19 +482,21 @@ async fn main() -> anyhow::Result<()> {
                         &factory_router,
                         Some(cli_session_label()),
                     )?
-                    .with_conversation_history(hist.clone());
+                    .with_conversation_history(hist.clone())
+                    .with_approval_responder(Arc::new(approval_responder.clone()));
                     Ok(Arc::new(agent))
                 };
                 let initial = factory(Some(baseline_effort), model.clone())?;
                 let mut tui = deepseeknova_tui::TuiRunner::new(initial)
-                    .with_model_label(model.as_deref().unwrap_or("default"))
+                    .with_model_label(effective_model.as_deref().unwrap_or("default"))
                     .with_agent_factory(factory)
                     .with_model_router(Arc::clone(&model_router))
                     .with_baseline_effort(baseline_effort)
-                    .with_current_model(model.clone())
+                    .with_current_model(effective_model.clone())
                     .with_mcp_servers(mcp_server_infos)
                     .with_mcp_probe(Arc::new(mcp_probe::CliMcpProbe::default()))
-                    .with_undo_controller(undo_controller);
+                    .with_undo_controller(undo_controller)
+                    .with_approval_rx(approval_rx);
                 if let Some(ctrl) = session_controller {
                     tui = tui.with_session_controller(ctrl);
                 }
@@ -442,6 +558,15 @@ async fn main() -> anyhow::Result<()> {
                             Some(cli_session_label()),
                         )?
                         .with_conversation_history(Arc::clone(&history_clone));
+                        let agent = if let Some(decider) = maybe_auto_router(
+                            &router,
+                            cfg,
+                            model_name.is_some() || effort.is_some(),
+                        ) {
+                            agent.with_auto_router(decider)
+                        } else {
+                            agent
+                        };
                         Ok(Box::new(agent))
                     };
 
@@ -462,13 +587,53 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
-        Some(Commands::Serve { addr }) => {
+        Some(Commands::Serve { addr, acp }) => {
             info!("serve command: addr={addr}");
 
             use deepseeknova_provider::cost::ModelRole;
             let provider = model_router.provider_for(ModelRole::Main, None)?;
             let task_provider = model_router.provider_for(ModelRole::Task, None)?;
             let mcp_tools = deepseeknova_runtime::discover_mcp_tools(&config).await;
+            let compact_provider = compact_provider_for(&model_router, &config)?;
+            let review_provider = review_provider_for(&model_router, &config)?;
+
+            if *acp {
+                // ACP stdio 模式：每个 session/new 用其 cwd 作为工作区边界重建
+                // agent，并挂一份共享会话历史，使连续 prompt 保持上下文。Ask
+                // 权限在无权限 RPC 的情况下 fail-closed 拒绝。
+                let cfg = config.clone();
+                let acp_tools = mcp_tools.clone();
+                let factory: deepseeknova_serve::AcpRunnerFactory =
+                    Arc::new(move |workspace_root, history| {
+                        let mut roles = deepseeknova_runtime::AgentRoleProviders::default();
+                        roles.task = Some(Arc::clone(&task_provider));
+                        roles.compact = Some(Arc::clone(&compact_provider));
+                        roles.review = review_provider.clone();
+                        let agent = build_agent_in(
+                            workspace_root,
+                            Arc::clone(&provider),
+                            roles,
+                            None,
+                            &cfg,
+                            0,
+                            acp_tools.clone(),
+                            &model_router,
+                            None,
+                        )?;
+                        let agent = agent.with_conversation_history(history);
+                        let agent =
+                            if let Some(decider) = maybe_auto_router(&model_router, &cfg, false) {
+                                agent.with_auto_router(decider)
+                            } else {
+                                agent
+                            };
+                        let agent = agent.with_approval_responder(Arc::new(DenyApprovalResponder));
+                        Ok(Arc::new(agent) as Arc<dyn Runner>)
+                    });
+                info!("serve: acp stdio mode");
+                return deepseeknova_serve::serve_acp(factory).await;
+            }
+
             // Share a pending-approvals map between the agent's approval
             // responder and the server's POST /v1/approval route so the gate's
             // `Ask` decisions can be answered over HTTP.
@@ -478,8 +643,8 @@ async fn main() -> anyhow::Result<()> {
             );
             let mut roles = deepseeknova_runtime::AgentRoleProviders::default();
             roles.task = Some(task_provider);
-            roles.compact = Some(compact_provider_for(&model_router, &config)?);
-            roles.review = review_provider_for(&model_router, &config)?;
+            roles.compact = Some(compact_provider);
+            roles.review = review_provider;
             let agent = build_agent(
                 Arc::clone(&provider),
                 roles,
@@ -489,11 +654,20 @@ async fn main() -> anyhow::Result<()> {
                 mcp_tools,
                 &model_router,
                 None, // serve：每次 run 由 Agent 生成唯一会话标注
-            )?
-            .with_approval_responder(responder);
+            )?;
+            let agent = if let Some(decider) = maybe_auto_router(&model_router, &config, false) {
+                agent.with_auto_router(decider)
+            } else {
+                agent
+            };
+            let agent = agent.with_approval_responder(responder);
             let runner: Arc<dyn Runner> = Arc::new(agent);
 
-            let server = deepseeknova_serve::Server::with_pending(runner, pending);
+            let workspace_root = std::env::current_dir().unwrap_or_default();
+            let metrics_dir = workspace_root.join(".deepseeknova").join("metrics");
+            let server = deepseeknova_serve::Server::with_pending(runner, pending)
+                .with_metrics_dir(metrics_dir)
+                .with_runs_dir(workspace_root.join(".deepseeknova").join("runs"));
             server.serve(addr).await?;
         }
 
@@ -512,9 +686,16 @@ async fn main() -> anyhow::Result<()> {
             let db = std::env::current_dir()
                 .unwrap_or_default()
                 .join(&config.memory.db_path);
-            let engine = deepseeknova_core::memory::engine::MemoryEngine::open(
+            let memory_embedder =
+                deepseeknova_provider::embeddings::try_memory_embedder(&config.memory);
+            let memory_embed_model = memory_embedder
+                .as_ref()
+                .map(|_| config.memory.embed_model.clone());
+            let engine = deepseeknova_core::memory::engine::MemoryEngine::open_with_embedder(
                 &db,
                 config.memory.redact_secrets,
+                memory_embedder,
+                memory_embed_model,
             )?;
             match action {
                 cli::MemoryAction::List { category, limit } => {
@@ -530,7 +711,9 @@ async fn main() -> anyhow::Result<()> {
                 }
                 cli::MemoryAction::Search { query } => {
                     let q = query.join(" ");
-                    for (i, r) in engine.recall(&q, 10)?.iter().enumerate() {
+                    let hits =
+                        engine.recall_with_weight(&q, 10, config.memory.rank_lifecycle_weight)?;
+                    for (i, r) in hits.iter().enumerate() {
                         let preview: String = r.entry.content.chars().take(120).collect();
                         println!("{}. [{}] {}", i + 1, r.entry.id, preview);
                     }
@@ -547,10 +730,25 @@ async fn main() -> anyhow::Result<()> {
                 }
                 cli::MemoryAction::Stats => {
                     let s = engine.stats()?;
+                    let stages = s
+                        .stage_counts
+                        .iter()
+                        .map(|(k, v)| format!("{k}:{v}"))
+                        .collect::<Vec<_>>()
+                        .join(",");
                     println!(
-                        "total={} recall_hit_rate={:.2} reinforce_ratio={:.2}",
-                        s.total, s.recall_hit_rate, s.reinforce_ratio
+                        "total={} embedded={} recall_hit_rate={:.2} reinforce_ratio={:.2} stages={} archived={}",
+                        s.total, s.embedded, s.recall_hit_rate, s.reinforce_ratio, stages, s.archived
                     );
+                }
+                cli::MemoryAction::EmbedBackfill => {
+                    let (attempted, ok) = engine.backfill_embeddings()?;
+                    println!("embed-backfill: attempted={attempted} ok={ok}");
+                }
+                cli::MemoryAction::Cleanup => {
+                    let (decayed, deleted) =
+                        engine.cleanup(config.memory.decay_rate, config.memory.archive_ttl_days)?;
+                    println!("cleanup: decayed={decayed} deleted={deleted}");
                 }
             }
         }
@@ -713,6 +911,15 @@ async fn main() -> anyhow::Result<()> {
                             Some(cli_session_label()),
                         )?
                         .with_conversation_history(Arc::clone(&history_clone));
+                        let agent = if let Some(decider) = maybe_auto_router(
+                            &router,
+                            cfg,
+                            model_name.is_some() || effort.is_some(),
+                        ) {
+                            agent.with_auto_router(decider)
+                        } else {
+                            agent
+                        };
                         Ok(Box::new(agent))
                     };
 
@@ -822,6 +1029,45 @@ fn review_provider_for(
     )?))
 }
 
+/// Run one eval case and return the agent's final text (streaming deltas are
+/// accumulated; the `Done` output wins if present).
+async fn run_eval_case(runner: &dyn Runner, prompt: String) -> anyhow::Result<String> {
+    let input = RunInput {
+        prompt,
+        images: Vec::new(),
+        model_override: None,
+    };
+    let mut stream = runner.run_stream(input).await?;
+    let mut text = String::new();
+    while let Some(event) = stream.next().await {
+        match event? {
+            RunEvent::TextDelta(t) => text.push_str(&t),
+            RunEvent::Done(out) => text = out.text,
+            _ => {}
+        }
+    }
+    Ok(text)
+}
+
+/// Build the per-run auto model+thinking decider when enabled and the user did
+/// not explicitly pick a model/effort (`--model` / `/model switch` / 显式
+/// effort 绕过 auto 模式，显式选择永远优先)。`None` = 不启用。
+fn maybe_auto_router(
+    router: &Arc<deepseeknova_provider::router::ModelRouter>,
+    config: &deepseeknova_config::Config,
+    explicit_override: bool,
+) -> Option<Arc<dyn deepseeknova_provider::auto::AutoRouteDecider>> {
+    if config.agent.auto_route && !explicit_override {
+        Some(Arc::new(deepseeknova_provider::auto::ModelAutoRouter::new(
+            Arc::clone(router),
+            config.agent.auto_router_model.clone(),
+            config.agent.auto_router_max_chars,
+        )))
+    } else {
+        None
+    }
+}
+
 /// Build an agent with built-in tools registered, plus any `extra_tools`
 /// (e.g. MCP tools discovered via [`deepseeknova_runtime::discover_mcp_tools`]).
 /// `roles` routes the delegation engine (sub-agents) to the Task-role model
@@ -838,8 +1084,39 @@ fn build_agent(
     router: &deepseeknova_provider::router::ModelRouter,
     session_label: Option<String>,
 ) -> anyhow::Result<deepseeknova_agent::Agent> {
-    let workspace_root = std::env::current_dir().unwrap_or_default();
+    build_agent_in(
+        std::env::current_dir().unwrap_or_default(),
+        provider,
+        roles,
+        _model,
+        config,
+        max_steps,
+        extra_tools,
+        router,
+        session_label,
+    )
+}
+
+/// `build_agent` 的显式工作区变体：ACP `session/new` 的 `cwd` 需要作为会话的
+/// 文件系统边界，而不是进程启动目录。
+#[allow(clippy::too_many_arguments)]
+fn build_agent_in(
+    workspace_root: PathBuf,
+    provider: Arc<dyn deepseeknova_provider::Provider>,
+    roles: deepseeknova_runtime::AgentRoleProviders,
+    _model: Option<&str>,
+    config: &deepseeknova_config::Config,
+    max_steps: usize,
+    extra_tools: Vec<Arc<dyn deepseeknova_core::Tool>>,
+    router: &deepseeknova_provider::router::ModelRouter,
+    session_label: Option<String>,
+) -> anyhow::Result<deepseeknova_agent::Agent> {
     let metrics_dir = workspace_root.join(".deepseeknova").join("metrics");
+    // 会话技能名收集器（P 任务 2，spec §13 #9）：builder 注入侧把实际注入
+    // prompt 的技能名写入，会话结束由 attach_metrics_hook_with_fitness 消费
+    // 做 fitness record_use/record_result。
+    let session_skills: Arc<std::sync::Mutex<Vec<String>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
     // Delegate to the shared runtime builder (security + sandbox + permission
     // gate wiring lives in one place). CLI is non-interactive, so no approval
     // responder is attached — the gate falls back to Allow on `Ask`.
@@ -851,14 +1128,14 @@ fn build_agent(
         max_steps,
         None,
         extra_tools,
+        Some(session_skills.clone()),
     )?;
     // 任务质量闭环装配：metrics（报告 + 评分卡落盘）、quality（ToolHook 链 +
     // 写后策略评估，`[quality] enabled` 开关）、diagnose（失败诊断报告，与
     // metrics 同目录 `diagnose/` 子目录）。诊断 dir 与 metrics dir 同源。
     // 协议增强（`[protocol] enabled`）：metrics 侧顺带 fitness 记录（会话技能
-    // 名集合暂为空——recall 注入侧 record_use 尚未把技能名回传，fitness 侧
-    // 记录会 warn 跳过，见 runtime TODO）；diagnose 侧顺带失败模式聚类；
-    // 会话启动前注入历史失败模式（≤3 条）到首轮 system prompt。
+    // 名集合由注入侧回填，见上）；diagnose 侧顺带失败模式聚类；会话启动前
+    // 注入历史失败模式（≤3 条）到首轮 system prompt。
     let agent = deepseeknova_runtime::attach_metrics_hook_with_fitness(
         agent,
         config,
@@ -868,9 +1145,9 @@ fn build_agent(
             dir: metrics_dir.clone(),
         },
         &workspace_root,
-        // 会话技能名集合：技能激活（record_use）接线后由注入侧回填；当前
-        // 为空 → fitness 记录跳过并 warn（不阻断 run）。
-        Arc::new(std::sync::Mutex::new(Vec::new())),
+        // 会话技能名集合：builder 注入侧已回填实际注入的技能名；空集合 =
+        // 本会话无注入技能，fitness 优雅跳过（不 warn）。
+        session_skills,
     );
     let agent = deepseeknova_runtime::attach_quality_hook(agent, config);
     let agent = deepseeknova_runtime::attach_diagnose_hook_with_ingest(
@@ -1018,9 +1295,14 @@ impl deepseeknova_tui::SessionController for TuiSessionController {
         for t in &turns {
             for m in &t.messages {
                 hist.push(m.into());
+                // 工具调用/结果是执行细节：不灌入恢复后的对话面板，
+                // 避免大段工具输出淹没用户与助手正文。
+                if m.role == "tool" {
+                    continue;
+                }
                 let role = match m.role.as_str() {
                     "assistant" => deepseeknova_tui::ResumedRole::Assistant,
-                    "system" | "tool" => deepseeknova_tui::ResumedRole::System,
+                    "system" => deepseeknova_tui::ResumedRole::System,
                     _ => deepseeknova_tui::ResumedRole::User,
                 };
                 restored.push(deepseeknova_tui::ResumedLine {
@@ -1174,6 +1456,84 @@ async fn stream_coordinator(runner: &dyn Runner, input: RunInput) -> anyhow::Res
         }
     }
     Ok(())
+}
+
+/// 非交互 CLI 的审批应答：`Ask` 一律拒绝（fail-closed），避免无人工确认时
+/// 静默放行写操作。交互面（TUI/HTTP）使用各自的真实应答器。
+struct DenyApprovalResponder;
+
+#[async_trait]
+impl deepseeknova_core::runner::ApprovalResponder for DenyApprovalResponder {
+    async fn request(&self, _id: &str, _title: &str, _description: Option<&str>) -> bool {
+        false
+    }
+}
+
+/// Coordinator 路径的会话指标包装器：CoordinatorRunner 本身不挂 metrics
+/// hook，这里在 CLI 侧补齐 SessionMetrics 落盘（执行面 + 成本面）。
+struct MetricsRunner {
+    inner: Box<dyn Runner + Send>,
+    ledger: Arc<deepseeknova_provider::cost::CostLedger>,
+    prices: deepseeknova_provider::cost::PriceTable,
+    dir: std::path::PathBuf,
+    session_id: String,
+}
+
+impl MetricsRunner {
+    fn new(
+        inner: Box<dyn Runner + Send>,
+        ledger: Arc<deepseeknova_provider::cost::CostLedger>,
+        prices: deepseeknova_provider::cost::PriceTable,
+        dir: std::path::PathBuf,
+    ) -> Self {
+        Self {
+            inner,
+            ledger,
+            prices,
+            dir,
+            session_id: deepseeknova_metrics::new_session_id(),
+        }
+    }
+}
+
+#[async_trait]
+impl Runner for MetricsRunner {
+    async fn run_stream(&self, input: RunInput) -> anyhow::Result<RunEventStream> {
+        let inner_stream = self.inner.run_stream(input).await?;
+        let ledger = Arc::clone(&self.ledger);
+        let prices = self.prices.clone();
+        let dir = self.dir.clone();
+        let session_id = self.session_id.clone();
+        let mut tracker = deepseeknova_metrics::SessionTracker::new();
+        let stream = inner_stream.map(move |ev| {
+            match &ev {
+                // Coordinator 的工具调用在 GraphExecutor 内部完成，事件流里
+                // 只有收尾的 ToolResult（call_id=节点 id）；按节点计步骤。
+                Ok(RunEvent::ToolResult { .. }) => {
+                    tracker.observe_step();
+                    tracker.observe_tool_call("coordinator", true);
+                }
+                // 非工具节点（think/reflect）以 [node_id] 文本事件呈现。
+                Ok(RunEvent::TextDelta(text)) if !text.starts_with("[PLAN]") => {
+                    tracker.observe_step();
+                }
+                Ok(RunEvent::Done(_)) => {
+                    tracker.mark_outcome(deepseeknova_metrics::RunOutcome::Completed);
+                    let report = deepseeknova_metrics::SessionReport {
+                        session_id: session_id.clone(),
+                        stats: tracker.snapshot(),
+                        cost: ledger.report(&prices),
+                    };
+                    if let Err(e) = deepseeknova_metrics::write_report(&report, &dir) {
+                        tracing::warn!("coordinator metrics write failed: {e}");
+                    }
+                }
+                _ => {}
+            }
+            ev
+        });
+        Ok(Box::pin(stream))
+    }
 }
 
 /// 解析并校验扫描根：词法归一 + 规范化双重包含性检查。

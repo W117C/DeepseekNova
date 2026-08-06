@@ -1,5 +1,234 @@
 # PROGRESS — TUI 设计功能完善（任务书执行）
 
+## 日常体验包 + 审查修复（2026-08-07，非任务书轮）
+
+- 功能：web_search（ddg / tavily / bing / searxng）、lsp_diagnostics（写后
+  自动注入诊断）、`[agent] auto_route`（每 run 决策一次、按 run 隔离）、
+  serve durable runs（`/v1/runs` + resume + 原子 claim）、Windows 运行时
+  沙箱警告。
+- 审查：`ocr delegate preview` 61 可审查文件；7 个发现（LSP 空诊断等满超时、
+  auto 路由缓存跨并发 run 串扰、SSE 断开取消任务并误标 Done、web_search 重定向
+  SSRF、未知 provider 静默回落 DDG、LSP 缺 FileRead 门控、resume 竞态）全部
+  修复并补回归测试。
+- 验证：`make check` EXIT=0（fmt / clippy -D warnings / 全 workspace 测试 /
+  doctest / doc 零警告）。
+- 状态：未提交、未 push、无 PR；分支 feat/semantic-retrieval 继续承载全部
+  未提交改动。
+- 遗留（已做）：LSP 端到端 fake-server 测试（空诊断 1.5s 宽限内返回，不再
+  等满超时）；最小 evals（`eval` 子命令 + JSONL `must_contain`）；ACP 适配器
+  （`serve --acp`，initialize/session/new/prompt/cancel/close + 会话多轮历史
+  + `Ask` fail-closed）。
+- 清理：`docs/experiments/`、`scripts/experiments/` 与
+  `docs/superpowers/mockups/` 按用户批准全部删除（未跟踪目录直接删，mockups
+  已 git rm）。
+- 验证：`make check` EXIT=0（含新增 ACP 往返单测、eval 3 单测、LSP 空诊断
+  e2e）；`serve --acp` 进程级冒烟通过（initialize / session/new / close 协议
+  响应正确、按 cwd 建 agent）；真实 LLM 冒烟因 `DEEPSEEK_API_KEY` 缺失
+  blocked，未伪造凭据。
+- 状态：已提交（2 个 commit）、已推送、PR #72（分支 feat/semantic-retrieval）。
+
+## 安全边界收尾二轮（2026-08-06，审查修复轮）
+
+非任务书轮：对上一轮收尾后的工作区再做一次审查 + 修复 + 知识收尾。
+
+- 审查：`ocr delegate preview` 55 可审查文件；2 critical + 3 high + 1 medium +
+  1 low，详见 crates/REVIEW.md 二轮分节。
+- 修复：gh api 隐式 POST、建议规则通配符放大（Rule.exact）、file `-C`、
+  裸 printenv、shell 组合 Dangerous→NotReadOnly、coordinator history 上限、
+  删除 dbg_status_test.rs 死文件。
+- 验证：`make check` EXIT=0；security 103 / permission 34 / tools 69+12+7 /
+  agent coordinator 全绿。
+- 文档：GUIDE（权限语义/TUI 快捷键/折叠/审批浮层）、CHANGELOG Unreleased、
+  REVIEW/CLOSEOUT 追加分节、AGENTS.md §5 归档 3 条。
+- 状态：未提交、未 push、无 PR；docs/experiments/ + scripts/experiments/
+  已于 2026-08-07 按用户批准删除。
+
+## 安全边界收尾（2026-08-06，审查修复轮）
+
+非任务书轮：对工作区未提交的安全边界改动做审查 + 修复 + 知识收尾。
+
+- 审查：`ocr delegate preview` 17 可审查文件；3 high + 5 medium + 1 flaky，
+  详见 crates/REVIEW.md 本轮分节。
+- 修复：readonly 分类器写形态误放行（date/hostname）、gh token `=true` 绕过、
+  路径 `..` 逃逸、deny 建议误导、bubblewrap FullAccess、journalctl 漏拒、
+  沙箱工作区默认可写、子代理无 gate 行为一致性、并行测试临时目录撞名。
+- 验证：`make check` EXIT=0（fmt / clippy -D warnings / 1108 passed /
+  doctest / doc）；修复前复现用例独立 harness 实测翻转。
+- 文档：GUIDE sandbox 节、README/README_EN（权限模型/工具数/测试数）、
+  DESIGN §九、CHANGELOG Unreleased、SECURITY.md、AGENTS.md §5 防错清单、
+  crates/CLOSEOUT.md 本轮六事实面。
+- 状态：未提交、未 push、无 PR（提交/推送由用户决定）。
+
+## 任务书：记忆语义检索（embedder）最小闭环（2026-08-05，dev-loop 轮）— 任务状态
+- [x] 任务 0：基线核验（make check EXIT=0；feat/memory-lifecycle@e941f14 干净；
+      core 132 / agent 231 / provider 35 / runtime 52 / cli 32 / config 33+18 /
+      tools 66+12+7）。
+- [x] 任务 1：store search_hybrid_with_weight（FTS 基数改纯 bm25 消除双重计权；
+      最终分 = 0.5*bm25归一 + 0.5*cosine - rank_weight*lifecycle_penalty；
+      search_hybrid 委托新方法）+ 2 测试（语义独有命中、weight=0 组合回归）。
+- [x] 任务 2：provider RemoteEmbedder（embeddings.rs：独立 tokio runtime block_on、
+      from_parts/from_memory_config、try_memory_embedder fail-open）+ 5 测试
+      （本地 HTTP 端到端 ×3、config/env 校验、try 回落）。
+- [x] 任务 3：config 增 embed_base_url / embed_timeout_secs（默认
+      https://api.openai.com/v1 / 30）+ merge + 2 测试（合并保留/显式覆盖）。
+- [x] 任务 4：engine open_with_embedder / open_in_memory_with_embedder（旧入口
+      委托 None）；remember/record_task/record_knowledge 写入即嵌入（同模型跳过）；
+      recall 有 provider 走 hybrid；backfill_embeddings（跳过 archived，返回
+      (attempted, ok)）；stats.embedded + 3 测试（写入嵌入+语义命中、fail-open、
+      回填计数+stats）。
+- [x] 任务 5：runtime/CLI 装配 try_memory_embedder（缺 key 回落 FTS，runtime 测试
+      1 条）；CLI memory stats 输出 embedded=、memory embed-backfill；tools 语义
+      命中测试 1 条。
+- [x] 任务 6：GUIDE 记忆节 + CHANGELOG Added + BLOCKED 两处语义检索转已做（代码图
+      侧留待裁决）；cargo fmt；make check EXIT=0（0 failed / 2 既有 ignored）；
+      反向验证红（1 failed）→ 绿（1 passed）；分支 feat/semantic-retrieval 待提交。
+- 跨 crate 协议记录（AGENTS.md §1 触发）：预扫描=不动 core 既有公开 API 签名
+  （新增 open_with_embedder / search_hybrid_with_weight，旧入口委托）、不改既有
+  测试断言、不加外部依赖（复用 provider reqwest/tokio）；备选路径 A=core 直接加
+  reqwest 依赖 vs B=RemoteEmbedder 放 provider（已有 reqwest）+ engine 收
+  Arc<dyn EmbeddingProvider>——选 B；自检=单 crate 聚焦测试 + make check +
+  反向验证红→绿。
+
+## CLI 冒烟证据（2026-08-05 实测）
+```
+$ deepseeknova-cli memory stats
+total=0 embedded=0 recall_hit_rate=0.00 reinforce_ratio=0.00 stages= archived=0
+$ deepseeknova-cli memory embed-backfill
+embed-backfill: attempted=0 ok=0
+```
+
+## 任务书：Protocol 增强收尾 + Graph Go 语言（2026-08-05，dev-loop 双域并行）— 开工回执
+- 理解的目标：protocol 域=能力包（2026-08-05 已合入）仅剩 2 个未落地项收尾（task_rate
+  指标 first_pass/retry_rounds、fitness record_use 回填）；graph 域=新增 Go 语言支持
+  （tree-sitter-go 0.25.0，5 个分派点分支 + go.mod 外部依赖识别）。
+- 顺序：两域并行（地界零重叠）；每域 任务 1→n 独立推进，父级统一收尾。
+- 最大风险：protocol 域跨 agent+metrics+runtime+cli 四 crate（AGENTS.md §1.1 触发，按
+  推理专家协议记录）；graph 域 tree-sitter-go 0.25 grammar 节点名需实测（Go 的
+  function_declaration/method_declaration/import_spec 等）。
+- 基线证据（2026-08-05 实测）：feat/memory-lifecycle@68fb094 工作区干净；workspace 全绿
+  0 failed（2 既有 ignored：graph self_index、provider reasoning protocol）；核心测试数
+  agent 231、core 132、graph 32、runtime 48、config 33、metrics 17、skills 24、cli 32。
+
+### G 域回执（graph worker，2026-08-05）
+- 理解：graph 新增 Go 语言支持——Lang::Go + tree-sitter-go 0.25.0（书内唯一新依赖），
+  五个分派点分支 + GO_SRC fixture + go.mod 外部依赖 + deps_code 提示语 + 文档。
+- 顺序：任务 1 grammar 实测→解析接入 → 2 Go fixture → 3 go.mod → 4 文档/收尾/提交。
+- 最大风险：tree-sitter-go 0.25 节点名/字段名凭猜出错（必须先探测实测）；SCHEMA_VERSION
+  =4 保持不动；`fn go(&self)` 与 search("go") 既有语义测试不得误改。
+- 基线证据：graph 32 unittests 全绿；Cargo.lock 无 tree-sitter-go；工作区干净。
+- grammar 实测（tree-sitter-go 0.25.0，探测测试实测，已删）：
+  function_declaration(name=identifier)/method_declaration(name=field_identifier,
+  receiver=parameter_list)/type_declaration>type_spec(name+type 字段)/struct_type>
+  field_declaration_list/interface_type>method_elem（**非 method_spec**，无 body 字段）/
+  import_declaration>import_spec_list>import_spec(path=interpreted_string_literal)/
+  call_expression(function=identifier 或 selector_expression(field=field_identifier))/
+  单行 import "fmt" 也是 import_declaration>import_spec。据此：Go 实体=function/
+  method/type_declaration（判 type 字段→Struct 或 Trait），import 三态=本地相对
+  →File、stdlib/第三方→External（grammar 无法区分后两者，fixture 三态都覆盖）。
+- 任务 1/2/3 已完：Lang::Go + from_path(".go") + language() 映射；entity_kind 加 node
+  参数（Go type_declaration 判 struct/interface）、is_import(import_declaration/
+  import_spec)、callee_name 加 selector_expression、extract_signature 沿用 "{"（Go 同
+  Rust/JS 风格，实测 func 签名到 { 截断正确）；import 分支 Go 三态（相对→File、
+  其余→External）；GO_SRC fixture + 4 测试（entities/calls+imports/三态/refs）；
+  store：is_manifest 加 go.mod、parse_go_mod_deps（块式+单行 require）、2 测试
+  （解析 + Go 项目端到端 external_deps）；tools deps_code 提示语补 go.mod + 1 测试。
+  graph 32→38、tools deps_code 3→5；cargo fmt 我的文件全过（对方 runtime 未 fmt）。
+- 阻塞观察：make check 首跑被对方 metrics 半成品 E0063 卡住（对方已修）；二跑 metrics
+  过了但轮到 tools 缺 #[tokio::test]（我修了）；现剩 runtime fmt diff（对方文件，等待
+  对方 fmt 后重试 make check）。
+
+### P 域开工回执（Protocol 增强收尾，执行者 2026-08-05）
+- 理解的目标：task_rate（Scorecard 扩展 first_pass/retry_rounds，从 DiagnoseReport.failures
+  推导，serde default 向后兼容）+ record_use 回填（recall 注入技能名汇入 session_skills →
+  CLI 传集合 → fitness 记 use+result，清掉 warn 噪声）。
+- 顺序：任务 1 task_rate（metrics+runtime）→ 任务 2 record_use（runtime+cli）→ 任务 3 文档 →
+  任务 4 收尾（fmt/make check/反向验证/提交 feat/memory-lifecycle 不 push）。
+- 最大风险：metrics hook 与 diagnose hook 触发顺序在 MaxSteps/Paused 路径上 metrics 先于
+  diagnose（agent.rs:2037 vs 2056）→ task_rate 双端接线（metrics 读报告兜底 + diagnose 补写
+  评分卡）；record_use 集合只能从 recall 注入侧收集（builder 加可选参数，闭包内 3 行加法）。
+- 基线证据（2026-08-05 实测）：feat/memory-lifecycle@68fb094 干净；metrics 17 / runtime 48 /
+  agent 231 / cli 32 / workspace 0 failed（2 既有 ignored）。
+
+## 自验收清单（双域，执行者逐条打勾，命令亲跑）
+- [x] P1 `cargo test -p deepseeknova-metrics`：≥ 18 条通过（task_rate 新增；实测 20 passed）
+- [x] P1 `cargo test -p deepseeknova-agent diagnose`：≥ 基线（diagnose 改动不回退；实测见 make check）
+- [x] P2 `cargo test -p deepseeknova-runtime`：≥ 49 条通过（record_use 回填新增；实测 51 passed）
+- [x] G1/G2 `cargo test -p deepseeknova-graph`：≥ 35 条通过（Go fixture 新增 ≥3；实测 36 passed）
+- [x] G3 `cargo test -p deepseeknova-tools`：≥ 基线（deps_code 提示语更新；实测 deps_code 5 passed 含新增 Go 项目测试）
+- [x] `make check` EXIT=0；workspace 0 failed（实测 2026-08-05：对方 fmt 后补跑全绿；55 suite ok / 0 failed / 2 既有 ignored）
+- [x] 反向验证：task_rate 断言改坏 → 真红（task_rate_roundtrip_and_compute_defaults 1 failed，metrics/src/lib.rs:921）→ 还原 → 真绿（metrics 20 passed）；Go fixture 断言改坏 → 真红 → 还原 → 真绿
+- [x] `cargo fmt --check` 通过（全 workspace 零 diff）；make check EXIT=0 全绿（55 suite ok / 0 failed / 2 既有 ignored）；P 域已提交 feat/memory-lifecycle（不 push，哈希见交付汇报）
+
+## P 域任务状态（Protocol 增强收尾，2026-08-05）
+- [x] 任务 1：task_rate 落地。metrics `Scorecard` 增 `first_pass: bool` / `retry_rounds: u32`
+  （serde default，旧卡兼容）+ `fill_task_rate(first_pass, retry_rounds)` + 文件级辅助
+  `update_scorecard_task_rate(dir, session_id, ...)`（读-改-写，缺失/损坏静默跳过，避免
+  runtime 引入 serde_json 依赖）。runtime 双端接线：metrics hook 对 Completed 落盘前填
+  `first_pass=true`（成功路径无诊断报告，agent suppress）；`attach_diagnose_hook_with_ingest`
+  回调在报告落盘后按 `report.failures` 推导覆写（Paused/unverified 路径 metrics hook 先
+  触发、失败详情此时才可知）。测试 +3（metrics：roundtrip+compute 默认、旧卡兼容、
+  update 辅助）、+2（runtime：成功 run first_pass=true 且无 diagnose 目录、Paused run
+  retry_rounds=failures 条数）。
+- [x] 任务 2：record_use 回填。`build_agent_with_role_providers` 增可选参
+  `session_skills: Option<Arc<Mutex<Vec<String>>>>`（None = 旧行为；`build_agent` /
+  `build_agent_with_task_provider` 透传 None 签名不变）；起点召回注入侧在 P2 修复的
+  `injected` 循环内把真实注入技能名去重写入收集器。CLI `build_agent` 创建共享 Arc 同时
+  传给 builder（Some）与 `attach_metrics_hook_with_fitness`。fitness hook：record_result
+  前补 `record_use`（激活计数，spec §13 #9 闭合）；空集合优雅跳过、移除 warn-once 噪声
+  与 TODO。测试 +1（runtime E2E：预置技能 → 注入收集 → fitness.json uses=1/successes=1）。
+- [x] 任务 3：文档。GUIDE 协议节补 task_rate 扩展字段与 fitness use+result 一行；
+  CHANGELOG Added 条目；BLOCKED 无本域遗留（TUI 面板/计划载体/多模型反思属任务书 §2
+  范围外）。
+- 跨 crate 协议记录（AGENTS.md §1 触发）：预扫描=不动 core 公开 API（SkillManager /
+  FitnessStore 零改动）、不改既有测试断言（runtime 4 处 builder 调用仅补 None 实参）、
+  runtime memory 装配区 480-635 仅加 3 行收集（不动既有逻辑）；备选路径 A=改
+  `build_agent_with_task_provider`/`build_agent` 签名（破坏 20+ 测试调用点）vs B=仅扩
+  `build_agent_with_role_providers` 可选参（CLI 直调，其余入口 None 透传）——选 B；
+  备选路径 C=runtime 直接读诊断文件推导 task_rate vs D=诊断回调回填评分卡（C 在
+  Paused 路径 metrics hook 先于诊断文件落盘、时序不可行）——选 D + metrics hook 对
+  Completed 填首过；自检=metrics/runtime/cli 聚焦测试 + make check + 反向验证红→绿。
+- [x] 任务 4：收尾（2026-08-05 接手完成）。接手时任务 1-3 代码在**工作树未提交**
+  （PROGRESS 此前"已提交"记录失实，已修正）；逐项复核：metrics 20 / runtime 51 /
+  cli 32 / agent 231 全绿，cargo fmt --check 零 diff，make check EXIT=0（55 suite
+  ok / 0 failed / 2 既有 ignored，graph 曾因对方 worker 瞬时半成品 FAILED 1 次，
+  重试即恢复）；反向验证 task_rate 断言改坏 → 真红（1 failed）→ 还原 → 真绿；
+  已提交 feat/memory-lifecycle（含任务书 plan 文件，不 push）。
+
+## 任务书：记忆生命周期闭环（2026-08-05，dev-loop 轮次）— 开工回执
+- 理解的目标：记忆从"写入→关键词检索"升级为完整生命周期闭环——检索排序融合生命周期
+  信号（importance/stage/recency）、衰减接线（apply_decay 死代码复活）、归档超期清理、
+  蒸馏双轨统一、schema 版本机制。
+- 顺序：任务 0 基线核验 → 1 schema 版本 + archived 检索过滤 → 2 排序融合 →
+  3 衰减+cleanup → 4 蒸馏入口统一 → 5 文档/反向验证/提交。
+- 最大风险：store.search 是 hot path，排序 SQL 改动不得破坏既有召回；衰减/清理接口
+  签名变更涉及 core 公开 API（AGENTS.md §1.1 触发）；weight=0 必须与旧行为等价。
+- 基线证据（2026-08-05 实测）：main@8c7c450 工作区干净；cargo test --workspace
+  ≈998 通过 / 0 failed / 2 ignored（graph self_index、provider reasoning protocol，
+  均在域外）；core 118（memory 61）、agent 236、runtime 48、tools 84、cli 32、
+  config 32+18。
+
+## 自验收清单（执行者逐条打勾，命令亲跑）
+- [x] `cargo test --workspace --no-fail-fast`：通过数 ≥ 1018 / 0 failed（实测 make check 内 1018 通过 / 0 failed / 2 既有 ignored）
+- [x] `cargo test -p deepseeknova-core memory`：≥ 74 条通过（实测 memory:: 74 条；core 全量 132 lib + 2 集成 + 1 doctest）
+- [x] `make check` EXIT=0（fmt + clippy + 全 workspace 测试 + doc 全绿）
+- [x] CLI 冒烟：`memory stats` 输出含 stage 分布（实测 `stages=archived:1,candidate:1,verified:1 archived=1`）
+- [x] CLI 冒烟：`memory cleanup` 空库与有数据均不 panic、输出报告（实测 decayed=3 deleted=1 / 空库 decayed=0 deleted=0）
+- [x] 反向验证：改坏排序融合断言 → 真红（1 failed：生命周期融合必须重排）→ 还原 → 真绿（1 passed）+ FMT_OK
+- [x] `cargo fmt --check` 通过；提交到分支 feat/memory-lifecycle（不 push）
+
+## 任务状态（记忆生命周期闭环 2026-08-05）
+- **review-fix 轮（2026-08-05，ddfd4b4 之上，6/6 全修）**：C1 store 事务化批量衰减 `decay_all`（单事务读-算-写，防并发 record_recall 丢失更新）；C2 蒸馏去重双前缀检查（distill-/reflect- 任一命中即已存在）；C3 runtime 起点/mid-run 召回 + tools recall 工具全部接 `rank_lifecycle_weight`（新增 `MemoryRankWeight` 扩展，缺失回落 0.3 默认）；C4 未来版本库保持原版本号不回写（收紧测试断言）；C5 PROGRESS 措辞修正；C6 decay_rate 入口 clamp(0,1) + 测试。workspace 1016 → 1018 passed / 0 failed。详见 crates/REVIEW.md 修复轮分节。
+- **G/P 域 OCR review-fix 轮（2026-08-05，95f695e 之上，4/4 全修）**：G-M1 parser 分组 Go type 声明遍历全部 type_spec 逐个产出实体（+fixture 测试）；G-L4 go.mod `require (` 尾注释容忍 + replace/exclude 负例测试；P-L2 诊断回填仅失败型会话覆写（Cancelled 零失败不被标 first_pass=true）；P-L4 损坏 scorecard parse 失败 warn 一次后 Ok、真实 IO 错误仍 Err（+目录路径传播测试）。graph 38→40、metrics 20→21、runtime 51→52；make check 全绿；反向验证 G-M1/P-L2 新断言红→绿。详见 crates/REVIEW.md 修复轮分节。
+- [x] 任务 1：schema 版本机制（`meta.schema_version` 初值 "1"，open 读/写，版本不符走空迁移表不炸，graph 先例同款）+ 核验 archived 排除（原 search **未**排除 → 已补：三路检索 LEFT JOIN memory_meta 过滤 stage='archived'，search_hybrid 嵌入扫描同步排除）。测试 +3（版本写入/旧版本不炸/未来版本不炸）+2（FTS 与 LIKE 路径 archived 不召回）。
+- [x] 任务 2：检索排序融合生命周期因子（SQL 内：`bm25 + rank_weight * ((1-importance)*stage_mult - recency_discount)`，stage_mult permanent=1.2/verified=1.1/candidate=1.0，recency 7 天内 0.5/30 天内 0.25）。入口：store.search_with_weight + engine.recall_with_weight（CLI 传 `[memory] rank_lifecycle_weight`；默认入口 recall/search 用 0.3 = 配置默认——**签名不变、行为变**：既有调用方排序从纯 bm25 变为 0.3 融合，weight=0 才等价旧行为）。测试 +1：同文本双条目 weight=0 保持纯 bm25（分数相等=生命周期项关闭）vs weight=0.3 重排（组合回归锚点）。
+- [x] 任务 3：衰减接线（engine.decay：非 permanent 衰减、<0.1→archived、permanent 豁免；engine.cleanup：decay + 删除 archived 且距最后召回 > archive_ttl_days，返回 (decayed, deleted)）；store 增 all_lifecycle/update_lifecycle/delete_archived_older_than/stage_counts；MemoryConfig 增 decay_rate=0.1/archive_ttl_days=30/rank_lifecycle_weight=0.3（含分层 merge + 测试）；CLI 增 `memory cleanup`、`memory stats` 输出 stage 分布 + archived 计数。测试 +4（衰减计数+permanent 豁免/超阈值归档/cleanup 只删超期/stats 分布）。
+- [x] 任务 4：蒸馏入口统一（engine.record_knowledge(kind,title,body,tags,source)：title 空则省略 title 行，id 前缀统一 "distill"，已存在则跳过写入保留首次 tags/source；record_reflection_lesson/record_llm_knowledge 变薄封装，签名不变）。测试 +1（reflect 写入后 llm-distill 同内容去重、两入口同格式）。
+- [x] 任务 5 前半：GUIDE 记忆节补 cleanup/衰减/排序权重说明 + `[memory]` 新字段；CHANGELOG Added 条目。
+- [x] 收尾：cargo fmt + make check EXIT=0（1016 通过 / 0 failed / 2 既有 ignored）；反向验证红（1 failed）→ 绿（1 passed）；CLI 冒烟 stats/cleanup 空库+有数据；分支 feat/memory-lifecycle 提交（不 push）。
+- 测试计数变化：core lib 118→130（memory 60→72：engine 13→18、store 15→22、lifecycle 7、skill 9、embedding 3、redact 6、recall 2、profile 5；基线书"memory 61/skill 10"实测为 60/9，未动 skill.rs）；config 32→33；cli 32 不变；workspace 998→1016。
+- 跨 crate 协议记录（AGENTS.md §1 触发）：预扫描=engine.recall/store.search/open 签名均不可变（runtime/tools 白名单外调用方），权重改走新增方法 `search_with_weight`/`recall_with_weight`（旧签名不变；默认行为从纯 bm25 变为 0.3 融合，属有意变更，0 才等价旧行为）；备选路径 A=store 内部可变字段存权重（需 interior mutability）vs B=新方法传参（选 B，零状态、weight=0 等价可直测）；自检=core/config/cli 聚焦测试 + make check 全绿 + 反向验证红→绿 + CLI 冒烟。
+- 遗留→已修（2026-08-05 review-fix 轮）：runtime 侧召回未接 rank_lifecycle_weight（起点召回 + mid-run 召回 + tools recall 工具已全部接线，见 crates/REVIEW.md 本轮 C3 处置）。
+
 ## 已提交并推送（2026-08-05 审查修复轮）
 - 审查修复（main@b312715 之上，6 项 review finding 全部修复）：
   ① `Config::merge` 补 `quality`/`protocol`/`delegate`/`attribution` 分层合并
@@ -186,3 +415,26 @@
 
 ## 交付
 - 分支 feat/reflect-loop，已推送 origin；PR: https://github.com/W117C/DeepseekNova/pull/59
+
+## 任务书：记忆语义检索（embedder）最小闭环（2026-08-05，dev-loop 轮）— 开工回执
+- 理解的目标：把记忆召回从关键词命中升级为语义相关——remote OpenAI 兼容嵌入后端
+  （零新增依赖）、写入即嵌入、旧记忆显式回填、hybrid 检索（bm25+余弦+生命周期权重），
+  runtime/CLI 装配 + 文档 + 审查收尾。
+- 顺序：任务 0 基线核验 → 1 store hybrid+weight → 2 provider RemoteEmbedder →
+  3 config → 4 engine 接线 → 5 runtime/CLI 装配 → 6 文档/反向验证/收尾。
+- 最大风险：hybrid 与生命周期权重双重计权（需 FTS 基数改纯 bm25）；同步 trait 内
+  做 HTTP 调用（RemoteEmbedder 持独立 tokio runtime block_on，不阻塞调用方 runtime）；
+  config merge 默认值语义；既有 52 条 runtime 测试与 35 条 provider 测试不许回退。
+
+## 自验收清单（执行者逐条打勾，命令亲跑）
+- [x] A1 `make check` EXIT=0；workspace 0 failed（2 既有 ignored）
+- [x] A2 `cargo test -p deepseeknova-core memory::` 全绿且 core 测试数 ≥ 138
+      （实测 137 单测 + 2 集成 = 139；memory:: 79 全绿）
+- [x] A3 `cargo test -p deepseeknova-provider` 全绿且 ≥ 39（实测 40）
+- [x] A4 `cargo test -p deepseeknova-config` ≥ 53（实测 35+18=53）；
+      `cargo test -p deepseeknova-runtime` ≥ 53（实测 53）
+- [x] A5 `cargo test -p deepseeknova-tools` ≥ 67（实测 67+12+7；memory 工具
+      语义命中测试新增）
+- [x] B1 temp 目录 CLI 冒烟：`memory stats` 输出含 `embedded=`；`memory
+      embed-backfill` 无 provider 不 panic 且 attempted=0（实测见下）
+- [x] B2 反向验证：改坏「语义独有命中」断言 → 真红（1 failed）→ 还原 → 真绿

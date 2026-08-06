@@ -53,7 +53,29 @@ Administrators can disable capabilities via `[security] disabled_capabilities` i
 
 ### Command & Domain Restrictions
 - `allowed_commands` — restrict shell tool to specific command prefixes
-- `allowed_domains` — restrict web_fetch to specific domains
+- `allowed_domains` — restrict web_fetch to specific domains (parent domain covers subdomains)
+
+### Read-Only Command Classifier
+Shell commands are classified before execution (`deepseeknova_security::readonly`):
+four layers (arbitrary-args safe / zero-args / exact form / subcommand + per-flag
+allowlist for git/gh/docker) plus injection detection that is quote-aware
+(`grep -E 'a|b'` is safe; `$(...)`, chained `|`/`;`, `git --output=`, `git -c
+core.pager=`, `find -exec`, `git submodule foreach` are classified accordingly).
+Ordinary shell composition (command substitution, chained commands, redirection)
+is not read-only and flows through the permission gate (ask/allow rules can
+approve it); tool-level injection surfaces (`git -c`/`--config-env`, format-string
+injection, UNC/URL/SMB path forms) are hard-denied and cannot be overridden by
+rules. Read-only commands run without prompting; explicit deny/ask rules always
+take precedence.
+
+### Decision Contract & Output Sanitization
+Permission checks return a full verdict (`CheckVerdict`: decision + reason +
+hard-deny flag + rule suggestions) instead of a bare allow/deny. Sub-agent and
+delegate output passes through `sanitize_output` before entering the parent
+context, neutralizing permission-override instruction shapes
+(`permissions.allow`, `--dangerously-skip-permissions`, `<settings-json>`, …);
+the same sanitization applies at the `remember` tool write path to prevent
+persistent injection via memory recall.
 
 ### Resource Limits
 Configurable limits prevent runaway execution:

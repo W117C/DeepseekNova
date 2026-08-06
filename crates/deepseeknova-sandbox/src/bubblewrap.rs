@@ -5,8 +5,9 @@ use crate::Sandbox;
 /// Wraps command execution inside a bubblewrap container to restrict
 /// filesystem access, network access, and process visibility.
 ///
-/// When the `bwrap` binary is not found at runtime, sandboxing is silently
-/// degraded to no-op (logged at warn level).
+/// When the `bwrap` binary is not found at runtime,
+/// [`Sandbox::backend_available`] 返回 false，上层 ShellTool 会 fail-closed
+/// 拒绝执行（不再静默降级为无沙箱）。
 #[derive(Debug, Clone)]
 pub struct BubblewrapSandbox {
     /// Additional directories to bind-mount read-only inside the sandbox.
@@ -54,6 +55,38 @@ impl BubblewrapSandbox {
             extra_readonly_binds: default_ro_binds(),
             readwrite_binds: writable_paths.to_vec(),
             allow_network,
+        }
+    }
+
+    /// 按档位构建 bubblewrap 沙箱（三档模型）。
+    ///
+    /// - [`crate::SandboxTier::ReadOnly`]：无用户可写根 + 强制禁网
+    /// - [`crate::SandboxTier::WorkspaceWrite`]：可写根 + 按 `allow_network` 开网
+    /// - [`crate::SandboxTier::FullAccess`]：全文件写（绑定 `/` 读写）+
+    ///   网络全开（`allow_network` 与 `writable_paths` 无效）
+    pub fn with_tier(
+        tier: crate::SandboxTier,
+        writable_paths: &[String],
+        allow_network: bool,
+    ) -> Self {
+        let readwrite_binds = match tier {
+            crate::SandboxTier::ReadOnly => Vec::new(),
+            crate::SandboxTier::WorkspaceWrite => writable_paths.to_vec(),
+            crate::SandboxTier::FullAccess => vec!["/".to_string()],
+        };
+        let extra_readonly_binds = match tier {
+            crate::SandboxTier::FullAccess => Vec::new(),
+            _ => default_ro_binds(),
+        };
+        let net = match tier {
+            crate::SandboxTier::ReadOnly => false,
+            crate::SandboxTier::WorkspaceWrite => allow_network,
+            crate::SandboxTier::FullAccess => true,
+        };
+        Self {
+            extra_readonly_binds,
+            readwrite_binds,
+            allow_network: net,
         }
     }
 
@@ -134,18 +167,16 @@ impl BubblewrapSandbox {
 
 impl Sandbox for BubblewrapSandbox {
     fn sandbox(&self, cmd_executable: &str, cmd_args: &[String]) -> (String, Vec<String>) {
-        // If bwrap is not available, fall back to no-op.
-        if !bwrap_available() {
-            tracing::warn!("bwrap not found; running command without sandbox");
-            return (cmd_executable.to_string(), cmd_args.to_vec());
-        }
-
         let args = self.build_args(cmd_executable, cmd_args);
         ("bwrap".to_string(), args)
     }
 
     fn name(&self) -> &str {
         "linux-bubblewrap"
+    }
+
+    fn backend_available(&self) -> bool {
+        bwrap_available()
     }
 }
 
@@ -267,6 +298,48 @@ mod tests {
         let policy_args = bw.build_args("sh", &["-c".into(), "echo hi".into()]);
         assert_eq!(policy_args, default_args);
         assert!(!policy_args.contains(&"--bind".to_string()));
+    }
+
+    // --- with_tier ---
+
+    #[test]
+    fn readonly_tier_forces_network_off_and_no_writable_roots() {
+        // 只读档：即使给了可写根与开网，也必须无 --bind 且强制 --unshare-net
+        let bw =
+            BubblewrapSandbox::with_tier(crate::SandboxTier::ReadOnly, &["/tmp/work".into()], true);
+        let args = bw.build_args("sh", &["-c".into(), "echo hi".into()]);
+        assert!(args.contains(&"--unshare-net".to_string()));
+        assert!(!args.contains(&"--share-net".to_string()));
+        assert!(!args.contains(&"--bind".to_string()));
+    }
+
+    #[test]
+    fn workspace_write_tier_binds_writable_paths() {
+        let bw = BubblewrapSandbox::with_tier(
+            crate::SandboxTier::WorkspaceWrite,
+            &["/tmp/work".into()],
+            false,
+        );
+        let args = bw.build_args("sh", &["-c".into(), "echo hi".into()]);
+        let pos = args.iter().position(|a| a == "--bind").expect("--bind");
+        assert_eq!(args[pos + 1], "/tmp/work");
+        assert!(args.contains(&"--unshare-net".to_string()));
+    }
+
+    #[test]
+    fn full_access_tier_opens_network_ignoring_flag() {
+        let bw = BubblewrapSandbox::with_tier(
+            crate::SandboxTier::FullAccess,
+            &[],
+            false, // allow_network 在 FullAccess 档无效
+        );
+        let args = bw.build_args("sh", &["-c".into(), "echo hi".into()]);
+        // FullAccess 必须绑定 `/` 读写（全文件写），且不再保留只读系统绑定
+        let pos = args.iter().position(|a| a == "--bind").expect("--bind");
+        assert_eq!(args[pos + 1], "/");
+        assert!(!args.contains(&"--ro-bind".to_string()));
+        assert!(args.contains(&"--share-net".to_string()));
+        assert!(!args.contains(&"--unshare-net".to_string()));
     }
 
     #[test]

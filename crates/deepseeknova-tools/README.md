@@ -1,8 +1,11 @@
 # deepseeknova-tools
 
-13+ built-in tools for file I/O, globbing, grep, shell execution, web fetching,
-task management, memory operations, and MCP bridging. Each tool implements the
-`Tool` trait with security-aware execution.
+17 built-in tools for file I/O, globbing, grep, shell execution, web fetching,
+task management, memory operations, code graph, Context7 docs, and delegation.
+Additional tools: `web_search` (DuckDuckGo / Tavily / Bing / SearXNG) and
+`lsp_diagnostics` (rust-analyzer / pyright / gopls / typescript-language-server /
+clangd, auto-invoked after write/edit/move). Each tool implements the `Tool`
+trait with security-aware execution.
 
 ## Context7 library docs
 

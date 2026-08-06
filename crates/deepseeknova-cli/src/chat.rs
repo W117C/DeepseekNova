@@ -1,8 +1,9 @@
+use deepseeknova_core::chunk::Usage;
 use deepseeknova_core::runner::{RunEvent, RunInput, Runner};
 use deepseeknova_core::{Message, Role};
 use deepseeknova_provider::factory::ReasoningEffort;
 use deepseeknova_store::{SessionStore, StoredOutput};
-use std::io::{BufRead, Write};
+use std::io::{BufRead, IsTerminal, Write};
 use std::sync::Arc;
 use tokio_stream::StreamExt;
 
@@ -72,10 +73,23 @@ where
     let mut current_effort = baseline_effort;
     let mut current_model = initial_model;
     println!();
-    println!("╭──────────────────────────────────────────────────╮");
-    println!("│     deepseeknova — interactive chat                  │");
-    println!("│     /exit  /new  /model  /cost  /skills  /help   │");
-    println!("╰──────────────────────────────────────────────────╯");
+    // 启动横幅：行宽统一由 title/commands 行动态计算填充，避免硬编码
+    // 空格数导致右边界错位（此前标题行比边框宽 5 列）。
+    let banner_width = 50usize;
+    let title = "     deepseeknova — interactive chat";
+    let commands = "     /exit  /new  /model  /cost  /skills  /help";
+    println!("╭{}╮", "─".repeat(banner_width));
+    println!(
+        "│{}{}│",
+        title,
+        " ".repeat(banner_width - title.chars().count())
+    );
+    println!(
+        "│{}{}│",
+        commands,
+        " ".repeat(banner_width - commands.chars().count())
+    );
+    println!("╰{}╯", "─".repeat(banner_width));
     println!();
 
     let stdin = std::io::stdin();
@@ -94,22 +108,43 @@ where
             DisplayMode::Lite => " [lite]",
             DisplayMode::Raw => " [raw]",
         };
-        print!(">{mode_indicator} ");
-        std::io::stdout().flush().ok();
+        let prompt = format!(">{mode_indicator} ");
 
-        let mut line = String::new();
-        match reader.read_line(&mut line) {
-            Ok(0) => {
-                // EOF — exit
-                println!();
-                break;
+        // TTY 走 raw 模式字符级编辑：退格按整字删除，中文不产生残渣；
+        // 管道/重定向回退字节级 read_until + 残渣清理（原逻辑）。
+        let line = if std::io::stdin().is_terminal() {
+            match read_line_tty(&prompt)? {
+                Some(l) => l,
+                // EOF / Esc / Ctrl+C → 退出
+                None => break,
             }
-            Ok(_) => {}
-            Err(e) => {
-                eprintln!("read error: {e}");
-                break;
+        } else {
+            print!("{prompt}");
+            std::io::stdout().flush().ok();
+
+            let mut line_bytes: Vec<u8> = Vec::new();
+            match reader.read_until(b'\n', &mut line_bytes) {
+                Ok(0) => {
+                    // EOF — exit
+                    println!();
+                    break;
+                }
+                Ok(_) => {
+                    // read_until 保留行尾 \n
+                    if line_bytes.last() == Some(&b'\n') {
+                        line_bytes.pop();
+                    }
+                    // 管道输入不会由 TTY 字节级擦除产生残渣，但保持防御性清理。
+                    let valid = utf8_prefix_len(&line_bytes);
+                    line_bytes.truncate(valid);
+                }
+                Err(e) => {
+                    eprintln!("read error: {e}");
+                    break;
+                }
             }
-        }
+            String::from_utf8(line_bytes).unwrap_or_default()
+        };
 
         let trimmed = line.trim();
 
@@ -171,19 +206,35 @@ where
         match runner.run_stream(input).await {
             Ok(mut stream) => {
                 println!();
-                let mut started_output = false;
+                // 块级打印状态机：block_open=当前行有未收尾输出块（推理/正文/
+                // 工具行）；reasoning_open=推理 dim 区间开启，收尾时闭合一次；
+                // pending_usage=延迟到块边界显示的 token 统计（避免插在工具
+                // 调用的 args 与结果之间）。
+                let mut block_open = false;
+                let mut reasoning_open = false;
+                let mut text_started = false;
+                let mut pending_usage: Option<Usage> = None;
                 let mut final_output: Option<StoredOutput> = None;
 
                 while let Some(event) = stream.next().await {
                     match event {
                         Ok(RunEvent::TextDelta(text)) => {
-                            if !started_output {
-                                started_output = true;
-                            }
                             if mode == DisplayMode::Raw {
                                 println!("[text] {text}");
                             } else {
+                                if pending_usage.is_some() {
+                                    flush_usage(&mut pending_usage, &mut block_open);
+                                }
+                                if !text_started {
+                                    text_started = true;
+                                    // 推理/工具行未收尾 → 先闭合样式再换行，
+                                    // [回答] 标签独立成行，不与上游内容粘连。
+                                    close_reasoning(&mut reasoning_open);
+                                    close_block(&mut block_open);
+                                    print!("\x1b[36m[回答]\x1b[0m ");
+                                }
                                 print!("{text}");
+                                block_open = true;
                             }
                             std::io::stdout().flush().ok();
                         }
@@ -191,8 +242,19 @@ where
                             if mode == DisplayMode::Raw {
                                 println!("[reasoning] {text}");
                             } else if mode == DisplayMode::Normal {
-                                // Show reasoning in dim style
-                                print!("\x1b[2m{text}\x1b[0m");
+                                if pending_usage.is_some() {
+                                    flush_usage(&mut pending_usage, &mut block_open);
+                                }
+                                if !reasoning_open {
+                                    // 上一块未收尾 → 先换行，推理独立成段
+                                    close_block(&mut block_open);
+                                    // dim 区间只开一次，流式增量不重复包裹，
+                                    // 收尾（正文/工具开始）时统一闭合。
+                                    print!("\x1b[2m[思考]\x1b[0m \x1b[2m");
+                                    reasoning_open = true;
+                                }
+                                print!("{text}");
+                                block_open = true;
                                 std::io::stdout().flush().ok();
                             }
                             // Lite mode: hide reasoning
@@ -201,38 +263,38 @@ where
                             if mode == DisplayMode::Raw {
                                 println!("[tool_start] {name}");
                             } else {
-                                if started_output {
-                                    println!();
-                                    started_output = false;
+                                if pending_usage.is_some() {
+                                    flush_usage(&mut pending_usage, &mut block_open);
                                 }
-                                print!("  ⚙ {name} ...");
+                                // 推理/正文行未收尾 → 闭合样式并换行，
+                                // 工具调用独立成行（此前会粘在推理文本尾部）。
+                                close_reasoning(&mut reasoning_open);
+                                close_block(&mut block_open);
+                                print!("  \x1b[36m⚙ {name}\x1b[0m ...");
+                                block_open = true;
                             }
                             std::io::stdout().flush().ok();
                         }
                         Ok(RunEvent::ToolCallEnd {
                             name: _, arguments, ..
                         }) => {
-                            if mode != DisplayMode::Raw {
-                                println!();
-                            }
                             if mode == DisplayMode::Raw {
                                 println!("[tool_end] args={}", truncate(&arguments, 200));
                             } else {
-                                println!("     args: {}", truncate(&arguments, 200));
+                                // 工具行收尾：换行后打印参数行
+                                close_block(&mut block_open);
+                                println!("     \x1b[2margs:\x1b[0m {}", truncate(&arguments, 200));
                             }
                         }
                         Ok(RunEvent::ToolResult { call_id: _, result }) => {
                             if mode == DisplayMode::Raw {
                                 println!("[tool_result] {}", truncate(&result, 300));
                             } else {
-                                println!("     → {}", truncate(&result, 300));
+                                close_block(&mut block_open);
+                                println!("     \x1b[32m→\x1b[0m {}", truncate(&result, 300));
                             }
                         }
                         Ok(RunEvent::Usage(u)) => {
-                            if started_output {
-                                println!();
-                                started_output = false;
-                            }
                             if mode == DisplayMode::Raw {
                                 println!(
                                     "[usage] {}↑ {}↓ (cache hit:{} miss:{})",
@@ -242,38 +304,56 @@ where
                                     u.cache_miss_tokens
                                 );
                             } else {
-                                eprintln!(
-                                    "  [{}↑ {}↓ {} total]",
-                                    u.prompt_tokens, u.completion_tokens, u.total_tokens
-                                );
+                                // 延迟到下一块边界显示：usage 常夹在工具调用
+                                // 链中（args 之后、结果之前），立即打印会撕裂
+                                // 工具调用的视觉顺序。
+                                pending_usage = Some(u);
                             }
                         }
                         Ok(RunEvent::Done(output)) => {
-                            if started_output {
-                                println!();
+                            if mode != DisplayMode::Raw {
+                                if pending_usage.is_some() {
+                                    flush_usage(&mut pending_usage, &mut block_open);
+                                }
+                                close_reasoning(&mut reasoning_open);
                             }
-                            if !output.text.is_empty() {
-                                println!("{}", output.text);
-                            }
-                            // Capture the final text for session persistence
-                            // (tool calls are already streamed above; the
-                            // stored turn keeps just the assistant text).
+                            close_block(&mut block_open);
+                            // 轮次分隔线：多轮对话之间留出明确边界。
+                            // 宽度取终端列数（上限 120 避免极端终端），失败回退 60。
+                            let sep_width = crossterm::terminal::size()
+                                .map(|(w, _)| (w as usize).clamp(20, 120))
+                                .unwrap_or(60);
+                            println!("\x1b[2m{}\x1b[0m", "─".repeat(sep_width));
+                            // 最终文本已通过 TextDelta 流式打印完毕，此处
+                            // 不再重复打印，只捕获最终输出供会话持久化使用。
                             final_output = Some(StoredOutput {
                                 text: output.text.clone(),
                                 tool_calls: Vec::new(),
                             });
                         }
-                        Ok(RunEvent::TurnComplete) if started_output => {
-                            println!();
-                            started_output = false;
+                        Ok(RunEvent::TurnComplete) if block_open => {
+                            close_block(&mut block_open);
                         }
                         Ok(RunEvent::Paused { reason, .. }) => {
+                            if mode != DisplayMode::Raw {
+                                if pending_usage.is_some() {
+                                    flush_usage(&mut pending_usage, &mut block_open);
+                                }
+                                close_reasoning(&mut reasoning_open);
+                            }
+                            close_block(&mut block_open);
                             println!(
                                 "\n⏸ paused: {reason} — 上下文已保留在本会话内存中，继续输入即可接着跑\
                                  （本轮进度尚未写入磁盘，退出进程后不会出现在 --resume 中）"
                             );
                         }
                         Err(e) => {
+                            if mode != DisplayMode::Raw {
+                                close_reasoning(&mut reasoning_open);
+                                if pending_usage.is_some() {
+                                    flush_usage(&mut pending_usage, &mut block_open);
+                                }
+                            }
                             eprintln!("\nerror: {e}");
                             break;
                         }
@@ -716,12 +796,171 @@ fn effort_label(effort: ReasoningEffort) -> &'static str {
     }
 }
 
+/// 收尾当前输出块：行未闭合则换行。
+fn close_block(block_open: &mut bool) {
+    if *block_open {
+        println!();
+        *block_open = false;
+    }
+}
+
+/// 闭合推理 dim 样式区间（若开启）。
+fn close_reasoning(reasoning_open: &mut bool) {
+    if *reasoning_open {
+        print!("\x1b[0m");
+        *reasoning_open = false;
+    }
+}
+
+/// 在打开新输出块之前显示缓存的 token 统计：若当前行有未收尾输出，
+/// 先换行再打印，保证 usage 不粘连、不打断工具调用链。
+fn flush_usage(pending: &mut Option<Usage>, block_open: &mut bool) {
+    if let Some(u) = pending.take() {
+        if *block_open {
+            println!();
+            *block_open = false;
+        }
+        eprintln!(
+            "\x1b[2m  [{}↑ {}↓ {} total]\x1b[0m",
+            u.prompt_tokens, u.completion_tokens, u.total_tokens
+        );
+    }
+}
+
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
         let end = s.floor_char_boundary(max);
         format!("{}…", &s[..end])
+    }
+}
+
+/// 返回 `bytes` 中最长合法 UTF-8 前缀的长度。
+///
+/// TTY 规范模式的行编辑按字节擦除，删除中文等多字节字符时行尾会留下
+/// 不完整的字符字节（残渣）；本函数从末尾回退截短，只丢弃残渣、保留
+/// 前面所有完整内容。正常输入时整行合法，直接返回原长。
+fn utf8_prefix_len(bytes: &[u8]) -> usize {
+    let mut len = bytes.len();
+    while len > 0 {
+        if std::str::from_utf8(&bytes[..len]).is_ok() {
+            return len;
+        }
+        len -= 1;
+    }
+    0
+}
+
+// ---------------------------------------------------------------------------
+// TTY raw-mode 行编辑：字符级退格/删除，中文不产生残渣。
+// 复用 TUI 的 InputState（纯逻辑、UTF-8 安全），本实现只负责按键分派与
+// 整行重绘；非 TTY（管道/重定向）走上方 read_until 回退路径。
+// ---------------------------------------------------------------------------
+
+/// 从 stdin 读一行。返回 `Ok(Some(line))` 为输入；`Ok(None)` 表示退出
+/// （EOF / Esc / Ctrl+C / 读取失败）。调用方负责恢复后的换行排版。
+fn read_line_tty(prompt: &str) -> std::io::Result<Option<String>> {
+    use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+    use crossterm::QueueableCommand;
+    use deepseeknova_tui::input::editor::InputState;
+    use std::io::Write;
+
+    let _guard = RawModeGuard::enter()?;
+    let mut stdout = std::io::stdout();
+    let mut input = InputState::default();
+
+    loop {
+        redraw_line(&mut stdout, prompt, &input)?;
+        match event::read() {
+            Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => match key.code {
+                KeyCode::Enter => {
+                    stdout.queue(crossterm::cursor::MoveToNextLine(1))?;
+                    stdout.flush()?;
+                    return Ok(Some(input.text.clone()));
+                }
+                KeyCode::Backspace => input.backspace(),
+                KeyCode::Delete => input.delete(),
+                KeyCode::Left => input.move_left(),
+                KeyCode::Right => input.move_right(),
+                KeyCode::Home => input.home_line(),
+                KeyCode::End => input.end_line(),
+                KeyCode::Up => input.move_line_up(),
+                KeyCode::Down => input.move_line_down(),
+                KeyCode::Esc => return Ok(None),
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    return Ok(None);
+                }
+                KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    // Ctrl+D：空行退出（EOF 语义），否则删除光标后字符
+                    if input.text.is_empty() {
+                        return Ok(None);
+                    }
+                    input.delete();
+                }
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    input.clear()
+                }
+                KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    input.delete_word_before()
+                }
+                KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => input.home(),
+                KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => input.end(),
+                KeyCode::Char(c)
+                    if !key.modifiers.contains(KeyModifiers::CONTROL)
+                        && !key.modifiers.contains(KeyModifiers::ALT) =>
+                {
+                    input.insert_char(c)
+                }
+                _ => {}
+            },
+            Ok(Event::Paste(text)) => {
+                for c in text.chars() {
+                    input.insert_char(c);
+                }
+            }
+            Ok(_) => {}
+            // stdin 关闭/不可读 → 视为退出
+            Err(_) => return Ok(None),
+        }
+    }
+}
+
+/// 整行重绘：清行 → prompt + 文本 → 光标定位到正确列（Unicode 宽度）。
+fn redraw_line<W: std::io::Write>(
+    w: &mut W,
+    prompt: &str,
+    input: &deepseeknova_tui::input::editor::InputState,
+) -> std::io::Result<()> {
+    use crossterm::cursor::MoveToColumn;
+    use crossterm::terminal::{Clear, ClearType::UntilNewLine};
+    use crossterm::QueueableCommand;
+    use unicode_width::UnicodeWidthStr;
+
+    w.queue(MoveToColumn(0))?;
+    w.queue(Clear(UntilNewLine))?;
+    w.queue(crossterm::style::Print(prompt))?;
+    w.queue(crossterm::style::Print(&input.text))?;
+    let col = UnicodeWidthStr::width(prompt) + UnicodeWidthStr::width(&input.text[..input.cursor]);
+    // 绝对定位：打印后光标已在文本末尾，MoveRight 会再右移 col 列导致
+    // 光标与文字间距拉大，必须用 MoveToColumn。
+    w.queue(MoveToColumn(col as u16))?;
+    w.flush()
+}
+
+/// raw 模式 RAII 守卫：离开作用域自动恢复终端。
+struct RawModeGuard;
+
+impl RawModeGuard {
+    fn enter() -> std::io::Result<Self> {
+        crossterm::terminal::enable_raw_mode()?;
+        Ok(Self)
+    }
+}
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        let _ = crossterm::terminal::disable_raw_mode();
     }
 }
 
@@ -732,6 +971,31 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── utf8_prefix_len（TTY 字节级删除残渣清理）───────────────
+
+    #[test]
+    fn utf8_prefix_keeps_fully_valid_input() {
+        assert_eq!(utf8_prefix_len(b"abc"), 3);
+        assert_eq!(utf8_prefix_len("你好".as_bytes()), "你好".len());
+        assert_eq!(utf8_prefix_len(b""), 0);
+    }
+
+    #[test]
+    fn utf8_prefix_drops_trailing_residue_bytes() {
+        // 删除中文后残留 1 字节（"好" 的 E5）在行尾：只丢 1 字节，保留"你"
+        let mut bytes = b"abc".to_vec();
+        bytes.extend_from_slice("你好".as_bytes());
+        bytes.truncate(bytes.len() - 1); // 模拟删 1 字节留下残渣
+        let len = utf8_prefix_len(&bytes);
+        assert_eq!(&bytes[..len], b"abc\xe4\xbd\xa0", "完整内容保留，残渣丢弃");
+
+        // 整行都是残渣（两个孤立字节）：全部丢弃
+        assert_eq!(utf8_prefix_len(&[0xe5, 0xbd]), 0);
+
+        // ASCII 与残渣混合
+        assert_eq!(utf8_prefix_len(b"hi\xe5"), 2);
+    }
 
     // ── parse_effort_command ───────────────────────────────────────────
 

@@ -76,6 +76,16 @@ pub enum Commands {
         #[arg(long, default_value = "low")]
         severity_min: String,
     },
+    /// Run eval cases from a JSONL file and print a pass/fail report.
+    Eval {
+        /// Path to JSONL eval file (default: evals.jsonl). Each line:
+        /// {"prompt":"...","must_contain":["..."]}
+        #[arg(long, default_value = "evals.jsonl")]
+        path: String,
+        /// Output format: "md" or "json".
+        #[arg(long, default_value = "md")]
+        format: String,
+    },
     /// Interactive chat session
     Chat {
         #[arg(long)]
@@ -91,6 +101,9 @@ pub enum Commands {
     Serve {
         #[arg(long, default_value = "127.0.0.1:8787")]
         addr: String,
+        /// Run as an Agent Client Protocol (ACP) stdio server instead of HTTP.
+        #[arg(long)]
+        acp: bool,
     },
     /// Run configuration wizard
     Setup {
@@ -131,8 +144,12 @@ pub enum MemoryAction {
     Search { query: Vec<String> },
     /// 按 id/key 删除一条记忆。
     Forget { id: String },
-    /// 打印统计（召回命中率、reinforce 比例）——P2 决策依据。
+    /// 打印统计（召回命中率、reinforce 比例、stage 分布）——P2 决策依据。
     Stats,
+    /// 为尚无向量的旧记忆生成嵌入（embedder=none/缺 key 时无操作）。
+    EmbedBackfill,
+    /// 衰减 + 归档超期清理（decay_rate/archive_ttl_days 取自 \[memory\] 配置）。
+    Cleanup,
 }
 
 #[derive(Subcommand)]

@@ -13,7 +13,8 @@ use deepseeknova_core::{
     Message, Role, RunEvent, RunEventStream, RunInput, RunOutput, Runner, Tool,
 };
 use deepseeknova_metrics::{RunOutcome, SessionSnapshot, SessionTracker};
-use deepseeknova_permission::{Decision, PermissionGate};
+use deepseeknova_permission::{CheckVerdict, Decision, PermissionGate, RuleSuggestion};
+use deepseeknova_provider::auto::AutoRouteDecider;
 use deepseeknova_provider::Provider;
 use deepseeknova_security::context::SecurityContext;
 use std::collections::HashMap;
@@ -126,6 +127,10 @@ pub struct Agent {
 
     /// P2 每步 effort 路由（quick=thinking off / high=高推理）；None = 固定主 provider。
     effort_routing: Option<EffortRouting>,
+
+    /// Auto 模型+思考路由（per-run decider）；None = 关闭。决策在每次
+    /// `run_stream` 开始时调用一次，按 run 隔离，不共享跨请求状态。
+    auto_router: Option<Arc<dyn AutoRouteDecider>>,
 
     /// P2 观察压缩设置；None = 关闭（默认）。
     observe: Option<ObserveSettings>,
@@ -384,6 +389,7 @@ impl Agent {
             lesson_hook: None,
             attribution_settings: None,
             effort_routing: None,
+            auto_router: None,
             observe: None,
             tool_cache: false,
             tool_hooks: Vec::new(),
@@ -660,6 +666,14 @@ impl Agent {
         self
     }
 
+    /// Auto 模型+思考路由：每次 `run_stream` 开始时调用一次 decider，整轮
+    /// 使用其返回的 provider（`None` 回落默认 provider）。决策状态按 run
+    /// 隔离，serve 等共享 Agent 的并发请求互不串扰。
+    pub fn with_auto_router(mut self, decider: Arc<dyn AutoRouteDecider>) -> Self {
+        self.auto_router = Some(decider);
+        self
+    }
+
     /// P2.2：启用观察压缩。超 `threshold_chars` 的工具结果由廉价模型摘要为
     /// 至多 `max_chars` 字符后入历史；事件流仍透出原始结果。
     pub fn with_observe_compression(
@@ -786,6 +800,7 @@ impl Runner for Agent {
         let lesson_hook = self.lesson_hook.clone();
         let attribution_settings = self.attribution_settings.clone();
         let effort_routing = self.effort_routing.clone();
+        let auto_router = self.auto_router.clone();
         let observe = self.observe.clone();
         let tool_cache = self.tool_cache;
         let recall_provider_for_loop = recall_provider.clone();
@@ -920,6 +935,7 @@ impl Runner for Agent {
                 lesson_hook,
                 attribution_settings,
                 effort_routing,
+                auto_router,
                 observe,
                 tool_cache,
                 recall_provider_for_loop,
@@ -987,7 +1003,10 @@ impl Runner for Agent {
             }
 
             if let Err(e) = result {
-                warn!("agent loop error: {e}");
+                // 打印完整错误链（{e:?} 展开 source），否则上游 provider 断流时
+                // 只能看到最外层 "failed to read chunk from stream"，无法诊断
+                // 是超时、连接重置还是 EOF。
+                warn!("agent loop error: {e:?}");
                 let _ = tx.send(Err(e)).await;
             }
         });
@@ -1300,6 +1319,27 @@ fn unique_run_label() -> String {
     )
 }
 
+/// 将权限裁决的"拒绝即教育"建议渲染为人类可读文本；无建议时返回空串。
+fn render_suggestions(suggestions: &[RuleSuggestion]) -> String {
+    if suggestions.is_empty() {
+        return String::new();
+    }
+    let lines: Vec<String> = suggestions
+        .iter()
+        .map(|s| {
+            let rule = match s.rule.subject {
+                Some(ref sub) => format!("{} subject={}", s.rule.tool, sub),
+                None => s.rule.tool.clone(),
+            };
+            format!(
+                "[建议] 添加规则即可自动放行: behavior={:?} rule={rule}",
+                s.behavior
+            )
+        })
+        .collect();
+    lines.join("\n")
+}
+
 async fn run_agent_loop(
     provider: Arc<dyn Provider>,
     tools: Vec<Arc<dyn Tool>>,
@@ -1328,6 +1368,7 @@ async fn run_agent_loop(
     lesson_hook: Option<crate::reflection::LessonHook>,
     attribution_settings: Option<Arc<crate::attribution::AttributionSettings>>,
     effort_routing: Option<EffortRouting>,
+    auto_router: Option<Arc<dyn AutoRouteDecider>>,
     observe: Option<ObserveSettings>,
     tool_cache: bool,
     recall_provider: Option<RecallProvider>,
@@ -1352,6 +1393,19 @@ async fn run_agent_loop(
         tool_call_id: None,
         reasoning_content: None,
     });
+
+    // Auto 模型+思考路由：每 run 决策一次（而非每步），决策状态随 run 隔离，
+    // serve 等共享 Agent 的并发请求互不串扰；显式 model_override 或决策失败/
+    // 无匹配指针时回落默认 provider。
+    let auto_provider = if let Some(ref decider) = auto_router {
+        if input.model_override.is_none() {
+            decider.decide(&memory.get_all()).await
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     // Resource-limit accounting (from SecurityContext.limits). Enforced at
     // step boundaries so each turn stays atomic — preserving the DeepSeek
@@ -1548,9 +1602,11 @@ async fn run_agent_loop(
             .map(|t| (t.schema().name.clone(), Arc::clone(t)))
             .collect();
 
-        // P2.1 每步 provider 选择：机械续步（上一步是正常工具结果）走 quick，
-        // 首步 / 出错 / 回炉反馈走 high。
-        let step_provider: &Arc<dyn Provider> = if let Some(r) = effort_routing.as_ref() {
+        // P2.1 每步 provider 选择：auto 路由（整轮固定）优先；否则机械续步
+        // （上一步是正常工具结果）走 quick，首步 / 出错 / 回炉反馈走 high。
+        let step_provider: &Arc<dyn Provider> = if let Some(p) = auto_provider.as_ref() {
+            p
+        } else if let Some(r) = effort_routing.as_ref() {
             if classify_quick_step(memory) {
                 &r.quick
             } else {
@@ -2404,20 +2460,36 @@ async fn stream_and_process_turn(
             if gate_block.is_none() {
                 gate_block = match permission {
                     Some(gate) => {
-                        let decision = match tool_map.get(&call.name) {
+                        // 完整裁决：reason + "拒绝即教育"建议随阻断文案透出。
+                        let verdict = match tool_map.get(&call.name) {
                             Some(tool) => gate.check(tool.as_ref(), &call.arguments),
-                            None => Decision::Allow,
+                            None => CheckVerdict::allow(),
                         };
-                        match decision {
+                        match verdict.decision() {
                             Decision::Allow => None,
-                            Decision::Deny => Some("blocked by permission policy".to_string()),
+                            Decision::Deny => {
+                                let mut msg = verdict.reason().to_string();
+                                if verdict.is_hard_deny() {
+                                    msg.push_str(" (安全硬拒，不可通过规则覆盖)");
+                                }
+                                let sug = render_suggestions(verdict.suggestions());
+                                if !sug.is_empty() {
+                                    msg.push_str(&format!("\n{sug}"));
+                                }
+                                Some(msg)
+                            }
                             Decision::Ask => {
                                 let approved = if let Some(responder) = approval {
                                     let approval_id = format!("approval_{}", uuid::Uuid::new_v4());
+                                    let mut description = call.arguments.clone();
+                                    let sug = render_suggestions(verdict.suggestions());
+                                    if !sug.is_empty() {
+                                        description.push_str(&format!("\n\n{sug}"));
+                                    }
                                     tx.send(Ok(RunEvent::ApprovalRequest {
                                         id: approval_id.clone(),
                                         title: format!("Allow tool: {}", call.name),
-                                        description: Some(call.arguments.clone()),
+                                        description: Some(description),
                                     }))
                                     .await
                                     .ok();
@@ -2674,7 +2746,7 @@ async fn stream_and_process_turn(
 
         // 按原始顺序回写事件与历史（顺序确定，replay 友好）。
         for (i, call) in pending_calls.iter().enumerate() {
-            let result = results[i].clone().unwrap_or_else(|| {
+            let mut result = results[i].clone().unwrap_or_else(|| {
                 if cancel.is_cancelled() {
                     format!("Error: tool '{}' cancelled before execution", call.name)
                 } else {
@@ -2690,6 +2762,35 @@ async fn stream_and_process_turn(
                     "write_file" | "edit_file" | "move_file" | "bash"
                 ) {
                     *wrote_files = true;
+                }
+            }
+            // 编辑后诊断：写类工具执行成功后，自动调用 lsp_diagnostics 并把
+            // 诊断注入 ToolResult（语言服务器未安装/被禁用时静默跳过，不制造噪音）。
+            if executed[i]
+                && matches!(call.name.as_str(), "write_file" | "edit_file" | "move_file")
+                && !is_tool_error_result(&result)
+            {
+                if let Some(lsp) = tool_map.get("lsp_diagnostics") {
+                    if let Some(path) = extract_tool_path(&call.arguments) {
+                        let lsp_ctx = build_tool_context(
+                            "lsp-post-edit",
+                            cancel.child_token(),
+                            workspace_root,
+                            security,
+                            extensions,
+                        );
+                        let lsp_args = serde_json::json!({ "path": path }).to_string();
+                        match lsp.execute(&lsp_ctx, &lsp_args).await {
+                            Ok(diag)
+                                if diag.starts_with("LSP diagnostics")
+                                    || diag.starts_with("No LSP diagnostics") =>
+                            {
+                                result.push_str("\n\n---\n");
+                                result.push_str(&diag);
+                            }
+                            _ => {}
+                        }
+                    }
                 }
             }
             // P2.2 观察压缩：事件透出原始结果；历史存压缩摘要（压缩失败回退原始截断）。
@@ -3058,6 +3159,12 @@ fn extract_touched_paths(name: &str, args: &str) -> Vec<String> {
     out
 }
 
+/// 编辑后诊断用：从 write/edit/move 工具参数提取目标文件路径（`path` 字段）。
+fn extract_tool_path(args: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(args).ok()?;
+    v.get("path").and_then(|p| p.as_str()).map(str::to_string)
+}
+
 /// Observe 阶段工具输出压缩提示词（契约：保留事实/路径/退出码/数字，纯摘要输出）。
 fn render_compression_prompt(tool: &str, raw: &str) -> String {
     format!(
@@ -3109,6 +3216,20 @@ mod tests {
     struct SpyTool {
         name: &'static str,
         result: String,
+    }
+
+    /// 固定返回给定 provider 的 fake decider，记录被调用次数。
+    struct FakeAutoDecider {
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        provider: Arc<dyn Provider>,
+    }
+
+    #[async_trait::async_trait]
+    impl AutoRouteDecider for FakeAutoDecider {
+        async fn decide(&self, _m: &[Message]) -> Option<Arc<dyn Provider>> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Some(Arc::clone(&self.provider))
+        }
     }
 
     #[async_trait::async_trait]
@@ -3250,6 +3371,20 @@ mod tests {
         });
         assert!(!classify_quick_step(&mem), "非工具消息不判 quick");
         assert!(!classify_quick_step(&Memory::new()), "空记忆不判 quick");
+    }
+
+    #[test]
+    fn extract_tool_path_reads_write_arguments() {
+        assert_eq!(
+            extract_tool_path(r#"{"path":"src/main.rs"}"#).as_deref(),
+            Some("src/main.rs")
+        );
+        // move_file 用 source/destination，不触发编辑后诊断（避免对改名目标误诊）。
+        assert_eq!(
+            extract_tool_path(r#"{"source":"a.rs","destination":"b.rs"}"#),
+            None
+        );
+        assert_eq!(extract_tool_path("not json"), None);
     }
 
     #[test]
@@ -4122,6 +4257,182 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn post_edit_lsp_diagnostics_are_injected_into_tool_result() {
+        // 编辑后诊断：write_file 成功 → 自动调用 lsp_diagnostics 并把结果
+        // 拼进 ToolResult，模型下一轮就能看到编译/类型错误。
+        let write = Arc::new(SpyTool {
+            name: "write_file",
+            result: "wrote ok".into(),
+        });
+        let lsp = Arc::new(SpyTool {
+            name: "lsp_diagnostics",
+            result: "LSP diagnostics for src/a.rs:\n- error: boom (line 1)".into(),
+        });
+        let responses = vec![
+            vec![
+                Chunk::ToolCallStart {
+                    id: "call_1".into(),
+                    name: "write_file".into(),
+                },
+                Chunk::ToolCallEnd {
+                    id: "call_1".into(),
+                    name: "write_file".into(),
+                    arguments: r#"{"path":"src/a.rs"}"#.into(),
+                },
+                Chunk::Done,
+            ],
+            vec![
+                Chunk::TextDelta("done after edit".into()),
+                Chunk::Usage(Usage::default()),
+                Chunk::Done,
+            ],
+        ];
+        let write_trait = Arc::clone(&write) as Arc<dyn Tool>;
+        let provider = Arc::new(MockProvider::sequential(responses).with_tools(vec![write_trait]));
+        let mut agent = Agent::new(provider, 5);
+        agent.register_tool(write);
+        agent.register_tool(lsp);
+
+        let mut stream = agent
+            .run_stream(RunInput {
+                prompt: "write a file".into(),
+                images: vec![],
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        let mut injected = false;
+        while let Some(event) = stream.next().await {
+            if let Ok(RunEvent::ToolResult { result, .. }) = event {
+                if result.contains("LSP diagnostics for src/a.rs") && result.contains("error: boom")
+                {
+                    injected = true;
+                }
+            }
+        }
+        assert!(
+            injected,
+            "post-edit LSP diagnostics must be injected into ToolResult"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_router_decides_once_per_run_and_routes_all_steps() {
+        let spy = Arc::new(SpyTool {
+            name: "spy",
+            result: "tool executed!".into(),
+        });
+        let routed = Arc::new(
+            MockProvider::sequential(vec![
+                vec![
+                    Chunk::ToolCallStart {
+                        id: "call_1".into(),
+                        name: "spy".into(),
+                    },
+                    Chunk::ToolCallEnd {
+                        id: "call_1".into(),
+                        name: "spy".into(),
+                        arguments: "{}".into(),
+                    },
+                    Chunk::Done,
+                ],
+                vec![
+                    Chunk::TextDelta("routed final".into()),
+                    Chunk::Usage(Usage::default()),
+                    Chunk::Done,
+                ],
+            ])
+            .with_tools(vec![Arc::clone(&spy) as Arc<dyn Tool>]),
+        );
+        let decider_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let decider = Arc::new(FakeAutoDecider {
+            calls: Arc::clone(&decider_calls),
+            provider: Arc::clone(&routed) as Arc<dyn Provider>,
+        });
+        let mut agent =
+            Agent::new(Arc::new(MockProvider::text("fallback")), 5).with_auto_router(decider);
+        agent.register_tool(spy);
+
+        let mut stream = agent
+            .run_stream(RunInput {
+                prompt: "use the tool".into(),
+                images: vec![],
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        let mut saw_tool_result = false;
+        let mut saw_routed_text = false;
+        while let Some(event) = stream.next().await {
+            match event.unwrap() {
+                RunEvent::ToolResult { .. } => saw_tool_result = true,
+                RunEvent::TextDelta(t) if t == "routed final" => saw_routed_text = true,
+                _ => {}
+            }
+        }
+
+        assert!(saw_tool_result, "routed provider's tool call must execute");
+        assert!(saw_routed_text, "routed provider must drive the whole run");
+        assert_eq!(routed.call_count(), 2, "two provider steps in one run");
+        assert_eq!(
+            decider_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "decision must happen once per run, not per step"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_router_decides_per_run_under_concurrency() {
+        let routed = Arc::new(MockProvider::text("routed"));
+        let decider_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let decider = Arc::new(FakeAutoDecider {
+            calls: Arc::clone(&decider_calls),
+            provider: Arc::clone(&routed) as Arc<dyn Provider>,
+        });
+        let agent = Arc::new(
+            Agent::new(Arc::new(MockProvider::text("fallback")), 3).with_auto_router(decider),
+        );
+
+        let a1 = Arc::clone(&agent);
+        let a2 = Arc::clone(&agent);
+        let (r1, r2) = tokio::join!(
+            async move {
+                let mut s = a1
+                    .run_stream(RunInput {
+                        prompt: "one".into(),
+                        images: vec![],
+                        model_override: None,
+                    })
+                    .await
+                    .unwrap();
+                while s.next().await.is_some() {}
+            },
+            async move {
+                let mut s = a2
+                    .run_stream(RunInput {
+                        prompt: "two".into(),
+                        images: vec![],
+                        model_override: None,
+                    })
+                    .await
+                    .unwrap();
+                while s.next().await.is_some() {}
+            }
+        );
+        let _ = (r1, r2);
+        assert_eq!(
+            routed.call_count(),
+            2,
+            "each concurrent run gets its own routed provider use"
+        );
+        assert_eq!(
+            decider_calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "each run decides independently (no shared cache)"
+        );
+    }
+
+    #[tokio::test]
     async fn agent_conversation_history_persists_across_runs() {
         // A shared persistent store simulates one desktop/CLI session.
         let history = Arc::new(tokio::sync::Mutex::new(Vec::<Message>::new()));
@@ -4319,9 +4630,15 @@ mod tests {
             !ran.load(Ordering::SeqCst),
             "a Denied tool must NOT execute"
         );
+        // 新契约：阻断信息须解释原因（deny rule 命中）；规则拒绝不附
+        // "添加 allow 即可放行"建议（deny 优先于 allow，该建议无效）
         assert!(
-            tool_result.contains("blocked by permission policy"),
-            "denied tool result should explain the block, got: {tool_result}"
+            tool_result.contains("blocked by deny rule"),
+            "denied tool result should name the deny rule, got: {tool_result}"
+        );
+        assert!(
+            !tool_result.contains("[建议]"),
+            "rule denial should not carry an ineffective allow suggestion, got: {tool_result}"
         );
     }
 
@@ -4586,16 +4903,11 @@ mod tests {
     }
 
     /// 建一个带未暂存改动的临时 git 仓库（`git diff HEAD` 非空），供审查触发。
-    fn temp_git_repo_with_diff(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "dnv-b3-review-{tag}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+    fn temp_git_repo_with_diff() -> (std::path::PathBuf, tempfile::TempDir) {
+        // 用 tempfile::tempdir()：并行测试共用时间戳目录会撞名
+        // （两个 "pause" 用例同时 git init → File exists）。
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().to_path_buf();
         let git = |args: &[&str]| {
             let out = std::process::Command::new("git")
                 .args(args)
@@ -4621,7 +4933,7 @@ mod tests {
             "init",
         ]);
         std::fs::write(dir.join("f.txt"), "v2\n").unwrap(); // 未暂存改动
-        dir
+        (dir, tmp)
     }
 
     /// 主 provider 脚本：先一次写类工具调用，再依次回若干段完成文本。
@@ -4718,7 +5030,7 @@ mod tests {
 
     #[tokio::test]
     async fn review_issues_then_fix_leads_to_done() {
-        let repo = temp_git_repo_with_diff("fix");
+        let (repo, _tmp) = temp_git_repo_with_diff();
         let reviewer = Arc::new(SeqProvider::new(vec![
             r#"{"verdict":"issues","issues":["missing test"]}"#,
             r#"{"verdict":"approve"}"#,
@@ -4752,12 +5064,11 @@ mod tests {
                 "counter {name} must fire exactly once, got {seen:?}"
             );
         }
-        let _ = std::fs::remove_dir_all(&repo);
     }
 
     #[tokio::test]
     async fn review_persistent_issues_pauses() {
-        let repo = temp_git_repo_with_diff("pause");
+        let (repo, _tmp) = temp_git_repo_with_diff();
         // 审查 provider 永远回 issues（单响应重复模式）。
         let reviewer = Arc::new(SeqProvider::new(vec![
             r#"{"verdict":"issues","issues":["still broken"]}"#,
@@ -4788,14 +5099,13 @@ mod tests {
             reason.starts_with("review_issues"),
             "pause reason must start with review_issues, got: {reason}"
         );
-        let _ = std::fs::remove_dir_all(&repo);
     }
 
     #[tokio::test]
     async fn review_pause_reason_includes_fix_plan_when_attribution_enabled() {
         // review 达 max_cycles → Paused 前归因；reason 附带 fix_plan（恢复建议，
         // Paused 恢复时可续用），与 verify 达上限路径共用 attribute_pause_reason。
-        let repo = temp_git_repo_with_diff("pause");
+        let (repo, _tmp) = temp_git_repo_with_diff();
         // 审查 provider 永远回 issues（单响应重复模式）。
         let reviewer = Arc::new(SeqProvider::new(vec![
             r#"{"verdict":"issues","issues":["still broken"]}"#,
@@ -4834,7 +5144,6 @@ mod tests {
             reason.contains("fix_plan: rewrite the import"),
             "Paused reason must carry fix_plan, got: {reason}"
         );
-        let _ = std::fs::remove_dir_all(&repo);
     }
 
     #[tokio::test]
@@ -5842,6 +6151,7 @@ mod tests {
             None,
             None,
             false,
+            None,
             None,
             None,
             None,

@@ -108,26 +108,20 @@ mod tests {
     use super::*;
     use crate::rule::builtin_rules;
 
-    fn tmp_with(files: &[(&str, &str)]) -> std::path::PathBuf {
-        let root = std::env::temp_dir().join(format!("dnv-scan-{}", uid()));
+    fn tmp_with(files: &[(&str, &str)]) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let root = dir.path().to_path_buf();
         for (rel, body) in files {
             let p = root.join(rel);
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(&p, body).unwrap();
         }
-        root
-    }
-    fn uid() -> u64 {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64
+        (dir, root)
     }
 
     #[test]
     fn scans_secret_and_reports_line() {
-        let root = tmp_with(&[(
+        let (_dir, root) = tmp_with(&[(
             "src/config.rs",
             "fn a() {}\nlet api_key = \"sk-abcdefgh\";\n",
         )]);
@@ -138,24 +132,22 @@ mod tests {
             .unwrap();
         assert_eq!(f.line, 2, "line is 1-based");
         assert!(f.verdict.is_none(), "scan stage sets no verdict");
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
     fn skips_gitignored_and_target() {
-        let root = tmp_with(&[
+        let (_dir, root) = tmp_with(&[
             (".gitignore", "ignored/\n"),
             ("ignored/x.rs", "let secret = \"sk-longenough\";\n"),
             ("target/y.rs", "let secret = \"sk-longenough\";\n"),
         ]);
         let findings = scan_files(&root, &builtin_rules()).unwrap();
         assert!(findings.is_empty(), "gitignored + target excluded");
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
     fn gitignore_matches_on_component_boundary_not_substring() {
-        let root = tmp_with(&[
+        let (_dir, root) = tmp_with(&[
             (".gitignore", "dist/\n"),
             // 同前缀但不同组件的文件不应被排除
             ("distutils/x.rs", "let api_key = \"sk-abcdefgh\";\n"),
@@ -171,7 +163,6 @@ mod tests {
             !findings.iter().any(|f| f.path.starts_with("dist/")),
             "真正 gitignored 的目录仍排除"
         );
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -190,12 +181,11 @@ mod tests {
 
     #[test]
     fn rust_rule_skips_python_file() {
-        let root = tmp_with(&[("a.py", "x = foo().unwrap()\n")]);
+        let (_dir, root) = tmp_with(&[("a.py", "x = foo().unwrap()\n")]);
         let findings = scan_files(&root, &builtin_rules()).unwrap();
         assert!(
             !findings.iter().any(|f| f.rule_id == "rust-unwrap"),
             "rust-scoped rule must not fire on .py"
         );
-        std::fs::remove_dir_all(&root).ok();
     }
 }

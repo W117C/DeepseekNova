@@ -28,15 +28,18 @@ impl ConversationApply for Conversation {
                 let Some(turn) = self.current_mut() else {
                     return;
                 };
-                // 正文增量按块整段提交：先落已有正文块，再落其后的推理块，
-                // 保证推理段精确落在「它之前到达的正文」与「它之后的正文」之间，
-                // 段序即事件序（r1 → t1 → r2 → t2 渲染为 r1, t1, r2, t2）。
-                turn.assistant.flush_text();
+                // 正文增量整段累积：先落段之前到达的推理（保持 r→t 段序），
+                // 正文本身留在 pending_text，等推理/工具/回合结束时再整段
+                // 提交。绝不按 delta 逐段落——流式响应逐 token 到达时，
+                // 那样会把一段正文切成几十个独立段（渲染竖排）。
                 turn.assistant.flush_reasoning();
+                turn.assistant.text_delta_seen = true;
                 turn.assistant.pending_text.push_str(&text);
             }
             RunEvent::ReasoningDelta { text, .. } => {
                 if let Some(turn) = self.current_mut() {
+                    // 推理增量整段累积：先落段之前到达的正文（保持 t→r 段序）。
+                    turn.assistant.flush_text();
                     turn.assistant.pending_reasoning.push_str(&text);
                 }
             }
@@ -44,6 +47,7 @@ impl ConversationApply for Conversation {
                 let Some(turn) = self.current_mut() else {
                     return;
                 };
+                turn.assistant.flush_text();
                 turn.assistant.flush_reasoning();
                 turn.assistant.segments.push(Segment::ToolCall {
                     call_id: id,
@@ -106,6 +110,7 @@ impl ConversationApply for Conversation {
                 let Some(turn) = self.current_mut() else {
                     return;
                 };
+                turn.assistant.flush_text();
                 turn.assistant.flush_reasoning();
                 turn.assistant.segments.push(Segment::Verification {
                     command,
@@ -121,6 +126,7 @@ impl ConversationApply for Conversation {
                 let Some(turn) = self.current_mut() else {
                     return;
                 };
+                turn.assistant.flush_text();
                 turn.assistant.flush_reasoning();
                 let severity = match finding.severity {
                     deepseeknova_core::tool_hook::FindingSeverity::Blocking => "🔴",
@@ -142,6 +148,7 @@ impl ConversationApply for Conversation {
                 let Some(turn) = self.current_mut() else {
                     return;
                 };
+                turn.assistant.flush_text();
                 turn.assistant.flush_reasoning();
                 turn.assistant.segments.push(Segment::System {
                     kind: SystemKind::Info,
@@ -155,6 +162,7 @@ impl ConversationApply for Conversation {
                 let Some(turn) = self.current_mut() else {
                     return;
                 };
+                turn.assistant.flush_text();
                 turn.assistant.flush_reasoning();
                 turn.assistant.segments.push(Segment::System {
                     kind: SystemKind::Info,
@@ -165,6 +173,7 @@ impl ConversationApply for Conversation {
                 let Some(turn) = self.current_mut() else {
                     return;
                 };
+                turn.assistant.flush_text();
                 turn.assistant.flush_reasoning();
                 turn.assistant.segments.push(Segment::System {
                     kind: SystemKind::Info,
@@ -185,6 +194,7 @@ impl ConversationApply for Conversation {
                 let Some(turn) = self.current_mut() else {
                     return;
                 };
+                turn.assistant.flush_text();
                 turn.assistant.flush_reasoning();
                 let desc = description
                     .as_deref()
@@ -222,7 +232,9 @@ impl ConversationApply for Conversation {
                 let Some(turn) = self.current_mut() else {
                     return;
                 };
-                if !output.text.is_empty() {
+                // `output.text` 是流式全文汇总：已收到过正文 delta 时跳过，
+                // 避免整段重复；纯非流式（仅 Done 携带文本）才追加。
+                if !output.text.is_empty() && !turn.assistant.text_delta_seen {
                     turn.assistant.flush_reasoning();
                     turn.assistant.pending_text.push_str(&output.text);
                 }
@@ -320,6 +332,40 @@ mod tests {
     }
 
     #[test]
+    fn consecutive_text_deltas_merge_into_one_segment() {
+        // 回归：流式逐 token delta 不得把正文切成碎片（曾导致 TUI 竖排）。
+        let mut c = Conversation::default();
+        new_turn(&mut c, "q");
+        for tok in ["你", "好", "！", "我是", "Deep", "seek"] {
+            c.apply(RunEvent::TextDelta(tok.into()));
+        }
+        c.apply(RunEvent::Done(crate::model::conversation::done_output("")));
+        let segs: Vec<&Segment> = c.current().unwrap().assistant.segments.iter().collect();
+        assert_eq!(segs.len(), 1, "连续正文合成一个 Text 段");
+        assert!(matches!(
+            &segs[0],
+            Segment::Text { text } if text == "你好！我是Deepseek"
+        ));
+    }
+
+    #[test]
+    fn text_then_reasoning_flushes_text_before_reasoning() {
+        // t1 → r2 切换：正文先落段，推理段序在正文之后。
+        let mut c = Conversation::default();
+        new_turn(&mut c, "q");
+        c.apply(RunEvent::TextDelta("t1".into()));
+        c.apply(RunEvent::ReasoningDelta {
+            text: "r2".into(),
+            signature: None,
+        });
+        c.apply(RunEvent::Done(crate::model::conversation::done_output("")));
+        let segs: Vec<&Segment> = c.current().unwrap().assistant.segments.iter().collect();
+        assert_eq!(segs.len(), 2);
+        assert!(matches!(segs[0], Segment::Text { text } if text == "t1"));
+        assert!(matches!(segs[1], Segment::Reasoning { text } if text == "r2"));
+    }
+
+    #[test]
     fn tool_call_flushes_reasoning_and_carries_result() {
         let mut c = Conversation::default();
         new_turn(&mut c, "q");
@@ -380,7 +426,48 @@ mod tests {
         assert_eq!(turn.assistant.segments.len(), 1);
         assert!(matches!(
             &turn.assistant.segments[0],
-            Segment::Text { text } if text == "final done"
+            Segment::Text { text } if text == "final "
+        ));
+    }
+
+    #[test]
+    fn done_does_not_duplicate_streamed_text() {
+        // 回归：provider 的 Done.output.text 是流式全文汇总；已流式过
+        // 正文时不得再追加（曾导致消息内容翻倍、块高膨胀）。
+        let mut c = Conversation::default();
+        new_turn(&mut c, "q");
+        let full = "你好！我是 DeepseekNova，一个终端原生的软件工程代理。";
+        for tok in [
+            "你好！",
+            "我是 ",
+            "DeepseekNova，",
+            "一个终端原生的软件工程代理。",
+        ] {
+            c.apply(RunEvent::TextDelta(tok.into()));
+        }
+        c.apply(RunEvent::Done(crate::model::conversation::done_output(
+            full,
+        )));
+        let turn = c.current().unwrap();
+        assert_eq!(turn.assistant.segments.len(), 1, "只落一个正文段");
+        assert!(matches!(
+            &turn.assistant.segments[0],
+            Segment::Text { text } if text == full
+        ));
+    }
+
+    #[test]
+    fn done_text_applied_when_no_stream() {
+        // 纯非流式（无 TextDelta，仅 Done 携带文本）→ 正常追加。
+        let mut c = Conversation::default();
+        new_turn(&mut c, "q");
+        c.apply(RunEvent::Done(crate::model::conversation::done_output(
+            "非流式全文",
+        )));
+        let turn = c.current().unwrap();
+        assert!(matches!(
+            &turn.assistant.segments[0],
+            Segment::Text { text } if text == "非流式全文"
         ));
     }
 

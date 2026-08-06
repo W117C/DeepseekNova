@@ -784,7 +784,7 @@ impl Tool for DepsCodeTool {
                 Err(e) => return Ok(graph_error_message("reading external deps", &e)),
             };
             if deps.is_empty() {
-                return Ok("no external dependencies indexed (no Cargo.toml/package.json/pyproject.toml found)".to_string());
+                return Ok("no external dependencies indexed (no Cargo.toml/package.json/pyproject.toml/go.mod found)".to_string());
             }
             let mut by_dep: BTreeMap<String, Vec<String>> = BTreeMap::new();
             for (path, dep) in deps {
@@ -1199,5 +1199,26 @@ mod tests {
         assert!(out.contains("serde: 1 files"), "{out}");
         assert!(out.contains("tokio: 1 files"), "{out}");
         assert!(out.contains("Cargo.toml"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn deps_code_reports_go_mod_external_deps() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("go.mod"),
+            "module example.com/app\n\ngo 1.21\n\nrequire (\n\tgithub.com/foo/bar v1.2.3\n)\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("main.go"),
+            "package main\n\nimport \"fmt\"\n\nfunc main() { fmt.Println(\"hi\") }\n",
+        )
+        .unwrap();
+        let ctx = ctx_with_index(root);
+
+        let out = DepsCodeTool.execute(&ctx, r#"{}"#).await.unwrap();
+        assert!(out.contains("github.com/foo/bar: 1 files"), "{out}");
+        assert!(out.contains("go.mod"), "{out}");
     }
 }

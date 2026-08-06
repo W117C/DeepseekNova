@@ -14,6 +14,71 @@ All notable changes to DeepseekNova will be documented in this file.
 
 ### Added
 
+- **日常体验包（个人开发者向）**：
+  - `web_search` 工具：DuckDuckGo（免 key）/ Tavily / Bing / SearXNG 四后端，
+    `[tools.web_search]` 配置 provider/base_url/api_key_env/max_results/timeout；
+    受 SecurityContext 域名策略与 NetworkAccess 能力约束。
+  - `lsp_diagnostics` 工具 + 编辑后自动诊断：write/edit/move 成功后自动调用
+    rust-analyzer / pyright-langserver / gopls / typescript-language-server /
+    clangd，诊断注入 ToolResult；`[tools.lsp]` 可关/调超时/按语言覆盖服务器；
+    服务器缺失或文件超限时静默跳过。
+  - Auto 模型+思考路由：`[agent] auto_route = true` 时每轮先由廉价模型决定
+    flash/pro 与 thinking off/high/max，工具续步复用决策，失败回退启发式/默认
+    模型；显式 `--model` / `/model switch` / 显式 effort 始终绕过 auto。
+  - serve 持久化任务恢复：run 落盘 `.deepseeknova/runs/`，新增
+    `GET /v1/runs` 与 `POST /v1/runs/{id}/resume`；重启后 running 任务自动
+    标记 interrupted 可重新拉起。
+  - ACP（Agent Client Protocol v1）stdio 适配器：`deepseeknova-cli serve
+    --acp` 以 JSON-RPC 2.0 行协议暴露 `initialize` / `session/new` /
+    `session/prompt` / `session/cancel` / `session/close`；会话按 `cwd`
+    重建 agent 并共享多轮历史，`Ask` 权限 fail-closed 拒绝。
+  - `eval` 子命令：从 JSONL（支持 `#` 注释）逐条跑真实 prompt 并断言
+    `must_contain` 子串，输出 md/json 报告，适合做最小回归评估集。
+  - Windows 运行时沙箱警告：无 OS 级沙箱时启动即打印显式警告（不只在 README）。
+
+### Fixed
+
+- LSP 空诊断不再等满 `timeout_secs`：收到空 `publishDiagnostics` 后 1.5s 内
+  无迟到的非空更新即返回“No LSP diagnostics”。
+- Auto 路由改为每 run 决策一次（由 Agent 循环持有），serve 并发请求不再共享
+  决策缓存、不会串台。
+- serve durable runs：SSE 客户端断开后任务继续跑完并正确落盘，不再取消任务
+  或把半截结果标成 Done；`resume` 通过原子 claim 防并发重复执行。
+- `web_search` 关闭自动重定向并逐跳复验域名/SSRF（与 web_fetch 一致）；
+  未知 provider 直接报错，不再静默回落 DuckDuckGo。
+- `lsp_diagnostics` 补 `FileRead` 能力门控，与 fs/grep/ls 一致。
+
+- **记忆语义检索（embedder remote）**：`[memory] embedder = "remote"` 启用
+  OpenAI 兼容嵌入（`/v1/embeddings`；key 从 `DEEPSEEKNOVA_EMBED_API_KEY` 读取，
+  回落 `OPENAI_API_KEY`，不落配置/日志）。写入记忆自动生成向量；召回融合
+  `0.5*bm25 + 0.5*余弦 - rank_lifecycle_weight*生命周期惩罚`（FTS 基数改纯
+  bm25，消除双重计权），可找回无共词的同义记忆；缺 key/网络错/解析错一律
+  fail-open 回落纯 FTS。`[memory]` 新增 `embed_base_url`（默认
+  https://api.openai.com/v1）/`embed_timeout_secs`（默认 30，含分层 merge）；
+  CLI 新增 `memory embed-backfill`（跳过 archived），`memory stats` 输出
+  `embedded=N/total=M`。零新增外部依赖（复用 provider 已有 reqwest/tokio）。
+
+- **Protocol 增强收尾（task_rate + record_use 回填）**：评分卡扩展 `first_pass` /
+  `retry_rounds` 字段（serde default，旧文件兼容）——成功会话按首过填写，失败/
+  Paused 会话由诊断回调按 `DiagnoseReport.failures` 推导覆写；fitness 记录
+  `record_use` 接线（recall 注入侧收集实际注入的技能名 → 会话结束记 `use` +
+  `result`，空集合优雅跳过、不再 warn）。
+
+- **Graph Go 语言支持**：代码图引擎新增 Go（tree-sitter-go 0.25，新依赖仅此一个）——
+  解析包级函数 / 方法（receiver）/ `type_declaration`（struct→Struct、
+  interface→Trait）实体、名称级调用（含 `pkg.Func`/`recv.Method` 取末段）、
+  import 三态（stdlib/第三方裸路径记外部依赖、相对路径记本地文件）；`go.mod`
+  require 段（块式与单行）解析进外部依赖表，`deps_code` 支持 Go 项目。
+
+- **记忆生命周期闭环**：memory schema 版本机制（`meta.schema_version` 初值 "1"，
+  版本不符走迁移表——当前为空——不炸）；检索排除 archived（不参与召回），排序融合
+  生命周期因子（bm25 + importance/stage/recency，`[memory] rank_lifecycle_weight`
+  默认 0.3，0 = 纯 bm25 等价旧行为）；衰减接线（`MemoryEngine::decay`/`cleanup`，
+  非 permanent 衰减、<0.1 归档、permanent 豁免、超期 archived 删除）；`[memory]`
+  新增 `decay_rate`/`archive_ttl_days`/`rank_lifecycle_weight`（含分层 merge）；CLI
+  新增 `memory cleanup`，`memory stats` 输出 stage 分布与 archived 计数；蒸馏双轨
+  统一入口 `record_knowledge`（reflect lesson / llm-distill 同内容跨入口去重）。
+
 - **任务质量闭环**：permission gate 升级为可编程 `ToolHook` 链（core 定义
   trait + `HookVerdict`/`QualityFinding`，agent 主循环 before/after 挂载，
   panic 契约：before/interested fail-closed Deny、after fail-open）；
@@ -146,6 +211,27 @@ All notable changes to DeepseekNova will be documented in this file.
   `fill_protocol` 由 metrics hook 填充；旧评分卡反序列化缺省 1.0）。全部能力
   挂 `[protocol] enabled`，默认 false 时行为与现状完全一致。
 
+- **权限裁决契约与只读命令分类器**：`PermissionGate::check` 返回完整
+  `CheckVerdict`（decision + reason + hard-deny 标志 + 规则建议），阻断文案
+  透出原因与"拒绝即教育"建议；`deepseeknova-security::readonly` 四层分类
+  （任意参数安全 / 零参 / 精确形式 / git·gh·docker·find·tar·openssl·xattr·
+  gpg·journalctl·plutil 子命令 flag 白名单）+ 引用感知注入检测，只读命令在
+  无 deny/ask 规则命中时免询问放行；普通 shell 组合（命令替换、链式、重定向）
+  归 NotReadOnly 走权限审批/规则，工具级注入面（git 全局 `-c`/`--config-env`、
+  格式串注入、UNC/URL/SMB 路径形态）硬拒且不可被规则覆盖；执行器形态
+  （`find -exec`、`git submodule foreach` 等）由专项白名单拒进只读表；
+  显式 deny/ask 规则优先于只读免询问。
+- **子代理工具执行层 + 输出净化**：`SubAgentRunner` 补上工具执行段（assistant
+  tool_calls → 逐条 Tool 结果，保住 replay 不变量），执行前经共享
+  `PermissionGate` 检查（Deny 回填原因、Ask 视为拒绝、无 gate 时与主 agent
+  权限关闭语义一致）；父级 deny 规则渲染为冻结清单注入子代理 system prompt；
+  delegate / 子代理最终输出与 `remember` 写路径经 `sanitize_output` 中和
+  权限修改指令形状（`permissions.allow`、`--dangerously-skip-permissions`、
+  `<settings-json>` 等），防持久化注入。
+- **沙箱三档模型**：`SandboxTier`（ReadOnly / WorkspaceWrite / FullAccess）
+  在 seatbelt 与 bubblewrap 两侧渲染一致策略；runtime 装配 `WorkspaceWrite`
+  并把工作区根并入可写绑定（`[sandbox] writable_paths` 之外工作区默认可写）。
+
 ### Changed
 
 - 审核修复：`[memory] mid_run_*` 配置真实生效（含 `mid_run_graph_top_k` 的代码图命中）；
@@ -157,9 +243,68 @@ All notable changes to DeepseekNova will be documented in this file.
 - `compaction_threshold_tokens` 留空时运行时按 `budget.max_total_tokens / 2` 推导，
   让无损的 L1 结果截断默认生效；显式配置与 `[budget] enabled=false` 时行为不变。
 - 内置工具 schema 文案精简 41%（7819→4613 字符），降低每次缓存未命中的固定 token 开销。
+- 权限“拒绝即教育”建议改为精确匹配规则（`Rule.exact`）：含 `*` 的命令
+  （如 `rm *.tmp`）生成的建议不再被 glob 前缀解释放大成 `rm -rf /`；
+  用户手写 glob 规则语义不变。
+- Coordinator 步骤历史有界：最多 50 条、总 50 万字符、单条 2000 字符截断，
+  超出丢最旧，避免后续 executor prompt 线性膨胀。
+- TUI：`/` 斜杠命令模糊候选与参数候选、`keybindings.json` 键位定制（热重载）、
+  `$EDITOR` 外部编辑（`Ctrl+X Ctrl+E`）、权限审批浮层（`y`/`Enter` 允许、
+  `n`/`Esc` 拒绝）、`Esc` 生成中取消/空闲二次确认退出。
 
 ### Fixed
 
+- 只读分类器：`date -u`/`date +%s`/`hostname -f`/`hostname -s` 此前按前缀
+  匹配进"任意参数安全"表，`date -u -s ...`、`hostname -f newname` 等写形态
+  被免询问放行；改为精确 argv 匹配。`gh auth status --show-token=true` /
+  `-t=true` 布尔形态此前绕过 token 泄露拒绝，现按 `=value` 归一化判定。
+  `journalctl --setup-keys` / `--update-catalog` 写操作补入拒绝列表。
+- 路径守卫：`is_within_workspace` 对含不存在中间目录的 `..` 路径（如
+  `root/missing/../../outside/file`）向上回溯时丢弃 `..` 分量，误判为工作区内
+  （工具 `create_dir_all` 后真实解析到工作区外）；回溯余段现保留
+  `ParentDir` 并在拼接后词法折叠。
+- 权限建议：命中 deny 规则时不再附加"添加 allow 规则即可自动放行"建议
+  （deny 优先于 allow，该建议无效且误导用户）。
+- bubblewrap `FullAccess` 档此前只绑定 `writable_paths`，与 seatbelt 全写语义
+  及 `SandboxTier` 文档不符；现绑定 `/` 读写并移除只读系统绑定。
+- 子代理无 permission gate 时此前全部工具 fail-closed，与
+  `permissions.enabled=false`（不经过门控）及主 agent 行为不一致；现与主路径
+  对齐直接执行，需要 fail-closed 的调用方显式挂 gate。
+- agent 审查测试临时 git 仓库改用 `tempfile::tempdir()`，消除并行执行纳秒
+  撞名导致的 `git init` flaky。
+- 只读分类器：`gh api` 带 `-f`/`-F`/`--input` 且未显式 `--method GET`/`-X GET`
+  时此前默认判只读，gh 实际会自动切 POST（创建/更新资源可免询问执行）；现归
+  `NotReadOnly`。`file` 移出“任意参数安全”表，`-C`/`--compile`（写
+  `magic.mgc`）不再放行；裸 `printenv` 不再只读（仅显式变量名放行）。
+- 常规 shell 组合（链式/重定向/命令替换/反引号）此前判 `Dangerous` 硬拒且
+  allow 规则无法覆盖，现归 `NotReadOnly` 走审批/规则；`Dangerous` 仅保留
+  工具级注入面（`git -c`/`--config-env`、格式串注入、UNC/URL/SMB 路径形态）。
+- 删除未挂模块的调试测试文件 `tui/render/dbg_status_test.rs`。
+
+- 依赖健康修复：OpenTelemetry 栈 0.27→0.32（telemetry 适配
+  `SdkTracerProvider` / `Resource::builder`，依赖特性统一收敛为 trace-only），ratatui 0.29→0.30（lru 0.12
+  unsound 与 paste unmaintained 两项豁免随之移除），crossterm 0.28→0.29，
+  rand 0.8→0.9（`rng().random_range`），thiserror 1→2，criterion 0.5→0.8
+  （bench 改用 `std::hint::black_box`）。`cargo deny` 重复依赖警告从 16 组
+  降至 0（剩余 5 组上游传递/目标平台分叉在 `deny.toml [bans].skip` 显式登记）。
+- scanner 测试临时目录改用 `tempfile::tempdir()`，消除并行测试纳秒撞名导致的
+  flaky 失败。
+
+- Graph Go 分组类型声明 `type ( A struct{}; B interface{} )` 此前只采集第一个
+  type_spec（tree-sitter-go 0.25 的 type_declaration children 为 multiple），组内
+  第 2+ 个类型静默丢失、引用不可解析；现遍历全部 type_spec 逐个产出实体。
+- Graph Go 分组类型声明的引用边归属：修复轮此前在 type_declaration Enter 时批量
+  push 全部成员，成员 1..n-1 的体内引用与自身 name 节点落入最后一个成员的 set
+  （`type ( A struct{next *B; ext *C}; B struct{} )` 产生伪边 B→A、A 无出边）；
+  现改为每个 type_spec 成员 Enter 时逐个建实体、成员结束时出栈，引用归属各自
+  成员。同步恢复类型实体 doc（注释在 type 关键字之前，回退父节点提取）与
+  signature 的 `type ` 前缀（单声明与旧行为逐字等价）。
+- `go.mod` 的 `require ( // 尾注释` 形态（gofmt 不产但合法）此前整块依赖静默丢失；
+  现块起始容忍尾注释。replace/exclude 段确认不进依赖（负例测试固化）。
+- 评分卡 task_rate 回填：Cancelled 且零失败详情的会话此前被误标
+  `first_pass=true`；现回填仅覆盖失败型会话（failures 非空），其余保持 metrics
+  侧已填值。损坏 scorecard JSON 解析失败此前静默 Ok 无告警；现 warn 一次后返回
+  Ok（与 NotFound 静默区分），真实 IO 错误仍 Err 传播。
 - 配置分层：`[quality]` / `[protocol]` / `[delegate]`（含新增 `inputs`）此前未进入
   `Config::merge`，在用户/项目配置文件中不生效；`[attribution]` 整体赋值会被项目层
   缺省覆盖。现改为字段级非默认值合并，各段配置真正生效。

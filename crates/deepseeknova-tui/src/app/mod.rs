@@ -4,10 +4,12 @@
 //! 注入能力从 [`crate::commands::TuiCaps`] 读取；runner 事件流转发到
 //! [`crate::model::apply::ConversationApply`]。
 
+pub mod actions;
 pub mod focus;
+pub mod keybindings;
 pub mod state;
 
-use crossterm::event::{self, Event as CEvent, KeyEventKind};
+use crossterm::event::{self, Event as CEvent, KeyEventKind, MouseEventKind};
 use deepseeknova_core::runner::{RunEvent, RunInput};
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc;
@@ -59,15 +61,24 @@ enum AppEvent {
     Done {
         gen: u64,
     },
+    /// 侧边栏会话列表刷新结果（SessionController 异步拉取）。
+    Sessions {
+        ids: Vec<String>,
+        current: Option<String>,
+    },
+    /// 会话列表拉取失败/完成：只复位刷新中标记，不清空旧列表。
+    SessionsRefreshDone,
 }
 
 /// 主事件循环：阻塞直到退出。返回 `true` 表示正常退出（命令 `/quit` 或 Esc）。
 pub async fn run_loop(
     terminal: &mut DefaultTerminal,
     app: &mut AppState,
-    caps: &TuiCaps,
+    caps: &mut TuiCaps,
 ) -> anyhow::Result<bool> {
     let (tx, mut rx) = mpsc::channel::<AppEvent>(256);
+    // 审批通道：从 caps 取出由本循环独占消费（agent 侧 responder 持有发送端）。
+    let mut approval_rx = caps.approval_rx.take();
 
     // Spawn input reader（阻塞线程，crossterm 事件源）。
     let input_tx = tx.clone();
@@ -90,6 +101,9 @@ pub async fn run_loop(
 
     let mut current_run: Option<JoinHandle<()>> = None;
     let mut session = RunSession::default();
+    let mut last_keymap_check = std::time::Instant::now();
+    let mut sessions_refreshing = false;
+    let mut last_sessions_refresh = std::time::Instant::now() - std::time::Duration::from_secs(10);
 
     loop {
         // 状态栏常驻成本与上下文占用：每帧从 router ledger 取会话累计值。
@@ -118,7 +132,74 @@ pub async fn run_loop(
             }
         }
 
+        // keybindings.json 热重载：500ms 轮询 mtime（Claude Code 同款
+        // 稳定阈值），改文件即时生效并回显诊断。
+        if last_keymap_check.elapsed() >= std::time::Duration::from_millis(500) {
+            last_keymap_check = std::time::Instant::now();
+            let mtime = std::fs::metadata(&app.keymap_path)
+                .ok()
+                .and_then(|m| m.modified().ok());
+            if mtime != app.keymap_mtime && mtime.is_some() {
+                let reloaded = crate::app::keybindings::Keymap::load(&app.keymap_path);
+                app.keymap_mtime = mtime;
+                if reloaded.diagnostics.is_empty() {
+                    app.keymap = reloaded;
+                    app.echo_line(
+                        crate::model::conversation::LineKind::System,
+                        "键位配置已热重载",
+                    );
+                } else {
+                    for d in &reloaded.diagnostics {
+                        app.echo_line(crate::model::conversation::LineKind::Error, d);
+                    }
+                    // 诊断失败不替换当前生效的 keymap。
+                }
+            }
+        }
+
+        // 侧边栏会话列表：首次必拉（含侧边栏未开时预热）；之后侧边栏可见时
+        // 每 2s 增量刷新（新会话落盘/恢复后自动出现）。
+        let need_sessions_refresh = caps.session.is_some()
+            && !sessions_refreshing
+            && (!app.sessions_loaded
+                || (app.sidebar_visible
+                    && last_sessions_refresh.elapsed() >= std::time::Duration::from_secs(2)));
+        if need_sessions_refresh {
+            sessions_refreshing = true;
+            last_sessions_refresh = std::time::Instant::now();
+            let ctrl = caps.session.clone();
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let Some(ctrl) = ctrl else {
+                    return;
+                };
+                match ctrl.list_sessions().await {
+                    Ok(mut ids) => {
+                        ids.sort();
+                        ids.reverse();
+                        let current = ctrl.current_session().await;
+                        let _ = tx.send(AppEvent::Sessions { ids, current }).await;
+                    }
+                    Err(_) => {
+                        let _ = tx.send(AppEvent::SessionsRefreshDone).await;
+                    }
+                }
+            });
+        }
+
         tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                // 轮询 tick：无输入事件也定期检查热重载。
+            }
+            Some(req) = async { approval_rx.as_mut()?.recv().await }, if approval_rx.is_some() => {
+                // 权限审批：agent 阻塞等待裁决，浮层显示在对话区上方。
+                if app.pending_approval.is_none() {
+                    app.pending_approval = Some(req);
+                } else {
+                    // 前一条未裁决（理论不发生：agent 单请求串行）→ 拒绝新请求。
+                    let _ = req.reply.send(false);
+                }
+            }
             Some(event) = rx.recv() => {
                 // 合并积压事件，burst 输出只重绘一次。
                 let mut batch = vec![event];
@@ -134,6 +215,15 @@ pub async fn run_loop(
                             }
                             match app.handle_key(&key) {
                                 KeyAction::Quit => return Ok(true),
+                                KeyAction::ExternalEditor => {
+                                    // ctrl+x ctrl+e：挂起终端跑 $EDITOR，读回内容写回输入框。
+                                    if let Err(e) = edit_external(app, terminal).await {
+                                        app.echo_line(
+                                            crate::model::conversation::LineKind::Error,
+                                            &format!("外部编辑器失败: {e}"),
+                                        );
+                                    }
+                                }
                                 KeyAction::Submit(prompt) => {
                                     // 命令交给注册表处理（/model /cost 需要 caps）。
                                     if let Some(cmd) = prompt.strip_prefix('/') {
@@ -143,9 +233,13 @@ pub async fn run_loop(
                                         continue;
                                     }
                                     app.running = true;
+                                    app.run_started_at = Some(std::time::Instant::now());
                                     app.turn += 1;
                                     app.last_prompt = Some(prompt.clone());
                                     app.conversation.begin_turn(prompt.clone());
+                                    // 新回合强制贴底：用户此前滚动查看历史
+                                    // 也不影响新消息可见性。
+                                    app.auto_scroll = true;
                                     let tx = tx.clone();
                                     let runner = caps.runtime.lock().unwrap().runner.clone();
                                     let gen = session.begin();
@@ -208,13 +302,42 @@ pub async fn run_loop(
                                         session.cancel();
                                         app.conversation.mark_current_cancelled();
                                         app.running = false;
-                                        app.echo_line(LineKind::System, "已取消（Ctrl+C）");
+                                        app.run_started_at = None;
+                                        app.echo_line(LineKind::System, "已取消（Ctrl+C / Esc）");
                                     }
                                 }
                                 KeyAction::None => {}
                             }
                         }
+                        AppEvent::Input(CEvent::Mouse(m)) => {
+                            // 鼠标滚轮 = 对话历史滚动（任何焦点都生效）：
+                            // 滚轮向上 → 看更早的记录（offset 减小）；
+                            // 滚轮向下 → 看更新内容（offset 增大），滚到底自动恢复跟随。
+                            match m.kind {
+                                MouseEventKind::ScrollUp => {
+                                    app.scroll_offset = app.scroll_offset.saturating_sub(3);
+                                    app.auto_scroll = false;
+                                }
+                                MouseEventKind::ScrollDown => {
+                                    app.scroll_offset = app.scroll_offset.saturating_add(3);
+                                    app.auto_scroll = false;
+                                }
+                                _ => {}
+                            }
+                        }
                         AppEvent::Input(_) => {}
+                        AppEvent::Sessions { ids, current } => {
+                            app.saved_sessions = ids;
+                            app.current_session = current;
+                            app.sessions_loaded = true;
+                            app.saved_session_selected = app
+                                .saved_session_selected
+                                .min(app.saved_sessions.len().saturating_sub(1));
+                            sessions_refreshing = false;
+                        }
+                        AppEvent::SessionsRefreshDone => {
+                            sessions_refreshing = false;
+                        }
                         AppEvent::Runner { gen, ev } => {
                             if !session.accepts(gen) {
                                 continue;
@@ -256,6 +379,7 @@ pub async fn run_loop(
                                 continue;
                             }
                             app.running = false;
+                            app.run_started_at = None;
                             current_run = None;
                         }
                     }
@@ -278,6 +402,47 @@ async fn handle_command(app: &mut AppState, caps: &TuiCaps, cmd: &str) -> bool {
             false
         }
     }
+}
+
+/// ctrl+x ctrl+e：把当前输入写入临时文件，挂起终端运行 `$EDITOR`
+/// （无 $EDITOR 时回退 vim），读回内容替换输入框。
+/// 挂起/恢复用手动 escape 序列（ratatui 0.30 无 suspend API）：
+/// 离开 alternate screen 让编辑器使用原始终端，回来后再进入。
+async fn edit_external(
+    app: &mut AppState,
+    terminal: &mut ratatui::DefaultTerminal,
+) -> anyhow::Result<()> {
+    use std::io::Write;
+
+    let mut path = std::env::temp_dir();
+    path.push(format!("deepseeknova-edit-{}.md", std::process::id()));
+    {
+        let mut f = std::fs::File::create(&path)?;
+        f.write_all(app.input.text.as_bytes())?;
+    }
+
+    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vim".to_string());
+    use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
+    let mut out = std::io::stdout();
+    crossterm::execute!(out, LeaveAlternateScreen)?;
+    crossterm::execute!(out, crossterm::event::DisableMouseCapture)?;
+    crossterm::execute!(out, crossterm::cursor::Show)?;
+    let result = std::process::Command::new(&editor).arg(&path).status();
+    crossterm::execute!(out, EnterAlternateScreen)?;
+    crossterm::execute!(out, crossterm::event::EnableMouseCapture)?;
+    crossterm::execute!(out, crossterm::cursor::Hide)?;
+    terminal.clear()?;
+    let status = match result {
+        Ok(s) => s,
+        Err(e) => anyhow::bail!("无法启动编辑器 {editor}: {e}"),
+    };
+    if !status.success() {
+        anyhow::bail!("编辑器退出码 {:?}", status.code());
+    }
+
+    let edited = std::fs::read_to_string(&path)?;
+    app.input.set_text(edited.trim_end().to_string());
+    Ok(())
 }
 
 #[cfg(test)]
@@ -318,6 +483,7 @@ mod tests {
             mcp_probe: None,
             undo: None,
             context_window: None,
+            approval_rx: None,
         };
         let mut app = AppState::default();
         let rt = tokio::runtime::Runtime::new().unwrap();

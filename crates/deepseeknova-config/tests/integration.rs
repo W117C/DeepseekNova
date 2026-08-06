@@ -79,6 +79,7 @@ fn merge_preserves_provider_overrides() {
         thinking_enabled: false,
         reasoning_effort: None,
         extra_body: None,
+        context_window: None,
     });
 
     let over = Config {
@@ -116,6 +117,7 @@ fn merge_overrides_non_default_providers() {
         thinking_enabled: false,
         reasoning_effort: None,
         extra_body: None,
+        context_window: None,
     });
 
     let over = Config {
@@ -132,6 +134,7 @@ fn merge_overrides_non_default_providers() {
             thinking_enabled: false,
             reasoning_effort: None,
             extra_body: None,
+            context_window: None,
         }],
         ..Default::default()
     };
@@ -184,6 +187,7 @@ fn resolve_provider_for_model() {
             thinking_enabled: false,
             reasoning_effort: None,
             extra_body: None,
+            context_window: None,
         }],
         models: vec![ModelConfig {
             name: "deepseek-v4-flash".into(),

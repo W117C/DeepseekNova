@@ -4,7 +4,7 @@
 //! 消费 `input_view` + `window_slice`，按键分派在 `app/state.rs` 的
 //! `handle_editor_key`（保留旧版全部编辑语义）。
 
-use ratatui::text::Line;
+use unicode_width::UnicodeWidthChar;
 
 /// 输入框状态：文本 + 光标（字节下标，始终停在 UTF-8 字符边界上）。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -199,25 +199,24 @@ impl InputState {
     /// 光标相对 `start` 的显示列（按 Unicode 宽度计，中文算 2 列）。
     #[cfg(test)]
     fn cursor_column(&self, start: usize) -> u16 {
-        Line::from(self.text[start..self.cursor].to_string()).width() as u16
+        text_width(&self.text[start..self.cursor]) as u16
     }
 }
 
-/// 单行水平窗口：让 `cursor`（行内字节下标）落在 `width` 内，UTF-8 边界安全。
+/// 单行水平窗口：让 `cursor`（行内字节下标）落在 `width`（显示列数）内，
+/// UTF-8 边界安全。宽度按 Unicode 显示宽度计（中文等宽字符占 2 列），
+/// 不再按字节截断——修复中文输入时光标错位/内容提前截断。
 pub fn window_slice(text: &str, cursor: usize, width: usize) -> (usize, &str) {
     let width = width.max(1);
     let cursor = cursor.min(text.len());
-    if text.len() <= width {
+    if text_width(text) <= width {
         return (0, text);
     }
-    let raw_start = if cursor < width {
-        0
-    } else {
-        cursor - width + 1
-    };
-    let start = floor_char_boundary(text, raw_start);
-    let raw_end = (start + width).min(text.len());
-    let end = floor_char_boundary(text, raw_end).max(start);
+    let cursor_col = text_width(&text[..cursor]);
+    // 窗口起点列：光标列往前最多 width-1 列，保证光标落在窗口右缘内。
+    let want_start_col = cursor_col.saturating_sub(width - 1);
+    let start = col_ceil_boundary(text, want_start_col);
+    let end = col_end_from(text, start, text_width(&text[..start]) + width);
     (start, &text[start..end])
 }
 
@@ -261,7 +260,7 @@ pub fn input_view(text: &str, cursor: usize, width: usize, max_rows: usize) -> I
         .unwrap_or(text.len());
     let cursor_in_line = cursor.saturating_sub(line_start).min(line_end - line_start);
     let (win_start, _) = window_slice(cursor_line, cursor_in_line, width);
-    let cursor_col = Line::from(&cursor_line[win_start..cursor_in_line]).width() as u16;
+    let cursor_col = text_width(&cursor_line[win_start..cursor_in_line]) as u16;
     let rows = lines
         .iter()
         .enumerate()
@@ -269,7 +268,7 @@ pub fn input_view(text: &str, cursor: usize, width: usize, max_rows: usize) -> I
             if i == cursor_row {
                 window_slice(l, cursor_in_line, width).1.to_string()
             } else {
-                let end = floor_char_boundary(l, width);
+                let end = col_end_from(l, 0, width);
                 l[..end].to_string()
             }
         })
@@ -287,14 +286,42 @@ pub fn input_view(text: &str, cursor: usize, width: usize, max_rows: usize) -> I
     }
 }
 
-fn floor_char_boundary(s: &str, mut idx: usize) -> usize {
-    if idx >= s.len() {
-        return s.len();
+/// 文本的 Unicode 显示宽度（ratatui 同口径：窄字符 1 列、宽字符 2 列、
+/// 零宽字符 0 列）。
+fn text_width(s: &str) -> usize {
+    s.chars()
+        .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
+        .sum()
+}
+
+/// 从 `start`（字节下标，须为字符边界）起累加显示宽度，超过 `max_col` 时
+/// 返回截断的字节位置（不切开字符）。
+fn col_end_from(text: &str, start: usize, max_col: usize) -> usize {
+    let mut w = text_width(&text[..start]);
+    for (i, c) in text[start..].char_indices() {
+        let cw = UnicodeWidthChar::width(c).unwrap_or(0);
+        if w + cw > max_col {
+            return start + i;
+        }
+        w += cw;
     }
-    while idx > 0 && !s.is_char_boundary(idx) {
-        idx -= 1;
+    text.len()
+}
+
+/// 显示列 `>= col` 的第一个字符边界（字节位置）：`col` 落在宽字符中间时
+/// 取该字符之后的边界，保证窗口起点不切开字符。
+fn col_ceil_boundary(text: &str, col: usize) -> usize {
+    if col == 0 {
+        return 0;
     }
-    idx
+    let mut w = 0;
+    for (i, c) in text.char_indices() {
+        if w >= col {
+            return i;
+        }
+        w += UnicodeWidthChar::width(c).unwrap_or(0);
+    }
+    text.len()
 }
 
 #[cfg(test)]
@@ -407,6 +434,31 @@ mod tests {
         let (start, visible) = input.visible_window(10);
         assert_eq!((start, visible), (0, "你a好"));
         assert_eq!(input.cursor_column(start), 5, "你=2 好=2 a=1");
+    }
+
+    #[test]
+    fn window_slice_uses_display_width_not_bytes() {
+        // 中文占 2 列但 3 字节：宽度窗口必须按列切，不能按字节切。
+        let (start, visible) = window_slice("你好world", "你好world".len(), 4);
+        assert_eq!(visible, "rld", "窗口从第 6 列起（宽 4），第 9 列光标在右缘");
+        assert_eq!(start, "你好wo".len(), "起点是字符边界");
+
+        // 光标在中部：窗口让光标落在右缘内（起点列 1）。
+        let (start, visible) = window_slice("abcdef", 3, 3);
+        assert_eq!((start, visible), (1, "bcd"));
+
+        // 光标后内容不足一窗：窗口以光标为右缘（宽字符占 2 列）。
+        let (start, visible) = window_slice("ab你", 5, 3);
+        assert_eq!(visible, "你", "ab(2列)+你(2列)=4列 > 3列窗口");
+        assert_eq!(start, 2);
+    }
+
+    #[test]
+    fn window_slice_does_not_split_wide_char() {
+        // 目标起点列 1 落在「你」(0..2 列) 中间：窗口从「好」开始，不切开「你」。
+        let (start, visible) = window_slice("你好x", 6, 4);
+        assert_eq!(visible, "好x", "起点列 2，宽 4 窗口");
+        assert_eq!(start, 3, "'你' 占 3 字节");
     }
 
     #[test]

@@ -140,6 +140,11 @@ pub struct ProviderConfig {
     #[serde(default)]
     pub model: Option<String>,
 
+    /// Provider 模型上下文窗口上限（tokens）。用于 TUI token 预算条等
+    /// 资源可见性 UI；未配置时由 CLI 回落 `[[models]]` 同名条目。
+    #[serde(default)]
+    pub context_window: Option<u32>,
+
     /// Environment variable that holds the API key.
     #[serde(default)]
     pub api_key_env: Option<String>,
@@ -310,6 +315,14 @@ pub struct ToolsConfig {
     /// Tool-specific overrides. Key = tool name.
     #[serde(default)]
     pub overrides: Vec<ToolOverride>,
+
+    /// Web search tool configuration (`web_search`).
+    #[serde(default)]
+    pub web_search: WebSearchConfig,
+
+    /// LSP 编辑后诊断工具配置（`lsp_diagnostics`）。
+    #[serde(default)]
+    pub lsp: LspConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -321,6 +334,92 @@ pub struct ToolOverride {
     pub timeout_secs: Option<u64>,
     #[serde(default)]
     pub max_file_size: Option<u64>,
+}
+
+fn default_web_search_provider() -> String {
+    "ddg".to_string()
+}
+fn default_web_search_max_results() -> usize {
+    5
+}
+fn default_web_search_timeout_secs() -> u64 {
+    30
+}
+
+/// `web_search` 工具配置：provider 可选用官方端点或自建 SearXNG。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebSearchConfig {
+    /// 搜索后端：`ddg`（默认，无需 key）/ `tavily` / `bing` / `searxng`。
+    #[serde(default = "default_web_search_provider")]
+    pub provider: String,
+
+    /// 自定义 API 地址。`searxng` 必填（如 `http://localhost:8888`）；
+    /// 其它 provider 留空使用官方端点。
+    #[serde(default)]
+    pub base_url: Option<String>,
+
+    /// API key 所在环境变量名（`tavily` / `bing` 需要）。
+    #[serde(default)]
+    pub api_key_env: Option<String>,
+
+    /// 每次搜索返回的最大结果数。
+    #[serde(default = "default_web_search_max_results")]
+    pub max_results: usize,
+
+    /// 单次搜索超时（秒）。
+    #[serde(default = "default_web_search_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+impl Default for WebSearchConfig {
+    fn default() -> Self {
+        Self {
+            provider: default_web_search_provider(),
+            base_url: None,
+            api_key_env: None,
+            max_results: default_web_search_max_results(),
+            timeout_secs: default_web_search_timeout_secs(),
+        }
+    }
+}
+
+fn default_lsp_timeout_secs() -> u64 {
+    8
+}
+fn default_lsp_max_file_bytes() -> usize {
+    1024 * 1024
+}
+
+/// LSP 编辑后诊断工具配置（`lsp_diagnostics`）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LspConfig {
+    /// 总开关（默认 true；关闭时工具执行返回提示而不启动语言服务器）。
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// 语言 ID → 服务器可执行文件覆盖（如 `rust = "rust-analyzer"`）。
+    /// 内置映射：rust / python / go / typescript / c / cpp。
+    #[serde(default)]
+    pub servers: HashMap<String, String>,
+
+    /// 等待诊断的超时（秒）。
+    #[serde(default = "default_lsp_timeout_secs")]
+    pub timeout_secs: u64,
+
+    /// 单文件内容送入 LSP 的大小上限（字节），超过则跳过诊断。
+    #[serde(default = "default_lsp_max_file_bytes")]
+    pub max_file_bytes: usize,
+}
+
+impl Default for LspConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            servers: HashMap::new(),
+            timeout_secs: default_lsp_timeout_secs(),
+            max_file_bytes: default_lsp_max_file_bytes(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -378,9 +477,15 @@ pub struct MemoryConfig {
     /// 嵌入后端：none | local | remote（P1 恒为 none）。
     #[serde(default = "default_embedder")]
     pub embedder: String,
-    /// 嵌入模型名（P2 起用）。
+    /// 嵌入模型名（`embedder=remote` 时必填，如 text-embedding-3-small）。
     #[serde(default)]
     pub embed_model: String,
+    /// 嵌入服务基础 URL（`embedder=remote` 时使用；默认 OpenAI v1）。
+    #[serde(default = "default_embed_base_url")]
+    pub embed_base_url: String,
+    /// 嵌入请求超时（秒，默认 30）。
+    #[serde(default = "default_embed_timeout_secs")]
+    pub embed_timeout_secs: u64,
     /// 起点召回注入块的 token 上限。0 = 不注入，仅保留按需工具。
     #[serde(default = "default_recall_inject_tokens")]
     pub recall_inject_tokens: usize,
@@ -443,6 +548,19 @@ pub struct MemoryConfig {
     /// （仅限 distill+draft；用户手写/verified/active 豁免）。
     #[serde(default = "default_max_auto_draft_skills")]
     pub max_auto_draft_skills: usize,
+
+    /// 非 permanent 记忆的每次衰减率（默认 0.1；`memory cleanup` 触发时应用）。
+    #[serde(default = "default_decay_rate")]
+    pub decay_rate: f32,
+
+    /// archived 记忆距最后召回（无召回按创建时间）超过该天数即被
+    /// `memory cleanup` 删除（默认 30）。
+    #[serde(default = "default_archive_ttl_days")]
+    pub archive_ttl_days: u32,
+
+    /// 检索排序的生命周期融合权重（默认 0.3；0 = 纯 bm25，与旧行为等价）。
+    #[serde(default = "default_rank_lifecycle_weight")]
+    pub rank_lifecycle_weight: f64,
 }
 
 fn default_memory_db_path() -> String {
@@ -450,6 +568,12 @@ fn default_memory_db_path() -> String {
 }
 fn default_embedder() -> String {
     "none".to_string()
+}
+fn default_embed_base_url() -> String {
+    "https://api.openai.com/v1".to_string()
+}
+fn default_embed_timeout_secs() -> u64 {
+    30
 }
 fn default_recall_inject_tokens() -> usize {
     200
@@ -490,6 +614,15 @@ fn default_active_session_threshold() -> u32 {
 fn default_max_auto_draft_skills() -> usize {
     20
 }
+fn default_decay_rate() -> f32 {
+    0.1
+}
+fn default_archive_ttl_days() -> u32 {
+    30
+}
+fn default_rank_lifecycle_weight() -> f64 {
+    0.3
+}
 
 impl Default for MemoryConfig {
     fn default() -> Self {
@@ -500,6 +633,8 @@ impl Default for MemoryConfig {
             redact_secrets: true,
             embedder: default_embedder(),
             embed_model: String::new(),
+            embed_base_url: default_embed_base_url(),
+            embed_timeout_secs: default_embed_timeout_secs(),
             recall_inject_tokens: 200,
             recall_top_k: 3,
             mid_run_recall: true,
@@ -517,6 +652,9 @@ impl Default for MemoryConfig {
             verify_use_threshold: default_verify_use_threshold(),
             active_session_threshold: default_active_session_threshold(),
             max_auto_draft_skills: default_max_auto_draft_skills(),
+            decay_rate: default_decay_rate(),
+            archive_ttl_days: default_archive_ttl_days(),
+            rank_lifecycle_weight: default_rank_lifecycle_weight(),
         }
     }
 }
@@ -631,6 +769,19 @@ pub struct AgentConfig {
     #[serde(default)]
     pub observe_compress: bool,
 
+    /// Auto 模型+思考路由：每轮（新用户消息）先由廉价模型决定
+    /// flash/pro 与 thinking off/high/max，再执行真实调用。默认关。
+    #[serde(default)]
+    pub auto_route: bool,
+
+    /// 路由决策用的模型名；None 时用 quick 指针（未配置回退 main 指针）。
+    #[serde(default)]
+    pub auto_router_model: Option<String>,
+
+    /// 路由调用送入的上下文最大字符数（从最新用户消息截取）。
+    #[serde(default = "default_auto_router_max_chars")]
+    pub auto_router_max_chars: usize,
+
     /// 触发观察压缩的输出大小阈值（字符）。
     #[serde(default = "default_observe_threshold")]
     pub observe_compress_threshold_chars: usize,
@@ -669,6 +820,9 @@ fn default_observe_threshold() -> usize {
 fn default_observe_max_chars() -> usize {
     4_000
 }
+fn default_auto_router_max_chars() -> usize {
+    6_000
+}
 fn default_reflect_max_chars() -> usize {
     4000
 }
@@ -685,6 +839,9 @@ impl Default for AgentConfig {
             l3_compaction: true,
             compact_model: String::new(),
             step_effort_routing: false,
+            auto_route: false,
+            auto_router_model: None,
+            auto_router_max_chars: default_auto_router_max_chars(),
             observe_compress: false,
             observe_compress_threshold_chars: default_observe_threshold(),
             observe_compress_max_chars: default_observe_max_chars(),
@@ -1383,6 +1540,47 @@ impl ToolsConfig {
         if !other.overrides.is_empty() {
             self.overrides = other.overrides;
         }
+        self.web_search.merge(other.web_search);
+        self.lsp.merge(other.lsp);
+    }
+}
+
+impl WebSearchConfig {
+    fn merge(&mut self, other: WebSearchConfig) {
+        let d = WebSearchConfig::default();
+        if other.provider != d.provider {
+            self.provider = other.provider;
+        }
+        if other.base_url.is_some() {
+            self.base_url = other.base_url;
+        }
+        if other.api_key_env.is_some() {
+            self.api_key_env = other.api_key_env;
+        }
+        if other.max_results != d.max_results {
+            self.max_results = other.max_results;
+        }
+        if other.timeout_secs != d.timeout_secs {
+            self.timeout_secs = other.timeout_secs;
+        }
+    }
+}
+
+impl LspConfig {
+    fn merge(&mut self, other: LspConfig) {
+        let d = LspConfig::default();
+        if other.enabled != d.enabled {
+            self.enabled = other.enabled;
+        }
+        if !other.servers.is_empty() {
+            self.servers.extend(other.servers);
+        }
+        if other.timeout_secs != d.timeout_secs {
+            self.timeout_secs = other.timeout_secs;
+        }
+        if other.max_file_bytes != d.max_file_bytes {
+            self.max_file_bytes = other.max_file_bytes;
+        }
     }
 }
 
@@ -1410,6 +1608,12 @@ impl MemoryConfig {
         }
         if !other.embed_model.is_empty() {
             self.embed_model = other.embed_model;
+        }
+        if other.embed_base_url != d.embed_base_url {
+            self.embed_base_url = other.embed_base_url;
+        }
+        if other.embed_timeout_secs != d.embed_timeout_secs {
+            self.embed_timeout_secs = other.embed_timeout_secs;
         }
         if other.recall_inject_tokens != d.recall_inject_tokens {
             self.recall_inject_tokens = other.recall_inject_tokens;
@@ -1462,6 +1666,15 @@ impl MemoryConfig {
         if other.max_auto_draft_skills != d.max_auto_draft_skills {
             self.max_auto_draft_skills = other.max_auto_draft_skills;
         }
+        if other.decay_rate != d.decay_rate {
+            self.decay_rate = other.decay_rate;
+        }
+        if other.archive_ttl_days != d.archive_ttl_days {
+            self.archive_ttl_days = other.archive_ttl_days;
+        }
+        if other.rank_lifecycle_weight != d.rank_lifecycle_weight {
+            self.rank_lifecycle_weight = other.rank_lifecycle_weight;
+        }
     }
 }
 
@@ -1483,6 +1696,11 @@ impl AgentConfig {
             self.compact_model = other.compact_model;
         }
         self.step_effort_routing = other.step_effort_routing;
+        self.auto_route = other.auto_route;
+        if other.auto_router_model.is_some() {
+            self.auto_router_model = other.auto_router_model;
+        }
+        self.auto_router_max_chars = other.auto_router_max_chars;
         self.observe_compress = other.observe_compress;
         self.observe_compress_threshold_chars = other.observe_compress_threshold_chars;
         self.observe_compress_max_chars = other.observe_compress_max_chars;
@@ -1765,6 +1983,7 @@ mod tests {
                 thinking_enabled: false,
                 reasoning_effort: None,
                 extra_body: None,
+                context_window: None,
             }],
             ..Config::default()
         };
@@ -1844,6 +2063,8 @@ mod tests {
         assert!(c.memory.redact_secrets);
         assert_eq!(c.memory.embedder, "none");
         assert_eq!(c.memory.embed_model, "");
+        assert_eq!(c.memory.embed_base_url, "https://api.openai.com/v1");
+        assert_eq!(c.memory.embed_timeout_secs, 30);
         assert_eq!(c.memory.recall_inject_tokens, 200);
         assert_eq!(c.memory.recall_top_k, 3);
         assert_eq!(c.memory.min_tool_calls, 5);
@@ -1858,11 +2079,13 @@ mod tests {
 
     #[test]
     fn memory_config_parses_from_toml() {
-        let toml = "[memory]\nenabled = false\nauto_learn = false\nrecall_top_k = 7\nllm_distill = true\nllm_distill_model = \"deepseek-v4-flash\"\nllm_distill_max_chars = 1500\n";
+        let toml = "[memory]\nenabled = false\nauto_learn = false\nrecall_top_k = 7\nembed_base_url = \"http://localhost:1234/v1\"\nembed_timeout_secs = 5\nllm_distill = true\nllm_distill_model = \"deepseek-v4-flash\"\nllm_distill_max_chars = 1500\n";
         let c: Config = toml::from_str(toml).unwrap();
         assert!(!c.memory.enabled);
         assert!(!c.memory.auto_learn);
         assert_eq!(c.memory.recall_top_k, 7);
+        assert_eq!(c.memory.embed_base_url, "http://localhost:1234/v1");
+        assert_eq!(c.memory.embed_timeout_secs, 5);
         assert!(c.memory.llm_distill);
         assert_eq!(
             c.memory.llm_distill_model.as_deref(),
@@ -1872,6 +2095,46 @@ mod tests {
         // 未覆盖字段仍取默认
         assert!(c.memory.redact_secrets);
         assert_eq!(c.memory.recall_inject_tokens, 200);
+    }
+
+    #[test]
+    fn embed_fields_merge_preserves_user_values_when_unset() {
+        let mut base = Config::default();
+        base.memory.embed_base_url = "http://user/v1".to_string();
+        base.memory.embed_timeout_secs = 9;
+
+        // 项目层只显式设置 timeout → 不覆盖用户层的 base_url。
+        let project = Config {
+            memory: MemoryConfig {
+                embed_timeout_secs: 5,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        base.merge(project);
+        assert_eq!(
+            base.memory.embed_base_url, "http://user/v1",
+            "未设置字段必须保留"
+        );
+        assert_eq!(base.memory.embed_timeout_secs, 5, "显式字段必须覆盖");
+    }
+
+    #[test]
+    fn embed_fields_merge_overrides_when_explicit() {
+        let mut base = Config::default();
+        let project = Config {
+            memory: MemoryConfig {
+                embed_base_url: "http://project/v1".to_string(),
+                embed_timeout_secs: 7,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        base.merge(project);
+        assert_eq!(base.memory.embed_base_url, "http://project/v1");
+        assert_eq!(base.memory.embed_timeout_secs, 7);
+        // 未设置字段仍是默认（不误写）。
+        assert_eq!(base.memory.embed_model, "");
     }
 
     #[test]
@@ -1923,6 +2186,36 @@ mod tests {
         };
         base.merge(project2);
         assert_eq!(base.memory.verify_use_threshold, 11);
+    }
+
+    #[test]
+    fn memory_lifecycle_fields_defaults_and_merge() {
+        let d = Config::default();
+        assert_eq!(d.memory.decay_rate, 0.1);
+        assert_eq!(d.memory.archive_ttl_days, 30);
+        assert_eq!(d.memory.rank_lifecycle_weight, 0.3);
+
+        let toml =
+            "[memory]\ndecay_rate = 0.2\narchive_ttl_days = 7\nrank_lifecycle_weight = 0.0\n";
+        let c: Config = toml::from_str(toml).unwrap();
+        assert_eq!(c.memory.decay_rate, 0.2);
+        assert_eq!(c.memory.archive_ttl_days, 7);
+        assert_eq!(c.memory.rank_lifecycle_weight, 0.0);
+
+        // merge：项目层显式设置覆盖；未设置保留用户层值。
+        let mut base = Config::default();
+        base.memory.decay_rate = 0.05;
+        base.memory.archive_ttl_days = 60;
+        base.merge(Config {
+            memory: MemoryConfig {
+                rank_lifecycle_weight: 0.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        assert_eq!(base.memory.decay_rate, 0.05, "未设置字段必须保留用户层值");
+        assert_eq!(base.memory.archive_ttl_days, 60);
+        assert_eq!(base.memory.rank_lifecycle_weight, 0.0, "显式设置必须覆盖");
     }
 
     #[test]
@@ -2231,14 +2524,63 @@ mod tests {
         assert_eq!(d.agent.observe_compress_threshold_chars, 12_000);
         assert_eq!(d.agent.observe_compress_max_chars, 4_000);
         assert!(!d.agent.tool_cache);
+        assert!(!d.agent.auto_route);
+        assert!(d.agent.auto_router_model.is_none());
+        assert_eq!(d.agent.auto_router_max_chars, 6_000);
 
-        let toml = "[agent]\nstep_effort_routing = true\nobserve_compress = true\nobserve_compress_threshold_chars = 5000\nobserve_compress_max_chars = 1000\ntool_cache = true\n";
+        let toml = "[agent]\nstep_effort_routing = true\nobserve_compress = true\nobserve_compress_threshold_chars = 5000\nobserve_compress_max_chars = 1000\ntool_cache = true\nauto_route = true\nauto_router_model = \"deepseek-v4-flash\"\nauto_router_max_chars = 4000\n";
         let c: Config = toml::from_str(toml).unwrap();
         assert!(c.agent.step_effort_routing);
         assert!(c.agent.observe_compress);
         assert_eq!(c.agent.observe_compress_threshold_chars, 5_000);
         assert_eq!(c.agent.observe_compress_max_chars, 1_000);
         assert!(c.agent.tool_cache);
+        assert!(c.agent.auto_route);
+        assert_eq!(
+            c.agent.auto_router_model.as_deref(),
+            Some("deepseek-v4-flash")
+        );
+        assert_eq!(c.agent.auto_router_max_chars, 4_000);
+    }
+
+    #[test]
+    fn tools_web_search_and_lsp_defaults_and_parse() {
+        let d = Config::default();
+        assert_eq!(d.tools.web_search.provider, "ddg");
+        assert_eq!(d.tools.web_search.max_results, 5);
+        assert!(d.tools.lsp.enabled);
+        assert_eq!(d.tools.lsp.timeout_secs, 8);
+        assert!(d.tools.lsp.servers.is_empty());
+
+        let toml = r#"
+            [tools.web_search]
+            provider = "tavily"
+            api_key_env = "TAVILY_API_KEY"
+            max_results = 7
+            timeout_secs = 15
+
+            [tools.lsp]
+            enabled = false
+            timeout_secs = 12
+            max_file_bytes = 2048
+            [tools.lsp.servers]
+            rust = "/opt/rust-analyzer"
+        "#;
+        let c: Config = toml::from_str(toml).unwrap();
+        assert_eq!(c.tools.web_search.provider, "tavily");
+        assert_eq!(
+            c.tools.web_search.api_key_env.as_deref(),
+            Some("TAVILY_API_KEY")
+        );
+        assert_eq!(c.tools.web_search.max_results, 7);
+        assert_eq!(c.tools.web_search.timeout_secs, 15);
+        assert!(!c.tools.lsp.enabled);
+        assert_eq!(c.tools.lsp.timeout_secs, 12);
+        assert_eq!(c.tools.lsp.max_file_bytes, 2048);
+        assert_eq!(
+            c.tools.lsp.servers.get("rust").map(String::as_str),
+            Some("/opt/rust-analyzer")
+        );
     }
 
     #[test]

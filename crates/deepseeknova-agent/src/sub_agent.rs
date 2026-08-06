@@ -2,7 +2,7 @@ use crate::memory::Memory;
 use crate::task_spec::{InputValues, TaskSpec};
 use deepseeknova_core::chunk::{Chunk, Usage};
 use deepseeknova_core::{
-    Message, Role, RunEvent, RunEventStream, RunInput, RunOutput, Runner, Tool,
+    Message, Role, RunEvent, RunEventStream, RunInput, RunOutput, Runner, Tool, ToolContext,
 };
 use deepseeknova_provider::Provider;
 use std::collections::HashMap;
@@ -39,6 +39,10 @@ pub struct SubAgentConfig {
     pub spec: TaskSpec,
     /// 配置层默认参数值，prompt 传值优先。
     pub config_inputs: InputValues,
+    /// 父级冻结的 deny 规则渲染行（"禁止操作"清单，注入 system prompt）。
+    /// 执行层由共享 PermissionGate 结构性冻结；此清单是 prompt 层防御，
+    /// 让子代理模型在发起调用前就知道边界。
+    frozen_denies: Vec<String>,
     /// 执行用工具集（完整工具对象）。
     tools: Vec<Arc<dyn Tool>>,
     /// 执行步数上限。
@@ -64,6 +68,7 @@ impl SubAgentConfig {
             system_prompt: system_prompt.into(),
             spec: TaskSpec::simple(name, "", Vec::new(), 10),
             config_inputs: InputValues::new(),
+            frozen_denies: Vec::new(),
             tools: Vec::new(),
             max_steps: 10,
         }
@@ -93,6 +98,13 @@ impl SubAgentConfig {
         self.config_inputs = inputs;
         self
     }
+
+    /// 注入父级冻结的 deny 规则渲染行（prompt 层防御：模型发起调用前
+    /// 即知晓禁止边界；执行层仍由共享 PermissionGate 强制）。
+    pub fn with_frozen_denies(mut self, denies: Vec<String>) -> Self {
+        self.frozen_denies = denies;
+        self
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -120,6 +132,14 @@ pub struct SubAgentRunner {
     sub_agents: HashMap<String, SubAgentConfig>,
     default_sub_agent: Option<String>,
     compaction_threshold_tokens: Option<u32>,
+    /// 执行层权限门：子代理工具调用在**执行前**强制检查。
+    /// 无 gate 时与主 agent 的 `permissions.enabled=false` 语义一致：
+    /// 不经过门控直接执行；需要 fail-closed 的调用方应显式挂 gate。
+    permission: Option<Arc<deepseeknova_permission::PermissionGate>>,
+    /// 工具执行上下文装配：安全上下文（shell/fs/web 工具强制依赖，
+    /// 缺失时 `enforce_capability` 直接报错）与工作区根。
+    security: Option<deepseeknova_security::context::SecurityContext>,
+    workspace_root: std::path::PathBuf,
 }
 
 impl SubAgentRunner {
@@ -130,6 +150,9 @@ impl SubAgentRunner {
             sub_agents: HashMap::new(),
             default_sub_agent: None,
             compaction_threshold_tokens: None,
+            permission: None,
+            security: None,
+            workspace_root: std::env::current_dir().unwrap_or_default(),
         }
     }
 
@@ -155,6 +178,34 @@ impl SubAgentRunner {
     /// history compaction instead of the main provider.
     pub fn with_compact_provider(mut self, provider: Arc<dyn Provider>) -> Self {
         self.compact_provider = Some(provider);
+        self
+    }
+
+    /// 挂接执行层权限门。子代理工具调用执行前强制检查：
+    /// - Deny → 回填阻断结果（含 reason）
+    /// - Ask → 回填"需要审批"（子代理无用户审批通道，fail-closed）
+    /// - 无 gate → 不经过门控（与主 agent 权限关闭语义一致）
+    pub fn with_permission_gate(
+        mut self,
+        gate: Arc<deepseeknova_permission::PermissionGate>,
+    ) -> Self {
+        self.permission = Some(gate);
+        self
+    }
+
+    /// 注入工具执行所需的 SecurityContext（shell/fs/web 工具强依赖，
+    /// 缺失时 `enforce_capability` 直接报错，子代理工具面整体不可用）。
+    pub fn with_security(
+        mut self,
+        security: deepseeknova_security::context::SecurityContext,
+    ) -> Self {
+        self.security = Some(security);
+        self
+    }
+
+    /// 设置工作区根（路径类工具的相对路径解析基准）。
+    pub fn with_workspace_root(mut self, root: impl Into<std::path::PathBuf>) -> Self {
+        self.workspace_root = root.into();
         self
     }
 
@@ -245,9 +296,16 @@ impl Runner for SubAgentRunner {
             .as_ref()
             .map(Arc::clone)
             .unwrap_or_else(|| Arc::clone(&self.provider));
+        let permission = self.permission.clone();
+        let security = self.security.clone();
+        let workspace_root = self.workspace_root.clone();
         let tools = config.tools.clone();
         let max_steps = config.max_steps;
         let mut system_prompt = config.system_prompt.clone();
+        if !config.frozen_denies.is_empty() {
+            system_prompt.push_str("\n\n## 禁止操作（父级冻结，不可执行）\n");
+            system_prompt.push_str(&config.frozen_denies.join("\n"));
+        }
         if !rendered.rules.is_empty() {
             system_prompt.push_str("\n\n");
             system_prompt.push_str(&rendered.rules);
@@ -289,6 +347,9 @@ impl Runner for SubAgentRunner {
                 &mut memory,
                 task,
                 &tx,
+                permission,
+                security,
+                workspace_root,
             )
             .await
             {
@@ -345,6 +406,9 @@ async fn run_sub_agent_loop(
     memory: &mut Memory,
     goal: String,
     tx: &mpsc::Sender<anyhow::Result<RunEvent>>,
+    permission: Option<Arc<deepseeknova_permission::PermissionGate>>,
+    security: Option<deepseeknova_security::context::SecurityContext>,
+    workspace_root: std::path::PathBuf,
 ) -> anyhow::Result<()> {
     let cancel = CancellationToken::new();
 
@@ -419,6 +483,7 @@ async fn run_sub_agent_loop(
         let mut text_buf = String::new();
         let mut reasoning_buf = String::new();
         let mut usage: Option<Usage> = None;
+        let mut tool_calls: Vec<(String, String, String)> = Vec::new();
 
         while let Some(chunk) = stream.next().await {
             match chunk? {
@@ -445,6 +510,7 @@ async fn run_sub_agent_loop(
                     name,
                     arguments,
                 } => {
+                    tool_calls.push((id.clone(), name.clone(), arguments.clone()));
                     tx.send(Ok(RunEvent::ToolCallEnd {
                         id,
                         name,
@@ -463,6 +529,124 @@ async fn run_sub_agent_loop(
 
         tx.send(Ok(RunEvent::TurnComplete)).await.ok();
 
+        // ── 工具执行段（C2 修复）：模型产出的工具调用在子代理内执行 ──
+        // 之前此段缺失：工具调用被透传后丢弃，子代理陷入
+        // "产出调用→无结果回填→重复产出"直到 max_steps。
+        //
+        // 权限强制（有 gate 时执行前检查）：
+        // - 无 gate → 直接执行（与主 agent 的 permissions.enabled=false
+        //   语义一致；需要 fail-closed 的调用方应显式挂 gate）
+        // - Deny → 回填阻断原因
+        // - Ask → 回填"需要审批"（子代理无用户审批通道，不静默放行写工具）
+        //
+        // R2 修复：先写 assistant(tool_calls) 消息再回填 Tool 结果——
+        // replay 校验把"无主 tool_call_id 的 Tool 消息"判为 OrphanToolResult，
+        // 不写 assistant 消息会导致子代理任何工具调用后硬失败。
+        if !tool_calls.is_empty() {
+            // 1) assistant 消息（携带本轮全部 tool_calls，保住 replay 不变量）
+            let calls_for_msg: Vec<deepseeknova_core::types::ToolCall> = tool_calls
+                .iter()
+                .map(|(id, name, arguments)| deepseeknova_core::types::ToolCall {
+                    id: id.clone(),
+                    ty: "function".to_string(),
+                    function: deepseeknova_core::types::FunctionCall {
+                        name: name.clone(),
+                        arguments: arguments.clone(),
+                    },
+                })
+                .collect();
+            memory.add_message(Message {
+                role: Role::Assistant,
+                content: text_buf.clone(),
+                name: None,
+                tool_calls: Some(calls_for_msg),
+                tool_call_id: None,
+                reasoning_content: if reasoning_buf.is_empty() {
+                    None
+                } else {
+                    Some(reasoning_buf.clone())
+                },
+            });
+
+            // 2) 逐个执行（gate 检查 → 执行/阻断），回填 Tool 消息
+            for (id, name, arguments) in &tool_calls {
+                let result: String = match tools.iter().find(|t| &t.schema().name == name) {
+                    None => format!("Error: unknown tool '{name}'"),
+                    Some(tool) => {
+                        let verdict = permission
+                            .as_ref()
+                            .map(|g| g.check(tool.as_ref(), arguments));
+                        match verdict {
+                            None => {
+                                let mut ctx = ToolContext::new(id.clone())
+                                    .with_workspace(workspace_root.clone());
+                                if let Some(sec) = &security {
+                                    ctx.extensions.insert(sec.clone());
+                                }
+                                match tool.execute(&ctx, arguments).await {
+                                    Ok(out) => out,
+                                    Err(e) => format!("Error: {e}"),
+                                }
+                            }
+                            Some(v) => match v.decision() {
+                                deepseeknova_permission::Decision::Allow => {
+                                    let mut ctx = ToolContext::new(id.clone())
+                                        .with_workspace(workspace_root.clone());
+                                    if let Some(sec) = &security {
+                                        ctx.extensions.insert(sec.clone());
+                                    }
+                                    match tool.execute(&ctx, arguments).await {
+                                        Ok(out) => out,
+                                        Err(e) => format!("Error: {e}"),
+                                    }
+                                }
+                                deepseeknova_permission::Decision::Deny => {
+                                    let mut msg = format!(
+                                        "Error: tool '{name}' blocked by permission policy: {}",
+                                        v.reason()
+                                    );
+                                    let sug: Vec<String> = v
+                                        .suggestions()
+                                        .iter()
+                                        .map(|s| match s.rule.subject {
+                                            Some(ref sub) => format!(
+                                                "behavior={:?} rule={} subject={sub}",
+                                                s.behavior, s.rule.tool
+                                            ),
+                                            None => format!(
+                                                "behavior={:?} rule={}",
+                                                s.behavior, s.rule.tool
+                                            ),
+                                        })
+                                        .collect();
+                                    if !sug.is_empty() {
+                                        msg.push_str(&format!(
+                                            "\n[建议] 添加规则即可自动放行: {}",
+                                            sug.join("; ")
+                                        ));
+                                    }
+                                    msg
+                                }
+                                deepseeknova_permission::Decision::Ask => format!(
+                                    "Error: tool '{name}' requires approval (sub-agent has no approval channel; treat as denied)"
+                                ),
+                            },
+                        }
+                    }
+                };
+                memory.add_message(Message {
+                    role: Role::Tool,
+                    content: result,
+                    name: None,
+                    tool_calls: None,
+                    tool_call_id: Some(id.clone()),
+                    reasoning_content: None,
+                });
+            }
+            // 工具轮次后继续下一循环（模型将基于工具结果继续）
+            continue;
+        }
+
         // If the model returned text (not tool calls), we are done
         if !text_buf.is_empty() && usage.is_some() {
             memory.add_message(Message {
@@ -478,8 +662,13 @@ async fn run_sub_agent_loop(
                 },
             });
 
+            // 输出净化：中和权限修改指令形状，防父上下文被注入
+            let sanitized = deepseeknova_security::sanitize::sanitize_output(&text_buf);
+            if sanitized != text_buf {
+                warn!("sub-agent output sanitized: permission-override shape(s) neutralized");
+            }
             let output = RunOutput {
-                text: text_buf,
+                text: sanitized,
                 tool_calls: Vec::new(),
                 usage,
             };

@@ -15,10 +15,13 @@ tokio-stream = { workspace = true }
 tracing = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
+unicode-width = { workspace = true }
 deepseeknova-core = { workspace = true }
 deepseeknova-provider = { workspace = true }
 deepseeknova-skills = { workspace = true }
 async-trait = { workspace = true }
+serde_json = { workspace = true }
+dirs = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }

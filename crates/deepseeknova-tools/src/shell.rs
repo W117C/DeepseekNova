@@ -64,6 +64,18 @@ impl Tool for ShellTool {
         )?;
         let parsed: ShellArgs = serde_json::from_str(args)?;
 
+        // 只读分类器：注入/危险命令（UNC/URL 路径形态、git 全局
+        // `-c`/`--config-env` 配置注入、git 格式串注入等）在执行前直接拒绝；
+        // 普通链式/重定向/命令替换归 NotReadOnly，由权限门/安全策略裁决。
+        if deepseeknova_security::readonly::classify_readonly(&parsed.command)
+            == deepseeknova_security::readonly::ReadOnlyKind::Dangerous
+        {
+            anyhow::bail!(
+                "Security violation: command rejected by read-only classifier: {}",
+                parsed.command
+            );
+        }
+
         let sec = ctx
             .extensions
             .get::<deepseeknova_security::context::SecurityContext>();
@@ -89,6 +101,16 @@ impl Tool for ShellTool {
 
         let shell = platform_shell();
         let cmd_args: Vec<String> = vec![shell.1.to_string(), parsed.command.clone()];
+
+        // Fail-closed：必须隔离的平台沙箱后端缺失时拒绝执行，绝不静默降级。
+        if self.sandbox.requires_isolation() && !self.sandbox.backend_available() {
+            anyhow::bail!(
+                "sandbox backend '{}' unavailable (sandbox-exec/bwrap not found); \
+                 refusing to run command without isolation. Install the backend or \
+                 set [sandbox] enabled=false.",
+                self.sandbox.name()
+            );
+        }
 
         let (sandbox_bin, sandbox_args) = self.sandbox.sandbox(shell.0, &cmd_args);
 
@@ -154,6 +176,7 @@ fn platform_shell() -> (&'static str, &'static str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use deepseeknova_sandbox::Sandbox;
     use deepseeknova_security::context::SecurityContext;
 
     // --- cap_output ---
@@ -212,6 +235,38 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn shell_refuses_when_required_sandbox_backend_missing() {
+        struct MissingBackend;
+        impl Sandbox for MissingBackend {
+            fn sandbox(&self, exe: &str, args: &[String]) -> (String, Vec<String>) {
+                (exe.to_string(), args.to_vec())
+            }
+            fn name(&self) -> &str {
+                "missing-backend"
+            }
+            fn requires_isolation(&self) -> bool {
+                true
+            }
+            fn backend_available(&self) -> bool {
+                false
+            }
+        }
+
+        let tool = ShellTool::new(Arc::new(MissingBackend));
+        let ctx = ctx_with(SecurityContext::with_safe_defaults());
+        let err = tool
+            .execute(&ctx, r#"{"command":"echo hi"}"#)
+            .await
+            .expect_err("后端缺失且必须隔离时必须拒绝");
+        assert!(
+            err.to_string()
+                .contains("refusing to run command without isolation"),
+            "错误信息应说明拒绝原因: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn shell_does_not_time_out_within_limit() {
         // 负例：限额内的命令正常返回
         let sec = SecurityContext::with_safe_defaults();
@@ -231,9 +286,10 @@ mod tests {
         sec.limits.max_output_bytes = 32;
         let ctx = ctx_with(sec);
 
-        // 产生远超 32 字节的输出
+        // 产生远超 32 字节的输出（直接使用 dd，避免命令替换形态
+        // 引入 shell 组合语义，测试目标只验证输出截断）
         let out = ShellTool::default()
-            .execute(&ctx, r#"{"command":"printf 'a%.0s' $(seq 1 500)"}"#)
+            .execute(&ctx, r#"{"command":"dd if=/dev/zero bs=1 count=500"}"#)
             .await
             .expect("命令应成功");
         assert!(out.contains("[truncated"), "got: {out}");

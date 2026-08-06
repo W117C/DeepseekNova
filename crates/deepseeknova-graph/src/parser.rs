@@ -1,4 +1,4 @@
-//! tree-sitter 四语言解析：实体提取 + 名称级 calls/imports。
+//! tree-sitter 五语言解析：实体提取 + 名称级 calls/imports。
 
 use crate::model::{node_id, GraphError, Node, NodeKind};
 use tree_sitter::{Language, Node as TsNode, Parser};
@@ -10,6 +10,7 @@ pub enum Lang {
     Python,
     JavaScript,
     TypeScript,
+    Go,
 }
 
 impl Lang {
@@ -21,6 +22,7 @@ impl Lang {
             "py" => Some(Lang::Python),
             "ts" | "tsx" => Some(Lang::TypeScript),
             "js" | "jsx" | "mjs" | "cjs" => Some(Lang::JavaScript),
+            "go" => Some(Lang::Go),
             _ => None,
         }
     }
@@ -31,6 +33,7 @@ impl Lang {
             Lang::Python => "python",
             Lang::JavaScript => "javascript",
             Lang::TypeScript => "typescript",
+            Lang::Go => "go",
         }
     }
 
@@ -40,6 +43,7 @@ impl Lang {
             Lang::Python => tree_sitter_python::LANGUAGE.into(),
             Lang::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
             Lang::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            Lang::Go => tree_sitter_go::LANGUAGE.into(),
         }
     }
 }
@@ -95,6 +99,7 @@ fn parse_err(path: &str, lang: Lang) -> GraphError {
 }
 
 /// 判定定义实体的 NodeKind；非实体返回 None。
+/// Go 的 type_declaration 不在此判定（分组声明需遍历子节点，见 parse_source）。
 fn entity_kind(lang: Lang, kind: &str, ancestors: &[&str]) -> Option<NodeKind> {
     match lang {
         Lang::Rust => match kind {
@@ -125,6 +130,13 @@ fn entity_kind(lang: Lang, kind: &str, ancestors: &[&str]) -> Option<NodeKind> {
             "method_definition" => Some(NodeKind::Method),
             _ => None,
         },
+        Lang::Go => match kind {
+            "function_declaration" => Some(NodeKind::Function),
+            "method_declaration" => Some(NodeKind::Method),
+            // type_spec/type_alias 不在此判定实体（单声明与分组 `type ( ... )`
+            // 均由 parse_source 的 Go 分支在成员节点 Enter 时逐个产出，见 parse_source）。
+            _ => None,
+        },
     }
 }
 
@@ -133,6 +145,7 @@ fn is_import(lang: Lang, kind: &str) -> bool {
         Lang::Rust => kind == "use_declaration",
         Lang::Python => kind == "import_statement" || kind == "import_from_statement",
         Lang::JavaScript | Lang::TypeScript => kind == "import_statement",
+        Lang::Go => kind == "import_declaration" || kind == "import_spec",
     }
 }
 
@@ -225,7 +238,7 @@ fn extract_doc(node: TsNode, src: &str) -> String {
     stripped.trim_end_matches("*/").trim().to_string()
 }
 
-/// 取被调用名：identifier 直接用；scoped/member/attribute 等取末段。
+/// 取被调用名：identifier 直接用；scoped/member/attribute/selector 等取末段。
 fn callee_name(call: TsNode, src: &str) -> Option<String> {
     let func = call.child_by_field_name("function")?;
     let target = match func.kind() {
@@ -234,6 +247,8 @@ fn callee_name(call: TsNode, src: &str) -> Option<String> {
         "field_expression" => func.child_by_field_name("field")?,
         "member_expression" => func.child_by_field_name("property")?,
         "attribute" => func.child_by_field_name("attribute")?,
+        // Go：pkg.Func / recv.Method → 取末段字段名
+        "selector_expression" => func.child_by_field_name("field")?,
         _ => return None,
     };
     target.utf8_text(src.as_bytes()).ok().map(str::to_string)
@@ -242,7 +257,8 @@ fn callee_name(call: TsNode, src: &str) -> Option<String> {
 enum Step<'t> {
     Enter(TsNode<'t>),
     Exit {
-        pop_def: bool,
+        /// 本节点产出的实体数（Go 分组 type 声明可为多个），Exit 时逐个出栈。
+        pop_def: usize,
         pop_trait: bool,
         pop_impl: bool,
     },
@@ -289,7 +305,7 @@ pub fn parse_source(lang: Lang, path: &str, src: &str) -> Result<FileParse, Grap
                 if pop_impl {
                     impl_trait_stack.pop();
                 }
-                if pop_def {
+                for _ in 0..pop_def {
                     if let (Some(name), Some(set)) = (def_stack.last(), refs_stack.pop()) {
                         for ref_name in set {
                             if ref_name != *name {
@@ -327,31 +343,52 @@ pub fn parse_source(lang: Lang, path: &str, src: &str) -> Result<FileParse, Grap
                 }
                 if is_import(lang, kind) {
                     if let Ok(text) = node.utf8_text(src.as_bytes()) {
-                        imports.push(text.trim().to_string());
-                        if matches!(lang, Lang::JavaScript | Lang::TypeScript) {
-                            if let Some(source) = node
-                                .child_by_field_name("source")
-                                .and_then(|n| n.utf8_text(src.as_bytes()).ok())
-                            {
-                                let spec = strip_quotes(source).to_string();
-                                let kind = if spec.starts_with("./")
-                                    || spec.starts_with("../")
-                                    || spec.starts_with('/')
+                        if lang == Lang::Go {
+                            // Go：仅 import_spec 逐条采集（import_declaration 本身跳过，
+                            // 避免整段重复）；path 三态：相对路径=File，其余=External。
+                            if kind == "import_spec" {
+                                if let Some(path) = node
+                                    .child_by_field_name("path")
+                                    .and_then(|n| n.utf8_text(src.as_bytes()).ok())
                                 {
-                                    ImportKind::File
-                                } else {
-                                    ImportKind::External
-                                };
-                                import_links.push(ImportLink { kind, target: spec });
+                                    let spec = strip_quotes(path).to_string();
+                                    imports.push(spec.clone());
+                                    let kind = if spec.starts_with("./") || spec.starts_with("../")
+                                    {
+                                        ImportKind::File
+                                    } else {
+                                        ImportKind::External
+                                    };
+                                    import_links.push(ImportLink { kind, target: spec });
+                                }
                             }
                         } else {
-                            let mut seen = std::collections::HashSet::new();
-                            for tok in identifier_tokens(text) {
-                                if seen.insert(tok.clone()) {
-                                    import_links.push(ImportLink {
-                                        kind: ImportKind::Symbol,
-                                        target: tok,
-                                    });
+                            imports.push(text.trim().to_string());
+                            if matches!(lang, Lang::JavaScript | Lang::TypeScript) {
+                                if let Some(source) = node
+                                    .child_by_field_name("source")
+                                    .and_then(|n| n.utf8_text(src.as_bytes()).ok())
+                                {
+                                    let spec = strip_quotes(source).to_string();
+                                    let kind = if spec.starts_with("./")
+                                        || spec.starts_with("../")
+                                        || spec.starts_with('/')
+                                    {
+                                        ImportKind::File
+                                    } else {
+                                        ImportKind::External
+                                    };
+                                    import_links.push(ImportLink { kind, target: spec });
+                                }
+                            } else {
+                                let mut seen = std::collections::HashSet::new();
+                                for tok in identifier_tokens(text) {
+                                    if seen.insert(tok.clone()) {
+                                        import_links.push(ImportLink {
+                                            kind: ImportKind::Symbol,
+                                            target: tok,
+                                        });
+                                    }
                                 }
                             }
                         }
@@ -401,19 +438,25 @@ pub fn parse_source(lang: Lang, path: &str, src: &str) -> Result<FileParse, Grap
                         }
                     }
                 }
-                let mut pushed_def = false;
-                if let Some(nk) = entity_kind(lang, kind, &ancestor_kinds) {
-                    if let Some(name) = entity_name(node, src) {
-                        let start_line = node.start_position().row as u32 + 1;
+                let mut pushed_def: usize = 0;
+                // 实体产出：Go 的 type_spec/type_alias 成员（单声明与分组
+                // `type ( A struct{}; B ... )` 的 tree-sitter-go 0.25 形态一致，
+                // type_declaration 下 children 为 multiple）在成员节点 Enter 时
+                // 逐个产出实体、成员子树 Exit 时出栈（pop_def 计数）——与单实体
+                // 路径一致，成员体内引用与自身 name 节点归属本成员（R1）；
+                // 其余语言经 entity_kind/entity_name 判定单一实体。
+                let mut push_entity =
+                    |nk: NodeKind, name: String, ent: TsNode, sig: String, doc: String| {
+                        let start_line = ent.start_position().row as u32 + 1;
                         nodes.push(Node {
                             id: node_id(path, &name, start_line),
                             kind: nk,
                             name: name.clone(),
                             path: path.to_string(),
                             start_line,
-                            end_line: node.end_position().row as u32 + 1,
-                            signature: extract_signature(lang, node, src),
-                            doc: extract_doc(node, src),
+                            end_line: ent.end_position().row as u32 + 1,
+                            signature: sig,
+                            doc,
                             score: 0.0,
                         });
                         refs_stack.push(std::collections::HashSet::new());
@@ -436,7 +479,49 @@ pub fn parse_source(lang: Lang, path: &str, src: &str) -> Result<FileParse, Grap
                             }
                         }
                         def_stack.push(name);
-                        pushed_def = true;
+                        pushed_def += 1;
+                    };
+                if lang == Lang::Go && matches!(kind, "type_spec" | "type_alias") {
+                    // 单声明 `type A struct{}` 与分组 `type ( A ...; B ... )`
+                    // 均落到此：成员 Enter 时建实体、成员子树 Exit 时 pop。
+                    // type_spec/type_alias 的 type 字段区分 struct/interface。
+                    let nk = match node.child_by_field_name("type").map(|t| t.kind()) {
+                        Some("struct_type") => Some(NodeKind::Struct),
+                        Some("interface_type") => Some(NodeKind::Trait),
+                        _ => None,
+                    };
+                    if let Some(nk) = nk {
+                        if let Some(name) = node
+                            .child_by_field_name("name")
+                            .and_then(|n| n.utf8_text(src.as_bytes()).ok())
+                            .map(str::to_string)
+                        {
+                            // R2 doc：成员自身紧邻注释优先（分组内逐成员注释），
+                            // 取不到时回退父节点 type_declaration——单声明注释在
+                            // `type` 关键字之前，type_spec 的 prev_sibling 是
+                            // "type" 匿名关键字节点；signature 保留 "type " 前缀
+                            // 与 G-M1 前旧行为等价。
+                            let direct_doc = extract_doc(node, src);
+                            let doc = if direct_doc.is_empty() {
+                                node.parent()
+                                    .map(|p| extract_doc(p, src))
+                                    .unwrap_or_default()
+                            } else {
+                                direct_doc
+                            };
+                            let sig = format!("type {}", extract_signature(lang, node, src));
+                            push_entity(nk, name, node, sig, doc);
+                        }
+                    }
+                } else if let Some(nk) = entity_kind(lang, kind, &ancestor_kinds) {
+                    if let Some(name) = entity_name(node, src) {
+                        push_entity(
+                            nk,
+                            name,
+                            node,
+                            extract_signature(lang, node, src),
+                            extract_doc(node, src),
+                        );
                     }
                 }
                 ancestor_kinds.push(kind);
@@ -480,6 +565,43 @@ pub fn make() -> Widget {
 \
 fn helper(w: Widget) -> Widget { w }\n";
 
+    const GO_SRC: &str = r#"package main
+
+import (
+    "fmt"
+    "os"
+    "example.com/lib"
+    "./localpkg"
+)
+
+type User struct {
+    Name string
+}
+
+type Greeter interface {
+    Greet() string
+}
+
+func (u User) Greet() string {
+    return "hi " + u.Name
+}
+
+func MakeUser(name string) *User {
+    u := User{Name: name}
+    u.Greet()
+    helper()
+    return &u
+}
+
+func helper() {
+    internal()
+}
+
+func internal() {
+    fmt.Println("x")
+}
+"#;
+
     #[test]
     fn parses_rust_entities() {
         let fp = parse_source(Lang::Rust, "src/w.rs", RUST_SRC).unwrap();
@@ -511,7 +633,218 @@ fn helper(w: Widget) -> Widget { w }\n";
         assert_eq!(Lang::from_path("a.js"), Some(Lang::JavaScript));
         assert_eq!(Lang::from_path("a.ts"), Some(Lang::TypeScript));
         assert_eq!(Lang::from_path("a.tsx"), Some(Lang::TypeScript));
+        assert_eq!(Lang::from_path("a.go"), Some(Lang::Go));
         assert_eq!(Lang::from_path("a.md"), None);
+    }
+
+    #[test]
+    fn parses_go_grouped_type_declarations() {
+        // 分组类型声明：一个 type_declaration 含多个 type_spec（tree-sitter-go
+        // 0.25 children 为 multiple），组内每个类型都要产出实体（G-M1）。
+        // 单行分号分隔与多行两个形态都覆盖。
+        for src in [
+            "package main\n\ntype ( A struct{}; B interface{} )\n",
+            "package main\n\ntype (\n\tA struct{}\n\tB interface{}\n)\n",
+        ] {
+            let fp = parse_source(Lang::Go, "src/grouped.go", src).unwrap();
+            let names: Vec<_> = fp.nodes.iter().map(|n| (n.kind, n.name.as_str())).collect();
+            assert!(
+                names.contains(&(NodeKind::Struct, "A")),
+                "分组内 A 应产出 Struct 实体：{names:?}"
+            );
+            assert!(
+                names.contains(&(NodeKind::Trait, "B")),
+                "分组内 B 应产出 Trait 实体：{names:?}"
+            );
+            assert_eq!(fp.nodes.len(), 2, "分组声明应恰好 2 个实体：{names:?}");
+        }
+        // 分组内不含实体的 type_spec（如 type 别名到非 struct/interface）不产出。
+        let src = "package main\n\ntype (\n\tA = int\n\tB struct{}\n)\n";
+        let fp = parse_source(Lang::Go, "src/grouped2.go", src).unwrap();
+        let names: Vec<_> = fp.nodes.iter().map(|n| (n.kind, n.name.as_str())).collect();
+        assert_eq!(names, vec![(NodeKind::Struct, "B")], "{names:?}");
+    }
+
+    #[test]
+    fn go_grouped_type_refs_attribution() {
+        // R1：分组 type_declaration 成员体内引用归属各自成员。修复前全部成员在
+        // 父节点 Enter 时一次性 push（栈顶=最后成员），成员 1..n-1 的体内引用与
+        // 自身 name 全部落入最后成员 set：refs=[(B,"A"),(B,"C")] 伪边、A 无出边。
+        for src in [
+            // 单行分号分隔（第二轮审查 /tmp 实测形态）
+            "package main\n\ntype ( A struct{ next *B; ext *C }; B struct{} )\n",
+            // 多行形态
+            "package main\n\ntype (\n\tA struct{ next *B; ext *C }\n\tB struct{}\n)\n",
+        ] {
+            let fp = parse_source(Lang::Go, "src/grouped_refs.go", src).unwrap();
+            // A 的体内引用：B、C
+            assert!(
+                fp.refs.contains(&("A".into(), "B".into())),
+                "A 应引用 B：{:?}",
+                fp.refs
+            );
+            assert!(
+                fp.refs.contains(&("A".into(), "C".into())),
+                "A 应引用 C：{:?}",
+                fp.refs
+            );
+            // B 无出边（不得有伪边 B→A，也不得收走 A 的引用）
+            assert!(
+                !fp.refs.iter().any(|(from, _)| from == "B"),
+                "B 不应有出边（含伪边 B→A）：{:?}",
+                fp.refs
+            );
+        }
+        // 分组后的方法调用归属：M→helper；组内成员不残留为 caller。
+        let src = "package main\n\ntype (\n\tA struct{ next *B; ext *C }\n\tB struct{}\n)\n\nfunc (a A) M() { helper() }\n";
+        let fp = parse_source(Lang::Go, "src/grouped_refs.go", src).unwrap();
+        assert!(
+            fp.calls.contains(&("M".into(), "helper".into())),
+            "方法调用应归属 M→helper：{:?}",
+            fp.calls
+        );
+        assert!(
+            !fp.calls.iter().any(|(c, _)| c == "A" || c == "B"),
+            "组内类型不得残留为 caller：{:?}",
+            fp.calls
+        );
+    }
+
+    #[test]
+    fn go_type_doc_and_signature_restored() {
+        // R2：实体从 type_declaration 改为 type_spec 后，doc 需回退父节点提取、
+        // signature 保留 "type " 前缀（与 G-M1 前旧行为等价）。
+        // 单声明：
+        let fp = parse_source(
+            Lang::Go,
+            "src/user.go",
+            "package main\n\n// User is a user.\ntype User struct {\n\tName string\n}\n",
+        )
+        .unwrap();
+        let user = fp.nodes.iter().find(|n| n.name == "User").unwrap();
+        assert_eq!(user.doc, "User is a user.", "doc 应恢复：{:?}", user.doc);
+        assert_eq!(
+            user.signature, "type User struct",
+            "signature 应保留 type 前缀"
+        );
+        // 分组声明：组注释归属首成员；每成员 signature 均带 "type " 前缀。
+        let fp = parse_source(
+            Lang::Go,
+            "src/grouped.go",
+            "package main\n\n// Group types.\ntype (\n\tA struct{}\n\tB interface{}\n)\n",
+        )
+        .unwrap();
+        let a = fp.nodes.iter().find(|n| n.name == "A").unwrap();
+        let b = fp.nodes.iter().find(|n| n.name == "B").unwrap();
+        assert_eq!(a.doc, "Group types.", "分组首成员应取组注释：{:?}", a.doc);
+        assert_eq!(a.signature, "type A struct", "A signature: {}", a.signature);
+        assert_eq!(
+            b.signature, "type B interface",
+            "B signature: {}",
+            b.signature
+        );
+    }
+
+    #[test]
+    fn parses_go_entities() {
+        let fp = parse_source(Lang::Go, "src/main.go", GO_SRC).unwrap();
+        let names: Vec<_> = fp.nodes.iter().map(|n| (n.kind, n.name.as_str())).collect();
+        assert!(names.contains(&(NodeKind::Struct, "User")), "{names:?}");
+        assert!(names.contains(&(NodeKind::Trait, "Greeter")), "{names:?}");
+        assert!(
+            names.contains(&(NodeKind::Function, "MakeUser")),
+            "{names:?}"
+        );
+        assert!(names.contains(&(NodeKind::Function, "helper")), "{names:?}");
+        assert!(names.contains(&(NodeKind::Method, "Greet")), "{names:?}");
+        let make_user = fp.nodes.iter().find(|n| n.name == "MakeUser").unwrap();
+        assert!(
+            make_user
+                .signature
+                .contains("func MakeUser(name string) *User"),
+            "Go 签名应从 func 到左花括号前：{}",
+            make_user.signature
+        );
+        assert!(!make_user.signature.contains('{'));
+    }
+
+    #[test]
+    fn extracts_go_calls_and_imports() {
+        let fp = parse_source(Lang::Go, "src/main.go", GO_SRC).unwrap();
+        // 调用链 a→b→c：MakeUser → helper → internal
+        assert!(
+            fp.calls
+                .iter()
+                .any(|(c, e)| c == "MakeUser" && e == "helper"),
+            "{:?}",
+            fp.calls
+        );
+        assert!(
+            fp.calls
+                .iter()
+                .any(|(c, e)| c == "helper" && e == "internal"),
+            "{:?}",
+            fp.calls
+        );
+        // 方法调用取末段：u.Greet() → Greet
+        assert!(
+            fp.calls
+                .iter()
+                .any(|(c, e)| c == "MakeUser" && e == "Greet"),
+            "{:?}",
+            fp.calls
+        );
+        // 包级调用取末段：fmt.Println → Println
+        assert!(
+            fp.calls
+                .iter()
+                .any(|(c, e)| c == "internal" && e == "Println"),
+            "{:?}",
+            fp.calls
+        );
+        assert!(fp.imports.iter().any(|i| i == "fmt"), "{:?}", fp.imports);
+        assert!(
+            fp.imports.iter().any(|i| i == "example.com/lib"),
+            "{:?}",
+            fp.imports
+        );
+    }
+
+    #[test]
+    fn go_import_three_states() {
+        let fp = parse_source(Lang::Go, "src/main.go", GO_SRC).unwrap();
+        // 本地相对路径 → File
+        assert!(fp.import_links.contains(&ImportLink {
+            kind: ImportKind::File,
+            target: "./localpkg".into()
+        }));
+        // stdlib / 第三方裸路径 → External
+        assert!(fp.import_links.contains(&ImportLink {
+            kind: ImportKind::External,
+            target: "fmt".into()
+        }));
+        assert!(fp.import_links.contains(&ImportLink {
+            kind: ImportKind::External,
+            target: "example.com/lib".into()
+        }));
+        // 无 Symbol 态（Go import 不产生符号级链接）
+        assert!(fp.import_links.iter().all(|l| l.kind != ImportKind::Symbol));
+    }
+
+    #[test]
+    fn go_collects_type_references_without_callees() {
+        let fp = parse_source(Lang::Go, "src/main.go", GO_SRC).unwrap();
+        // MakeUser 引用 User 类型
+        assert!(
+            fp.refs.iter().any(|(f, r)| f == "MakeUser" && r == "User"),
+            "{:?}",
+            fp.refs
+        );
+        // 递归/自调用不进引用
+        assert!(!fp
+            .refs
+            .iter()
+            .any(|(f, r)| f == "internal" && r == "internal"));
     }
 
     #[test]

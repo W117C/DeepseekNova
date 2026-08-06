@@ -1,6 +1,7 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
 use deepseeknova_core::chunk::Usage;
 use deepseeknova_core::{RunEvent, RunInput, RunOutput};
+use std::hint::black_box;
 
 fn bench_event_clone(c: &mut Criterion) {
     let text_delta = RunEvent::TextDelta("some text delta".to_string());
