@@ -25,7 +25,7 @@
   e2e）；`serve --acp` 进程级冒烟通过（initialize / session/new / close 协议
   响应正确、按 cwd 建 agent）；真实 LLM 冒烟因 `DEEPSEEK_API_KEY` 缺失
   blocked，未伪造凭据。
-- 状态：待提交、待推送、待建 PR（分支 feat/semantic-retrieval）。
+- 状态：已提交（2 个 commit）、已推送、PR #72（分支 feat/semantic-retrieval）。
 
 ## 安全边界收尾二轮（2026-08-06，审查修复轮）
 

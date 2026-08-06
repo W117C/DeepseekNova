@@ -13,7 +13,7 @@
 | 文档 | changed-and-verified | README / GUIDE / CHANGELOG / README_EN / serve+cli README 同步 ACP 与 eval；PROGRESS 与 CLOSEOUT 追加本轮；neat-freak 前序已同步 DESIGN / AGENTS / BUILDING / tool README |
 | 规则 | verified-current | AGENTS.md 无新增漂移；跨 crate 改动（cli/serve/tools/agent/provider）遵守 §1 推理专家协议并全量验证 |
 | 记忆 | not-applicable | 平台记忆为 generated-read-only，本轮无授权写入 |
-| 工作区 | cleaned | `docs/experiments/` + `scripts/experiments/` + `docs/superpowers/mockups/` 按用户批准删除；无 stash、无额外 worktree；改动待提交/推送/建 PR |
+| 工作区 | cleaned | `docs/experiments/` + `scripts/experiments/` + `docs/superpowers/mockups/` 按用户批准删除；无 stash、无额外 worktree；改动已提交并推送，PR #72 |
 
 ## 遗留清单执行情况（用户批准“删除候选都删除，遗留都做一遍”）
 
@@ -30,7 +30,7 @@
   待用户提供凭据后补 `deepseeknova-cli run` / `eval` 冒烟。
 - 删除：3 个 mockups 已 `git rm`；未跟踪的 experiments 目录与其中 .DS_Store
   已删除。
-- 提交/推送/PR：分支上继续开发，完成后推送并建 PR（见状态）。
+- 提交/推送/PR：已完成，分支 feat/semantic-retrieval 推送至 origin，PR #72。
 
 ---
 
