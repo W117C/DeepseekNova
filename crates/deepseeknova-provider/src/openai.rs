@@ -10,7 +10,7 @@ use std::env;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
-use tracing::info;
+use tracing::{info, warn};
 
 pub struct OpenAIProvider {
     client: Client,
@@ -144,64 +144,78 @@ impl OpenAIProvider {
     }
 
     async fn send_request(&self, body: &serde_json::Value) -> anyhow::Result<reqwest::Response> {
-        let url = format!("{}/chat/completions", self.base_url);
+        send_chat_request(
+            &self.client,
+            &self.api_key,
+            &self.base_url,
+            self.max_retries,
+            body,
+        )
+        .await
+    }
+}
 
-        let stream = body
-            .get("stream")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        info!("POST {} (stream={})", url, stream);
+/// POST a chat-completions payload with header-phase retry (429/5xx/network).
+/// Retries cover everything up to response headers; body-read failures of a
+/// streaming response are handled separately in `stream()` because retrying
+/// after emitting chunks would duplicate output.
+async fn send_chat_request(
+    client: &Client,
+    api_key: &str,
+    base_url: &str,
+    max_retries: u32,
+    body: &serde_json::Value,
+) -> anyhow::Result<reqwest::Response> {
+    let url = format!("{base_url}/chat/completions");
 
-        let max_retries = self.max_retries;
-        let client = self.client.clone();
-        let api_key = self.api_key.clone();
+    let stream = body
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    info!("POST {} (stream={})", url, stream);
+
+    let result = retry_with_backoff(max_retries, || {
+        let client = client.clone();
+        let api_key = api_key.to_string();
         let body = body.clone();
-
-        let result = retry_with_backoff(max_retries, || {
-            let client = client.clone();
-            let api_key = api_key.clone();
-            let body = body.clone();
-            let url = url.clone();
-            Box::pin(async move {
-                match client
-                    .post(&url)
-                    .bearer_auth(&api_key)
-                    .json(&body)
-                    .send()
-                    .await
-                {
-                    Ok(response) => {
-                        let status = response.status();
-                        if status.is_success() {
-                            HttpAttempt::Success(response)
-                        } else if crate::retry::is_retryable_status(status.as_u16()) {
-                            let error_text = response.text().await.unwrap_or_default();
-                            HttpAttempt::Retryable(format!("HTTP {status}: {error_text}"))
-                        } else {
-                            let error_text = response.text().await.unwrap_or_default();
-                            HttpAttempt::Fatal(format!("HTTP {status}: {error_text}"))
-                        }
-                    }
-                    Err(e) => {
-                        let err_str = e.to_string();
-                        if crate::retry::is_retryable_error(&err_str) {
-                            HttpAttempt::Retryable(err_str)
-                        } else {
-                            HttpAttempt::Fatal(err_str)
-                        }
+        let url = url.clone();
+        Box::pin(async move {
+            match client
+                .post(&url)
+                .bearer_auth(&api_key)
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(response) => {
+                    let status = response.status();
+                    if status.is_success() {
+                        HttpAttempt::Success(response)
+                    } else if crate::retry::is_retryable_status(status.as_u16()) {
+                        let error_text = response.text().await.unwrap_or_default();
+                        HttpAttempt::Retryable(format!("HTTP {status}: {error_text}"))
+                    } else {
+                        let error_text = response.text().await.unwrap_or_default();
+                        HttpAttempt::Fatal(format!("HTTP {status}: {error_text}"))
                     }
                 }
-            })
-        })
-        .await;
-
-        match result {
-            HttpAttempt::Success(response) => Ok(response),
-            HttpAttempt::Retryable(msg) => {
-                Err(anyhow::anyhow!("request failed after retries: {msg}"))
+                Err(e) => {
+                    let err_str = e.to_string();
+                    if crate::retry::is_retryable_error(&err_str) {
+                        HttpAttempt::Retryable(err_str)
+                    } else {
+                        HttpAttempt::Fatal(err_str)
+                    }
+                }
             }
-            HttpAttempt::Fatal(msg) => Err(anyhow::anyhow!("{msg}")),
-        }
+        })
+    })
+    .await;
+
+    match result {
+        HttpAttempt::Success(response) => Ok(response),
+        HttpAttempt::Retryable(msg) => Err(anyhow::anyhow!("request failed after retries: {msg}")),
+        HttpAttempt::Fatal(msg) => Err(anyhow::anyhow!("{msg}")),
     }
 }
 
@@ -246,20 +260,52 @@ impl Provider for OpenAIProvider {
         let messages = validated.messages;
         let tools = validated.tools;
         let body = self.build_request(messages, tools, true);
-        let response = self.send_request(&body).await?;
 
-        let (tx, rx) = mpsc::channel(64);
+        // Body-read retry, separate from the header-phase retries inside
+        // send_chat_request: gateways frequently drop long SSE streams
+        // mid-body. A disconnect is only safe to retry when *nothing* was
+        // delivered yet — once any text/tool/usage chunk reached the caller,
+        // retrying would duplicate output, so the error propagates instead.
+        let mut attempt = 0u32;
+        loop {
+            let response = self.send_request(&body).await?;
 
-        // Spawn a task that reads the SSE stream chunk-by-chunk and feeds
-        // parsed Chunks into the channel. This gives us true streaming
-        // instead of buffering the entire response body.
-        tokio::spawn(async move {
-            if let Err(e) = stream_sse_response(response, &tx).await {
-                let _ = tx.send(Err(e)).await;
+            let (tx, mut rx) = mpsc::channel(64);
+
+            // Spawn a task that reads the SSE stream chunk-by-chunk and feeds
+            // parsed Chunks into the channel. This gives us true streaming
+            // instead of buffering the entire response body.
+            tokio::spawn(async move {
+                let mut sent_any = false;
+                if let Err(e) = stream_sse_response(response, &tx, &mut sent_any).await {
+                    let _ = tx.send(Err(e)).await;
+                }
+            });
+
+            // Peek at the first item to decide retry vs. hand-off.
+            match rx.recv().await {
+                Some(Err(e)) if attempt < self.max_retries => {
+                    let delay = crate::retry::backoff_duration(attempt + 1);
+                    warn!(
+                        "stream disconnected before any content, retry {}/{}: {e:?}",
+                        attempt + 1,
+                        self.max_retries
+                    );
+                    drop(rx);
+                    tokio::time::sleep(delay).await;
+                    attempt += 1;
+                }
+                Some(first) => {
+                    // First item arrived — forward it, then the live rest.
+                    let rest = tokio_stream::wrappers::ReceiverStream::new(rx);
+                    let chained = tokio_stream::iter(std::iter::once(first)).chain(rest);
+                    return Ok(Box::pin(chained));
+                }
+                None => {
+                    return Err(anyhow::anyhow!("stream ended before producing any event"));
+                }
             }
-        });
-
-        Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+        }
     }
 }
 
@@ -281,6 +327,7 @@ struct AccToolCall {
 async fn stream_sse_response(
     response: reqwest::Response,
     tx: &mpsc::Sender<anyhow::Result<Chunk>>,
+    sent_any: &mut bool,
 ) -> anyhow::Result<()> {
     // Accumulate raw bytes per line to avoid UTF-8 corruption across TCP chunks
     let mut line_bytes: Vec<u8> = Vec::new();
@@ -304,7 +351,7 @@ async fn stream_sse_response(
                     if trimmed.is_empty() {
                         continue;
                     }
-                    process_sse_line(&trimmed, tx, &mut tool_acc).await?;
+                    process_sse_line(&trimmed, tx, &mut tool_acc, sent_any).await?;
                 }
                 b'\r' => { /* skip — handled by \n */ }
                 _ => line_bytes.push(b),
@@ -318,12 +365,12 @@ async fn stream_sse_response(
             .map_err(|e| anyhow::anyhow!("invalid UTF-8 in SSE stream tail: {e}"))?;
         let trimmed = tail_str.trim().to_string();
         if !trimmed.is_empty() {
-            process_sse_line(&trimmed, tx, &mut tool_acc).await?;
+            process_sse_line(&trimmed, tx, &mut tool_acc, sent_any).await?;
         }
     }
 
     // Flush any pending tool calls
-    flush_pending_tool_calls(tx, &mut tool_acc).await?;
+    flush_pending_tool_calls(tx, &mut tool_acc, sent_any).await?;
 
     Ok(())
 }
@@ -333,10 +380,12 @@ async fn process_sse_line(
     line: &str,
     tx: &mpsc::Sender<anyhow::Result<Chunk>>,
     tool_acc: &mut Vec<AccToolCall>,
+    sent_any: &mut bool,
 ) -> anyhow::Result<()> {
     // End-of-stream marker
     if line == "data: [DONE]" {
-        flush_pending_tool_calls(tx, tool_acc).await?;
+        flush_pending_tool_calls(tx, tool_acc, sent_any).await?;
+        *sent_any = true;
         let _ = tx.send(Ok(Chunk::Done)).await;
         return Ok(());
     }
@@ -355,6 +404,7 @@ async fn process_sse_line(
     // hit/miss and reasoning tokens) via the shared conversion so the stream
     // never drops billed reasoning tokens.
     if let Some(ref u) = resp.usage {
+        *sent_any = true;
         let _ = tx.send(Ok(Chunk::Usage(u.to_usage()))).await;
     }
 
@@ -366,6 +416,7 @@ async fn process_sse_line(
             // --- Text content ---
             if let Some(ref content) = delta.content {
                 if !content.is_empty() {
+                    *sent_any = true;
                     let _ = tx.send(Ok(Chunk::TextDelta(content.clone()))).await;
                 }
             }
@@ -373,6 +424,7 @@ async fn process_sse_line(
             // --- Reasoning content (DeepSeek thinking mode) ---
             if let Some(ref reasoning) = delta.reasoning_content {
                 if !reasoning.is_empty() {
+                    *sent_any = true;
                     let _ = tx
                         .send(Ok(Chunk::ReasoningDelta {
                             text: reasoning.clone(),
@@ -400,6 +452,7 @@ async fn process_sse_line(
                             if let Some(ref func) = tc.function {
                                 if let Some(ref name) = func.name {
                                     acc.name = Some(name.clone());
+                                    *sent_any = true;
                                     let _ = tx
                                         .send(Ok(Chunk::ToolCallStart {
                                             id: id.clone(),
@@ -416,6 +469,7 @@ async fn process_sse_line(
                         if let Some(ref args) = func.arguments {
                             if !args.is_empty() {
                                 let call_id = acc.id.clone().unwrap_or_default();
+                                *sent_any = true;
                                 let _ = tx
                                     .send(Ok(Chunk::ToolCallDelta {
                                         id: call_id.clone(),
@@ -432,7 +486,7 @@ async fn process_sse_line(
 
         // On finish_reason = "tool_calls", emit accumulated ToolCallEnd events
         if is_tool_call_finish {
-            flush_pending_tool_calls(tx, tool_acc).await?;
+            flush_pending_tool_calls(tx, tool_acc, sent_any).await?;
         }
     }
 
@@ -443,9 +497,11 @@ async fn process_sse_line(
 async fn flush_pending_tool_calls(
     tx: &mpsc::Sender<anyhow::Result<Chunk>>,
     tool_acc: &mut Vec<AccToolCall>,
+    sent_any: &mut bool,
 ) -> anyhow::Result<()> {
     for acc in tool_acc.drain(..) {
         if let (Some(id), Some(name)) = (acc.id, acc.name) {
+            *sent_any = true;
             let _ = tx
                 .send(Ok(Chunk::ToolCallEnd {
                     id,
@@ -498,13 +554,16 @@ data: [DONE]
 
         let (tx, mut rx) = mpsc::channel(64);
         let mut tool_acc = Vec::new();
+        let mut sent_any = false;
 
         for line in sse_data.lines() {
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
             }
-            process_sse_line(trimmed, &tx, &mut tool_acc).await.unwrap();
+            process_sse_line(trimmed, &tx, &mut tool_acc, &mut sent_any)
+                .await
+                .unwrap();
         }
 
         drop(tx);
@@ -552,13 +611,16 @@ data: [DONE]
 
         let (tx, mut rx) = mpsc::channel(64);
         let mut tool_acc = Vec::new();
+        let mut sent_any = false;
 
         for line in sse_data.lines() {
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
             }
-            process_sse_line(trimmed, &tx, &mut tool_acc).await.unwrap();
+            process_sse_line(trimmed, &tx, &mut tool_acc, &mut sent_any)
+                .await
+                .unwrap();
         }
 
         drop(tx);
@@ -602,13 +664,16 @@ data: [DONE]
 
         let (tx, mut rx) = mpsc::channel(64);
         let mut tool_acc = Vec::new();
+        let mut sent_any = false;
 
         for line in sse_data.lines() {
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
             }
-            process_sse_line(trimmed, &tx, &mut tool_acc).await.unwrap();
+            process_sse_line(trimmed, &tx, &mut tool_acc, &mut sent_any)
+                .await
+                .unwrap();
         }
 
         drop(tx);
@@ -646,13 +711,16 @@ data: [DONE]
 
         let (tx, mut rx) = mpsc::channel(64);
         let mut tool_acc = Vec::new();
+        let mut sent_any = false;
 
         for line in sse_data.lines() {
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
             }
-            process_sse_line(trimmed, &tx, &mut tool_acc).await.unwrap();
+            process_sse_line(trimmed, &tx, &mut tool_acc, &mut sent_any)
+                .await
+                .unwrap();
         }
 
         drop(tx);
@@ -694,5 +762,156 @@ data: [DONE]
         let mapped = usage.to_usage();
         assert_eq!(mapped.reasoning_tokens, 0);
         assert_eq!(mapped.total_tokens, 15);
+    }
+
+    /// env 相关测试串行化（异步锁：guard 需跨 await 持有）。
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Mock SSE 服务器：第 1 次请求返回 200 但 body 中途断开（模拟网关
+    /// 断流），第 2 次返回完整 SSE。返回 base_url 与请求记录。
+    fn serve_stream_retry() -> (String, std::sync::mpsc::Receiver<String>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for i in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                loop {
+                    let n = stream.read(&mut tmp).unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&tmp[..n]);
+                    if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                tx.send(String::from_utf8_lossy(&buf).to_string()).unwrap();
+                if i == 0 {
+                    // 声明 1024 字节但 body 一个字节都不写就断开 → 读 body 第一块即报错
+                    let head =
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 1024\r\n\r\n";
+                    let _ = stream.write_all(head.as_bytes());
+                    drop(stream);
+                } else {
+                    let body = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n";
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                    drop(stream);
+                }
+            }
+        });
+        (format!("http://{addr}/v1"), rx)
+    }
+
+    /// 流式响应在发出任何内容前断流时必须重试；重试后拿到完整输出。
+    #[tokio::test]
+    async fn stream_retries_zero_output_disconnect() {
+        let _guard = ENV_LOCK.lock().await;
+        std::env::set_var("DEEPSEEK_API_KEY", "sk-test");
+
+        let (base, rx) = serve_stream_retry();
+        let provider =
+            OpenAIProvider::new(&base, "deepseek-v4-flash", "DEEPSEEK_API_KEY", 30, 2).unwrap();
+
+        let msg = Message {
+            role: deepseeknova_core::Role::User,
+            content: "hi".into(),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        };
+        let tool_refs: Vec<&dyn Tool> = Vec::new();
+        let messages = [msg];
+        let validated = ValidatedRequest::new(&messages, &tool_refs).unwrap();
+
+        let mut stream = provider.stream(validated).await.unwrap();
+        let mut text = String::new();
+        while let Some(item) = stream.next().await {
+            if let Ok(Chunk::TextDelta(t)) = item {
+                text.push_str(&t);
+            }
+        }
+
+        assert_eq!(text, "hello", "重试后应拿到完整输出");
+        assert_eq!(
+            rx.try_iter().count(),
+            2,
+            "应发生 2 次 HTTP 请求（首次断流 + 重试）"
+        );
+        std::env::remove_var("DEEPSEEK_API_KEY");
+    }
+
+    /// 已发出过内容后断流不得重试（重试会重复输出）——错误直接上抛。
+    #[tokio::test]
+    async fn stream_does_not_retry_after_partial_output() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 4096];
+            loop {
+                let n = stream.read(&mut tmp).unwrap();
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&tmp[..n]);
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            // 先发一个完整 data 帧（已产出内容），再中途断开
+            let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 1024\r\n\r\n";
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(
+                b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}\n\n",
+            );
+            drop(stream);
+        });
+
+        let _guard = ENV_LOCK.lock().await;
+        std::env::set_var("DEEPSEEK_API_KEY", "sk-test");
+        let base = format!("http://{addr}/v1");
+        let provider =
+            OpenAIProvider::new(&base, "deepseek-v4-flash", "DEEPSEEK_API_KEY", 30, 2).unwrap();
+
+        let msg = Message {
+            role: deepseeknova_core::Role::User,
+            content: "hi".into(),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        };
+        let tool_refs: Vec<&dyn Tool> = Vec::new();
+        let messages = [msg];
+        let validated = ValidatedRequest::new(&messages, &tool_refs).unwrap();
+
+        let mut stream = provider.stream(validated).await.unwrap();
+        let mut saw_error = false;
+        let mut saw_text = false;
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(Chunk::TextDelta(t)) => saw_text |= t == "partial",
+                Err(_) => saw_error = true,
+                _ => {}
+            }
+        }
+        assert!(saw_text, "应收到首个 data 帧");
+        assert!(
+            saw_error,
+            "已产出内容后的断流必须上抛错误，不能重试导致重复输出"
+        );
+        std::env::remove_var("DEEPSEEK_API_KEY");
     }
 }

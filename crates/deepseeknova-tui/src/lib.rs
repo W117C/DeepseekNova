@@ -35,8 +35,9 @@
 //! ```
 
 mod app;
+pub mod approval;
 mod commands;
-mod input;
+pub mod input;
 mod model;
 mod render;
 mod theme;
@@ -90,6 +91,8 @@ pub struct TuiRunner {
     at_files: Vec<String>,
     /// 主模型上下文窗口上限（tokens），CLI 从 config 注入；None 不显示占用率。
     context_window: Option<u32>,
+    /// 权限审批请求接收端（CLI 注入 agent 的 responder 通道）。
+    approval_rx: Option<tokio::sync::mpsc::Receiver<crate::approval::ApprovalRequest>>,
 }
 
 impl TuiRunner {
@@ -114,7 +117,18 @@ impl TuiRunner {
             theme: None,
             at_files: Vec::new(),
             context_window: None,
+            approval_rx: None,
         }
+    }
+
+    /// 注入权限审批请求接收端（与注入 agent 的 `TuiApprovalResponder`
+    /// 同一通道），启用确认浮层（y 允许 / n 拒绝）。
+    pub fn with_approval_rx(
+        mut self,
+        rx: tokio::sync::mpsc::Receiver<crate::approval::ApprovalRequest>,
+    ) -> Self {
+        self.approval_rx = Some(rx);
+        self
     }
 
     /// 状态栏显示的模型标签（CLI 传入实际模型名）。
@@ -206,7 +220,11 @@ impl TuiRunner {
     /// Enter the TUI and block until the user quits.
     pub async fn run(&mut self) -> anyhow::Result<()> {
         let mut terminal = ratatui::init();
+        // 启用鼠标上报：滚轮事件由应用消费并滚动对话历史，
+        // 否则滚轮只会滚动终端自身滚动区（表现为“滚动到了输入框”）。
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture);
         let result = self.run_inner(&mut terminal).await;
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
         ratatui::restore();
         result
     }
@@ -227,7 +245,7 @@ impl TuiRunner {
             factory: self.factory.clone(),
             router: self.router.clone(),
         };
-        let caps = TuiCaps {
+        let mut caps = TuiCaps {
             runtime: Arc::new(Mutex::new(runtime)),
             session: self.session.clone(),
             skills_paths: self.skills_paths.clone(),
@@ -235,6 +253,7 @@ impl TuiRunner {
             mcp_probe: self.mcp_probe.clone(),
             undo: self.undo.clone(),
             context_window: self.context_window,
+            approval_rx: self.approval_rx.take(),
         };
 
         let mut app = AppState {
@@ -243,11 +262,32 @@ impl TuiRunner {
             at_files: self.at_files.clone(),
             ..Default::default()
         };
+        // 用户键位定制（keybindings.json）：启动时加载，事件循环轮询热重载。
+        app.keymap_path = crate::app::keybindings::Keymap::default_path();
+        app.keymap = crate::app::keybindings::Keymap::load(&app.keymap_path);
+        app.keymap_mtime = std::fs::metadata(&app.keymap_path)
+            .ok()
+            .and_then(|m| m.modified().ok());
+        if !app.keymap.diagnostics.is_empty() {
+            let diags: Vec<String> = app.keymap.diagnostics.clone();
+            for d in &diags {
+                app.echo_line(model::conversation::LineKind::Error, d);
+            }
+        } else if app.keymap_path.exists() {
+            app.echo_line(
+                model::conversation::LineKind::System,
+                &format!(
+                    "已加载键位定制 {}（{} 条覆盖）",
+                    app.keymap_path.display(),
+                    app.keymap.override_count()
+                ),
+            );
+        }
         if let Some(warning) = theme_warning {
             app.echo_line(model::conversation::LineKind::System, &warning);
         }
 
-        app::run_loop(terminal, &mut app, &caps).await?;
+        app::run_loop(terminal, &mut app, &mut caps).await?;
         Ok(())
     }
 }

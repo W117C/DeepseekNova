@@ -4,12 +4,13 @@ use ratatui::layout::Constraint;
 
 use crate::app::state::AppState;
 
-/// 底部面板布局（与旧版一致）：对话区 + 状态行(1) + 输入框(5) + 提示行(1)。
+/// 底部面板布局（Claude Code 风格）：对话区 + 状态行(1) + 输入区(3) + 提示行(1)。
+/// 输入区无边框紧凑（`❯` 前缀 + 2 行输入窗口，多行自动滚动）。
 pub fn layout_constraints() -> [Constraint; 4] {
     [
         Constraint::Min(0),
         Constraint::Length(1),
-        Constraint::Length(5),
+        Constraint::Length(3),
         Constraint::Length(1),
     ]
 }
@@ -30,7 +31,7 @@ mod tests {
             [
                 Constraint::Min(0),
                 Constraint::Length(1),
-                Constraint::Length(5),
+                Constraint::Length(3),
                 Constraint::Length(1),
             ]
         );

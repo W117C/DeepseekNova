@@ -8,6 +8,34 @@ pub mod bubblewrap;
 #[cfg(target_os = "macos")]
 pub mod seatbelt;
 
+/// 沙箱档位：把 agent 运行权限抽象为少量分级档位（而非自由裁量）。
+///
+/// 设计对照 Codex 的三档模型（read-only / workspace-write / full-access）：
+/// 每档对应一套可渲染、可校验的沙箱策略；档位越靠前，网络与写入
+/// 限制越严。平台实现（seatbelt/bubblewrap）按档位渲染策略。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxTier {
+    /// 只读：不可写文件系统（除系统临时区）、不可网络（强制禁网）。
+    ReadOnly,
+    /// 工作区写：可写根（writable paths）+ 网络按配置（默认禁网）。
+    WorkspaceWrite,
+    /// 全权限：可写任意路径 + 网络全开（仅在高风险授权场景使用）。
+    FullAccess,
+}
+
+impl SandboxTier {
+    /// 是否为只读档（无任何用户可写根）。
+    pub fn is_read_only(&self) -> bool {
+        matches!(self, SandboxTier::ReadOnly)
+    }
+
+    /// 该档位是否允许网络（受配置约束时）。
+    /// `FullAccess` 全开；其余档位默认禁网，网络是否放行由上层配置决定。
+    pub fn allows_network_by_default(&self) -> bool {
+        matches!(self, SandboxTier::FullAccess)
+    }
+}
+
 /// Trait for sandboxing shell command execution.
 ///
 /// Implementations wrap a shell command invocation inside a platform-specific
@@ -30,6 +58,17 @@ pub trait Sandbox: Send + Sync {
     fn is_active(&self) -> bool {
         true
     }
+
+    /// 该沙箱是否属于"必须隔离"型（平台沙箱为 true，NoOp 为 false）。
+    /// 上层工具据此 fail-closed：必须隔离但后端不可用时拒绝执行。
+    fn requires_isolation(&self) -> bool {
+        true
+    }
+
+    /// 后端可执行文件是否可用（macOS sandbox-exec / Linux bwrap）。
+    fn backend_available(&self) -> bool {
+        true
+    }
 }
 
 /// A sandbox that performs no isolation — commands run directly.
@@ -48,6 +87,10 @@ impl Sandbox for NoOpSandbox {
     }
 
     fn is_active(&self) -> bool {
+        false
+    }
+
+    fn requires_isolation(&self) -> bool {
         false
     }
 }
@@ -97,6 +140,62 @@ pub fn platform_sandbox_with(writable_paths: &[String], allow_network: bool) -> 
     }
 }
 
+/// 按档位构造平台沙箱（Codex 式三档模型）。
+///
+/// - [`SandboxTier::ReadOnly`]：强制禁网、无用户可写根（只读档）
+/// - [`SandboxTier::WorkspaceWrite`]：可写根 + 网络按 `allow_network`（默认禁网）
+/// - [`SandboxTier::FullAccess`]：网络全开（`allow_network` 无效），
+///   `writable_paths` 为空时仍由平台默认写策略约束
+///
+/// 空档位配置退化为 [`platform_sandbox`]。
+pub fn platform_sandbox_tiered(
+    tier: SandboxTier,
+    writable_paths: &[String],
+    allow_network: bool,
+) -> Box<dyn Sandbox> {
+    match tier {
+        SandboxTier::ReadOnly => {
+            #[cfg(target_os = "macos")]
+            {
+                Box::new(seatbelt::SeatbeltSandbox::with_tier(tier, &[], false))
+            }
+            #[cfg(target_os = "linux")]
+            {
+                Box::new(bubblewrap::BubblewrapSandbox::with_tier(tier, &[], false))
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+            {
+                let _ = (tier, writable_paths, allow_network);
+                Box::new(NoOpSandbox)
+            }
+        }
+        SandboxTier::WorkspaceWrite | SandboxTier::FullAccess => {
+            let net = tier.allows_network_by_default() || allow_network;
+            #[cfg(target_os = "macos")]
+            {
+                Box::new(seatbelt::SeatbeltSandbox::with_tier(
+                    tier,
+                    writable_paths,
+                    net,
+                ))
+            }
+            #[cfg(target_os = "linux")]
+            {
+                Box::new(bubblewrap::BubblewrapSandbox::with_tier(
+                    tier,
+                    writable_paths,
+                    net,
+                ))
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+            {
+                let _ = (tier, writable_paths, allow_network);
+                Box::new(NoOpSandbox)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,5 +231,28 @@ mod tests {
         // 带策略时仍返回平台实现，不会退化为其他沙箱
         let sb = platform_sandbox_with(&["/tmp/work".to_string()], true);
         assert_eq!(sb.name(), platform_sandbox().name());
+    }
+
+    #[test]
+    fn tier_semantics() {
+        assert!(SandboxTier::ReadOnly.is_read_only());
+        assert!(!SandboxTier::WorkspaceWrite.is_read_only());
+        assert!(!SandboxTier::FullAccess.is_read_only());
+        // 网络默认：FullAccess 全开，其余档位默认禁网
+        assert!(SandboxTier::FullAccess.allows_network_by_default());
+        assert!(!SandboxTier::ReadOnly.allows_network_by_default());
+        assert!(!SandboxTier::WorkspaceWrite.allows_network_by_default());
+    }
+
+    #[test]
+    fn tiered_sandbox_keeps_platform_impl() {
+        for tier in [
+            SandboxTier::ReadOnly,
+            SandboxTier::WorkspaceWrite,
+            SandboxTier::FullAccess,
+        ] {
+            let sb = platform_sandbox_tiered(tier, &["/tmp/work".to_string()], false);
+            assert_eq!(sb.name(), platform_sandbox().name());
+        }
     }
 }

@@ -163,6 +163,10 @@ mod tests {
     fn accent_fg_is_derived_from_theme() {
         let t = Theme::default();
         let spans = md_spans("- x", &t);
-        assert_eq!(spans[0].style.fg, Some(Color::Cyan), "默认 codex accent");
+        assert_eq!(
+            spans[0].style.fg,
+            Some(Color::Rgb(77, 107, 254)),
+            "默认 DeepSeek accent"
+        );
     }
 }

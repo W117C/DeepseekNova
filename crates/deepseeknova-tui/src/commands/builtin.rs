@@ -8,7 +8,7 @@ use deepseeknova_provider::cost::ModelRole;
 use deepseeknova_provider::factory::ReasoningEffort;
 
 use super::{ArgsSpec, Command, CommandCtx, CommandHandler, CommandOutcome};
-use crate::app::state::{McpStatus, ResumedRole};
+use crate::app::state::McpStatus;
 use crate::model::conversation::LineKind;
 
 // ── help ────────────────────────────────────────────────────────
@@ -79,6 +79,7 @@ impl CommandHandler for NewCmd {
                 Ok(()) => {
                     ctx.app.clear_display();
                     ctx.app.last_prompt = None;
+                    ctx.app.sessions_loaded = false;
                     ctx.app.echo_line(LineKind::System, "新会话已开始");
                 }
                 Err(e) => ctx
@@ -142,20 +143,16 @@ impl CommandHandler for ResumeCmd {
         match &ctx.caps.session {
             Some(ctrl) if !target.is_empty() => match ctrl.resume(target).await {
                 Ok(lines) => {
-                    ctx.app.clear_display();
+                    let count = lines.len();
+                    ctx.app.restore_conversation(lines);
                     ctx.app.last_prompt = None;
                     ctx.app.echo_line(
                         LineKind::System,
-                        &format!("已恢复 '{target}' — {} 条消息", lines.len()),
+                        &format!(
+                            "已恢复 '{target}' — {} 条消息（进入对话面板，可滚动/折叠）",
+                            count
+                        ),
                     );
-                    for line in lines {
-                        let kind = match line.role {
-                            ResumedRole::User => LineKind::User,
-                            ResumedRole::Assistant => LineKind::Agent,
-                            ResumedRole::System => LineKind::System,
-                        };
-                        ctx.app.echo_line(kind, &line.text);
-                    }
                 }
                 Err(e) => ctx
                     .app
@@ -664,6 +661,7 @@ pub const BUILTIN: &[Command] = &[
         desc: "显示帮助与全部命令",
         keywords: &["帮助", "命令", "h"],
         args_spec: ArgsSpec::None,
+        args_hint: None,
         handler: &HELP,
     },
     Command {
@@ -671,6 +669,7 @@ pub const BUILTIN: &[Command] = &[
         desc: "清空对话面板",
         keywords: &["清空"],
         args_spec: ArgsSpec::None,
+        args_hint: None,
         handler: &CLEAR,
     },
     Command {
@@ -678,6 +677,7 @@ pub const BUILTIN: &[Command] = &[
         desc: "开始新会话",
         keywords: &["新会话", "会话"],
         args_spec: ArgsSpec::None,
+        args_hint: None,
         handler: &NEW,
     },
     Command {
@@ -685,6 +685,7 @@ pub const BUILTIN: &[Command] = &[
         desc: "列出已保存会话",
         keywords: &["会话", "历史"],
         args_spec: ArgsSpec::None,
+        args_hint: None,
         handler: &SESSIONS,
     },
     Command {
@@ -692,6 +693,7 @@ pub const BUILTIN: &[Command] = &[
         desc: "恢复指定会话",
         keywords: &["会话", "恢复"],
         args_spec: ArgsSpec::FreeText,
+        args_hint: Some(&["<session-id>"]),
         handler: &RESUME,
     },
     Command {
@@ -699,6 +701,12 @@ pub const BUILTIN: &[Command] = &[
         desc: "模型与 effort 热切换",
         keywords: &["模型", "effort", "thinking", "switch", "use"],
         args_spec: ArgsSpec::FreeText,
+        args_hint: Some(&[
+            "effort <disabled|high|max>",
+            "thinking",
+            "switch <model-name>",
+            "use <main|task|compact|quick> <model-name>",
+        ]),
         handler: &MODEL,
     },
     Command {
@@ -706,6 +714,7 @@ pub const BUILTIN: &[Command] = &[
         desc: "会话成本报表",
         keywords: &["成本", "价格", "费用", "tokens"],
         args_spec: ArgsSpec::None,
+        args_hint: None,
         handler: &COST,
     },
     Command {
@@ -713,6 +722,7 @@ pub const BUILTIN: &[Command] = &[
         desc: "列出可用技能",
         keywords: &["技能", "skills"],
         args_spec: ArgsSpec::None,
+        args_hint: None,
         handler: &SKILLS,
     },
     Command {
@@ -720,6 +730,7 @@ pub const BUILTIN: &[Command] = &[
         desc: "列出已配置 MCP 服务器（实时状态）",
         keywords: &["mcp", "服务器"],
         args_spec: ArgsSpec::None,
+        args_hint: None,
         handler: &MCP,
     },
     Command {
@@ -727,6 +738,7 @@ pub const BUILTIN: &[Command] = &[
         desc: "回滚快照（all/list）",
         keywords: &["撤销", "回滚", "快照"],
         args_spec: ArgsSpec::Enum(&["all", "list"]),
+        args_hint: Some(&["all", "list"]),
         handler: &UNDO,
     },
     Command {
@@ -734,6 +746,7 @@ pub const BUILTIN: &[Command] = &[
         desc: "切换显示模式（normal/lite/raw）",
         keywords: &["显示", "模式", "raw"],
         args_spec: ArgsSpec::None,
+        args_hint: None,
         handler: &RAW,
     },
     Command {
@@ -741,6 +754,7 @@ pub const BUILTIN: &[Command] = &[
         desc: "折叠控制（all/none/reset）",
         keywords: &["折叠", "展开"],
         args_spec: ArgsSpec::Enum(&["all", "none", "reset"]),
+        args_hint: Some(&["all", "none", "reset"]),
         handler: &FOLD,
     },
     Command {
@@ -748,6 +762,7 @@ pub const BUILTIN: &[Command] = &[
         desc: "复制当前选中消息",
         keywords: &["复制"],
         args_spec: ArgsSpec::None,
+        args_hint: None,
         handler: &COPY,
     },
     Command {
@@ -755,6 +770,7 @@ pub const BUILTIN: &[Command] = &[
         desc: "退出 TUI",
         keywords: &["退出", "exit", "q"],
         args_spec: ArgsSpec::None,
+        args_hint: None,
         handler: &QUIT,
     },
 ];
@@ -806,6 +822,7 @@ mod tests {
             mcp_probe: None,
             undo: None,
             context_window: None,
+            approval_rx: None,
         }
     }
 

@@ -928,6 +928,19 @@ impl Store {
         Ok(out)
     }
 
+    /// Contains 入边指向的直接父节点（类型/模块归属）。
+    pub fn parents(&self, id: &str) -> Result<Vec<Node>, GraphError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT n.id, n.kind, n.name, n.path, n.start_line, n.end_line,\n                    n.signature, n.doc, n.score\n             FROM edges e JOIN nodes n ON n.id = e.src\n             WHERE e.dst = ?1 AND e.kind = 'contains'\n             ORDER BY n.start_line",
+        )?;
+        let rows = stmt.query_map([id], node_from_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     /// 按相对路径取文件节点 id（依赖图文件→文件边用）。
     pub fn file_node(&self, path: &str) -> Result<Option<String>, GraphError> {
         let result = self.conn.query_row(

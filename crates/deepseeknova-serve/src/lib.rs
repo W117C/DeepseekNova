@@ -19,6 +19,10 @@
 //! # }
 //! ```
 
+mod acp;
+
+pub use acp::{run_acp_io, serve_acp, AcpRunnerFactory};
+
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::sse::{Event, Sse};
@@ -28,10 +32,156 @@ use deepseeknova_core::runner::{ApprovalResponder, RunEvent, RunInput, Runner};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{oneshot, Mutex};
 use tower_http::cors::{Any, CorsLayer};
+
+// ── Durable run store ─────────────────────────────────────────
+
+/// Status of a persisted run.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RunStatus {
+    Running,
+    Done,
+    Failed,
+    Paused,
+    /// Server restarted while the run was still running; it can be resumed.
+    Interrupted,
+}
+
+/// A run record persisted to disk so long tasks survive process restarts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunRecord {
+    pub id: String,
+    pub prompt: String,
+    pub model: Option<String>,
+    pub created_at_ms: u64,
+    pub status: RunStatus,
+    pub summary: Option<String>,
+    pub error: Option<String>,
+}
+
+/// JSON-file-backed store (`<dir>/<id>.json`), atomic via temp+rename.
+pub struct DurableRuns {
+    dir: PathBuf,
+    /// 串行化“状态迁移”（claim / mark_interrupted），避免并发 resume 的
+    /// check-then-act 竞态。std Mutex 只做短临界区，不跨 await。
+    state: std::sync::Mutex<()>,
+}
+
+impl DurableRuns {
+    pub fn open(dir: PathBuf) -> anyhow::Result<Self> {
+        fs::create_dir_all(&dir)?;
+        Ok(Self {
+            dir,
+            state: std::sync::Mutex::new(()),
+        })
+    }
+
+    pub fn dir(&self) -> &PathBuf {
+        &self.dir
+    }
+
+    fn path(&self, id: &str) -> PathBuf {
+        self.dir.join(format!("{id}.json"))
+    }
+
+    pub fn save(&self, record: &RunRecord) -> anyhow::Result<()> {
+        let path = self.path(&record.id);
+        let tmp = path.with_extension("json.tmp");
+        fs::write(&tmp, serde_json::to_string_pretty(record)?)?;
+        fs::rename(&tmp, &path)?;
+        Ok(())
+    }
+
+    pub fn load(&self, id: &str) -> anyhow::Result<Option<RunRecord>> {
+        match fs::read_to_string(self.path(id)) {
+            Ok(text) => Ok(Some(serde_json::from_str(&text)?)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn list(&self) -> anyhow::Result<Vec<RunRecord>> {
+        let mut records = Vec::new();
+        for entry in fs::read_dir(&self.dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json")
+                || path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.ends_with(".json.tmp"))
+            {
+                continue;
+            }
+            if let Ok(text) = fs::read_to_string(&path) {
+                if let Ok(record) = serde_json::from_str::<RunRecord>(&text) {
+                    records.push(record);
+                }
+            }
+        }
+        records.sort_by_key(|r| std::cmp::Reverse(r.created_at_ms));
+        Ok(records)
+    }
+
+    /// On server startup: mark records left in `Running` as `Interrupted`.
+    /// Returns the number of records touched.
+    pub fn mark_interrupted(&self) -> anyhow::Result<usize> {
+        let _guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut touched = 0;
+        for mut record in self.list()? {
+            if record.status == RunStatus::Running {
+                record.status = RunStatus::Interrupted;
+                record.error = Some("server restarted while run was in progress".to_string());
+                self.save(&record)?;
+                touched += 1;
+            }
+        }
+        Ok(touched)
+    }
+}
+
+/// Outcome of atomically claiming a run for (re-)execution.
+#[derive(Debug)]
+pub enum ClaimResult {
+    /// Successfully transitioned to `Running`; caller may start the run.
+    Claimed(RunRecord),
+    /// The run already exists and is `Running`.
+    AlreadyRunning,
+    /// No record with this id exists.
+    NotFound,
+}
+
+impl DurableRuns {
+    /// Atomically transition a non-running record to `Running`. This is the
+    /// only path that should start a run, so two concurrent resumes cannot
+    /// both pass the status check.
+    pub fn claim(&self, id: &str) -> anyhow::Result<ClaimResult> {
+        let _guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(mut record) = self.load(id)? else {
+            return Ok(ClaimResult::NotFound);
+        };
+        if record.status == RunStatus::Running {
+            return Ok(ClaimResult::AlreadyRunning);
+        }
+        record.status = RunStatus::Running;
+        record.error = None;
+        self.save(&record)?;
+        Ok(ClaimResult::Claimed(record))
+    }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 // ── Public API ──────────────────────────────────────────────────
 
@@ -75,6 +225,8 @@ pub struct Server {
     /// Metrics/diagnose 输出目录（`<dir>/<id>.scorecard.json` 与
     /// `<dir>/diagnose/<id>.json` 的读取根目录）。`None` 时相关端点返回 404。
     metrics_dir: Option<PathBuf>,
+    /// Durable run store; `None` disables `/v1/runs` and run persistence.
+    runs: Option<Arc<DurableRuns>>,
 }
 
 impl Server {
@@ -83,6 +235,7 @@ impl Server {
             runner,
             pending: new_pending_approvals(),
             metrics_dir: None,
+            runs: None,
         }
     }
 
@@ -94,6 +247,7 @@ impl Server {
             runner,
             pending,
             metrics_dir: None,
+            runs: None,
         }
     }
 
@@ -107,6 +261,29 @@ impl Server {
     /// 地址时需自行加认证层（本实现不做认证，属刻意范围裁剪）。
     pub fn with_metrics_dir(mut self, dir: PathBuf) -> Self {
         self.metrics_dir = Some(dir);
+        self
+    }
+
+    /// Enable durable run persistence + `/v1/runs` endpoints. Running records
+    /// left by a previous process are marked `interrupted` so they can be
+    /// resumed. Failure to open the directory only warns (server still runs).
+    pub fn with_runs_dir(mut self, dir: PathBuf) -> Self {
+        match DurableRuns::open(dir.clone()) {
+            Ok(store) => {
+                match store.mark_interrupted() {
+                    Ok(n) if n > 0 => {
+                        tracing::info!("durable runs: marked {n} interrupted run(s) for resume")
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("durable runs: mark_interrupted failed: {e}"),
+                }
+                self.runs = Some(Arc::new(store));
+            }
+            Err(e) => tracing::warn!(
+                "durable runs: cannot open {} ({e}); run persistence disabled",
+                dir.display()
+            ),
+        }
         self
     }
 
@@ -125,6 +302,8 @@ impl Server {
         let app = Router::new()
             .route("/health", get(health))
             .route("/v1/chat", post(chat))
+            .route("/v1/runs", get(list_runs))
+            .route("/v1/runs/{id}/resume", post(resume_run))
             .route("/v1/approval", post(approval))
             .route("/v1/sessions/{id}/diagnose", get(session_diagnose))
             .route("/v1/sessions/{id}/scorecard", get(session_scorecard))
@@ -166,10 +345,10 @@ struct ApprovalRequestBody {
     approved: bool,
 }
 
-async fn chat(
-    State(state): State<Arc<Server>>,
-    Json(req): Json<ChatRequest>,
-) -> Sse<impl futures_core::Stream<Item = Result<Event, Infallible>>> {
+/// Concrete SSE stream type shared by `/v1/chat` and `/v1/runs/{id}/resume`.
+type RunSse = Sse<futures::channel::mpsc::UnboundedReceiver<Result<Event, Infallible>>>;
+
+async fn chat(State(state): State<Arc<Server>>, Json(req): Json<ChatRequest>) -> RunSse {
     // Validate prompt
     if req.prompt.trim().is_empty() {
         let error_event = Event::default()
@@ -195,10 +374,26 @@ async fn chat(
         model_override: req.model,
     };
 
+    let run_id = state
+        .runs
+        .as_ref()
+        .map(|_| uuid::Uuid::new_v4().to_string());
+    stream_input(state, input, run_id)
+}
+
+/// Shared SSE runner used by both `/v1/chat` and `/v1/runs/{id}/resume`.
+/// When a durable store is configured the run is persisted as `running`
+/// before launch and updated to done/failed/paused when the stream ends.
+fn stream_input(state: Arc<Server>, input: RunInput, run_id: Option<String>) -> RunSse {
+    start_run_record(state.runs.as_ref(), &input, run_id.as_deref());
     let (tx, rx) = futures::channel::mpsc::unbounded::<Result<Event, Infallible>>();
 
     tokio::spawn(async move {
-        match state.runner.run_stream(input).await {
+        let mut done_text = String::new();
+        let mut failed: Option<String> = None;
+        let mut paused = false;
+        let mut client_gone = false;
+        match state.runner.run_stream(input.clone()).await {
             Ok(mut stream) => {
                 use tokio_stream::StreamExt;
                 while let Some(event) = stream.next().await {
@@ -230,6 +425,7 @@ async fn chat(
                             .event("usage")
                             .data(serde_json::to_string(&u).unwrap_or_default())),
                         Ok(RunEvent::Done(output)) => {
+                            done_text = output.text.clone();
                             let json = serde_json::json!({
                                 "text": output.text,
                                 "tool_calls": output.tool_calls.iter().map(|tc| serde_json::json!({
@@ -262,6 +458,7 @@ async fn chat(
                                 .data(json.to_string()))
                         }
                         Ok(RunEvent::Paused { reason, session_id }) => {
+                            paused = true;
                             let json = serde_json::json!({
                                 "reason": reason,
                                 "session_id": session_id,
@@ -297,21 +494,141 @@ async fn chat(
                         Ok(RunEvent::DriftFinding(drift)) => Ok(Event::default()
                             .event("drift_finding")
                             .data(serde_json::to_string(&drift).unwrap_or_default())),
-                        Err(e) => Ok(Event::default().event("error").data(e.to_string())),
+                        Err(e) => {
+                            let text = e.to_string();
+                            failed = Some(text.clone());
+                            Ok(Event::default().event("error").data(text))
+                        }
                     };
-                    if tx.unbounded_send(sse_event).is_err() {
-                        break;
+                    if !client_gone && tx.unbounded_send(sse_event).is_err() {
+                        // 客户端断开：停止发送但继续消费 stream，让 run 跑完并
+                        // 正确落盘，而不是取消任务、把半截结果标成 Done。
+                        client_gone = true;
                     }
                 }
             }
             Err(e) => {
-                let _ = tx.unbounded_send(Ok(Event::default().event("error").data(e.to_string())));
+                let text = e.to_string();
+                failed = Some(text.clone());
+                let _ = tx.unbounded_send(Ok(Event::default().event("error").data(text)));
             }
         }
+        finish_run_record(
+            state.runs.as_ref(),
+            run_id.as_deref(),
+            &input,
+            done_text,
+            failed,
+            paused,
+        );
         // Channel closed when tx is dropped — SSE stream ends.
     });
 
     Sse::new(rx)
+}
+
+/// Write a `running` record before the run starts (or reset a resumed one).
+fn start_run_record(runs: Option<&Arc<DurableRuns>>, input: &RunInput, run_id: Option<&str>) {
+    let (Some(runs), Some(id)) = (runs, run_id) else {
+        return;
+    };
+    let mut record = runs.load(id).ok().flatten().unwrap_or_else(|| RunRecord {
+        id: id.to_string(),
+        prompt: input.prompt.clone(),
+        model: input.model_override.clone(),
+        created_at_ms: now_ms(),
+        status: RunStatus::Running,
+        summary: None,
+        error: None,
+    });
+    record.prompt = input.prompt.clone();
+    record.model = input.model_override.clone();
+    record.status = RunStatus::Running;
+    record.error = None;
+    if let Err(e) = runs.save(&record) {
+        tracing::warn!("durable runs: failed to persist run {id}: {e}");
+    }
+}
+
+/// Update the persisted record at stream end.
+fn finish_run_record(
+    runs: Option<&Arc<DurableRuns>>,
+    run_id: Option<&str>,
+    input: &RunInput,
+    done_text: String,
+    failed: Option<String>,
+    paused: bool,
+) {
+    let (Some(runs), Some(id)) = (runs, run_id) else {
+        return;
+    };
+    let status = if failed.is_some() {
+        RunStatus::Failed
+    } else if paused {
+        RunStatus::Paused
+    } else {
+        RunStatus::Done
+    };
+    let summary = if done_text.is_empty() {
+        None
+    } else {
+        Some(done_text.chars().take(2000).collect())
+    };
+    let Some(mut record) = runs.load(id).ok().flatten() else {
+        return;
+    };
+    record.prompt = input.prompt.clone();
+    record.model = input.model_override.clone();
+    record.status = status;
+    record.summary = summary;
+    record.error = failed;
+    if let Err(e) = runs.save(&record) {
+        tracing::warn!("durable runs: failed to finalize run {id}: {e}");
+    }
+}
+
+/// `GET /v1/runs` — list persisted runs (newest first).
+async fn list_runs(
+    State(state): State<Arc<Server>>,
+) -> Result<Json<Vec<RunRecord>>, (StatusCode, String)> {
+    let runs = state.runs.as_ref().ok_or((
+        StatusCode::NOT_FOUND,
+        "durable runs not configured".to_string(),
+    ))?;
+    runs.list()
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+/// `POST /v1/runs/{id}/resume` — re-run a persisted run from its stored
+/// prompt/model, streaming the same SSE event shape as `/v1/chat`.
+async fn resume_run(
+    State(state): State<Arc<Server>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<RunSse, (StatusCode, String)> {
+    let runs = state.runs.as_ref().ok_or((
+        StatusCode::NOT_FOUND,
+        "durable runs not configured".to_string(),
+    ))?;
+    if !valid_session_id(&id) {
+        return Err((StatusCode::NOT_FOUND, "not found".to_string()));
+    }
+    let record = match runs
+        .claim(&id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    {
+        ClaimResult::Claimed(record) => record,
+        ClaimResult::AlreadyRunning => {
+            return Err((StatusCode::CONFLICT, "run already running".to_string()));
+        }
+        ClaimResult::NotFound => return Err((StatusCode::NOT_FOUND, "run not found".to_string())),
+    };
+    let input = RunInput {
+        prompt: record.prompt.clone(),
+        images: Vec::new(),
+        model_override: record.model.clone(),
+    };
+    Ok(stream_input(state, input, Some(record.id)))
 }
 
 /// 会话 id 合法性校验：仅允许 `[A-Za-z0-9_-]`，防 URL path 拼接路径穿越。
@@ -436,5 +753,72 @@ mod tests {
         assert_eq!(req.prompt, "hi");
         assert_eq!(req.images.unwrap(), vec!["data:img"]);
         assert_eq!(req.model.unwrap(), "gpt-4");
+    }
+
+    #[test]
+    fn durable_runs_roundtrip_list_and_interrupt() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DurableRuns::open(dir.path().to_path_buf()).unwrap();
+        let record = RunRecord {
+            id: "run-1".to_string(),
+            prompt: "hello".to_string(),
+            model: None,
+            created_at_ms: 42,
+            status: RunStatus::Running,
+            summary: None,
+            error: None,
+        };
+        store.save(&record).unwrap();
+        assert_eq!(
+            store.load("run-1").unwrap().unwrap().status,
+            RunStatus::Running
+        );
+        assert_eq!(store.list().unwrap().len(), 1);
+
+        assert_eq!(store.mark_interrupted().unwrap(), 1);
+        let loaded = store.load("run-1").unwrap().unwrap();
+        assert_eq!(loaded.status, RunStatus::Interrupted);
+        assert!(loaded.error.is_some());
+
+        // 再次 mark 不再重复计数。
+        assert_eq!(store.mark_interrupted().unwrap(), 0);
+    }
+
+    #[test]
+    fn durable_runs_missing_id_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DurableRuns::open(dir.path().to_path_buf()).unwrap();
+        assert!(store.load("nope").unwrap().is_none());
+        assert!(store.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn durable_runs_claim_is_atomic_and_excludes_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DurableRuns::open(dir.path().to_path_buf()).unwrap();
+        store
+            .save(&RunRecord {
+                id: "run-1".to_string(),
+                prompt: "hello".to_string(),
+                model: None,
+                created_at_ms: 1,
+                status: RunStatus::Interrupted,
+                summary: None,
+                error: None,
+            })
+            .unwrap();
+
+        match store.claim("run-1").unwrap() {
+            ClaimResult::Claimed(record) => assert_eq!(record.status, RunStatus::Running),
+            other => panic!("expected Claimed, got {other:?}"),
+        }
+        assert!(matches!(
+            store.claim("run-1").unwrap(),
+            ClaimResult::AlreadyRunning
+        ));
+        assert!(matches!(
+            store.claim("missing").unwrap(),
+            ClaimResult::NotFound
+        ));
     }
 }

@@ -5,8 +5,9 @@ use crate::Sandbox;
 /// Wraps command execution inside `sandbox-exec -f <profile>` to restrict
 /// filesystem access, network access, process spawning, and syscalls.
 ///
-/// When the `sandbox-exec` binary is not found at runtime, sandboxing is
-/// silently degraded to no-op (logged at warn level).
+/// When the `sandbox-exec` binary is not found at runtime,
+/// [`Sandbox::backend_available`] 返回 false，上层 ShellTool 会 fail-closed
+/// 拒绝执行（不再静默降级为无沙箱）。
 #[derive(Debug, Clone)]
 pub struct SeatbeltSandbox {
     /// The seatbelt profile content. Use `-p` flag to pass inline.
@@ -40,6 +41,40 @@ impl SeatbeltSandbox {
                 profile.push_str(&format!("(allow file-write* (subpath \"{p}\"))\n"));
             }
             if allow_network {
+                profile.push_str("(allow network*)\n");
+            }
+        }
+        Self { profile }
+    }
+
+    /// 按档位构建 seatbelt profile（三档模型）。
+    ///
+    /// - [`crate::SandboxTier::ReadOnly`]：默认 profile 原样（禁网 + 仅系统临时区可写），
+    ///   忽略 `writable_paths` 与 `allow_network`——只读档不允许任何用户可写根
+    /// - [`crate::SandboxTier::WorkspaceWrite`]：默认 + 可写根 + 按 `allow_network` 开网
+    /// - [`crate::SandboxTier::FullAccess`]：全文件写 + 全网络（`allow_network` 无效）
+    pub fn with_tier(
+        tier: crate::SandboxTier,
+        writable_paths: &[String],
+        allow_network: bool,
+    ) -> Self {
+        let mut profile = default_profile();
+        match tier {
+            crate::SandboxTier::ReadOnly => {}
+            crate::SandboxTier::WorkspaceWrite => {
+                if !writable_paths.is_empty() || allow_network {
+                    profile.push_str("\n;; --- tier: workspace-write (last match wins) ---\n");
+                    for p in writable_paths {
+                        profile.push_str(&format!("(allow file-write* (subpath \"{p}\"))\n"));
+                    }
+                    if allow_network {
+                        profile.push_str("(allow network*)\n");
+                    }
+                }
+            }
+            crate::SandboxTier::FullAccess => {
+                profile.push_str("\n;; --- tier: full-access (last match wins) ---\n");
+                profile.push_str("(allow file-write*)\n");
                 profile.push_str("(allow network*)\n");
             }
         }
@@ -125,12 +160,6 @@ impl SeatbeltSandbox {
 
 impl Sandbox for SeatbeltSandbox {
     fn sandbox(&self, cmd_executable: &str, cmd_args: &[String]) -> (String, Vec<String>) {
-        // If sandbox-exec is not available, fall back to no-op.
-        if !sandbox_exec_available() {
-            tracing::warn!("sandbox-exec not found; running command without sandbox");
-            return (cmd_executable.to_string(), cmd_args.to_vec());
-        }
-
         let mut args = vec![
             "-p".to_string(),
             self.profile.clone(),
@@ -143,6 +172,10 @@ impl Sandbox for SeatbeltSandbox {
 
     fn name(&self) -> &str {
         "macos-seatbelt"
+    }
+
+    fn backend_available(&self) -> bool {
+        sandbox_exec_available()
     }
 }
 
@@ -233,5 +266,41 @@ mod tests {
         let sb = SeatbeltSandbox::with_policy(&[], false);
         assert_eq!(sb.profile, default_profile());
         assert!(!sb.profile.contains("policy appended from config"));
+    }
+
+    // --- with_tier ---
+
+    #[test]
+    fn readonly_tier_ignores_writable_paths_and_network() {
+        // 只读档：即使给了可写根与开网，profile 也必须与默认完全一致
+        let sb =
+            SeatbeltSandbox::with_tier(crate::SandboxTier::ReadOnly, &["/tmp/work".into()], true);
+        assert_eq!(sb.profile, default_profile());
+        assert!(!sb.profile.contains("(allow network*)"));
+    }
+
+    #[test]
+    fn workspace_write_tier_allows_writable_paths() {
+        let sb = SeatbeltSandbox::with_tier(
+            crate::SandboxTier::WorkspaceWrite,
+            &["/tmp/work".into()],
+            false,
+        );
+        assert!(sb
+            .profile
+            .contains("(allow file-write* (subpath \"/tmp/work\"))"));
+        // 未开网时禁网规则仍在
+        assert!(!sb.profile.contains("(allow network*)"));
+    }
+
+    #[test]
+    fn full_access_tier_opens_all() {
+        let sb = SeatbeltSandbox::with_tier(
+            crate::SandboxTier::FullAccess,
+            &[],
+            false, // allow_network 在 FullAccess 档无效
+        );
+        assert!(sb.profile.contains("(allow file-write*)"));
+        assert!(sb.profile.contains("(allow network*)"));
     }
 }

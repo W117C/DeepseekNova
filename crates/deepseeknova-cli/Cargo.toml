@@ -10,6 +10,8 @@ documentation = "https://docs.rs/deepseeknova-cli/0.4.0"
 
 [dependencies]
 anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 clap = { workspace = true }
@@ -29,9 +31,12 @@ deepseeknova-scanner = { workspace = true }
 deepseeknova-security = { workspace = true }
 deepseeknova-skills = { workspace = true }
 deepseeknova-serve = { workspace = true }
+deepseeknova-metrics = { workspace = true }
 deepseeknova-telemetry = { workspace = true }
 deepseeknova-store = { workspace = true }
 deepseeknova-tui = { workspace = true }
+crossterm = { workspace = true }
+unicode-width = { workspace = true }
 dirs = { workspace = true }
 
 [dev-dependencies]

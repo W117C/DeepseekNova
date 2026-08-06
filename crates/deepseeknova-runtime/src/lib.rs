@@ -115,7 +115,11 @@ impl Runtime {
     }
 
     /// Check whether a tool call is allowed by the permission policy.
-    pub fn check_permission(&self, tool: &dyn deepseeknova_core::Tool, args: &str) -> Decision {
+    pub fn check_permission(
+        &self,
+        tool: &dyn deepseeknova_core::Tool,
+        args: &str,
+    ) -> deepseeknova_permission::CheckVerdict {
         self.permission.check(tool, args)
     }
 }
@@ -173,6 +177,19 @@ pub fn permission_gate_for(
     } else {
         None
     }
+}
+
+/// 沙箱可写根：配置的 `writable_paths` 加上工作区根。
+///
+/// 工作区默认可写（与 `build_security_context` 把 workspace root 加入
+/// allow-list 的语义对齐）；已显式配置时不重复添加。
+fn sandbox_writable_paths(config: &Config, workspace_root: &std::path::Path) -> Vec<String> {
+    let root = workspace_root.to_string_lossy().into_owned();
+    let mut paths: Vec<String> = config.sandbox.writable_paths.clone();
+    if !paths.iter().any(|p| p == &root) {
+        paths.push(root);
+    }
+    paths
 }
 
 /// Parse a capability name (case-insensitive) from config.
@@ -393,8 +410,9 @@ pub fn build_agent_with_role_providers(
     };
     if config.sandbox.enabled {
         let sandbox: Arc<dyn deepseeknova_sandbox::Sandbox> =
-            Arc::from(deepseeknova_sandbox::platform_sandbox_with(
-                &config.sandbox.writable_paths,
+            Arc::from(deepseeknova_sandbox::platform_sandbox_tiered(
+                deepseeknova_sandbox::SandboxTier::WorkspaceWrite,
+                &sandbox_writable_paths(config, &workspace_root),
                 config.sandbox.allow_network,
             ));
         register(
@@ -417,6 +435,17 @@ pub fn build_agent_with_role_providers(
     // 文档检索工具（context7_docs）：常驻注册，与 web_fetch 同级；执行时由
     // NetworkAccess 能力把关，用户可用 tools.overrides 禁用。
     register(&mut agent, deepseeknova_tools::docs_tools());
+
+    // 日常体验工具：web 搜索 + LSP 编辑后诊断。两者均只读、可经
+    // tools.overrides 禁用（如 `name = "web_search"` / `name = "lsp_diagnostics"`）。
+    register(
+        &mut agent,
+        deepseeknova_tools::web_search_tools(&config.tools),
+    );
+    register(
+        &mut agent,
+        deepseeknova_tools::lsp_diagnostics_tools(&config.tools),
+    );
 
     // Dynamically-discovered tools (MCP, etc). Same disable-filter as built-ins;
     // their namespaced names (`mcp__server__tool`) can be toggled via overrides.
@@ -1708,7 +1737,7 @@ fn build_delegate_engine(
     let base: Vec<Arc<dyn Tool>> = if config.sandbox.enabled {
         let sandbox: Arc<dyn deepseeknova_sandbox::Sandbox> =
             Arc::from(deepseeknova_sandbox::platform_sandbox_with(
-                &config.sandbox.writable_paths,
+                &sandbox_writable_paths(config, workspace_root),
                 config.sandbox.allow_network,
             ));
         deepseeknova_tools::all_builtin_tools_with_sandbox(sandbox)
@@ -1746,6 +1775,14 @@ fn build_delegate_engine(
         }
         if let Some(gate) = &gate {
             sub = sub.with_permission_gate(gate.clone());
+            // deny 冻结（prompt 层）：父级 deny 规则注入子代理 system prompt，
+            // 让子代理模型在发起调用前即知晓禁止边界。执行层仍由共享 gate 强制。
+            if let Some(frozen) = render_frozen_denies(gate.deny_rules()) {
+                sub = sub.with_system_prompt(format!(
+                    "{}\n\n## 禁止操作（父级冻结，不可执行）\n{frozen}",
+                    p.system_prompt
+                ));
+            }
         }
         agents.insert(p.name.clone(), Arc::new(sub));
     }
@@ -1764,6 +1801,22 @@ fn build_delegate_engine(
     Arc::new(engine)
 }
 
+/// 把 deny 规则渲染为冻结清单文本（供子代理 system prompt 注入）。
+/// 空规则返回 `None`（不产生追加）。
+fn render_frozen_denies(rules: &[deepseeknova_permission::Rule]) -> Option<String> {
+    if rules.is_empty() {
+        return None;
+    }
+    let lines: Vec<String> = rules
+        .iter()
+        .map(|r| match &r.subject {
+            Some(s) => format!("- {} {s}", r.tool),
+            None => format!("- {}", r.tool),
+        })
+        .collect();
+    Some(lines.join("\n"))
+}
+
 /// Build a [`SubAgentRunner`](deepseeknova_agent::SubAgentRunner) for
 /// coordinator `Delegate` actions: sub-agent turns use `task_provider` (the
 /// `task` model pointer), history compaction uses `compact_provider` (the
@@ -1776,14 +1829,24 @@ pub fn build_sub_agent_runner(
     config: &Config,
     task_provider: Arc<dyn deepseeknova_provider::Provider>,
     compact_provider: Option<Arc<dyn deepseeknova_provider::Provider>>,
+    frozen_denies: &[deepseeknova_permission::Rule],
+    permission_gate: Option<Arc<deepseeknova_permission::PermissionGate>>,
+    security: Option<deepseeknova_security::context::SecurityContext>,
+    workspace_root: &std::path::Path,
 ) -> deepseeknova_agent::SubAgentRunner {
     use deepseeknova_core::Tool;
+
+    // deny 冻结（prompt 层）：渲染一次，注入每个子代理 system prompt
+    let frozen_lines: Vec<String> = render_frozen_denies(frozen_denies)
+        .map(|s| s.lines().map(|l| l.to_string()).collect())
+        .unwrap_or_default();
 
     // 子代理工具源（与委派引擎同款：沿用沙箱选择，不接 MCP 工具）。
     let base: Vec<Arc<dyn Tool>> = if config.sandbox.enabled {
         let sandbox: Arc<dyn deepseeknova_sandbox::Sandbox> =
-            Arc::from(deepseeknova_sandbox::platform_sandbox_with(
-                &config.sandbox.writable_paths,
+            Arc::from(deepseeknova_sandbox::platform_sandbox_tiered(
+                deepseeknova_sandbox::SandboxTier::WorkspaceWrite,
+                &sandbox_writable_paths(config, workspace_root),
                 config.sandbox.allow_network,
             ));
         deepseeknova_tools::all_builtin_tools_with_sandbox(sandbox)
@@ -1810,6 +1873,7 @@ pub fn build_sub_agent_runner(
                 // 未来 spec 声明源就位后此路径立即生效。with_tools/with_max_steps
                 // 在其后调用，保持 spec.tools/spec.max_steps 与执行参数同步。
                 .with_task_spec(p.spec.clone())
+                .with_frozen_denies(frozen_lines.clone())
                 .with_tools(sub_tools)
                 .with_max_steps(p.spec.max_steps)
                 .with_config_inputs(p.config_inputs.clone()),
@@ -1821,6 +1885,17 @@ pub fn build_sub_agent_runner(
     if let Some(compact) = compact_provider {
         runner = runner.with_compact_provider(compact);
     }
+    if let Some(gate) = permission_gate {
+        // 执行层权限强制：子代理工具调用在 execute 前经 gate 检查
+        //（与 Agent 型 delegate engine 的 with_permission_gate 对齐）。
+        runner = runner.with_permission_gate(gate);
+    }
+    if let Some(sec) = security {
+        // 执行上下文装配：shell/fs/web 工具强依赖 SecurityContext
+        //（缺失时 enforce_capability 直接报错，子代理工具面不可用）。
+        runner = runner.with_security(sec);
+    }
+    runner = runner.with_workspace_root(workspace_root);
     runner
 }
 
@@ -1856,6 +1931,20 @@ mod tests {
 
     fn stub_provider() -> StubProvider {
         StubProvider
+    }
+
+    #[test]
+    fn sandbox_writable_paths_includes_workspace_once() {
+        let mut config = Config::default();
+        config.sandbox.writable_paths = vec!["/tmp/work".into()];
+        let root = std::path::Path::new("/ws");
+        let paths = sandbox_writable_paths(&config, root);
+        assert_eq!(paths, vec!["/tmp/work".to_string(), "/ws".to_string()]);
+
+        // 已显式包含工作区根时不重复添加
+        config.sandbox.writable_paths = vec!["/ws".into(), "/tmp/work".into()];
+        let paths = sandbox_writable_paths(&config, root);
+        assert_eq!(paths, vec!["/ws".to_string(), "/tmp/work".to_string()]);
     }
 
     /// 空内容 provider：agent 每步无输出 → MaxSteps → Paused（构造失败 run
@@ -1919,7 +2008,15 @@ mod tests {
         let compact = std::sync::Arc::new(CountingProvider {
             calls: std::sync::atomic::AtomicUsize::new(0),
         });
-        let runner = build_sub_agent_runner(&config, task, Some(compact.clone()));
+        let runner = build_sub_agent_runner(
+            &config,
+            task,
+            Some(compact.clone()),
+            &[],
+            None,
+            None,
+            &std::env::temp_dir(),
+        );
 
         let mut stream = runner
             .run_stream(deepseeknova_core::RunInput {
@@ -2046,7 +2143,8 @@ mod tests {
                 inputs: None,
             });
         let task = std::sync::Arc::new(stub_provider());
-        let _runner = build_sub_agent_runner(&config, task, None);
+        let _runner =
+            build_sub_agent_runner(&config, task, None, &[], None, None, &std::env::temp_dir());
     }
 
     #[tokio::test]

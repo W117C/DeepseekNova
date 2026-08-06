@@ -1,10 +1,13 @@
 //! 焦点状态机：按键按当前焦点分发表路由。
 //!
 //! 焦点归属：`Input`（编辑器）与 `Conversation`（消息导航）是主焦点；
-//! `Sidebar`/`Palette`/`Completion` 为模态焦点；`Confirm` 保留给破坏性操作。
+//! `Sidebar`/`Completion` 为模态焦点；`Confirm` 保留给破坏性操作。
+//! 斜杠命令候选（`command_hint`）是非模态的——焦点保持 Input，
+//! 候选就地展开在输入区上方（Claude Code 风格）。
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use super::actions::{Action, ActionContext};
 use super::state::{AppState, KeyAction};
 
 /// 当前焦点。
@@ -17,8 +20,6 @@ pub enum Focus {
     Input,
     /// 侧边栏（Tab/Ctrl+1..5 切面板、j/k 列表）。
     Sidebar,
-    /// Ctrl+K 命令面板。
-    Palette,
     /// @ 文件补全浮层。
     Completion,
     /// 破坏性操作确认（spec 预留位；当前无挂起操作，保持可达性以避
@@ -68,15 +69,6 @@ impl SidebarTab {
     }
 }
 
-/// Ctrl+K 命令面板状态。
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct PaletteState {
-    pub query: String,
-    pub selected: usize,
-    /// 已选中命令后进入的参数子输入（有参数的命令）。
-    pub arg_input: Option<String>,
-}
-
 /// @ 补全浮层状态。
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompletionState {
@@ -92,24 +84,73 @@ pub struct CompletionState {
 impl AppState {
     /// 按键分派：按焦点路由。返回是否退出/提交/取消。
     pub fn handle_key(&mut self, key: &KeyEvent) -> KeyAction {
+        // 审批浮层优先：挂起请求时 y 允许 / n|Esc 拒绝，其余键忽略
+        //（Claude Code Confirmation context 语义）。
+        if self.pending_approval.is_some() {
+            return match key.code {
+                KeyCode::Char('y') | KeyCode::Enter => {
+                    if let Some(req) = self.pending_approval.take() {
+                        let _ = req.reply.send(true);
+                    }
+                    KeyAction::None
+                }
+                KeyCode::Char('n') | KeyCode::Esc => {
+                    if let Some(req) = self.pending_approval.take() {
+                        let _ = req.reply.send(false);
+                    }
+                    KeyAction::None
+                }
+                _ => KeyAction::None,
+            };
+        }
+        // 任意非 Esc 键复位退出确认。
+        if key.code != KeyCode::Esc {
+            self.disarm_quit();
+        }
+        // ctrl+x 双键序列（低频高危动作专用，Claude Code 同款设计）：
+        // 首键 ctrl+x → 3 秒窗等待第二键；第二键 ctrl+e → 外部编辑器。
+        if self.focus == Focus::Input {
+            if let Some(started) = self.chord_pending {
+                self.chord_pending = None;
+                if started.elapsed() < std::time::Duration::from_secs(3)
+                    && key.code == KeyCode::Char('e')
+                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                {
+                    return KeyAction::ExternalEditor;
+                }
+            } else if key.code == KeyCode::Char('x')
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+            {
+                self.chord_pending = Some(std::time::Instant::now());
+                return KeyAction::None;
+            }
+        }
+        // 斜杠命令候选优先于焦点分派：浮层打开时 ↑↓/Enter/Tab/Esc 由它消费，
+        // 即使焦点意外不在 Input（如刚切过侧边栏），按键也不会“无响应”。
+        if let Some(action) = self.handle_command_hint_key(key) {
+            return action;
+        }
         match self.focus {
             Focus::Conversation => self.handle_conversation_key(key),
             Focus::Input => {
                 let action = self.handle_editor_key(key);
-                // 编辑后尝试打开 @ 补全浮层（仅在有候选文件源时生效）。
+                // @ 补全浮层在按键后检查打开；斜杠候选的刷新只在
+                // handle_editor_key 内部文本变更路径上发生——此处不再
+                // 无条件重建，否则选择/关闭后候选状态会被重置（selected
+                // 恒回 0、Esc 关不掉）。
                 self.maybe_open_completion();
                 action
             }
             Focus::Sidebar => self.handle_sidebar_key(key),
-            Focus::Palette => crate::commands::palette::handle_key(self, key),
             Focus::Completion => crate::input::at_complete::handle_key(self, key),
             Focus::Confirm => self.handle_confirm_key(key),
         }
     }
 
     /// 光标前是 `@` 词且候选非空时打开补全浮层（文件清单由 CLI 注入，缺省不触发）。
+    /// 斜杠候选打开期间不抢焦点（选择键 j/k 等不得误触发 @ 补全）。
     fn maybe_open_completion(&mut self) {
-        if self.completion.is_some() || self.at_files.is_empty() {
+        if self.command_hint.is_some() || self.completion.is_some() || self.at_files.is_empty() {
             return;
         }
         let Some((start, end, prefix)) =
@@ -131,67 +172,131 @@ impl AppState {
         self.focus = Focus::Completion;
     }
 
-    /// Conversation 焦点：消息导航 / 折叠 / 复制。
+    /// Conversation 焦点：action 注册表驱动（消息导航 / 折叠 / 复制 /
+    /// vim 滚动）。未绑定键忽略。
     fn handle_conversation_key(&mut self, key: &KeyEvent) -> KeyAction {
-        match key.code {
-            KeyCode::Char('j') | KeyCode::Down => {
+        let Some(action) =
+            crate::app::actions::resolve_action(&self.keymap, ActionContext::Conversation, key)
+        else {
+            // 数字/字母快捷键（Tab 循环焦点、q 退出）为会话级，非注册表。
+            return match key.code {
+                KeyCode::Tab => {
+                    self.focus = if self.sidebar_visible {
+                        Focus::Sidebar
+                    } else {
+                        Focus::Input
+                    };
+                    KeyAction::None
+                }
+                KeyCode::Char('q') => self.confirm_quit(),
+                _ => KeyAction::None,
+            };
+        };
+        match action {
+            Action::ConvSelectNext => {
                 self.select_next();
                 KeyAction::None
             }
-            KeyCode::Char('k') | KeyCode::Up => {
+            Action::ConvSelectPrev => {
                 self.select_prev();
                 KeyAction::None
             }
-            KeyCode::Enter => {
+            Action::ConvToggleFold => {
                 if let Some(seg) = self.selected {
                     self.toggle_fold(seg);
                 }
                 KeyAction::None
             }
-            KeyCode::Char('y') => {
+            Action::ConvCopy => {
                 self.copy_selected();
                 KeyAction::None
             }
-            KeyCode::Tab => {
-                // 焦点循环：Conversation → Sidebar（可见时）→ Input。
-                self.focus = if self.sidebar_visible {
-                    Focus::Sidebar
-                } else {
-                    Focus::Input
-                };
+            Action::ConvScrollPageUp => {
+                // 向上翻页 = 看更早记录（offset 减小）。
+                self.scroll_offset = self.scroll_offset.saturating_sub(20);
+                self.auto_scroll = false;
                 KeyAction::None
             }
-            KeyCode::Esc | KeyCode::Char('i') => {
+            Action::ConvScrollPageDown => {
+                self.scroll_offset = self.scroll_offset.saturating_add(20);
+                KeyAction::None
+            }
+            Action::ConvScrollTop => {
+                self.scroll_offset = 0;
+                self.auto_scroll = false;
+                KeyAction::None
+            }
+            Action::ConvScrollBottom => {
+                self.auto_scroll = true;
+                KeyAction::None
+            }
+            Action::ConvFocusInput => {
                 self.focus = Focus::Input;
                 KeyAction::None
             }
-            KeyCode::Char('q') => KeyAction::Quit,
             _ => KeyAction::None,
         }
     }
 
-    /// Sidebar 焦点：面板切换 / 列表导航 / 关闭。
+    /// Sidebar 焦点：action 注册表驱动（面板切换 / 关闭）。
     fn handle_sidebar_key(&mut self, key: &KeyEvent) -> KeyAction {
-        match key.code {
-            KeyCode::Tab => {
+        let Some(action) =
+            crate::app::actions::resolve_action(&self.keymap, ActionContext::Sidebar, key)
+        else {
+            // 数字 1..5 直接切面板（会话级快捷键）。
+            return match key.code {
+                KeyCode::Char('1') => self.set_sidebar_tab(SidebarTab::Sessions),
+                KeyCode::Char('2') => self.set_sidebar_tab(SidebarTab::Tools),
+                KeyCode::Char('3') => self.set_sidebar_tab(SidebarTab::Mcp),
+                KeyCode::Char('4') => self.set_sidebar_tab(SidebarTab::Cost),
+                KeyCode::Char('5') => self.set_sidebar_tab(SidebarTab::Skills),
+                KeyCode::Char('q') => self.confirm_quit(),
+                _ => KeyAction::None,
+            };
+        };
+        match action {
+            Action::SidebarNextTab => {
                 self.sidebar_tab = self.sidebar_tab.next();
                 KeyAction::None
             }
-            KeyCode::BackTab => {
+            Action::SidebarPrevTab => {
                 self.sidebar_tab = self.sidebar_tab.prev();
                 KeyAction::None
             }
-            KeyCode::Char('1') => self.set_sidebar_tab(SidebarTab::Sessions),
-            KeyCode::Char('2') => self.set_sidebar_tab(SidebarTab::Tools),
-            KeyCode::Char('3') => self.set_sidebar_tab(SidebarTab::Mcp),
-            KeyCode::Char('4') => self.set_sidebar_tab(SidebarTab::Cost),
-            KeyCode::Char('5') => self.set_sidebar_tab(SidebarTab::Skills),
-            KeyCode::Esc | KeyCode::Backspace => {
+            Action::SidebarClose => {
                 self.sidebar_visible = false;
                 self.focus = Focus::Input;
                 KeyAction::None
             }
-            KeyCode::Char('q') => KeyAction::Quit,
+            Action::SidebarSelectPrev => {
+                if self.sidebar_tab == SidebarTab::Sessions && !self.saved_sessions.is_empty() {
+                    self.saved_session_selected =
+                        (self.saved_session_selected + self.saved_sessions.len() - 1)
+                            % self.saved_sessions.len();
+                }
+                KeyAction::None
+            }
+            Action::SidebarSelectNext => {
+                if self.sidebar_tab == SidebarTab::Sessions && !self.saved_sessions.is_empty() {
+                    self.saved_session_selected =
+                        (self.saved_session_selected + 1) % self.saved_sessions.len();
+                }
+                KeyAction::None
+            }
+            Action::SidebarResumeSelected => {
+                if self.sidebar_tab == SidebarTab::Sessions {
+                    if let Some(id) = self
+                        .saved_sessions
+                        .get(self.saved_session_selected)
+                        .cloned()
+                    {
+                        // 事件循环用真实 caps 消费 pending_command，与 Ctrl+K 同路。
+                        self.pending_command = Some(("resume".to_string(), id));
+                        self.focus = Focus::Input;
+                    }
+                }
+                KeyAction::None
+            }
             _ => KeyAction::None,
         }
     }
@@ -213,25 +318,21 @@ impl AppState {
         }
     }
 
-    /// 全局模态热键：Ctrl+K 命令面板、Ctrl+\ 侧边栏开合（任意焦点生效）。
+    /// 全局模态热键：Ctrl+\ 侧边栏开合（任意焦点生效）。
+    /// 命令面板为纯 `/` 触发（就地候选，非模态），无 Ctrl+K。
     pub fn handle_modal_shortcuts(&mut self, key: &KeyEvent) -> bool {
-        if key.modifiers.contains(KeyModifiers::CONTROL) {
-            match key.code {
-                KeyCode::Char('k') => {
-                    self.palette = Some(PaletteState::default());
-                    self.focus = Focus::Palette;
-                    return true;
-                }
-                // Ctrl+\ (0x1C)：crossterm unix 下解析为 Char('4')+CONTROL；
-                // 兼容显式 `\` 形态（部分终端 modifyOtherKeys）。
-                KeyCode::Char('4') | KeyCode::Char('\\') => {
-                    self.sidebar_visible = !self.sidebar_visible;
-                    return true;
-                }
-                _ => {}
+        let Some(action) =
+            crate::app::actions::resolve_action(&self.keymap, ActionContext::Input, key)
+        else {
+            return false;
+        };
+        match action {
+            Action::AppToggleSidebar => {
+                self.sidebar_visible = !self.sidebar_visible;
+                true
             }
+            _ => false,
         }
-        false
     }
 }
 
@@ -301,10 +402,56 @@ mod tests {
     }
 
     #[test]
-    fn modal_shortcuts_open_palette_and_toggle_sidebar() {
+    fn sidebar_selects_and_resumes_saved_session() {
+        let mut app = AppState {
+            focus: Focus::Sidebar,
+            sidebar_tab: SidebarTab::Sessions,
+            saved_sessions: vec!["chat-a".to_string(), "chat-b".to_string()],
+            ..Default::default()
+        };
+        app.handle_key(&key(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.saved_session_selected, 1);
+        app.handle_key(&key(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(app.saved_session_selected, 0);
+        app.handle_key(&key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            app.pending_command,
+            Some(("resume".to_string(), "chat-a".to_string())),
+            "Enter 把选中会话交给事件循环恢复"
+        );
+        assert_eq!(app.focus, Focus::Input, "恢复后回输入焦点");
+    }
+
+    #[test]
+    fn command_hint_keys_win_over_focus_dispatch() {
+        // 回归：候选浮层打开时，即使焦点在 Conversation，↑↓/Enter 也必须
+        // 操作浮层而不是被焦点路由吞掉（“提示写了按键但按了没反应”）。
         let mut app = AppState::default();
-        assert!(app.handle_modal_shortcuts(&key(KeyCode::Char('k'), KeyModifiers::CONTROL)));
-        assert_eq!(app.focus, Focus::Palette);
+        app.input.set_text("/s".to_string());
+        app.command_hint = Some(crate::commands::CommandHintState {
+            candidates: crate::commands::CommandRegistry::search("s"),
+            selected: 0,
+            arg_options: None,
+        });
+        app.focus = Focus::Conversation;
+        app.handle_key(&key(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(
+            app.command_hint.as_ref().unwrap().selected,
+            1,
+            "↓ 移动候选选中项"
+        );
+        let action = app.handle_key(&key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(action, KeyAction::Submit(_)), "Enter 执行候选");
+        assert!(app.input.text.is_empty(), "执行后输入框清空");
+        assert!(app.command_hint.is_none(), "执行后浮层关闭");
+    }
+
+    #[test]
+    fn modal_shortcuts_toggle_sidebar_only() {
+        // 命令面板为纯 `/` 触发：Ctrl+K 不再打开任何模态。
+        let mut app = AppState::default();
+        assert!(!app.handle_modal_shortcuts(&key(KeyCode::Char('k'), KeyModifiers::CONTROL)));
+        assert_eq!(app.focus, Focus::Input, "Ctrl+K 无模态可开");
         assert!(!app.sidebar_visible);
         // Ctrl+\ 在 crossterm unix 下解析为 Char('4')+CONTROL。
         assert!(app.handle_modal_shortcuts(&key(KeyCode::Char('4'), KeyModifiers::CONTROL)));
@@ -324,5 +471,86 @@ mod tests {
         };
         app.handle_key(&key(KeyCode::Char('y'), KeyModifiers::NONE));
         assert_eq!(app.focus, Focus::Input);
+    }
+
+    #[test]
+    fn esc_requires_second_press_to_quit() {
+        // Claude Code "Esc Esc" 防误触：首次 Esc 置位并提示，3 秒内再按才退出。
+        let mut app = AppState::default();
+        assert_eq!(
+            app.handle_key(&key(KeyCode::Esc, KeyModifiers::NONE)),
+            KeyAction::None,
+            "首次 Esc 不退出"
+        );
+        assert!(app.quit_armed, "首次 Esc 置位");
+        assert_eq!(
+            app.handle_key(&key(KeyCode::Esc, KeyModifiers::NONE)),
+            KeyAction::Quit,
+            "3 秒内再按 Esc 退出"
+        );
+    }
+
+    #[test]
+    fn non_esc_key_disarms_quit() {
+        let mut app = AppState::default();
+        app.handle_key(&key(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.quit_armed);
+        app.handle_key(&key(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert!(!app.quit_armed, "任意非 Esc 键复位");
+    }
+
+    #[test]
+    fn esc_cancels_running_turn() {
+        // 生成中按 Esc = 取消（不再直接退出）。
+        let mut app = AppState {
+            running: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            app.handle_key(&key(KeyCode::Esc, KeyModifiers::NONE)),
+            KeyAction::Cancel
+        );
+    }
+
+    #[test]
+    fn conversation_vim_scroll_keys() {
+        let mut app = AppState {
+            focus: Focus::Conversation,
+            scroll_offset: 50,
+            ..Default::default()
+        };
+        app.handle_key(&key(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        assert_eq!(app.scroll_offset, 30, "ctrl+b 上翻一页（看更早记录）");
+        app.handle_key(&key(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        assert_eq!(app.scroll_offset, 50, "ctrl+f 下翻一页（看更新内容）");
+        app.handle_key(&key(KeyCode::Char('g'), KeyModifiers::NONE));
+        assert_eq!(app.scroll_offset, 0, "g → 顶部");
+        app.handle_key(&key(KeyCode::Char('G'), KeyModifiers::NONE));
+        assert!(app.auto_scroll, "G → 贴底");
+    }
+
+    #[test]
+    fn ctrl_x_chord_triggers_external_editor() {
+        // ctrl+x ctrl+e 双键序列 → ExternalEditor（低频动作双键设计）。
+        let mut app = AppState::default();
+        assert_eq!(
+            app.handle_key(&key(KeyCode::Char('x'), KeyModifiers::CONTROL)),
+            KeyAction::None,
+            "首键 ctrl+x 不触发"
+        );
+        assert!(app.chord_pending.is_some());
+        assert_eq!(
+            app.handle_key(&key(KeyCode::Char('e'), KeyModifiers::CONTROL)),
+            KeyAction::ExternalEditor,
+            "3 秒内 ctrl+e 触发外部编辑器"
+        );
+        // 非 ctrl+e 第二键不触发。
+        let mut app = AppState::default();
+        app.handle_key(&key(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        assert_eq!(
+            app.handle_key(&key(KeyCode::Char('k'), KeyModifiers::CONTROL)),
+            KeyAction::None
+        );
+        assert!(app.chord_pending.is_none(), "第二键后 chord 复位");
     }
 }

@@ -11,6 +11,7 @@ use deepseeknova_core::chunk::ChunkStream;
 use deepseeknova_core::Message;
 
 pub mod anthropic;
+pub mod auto;
 pub mod cost;
 pub mod embeddings;
 pub mod openai;
@@ -358,6 +359,7 @@ pub mod factory {
                 api_key_env: None,
                 timeout_secs: 30,
                 max_retries: 3,
+                context_window: None,
                 headers: vec![],
                 thinking_enabled: false,
                 reasoning_effort: Some(effort.to_string()),
@@ -430,6 +432,7 @@ pub mod factory {
                 api_key_env: None,
                 timeout_secs: 30,
                 max_retries: 3,
+                context_window: None,
                 headers: vec![],
                 thinking_enabled: false,
                 reasoning_effort: None,

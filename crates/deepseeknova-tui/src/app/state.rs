@@ -11,7 +11,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use deepseeknova_core::chunk::Usage;
 use deepseeknova_core::runner::RunEvent;
 
-use super::focus::{CompletionState, Focus, PaletteState, SidebarTab};
+use super::focus::{CompletionState, Focus, SidebarTab};
 use crate::input::editor::InputState;
 use crate::model::apply::ConversationApply;
 use crate::model::conversation::{Conversation, SegId};
@@ -49,6 +49,8 @@ pub enum KeyAction {
     Quit,
     Submit(String),
     Cancel,
+    /// ctrl+x ctrl+e：外部编辑器（事件循环挂起终端执行 $EDITOR）。
+    ExternalEditor,
     None,
 }
 
@@ -123,6 +125,9 @@ pub struct AppState {
     pub history: Vec<String>,
     pub history_idx: Option<usize>,
     pub running: bool,
+    /// 本轮运行开始时刻（等待 spinner 帧推导用）；提交时置位，
+    /// Done/Cancel 时清除。None 时渲染静态帧。
+    pub run_started_at: Option<std::time::Instant>,
     pub turn: usize,
     pub usage: Option<Usage>,
     /// 会话累计成本（美元），由 router ledger 每帧刷新。
@@ -132,6 +137,8 @@ pub struct AppState {
     /// 未配置 window 时为 None（状态行不显示占用率）。
     pub context_usage: Option<(u64, u64)>,
     pub scroll_offset: usize,
+    /// 上一帧估算的对话区物理行数（wrap 后），滚动钳制/百分比口径。
+    pub rendered_lines: usize,
     pub auto_scroll: bool,
     pub model_label: String,
     pub display_mode: DisplayMode,
@@ -145,12 +152,38 @@ pub struct AppState {
     pub fold: HashMap<SegId, bool>,
     pub sidebar_visible: bool,
     pub sidebar_tab: SidebarTab,
-    pub palette: Option<PaletteState>,
     pub completion: Option<CompletionState>,
+    /// 斜杠命令行内候选（输入 `/` 开头时触发，Claude Code 风格）。
+    pub command_hint: Option<crate::commands::CommandHintState>,
+    /// 磁盘保存的会话 id 列表（最新优先；事件循环经 SessionController 刷新）。
+    pub saved_sessions: Vec<String>,
+    /// 当前会话 id（SessionController 上报；侧边栏“当前”标记用）。
+    pub current_session: Option<String>,
+    /// 是否已从磁盘加载过会话列表（首次加载前渲染“加载中”占位）。
+    pub sessions_loaded: bool,
+    /// 侧边栏会话列表当前选中项。
+    pub saved_session_selected: usize,
     /// @ 补全候选文件清单（由 CLI 注入；为空则不触发补全）。
     pub at_files: Vec<String>,
     /// Ctrl+K 面板选中命令后待执行请求（事件循环用真实 caps 消费）。
     pub pending_command: Option<(String, String)>,
+    /// ctrl+x 双键序列状态：首键时间戳（3 秒窗），等待第二键。
+    pub chord_pending: Option<std::time::Instant>,
+    /// 用户键位定制层（keybindings.json，热重载）。
+    pub keymap: crate::app::keybindings::Keymap,
+    /// keybindings.json 路径（热重载轮询用）。
+    pub keymap_path: std::path::PathBuf,
+    /// keybindings.json 上次加载的 mtime。
+    pub keymap_mtime: Option<std::time::SystemTime>,
+    /// 待审批请求（agent 阻塞等待 y/n；无挂起请求为 None）。
+    pub pending_approval: Option<crate::approval::ApprovalRequest>,
+    /// Esc 二次确认退出：首次 Esc 置位（提示再按一次退出），
+    /// 3 秒无后续按键或任意非 Esc 键复位；与 Claude Code
+    /// "Esc Esc / press Esc again to exit" 防误触设计一致。
+    pub quit_armed: bool,
+    /// `quit_armed` 的置位时间戳（纳秒，monotonic）。
+    /// `pub(crate)`：结构体在其他模块以 `..Default::default()` 构造。
+    pub(crate) quit_armed_at: Option<std::time::Instant>,
 }
 
 impl AppState {
@@ -163,6 +196,82 @@ impl AppState {
         if self.echo.len() > MAX_ECHO {
             self.echo.drain(0..self.echo.len() - MAX_ECHO);
         }
+    }
+
+    /// 斜杠命令行内候选刷新：输入以 `/` 开头时展示模糊匹配候选
+    /// （纯 `/` 触发，Claude Code 风格）；已输入参数（含空格）时
+    /// 切换到参数模式：展示该命令的枚举/用法候选（如 `/fold ` →
+    /// all|none|reset），Enter 选中执行。无匹配时关闭（Enter 回退
+    /// 原样提交，由命令分发报未知命令）。
+    pub fn refresh_command_hint(&mut self) {
+        let text = self.input.text.trim_start();
+        if let Some(cmd) = text.strip_prefix('/') {
+            // 已输入参数（含空格）→ 参数模式：仅当命令唯一命中时展示。
+            if cmd.contains(char::is_whitespace) {
+                let name = cmd.split_whitespace().next().unwrap_or("");
+                let args = cmd.split_whitespace().skip(1).collect::<Vec<_>>().join(" ");
+                let hint = crate::commands::CommandRegistry::find(name).and_then(|c| {
+                    // 仅支持显式 args_hint 的命令进入参数模式。
+                    let options = c.args_hint?;
+                    let matched: Vec<&'static str> = options
+                        .iter()
+                        .copied()
+                        .filter(|o| o.starts_with(&args) || args.is_empty() || args.contains(o))
+                        .collect();
+                    if matched.is_empty() {
+                        None
+                    } else {
+                        Some(crate::commands::CommandHintState {
+                            candidates: vec![c],
+                            selected: 0,
+                            arg_options: Some(matched),
+                        })
+                    }
+                });
+                self.command_hint = hint;
+                return;
+            }
+            let candidates = crate::commands::CommandRegistry::search(cmd);
+            if candidates.is_empty() {
+                self.command_hint = None;
+                return;
+            }
+            self.command_hint = Some(crate::commands::CommandHintState {
+                candidates,
+                selected: 0,
+                arg_options: None,
+            });
+        } else {
+            self.command_hint = None;
+        }
+    }
+
+    /// Esc 二次确认退出：返回是否真正退出（Claude Code "Esc Esc" 防误触）。
+    /// - 未置位 → 置位并回显提示（再按一次 Esc 退出），3 秒超时自动复位；
+    /// - 已置位（3 秒内再按 Esc）→ 退出。
+    pub fn confirm_quit(&mut self) -> KeyAction {
+        if self.quit_armed
+            && self
+                .quit_armed_at
+                .map(|t| t.elapsed() < std::time::Duration::from_secs(3))
+                .unwrap_or(false)
+        {
+            KeyAction::Quit
+        } else {
+            self.quit_armed = true;
+            self.quit_armed_at = Some(std::time::Instant::now());
+            self.echo_line(
+                crate::model::conversation::LineKind::System,
+                "再按 Esc 退出（3 秒内）",
+            );
+            KeyAction::None
+        }
+    }
+
+    /// 非 Esc 键复位退出确认（防误触连锁）。
+    pub fn disarm_quit(&mut self) {
+        self.quit_armed = false;
+        self.quit_armed_at = None;
     }
 
     /// 单一入口消费 RunEvent：委托消息树 + 单独消费 Usage。
@@ -183,11 +292,16 @@ impl AppState {
         self.fold.clear();
     }
 
-    /// 折叠判断：显式设置优先，默认按智能策略（推理折叠，其余展开）。
+    /// 折叠判断：显式设置优先，默认按智能策略（推理、工具调用折叠，
+    /// 其余展开）。工具调用默认折叠让 agent 输出保持整洁——参数与结果
+    /// 可能很长，需要时 Enter 展开查看。
     pub fn is_folded(&self, seg: SegId, kind: crate::model::conversation::LineKind) -> bool {
         match self.fold.get(&seg) {
             Some(f) => *f,
-            None => kind == crate::model::conversation::LineKind::Reasoning,
+            None => {
+                kind == crate::model::conversation::LineKind::Reasoning
+                    || kind == crate::model::conversation::LineKind::Tool
+            }
         }
     }
 
@@ -279,14 +393,145 @@ impl AppState {
         );
     }
 
+    /// 斜杠命令候选浮层按键（`/` 触发时优先于焦点分派）。
+    ///
+    /// 返回 `Some` = 按键已被浮层消费；`None` = 非浮层键，继续走编辑/焦点逻辑。
+    /// 浮层打开时即使焦点意外不在 Input（如刚切过侧边栏），↑↓/Enter/Tab/Esc
+    /// 也由这里处理——避免“提示写了按键但按了没反应”。
+    pub fn handle_command_hint_key(&mut self, key: &KeyEvent) -> Option<KeyAction> {
+        self.command_hint.as_ref()?;
+        // 循环选择长度：参数模式按 arg_options 数，命令模式按候选数
+        //（此前统一用 candidates.len()，参数模式恒为 1 → 选中永远
+        // 停在 0，↑↓ 看起来没有交互）。
+        let select_len = |h: &crate::commands::CommandHintState| match &h.arg_options {
+            Some(opts) => opts.len(),
+            None => h.candidates.len(),
+        };
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(hint) = &mut self.command_hint {
+                    let n = select_len(hint);
+                    if n > 0 {
+                        hint.selected = (hint.selected + n - 1) % n;
+                    }
+                }
+                Some(KeyAction::None)
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(hint) = &mut self.command_hint {
+                    let n = select_len(hint);
+                    if n > 0 {
+                        hint.selected = (hint.selected + 1) % n;
+                    }
+                }
+                Some(KeyAction::None)
+            }
+            KeyCode::Enter => {
+                // 参数模式（`/fold ` 后）：选中枚举/用法候选直接执行完整命令。
+                // 命令名模式：已输入的部分参数（`/model sw` 的 `sw`）保留拼接，
+                // 未输入参数则空——命令自己处理缺参提示。
+                let prefix = self.input.text.trim_start();
+                let hint = self.command_hint.take();
+                if let Some(h) = &hint {
+                    // 参数模式：候选即选中项，命令名取 h.candidates[0]。
+                    if let (Some(opts), Some(picked)) =
+                        (&h.arg_options, h.candidates.get(h.selected).map(|c| c.name))
+                    {
+                        if let Some(opt) = opts.get(h.selected).copied() {
+                            self.input.clear();
+                            return Some(KeyAction::Submit(format!("/{picked} {opt}")));
+                        }
+                    }
+                    let picked = h.candidates.get(h.selected).map(|c| c.name);
+                    if let Some(name) = picked {
+                        let typed_args = prefix
+                            .strip_prefix('/')
+                            .map(|rest| {
+                                rest.split_once(char::is_whitespace)
+                                    .map(|(_, args)| args.trim().to_string())
+                                    .unwrap_or_default()
+                            })
+                            .unwrap_or_default();
+                        let full = if typed_args.is_empty() {
+                            format!("/{name}")
+                        } else {
+                            format!("/{name} {typed_args}")
+                        };
+                        // 执行后清空输入框：命令一旦提交，残留文本会让后续输入
+                        // 拼成 `/s/sessions` 之类的无效串（实测复现的“按键没反应”）。
+                        self.input.clear();
+                        return Some(KeyAction::Submit(full));
+                    }
+                }
+                Some(KeyAction::None)
+            }
+            KeyCode::Tab => {
+                let picked = self
+                    .command_hint
+                    .as_ref()
+                    .and_then(|h| h.candidates.get(h.selected).map(|c| c.name));
+                if let Some(name) = picked {
+                    // 仅填入命令名 + 空格，让用户继续输入参数再回车。
+                    self.input.set_text(format!("/{name} "));
+                }
+                self.command_hint = None;
+                Some(KeyAction::None)
+            }
+            KeyCode::Esc => {
+                self.command_hint = None;
+                Some(KeyAction::None)
+            }
+            _ => None,
+        }
+    }
+
+    /// 把恢复的会话行灌入消息树（`/resume` 共用）：用户行开新回合，
+    /// 助手行落 Text 段，系统行落 System 段；全部标记 Done。
+    pub fn restore_conversation(&mut self, lines: Vec<ResumedLine>) {
+        self.clear_display();
+        for line in lines {
+            match line.role {
+                ResumedRole::User => {
+                    self.conversation.begin_turn(line.text);
+                }
+                ResumedRole::Assistant => {
+                    if let Some(turn) = self.conversation.current_mut() {
+                        turn.assistant.flush_all();
+                        turn.assistant
+                            .segments
+                            .push(crate::model::conversation::Segment::Text { text: line.text });
+                    }
+                }
+                ResumedRole::System => {
+                    if !line.text.trim().is_empty() {
+                        self.conversation
+                            .push_system(crate::model::conversation::SystemKind::Info, line.text);
+                    }
+                }
+            }
+        }
+        if let Some(turn) = self.conversation.current_mut() {
+            turn.assistant.flush_all();
+            turn.status = crate::model::conversation::TurnStatus::Done;
+        }
+        self.turn = self.conversation.turn_count();
+        // 恢复后会话 id 已切换，让事件循环尽快重拉侧边栏列表。
+        self.sessions_loaded = false;
+    }
+
     /// 编辑器按键（Input 焦点）：保留旧版全部编辑语义。
     pub fn handle_editor_key(&mut self, key: &KeyEvent) -> KeyAction {
+        if let Some(action) = self.handle_command_hint_key(key) {
+            return action;
+        }
         match key.code {
             KeyCode::Esc => {
                 if self.running {
-                    KeyAction::None
+                    // 生成中按 Esc：取消当前生成（Claude Code Chat context 行为）。
+                    KeyAction::Cancel
                 } else {
-                    KeyAction::Quit
+                    // 空闲按 Esc：二次确认退出（防误触）。
+                    self.confirm_quit()
                 }
             }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -299,12 +544,14 @@ impl AppState {
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if !self.running {
                     self.input.clear();
+                    self.refresh_command_hint();
                 }
                 KeyAction::None
             }
             KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if !self.running {
                     self.input.delete_word_before();
+                    self.refresh_command_hint();
                 }
                 KeyAction::None
             }
@@ -348,12 +595,14 @@ impl AppState {
                     && !key.modifiers.contains(KeyModifiers::ALT)
                 {
                     self.input.insert_char(c);
+                    self.refresh_command_hint();
                 }
                 KeyAction::None
             }
             KeyCode::Backspace => {
                 if !self.running {
                     self.input.backspace();
+                    self.refresh_command_hint();
                 }
                 KeyAction::None
             }
@@ -372,36 +621,44 @@ impl AppState {
             KeyCode::Delete => {
                 if !self.running {
                     self.input.delete();
+                    self.refresh_command_hint();
                 }
                 KeyAction::None
             }
             KeyCode::Up => {
                 if !self.running {
-                    if self.input.text.contains('\n') {
+                    if self.command_hint.is_some() {
+                        // 候选选择在上面已处理；这里兜底。
+                    } else if self.input.text.contains('\n') {
                         self.input.move_line_up();
                     } else {
                         self.history_prev();
+                        self.refresh_command_hint();
                     }
                 }
                 KeyAction::None
             }
             KeyCode::Down => {
                 if !self.running {
-                    if self.input.text.contains('\n') {
+                    if self.command_hint.is_some() {
+                        // 候选选择在上面已处理；这里兜底。
+                    } else if self.input.text.contains('\n') {
                         self.input.move_line_down();
                     } else {
                         self.history_next();
+                        self.refresh_command_hint();
                     }
                 }
                 KeyAction::None
             }
             KeyCode::PageUp => {
-                self.scroll_offset = self.scroll_offset.saturating_add(20);
+                // 向上翻页 = 看更早记录（offset 减小）。
+                self.scroll_offset = self.scroll_offset.saturating_sub(20);
                 self.auto_scroll = false;
                 KeyAction::None
             }
             KeyCode::PageDown => {
-                self.scroll_offset = self.scroll_offset.saturating_sub(20);
+                self.scroll_offset = self.scroll_offset.saturating_add(20);
                 KeyAction::None
             }
             KeyCode::Home => {
@@ -461,18 +718,22 @@ impl AppState {
 
     /// 滚动钳制：自动跟随贴底，手动滚动不越界。
     pub fn clamp_scroll(&mut self, viewport: usize) {
-        let len = self.render_line_count();
+        let len = self.rendered_lines;
         let max = len.saturating_sub(viewport);
         if self.auto_scroll {
             self.scroll_offset = max;
         } else {
             self.scroll_offset = self.scroll_offset.min(max);
+            // 手动滚到最底部后恢复“跟随新消息”（滚轮向下/PageDown 到底即贴底）。
+            if self.scroll_offset >= max {
+                self.auto_scroll = true;
+            }
         }
     }
 
-    /// 渲染行总数（树 + pending + echo 的近似行数，滚动百分比用）。
+    /// 渲染行总数（上一帧估算的 wrap 物理行数，滚动百分比用）。
     pub fn render_line_count(&self) -> usize {
-        self.conversation.segment_count() + self.echo.len()
+        self.rendered_lines
     }
 }
 
@@ -569,14 +830,27 @@ mod tests {
             _ => panic!("should submit"),
         }
         assert_eq!(app.history, vec!["ab"], "普通输入入历史");
-        // 命令走 Submit 且不入历史
+        // 命令走 Submit 且不入历史；`/q` 命中 quit 候选 → Enter 执行完整命令
+        //（Claude Code 候选优先行为）。
         app.handle_editor_key(&key(KeyCode::Char('/')));
         app.handle_editor_key(&key(KeyCode::Char('q')));
+        assert!(app.command_hint.is_some(), "/q 触发命令候选");
         match app.handle_editor_key(&key(KeyCode::Enter)) {
-            KeyAction::Submit(p) => assert_eq!(p, "/q"),
+            KeyAction::Submit(p) => assert_eq!(p, "/quit", "候选优先：/q → /quit"),
             _ => panic!("should submit command"),
         }
         assert_eq!(app.history, vec!["ab"], "命令不入历史");
+        // 无候选的命令（未知）原样提交，由命令分发报错。
+        app.input.clear();
+        app.handle_editor_key(&key(KeyCode::Char('/')));
+        for c in "wat".chars() {
+            app.handle_editor_key(&key(KeyCode::Char(c)));
+        }
+        assert!(app.command_hint.is_none(), "无匹配候选时 hint 关闭");
+        match app.handle_editor_key(&key(KeyCode::Enter)) {
+            KeyAction::Submit(p) => assert_eq!(p, "/wat", "无候选原样提交"),
+            _ => panic!("should submit"),
+        }
     }
 
     #[test]
@@ -609,6 +883,161 @@ mod tests {
             app.echo.iter().any(|l| l.text.contains("剪贴板不可用")),
             "降级文案明确提示未复制"
         );
+    }
+
+    #[test]
+    fn command_hint_selection_survives_full_key_cycle() {
+        // 回归：handle_key 全链路下，↑↓ 选择后选中项不得被后续刷新重置。
+        // 此前 Focus::Input 分支在 handle_editor_key 之后无条件重建 hint，
+        // selected 恒回 0——浮层高亮永远停在第一项，按键看似无响应。
+        let mut app = AppState::default();
+        let key = |code: KeyCode| KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        };
+        app.handle_key(&key(KeyCode::Char('/')));
+        app.handle_key(&key(KeyCode::Char('s')));
+        assert!(app.command_hint.is_some(), "/s 触发候选");
+        assert_eq!(app.command_hint.as_ref().unwrap().selected, 0);
+        app.handle_key(&key(KeyCode::Down));
+        assert_eq!(
+            app.command_hint.as_ref().unwrap().selected,
+            1,
+            "↓ 后选中第 2 项（/s 命中 sessions/resume/skills 3 项，不得被重置）"
+        );
+        app.handle_key(&key(KeyCode::Down));
+        assert_eq!(app.command_hint.as_ref().unwrap().selected, 2);
+        app.handle_key(&key(KeyCode::Up));
+        assert_eq!(app.command_hint.as_ref().unwrap().selected, 1, "↑ 回退一项");
+        // Esc 关闭后不得被重建。
+        app.handle_key(&key(KeyCode::Esc));
+        assert!(app.command_hint.is_none(), "Esc 关闭且不被重建");
+    }
+
+    #[test]
+    fn ctrl_u_clears_input_and_closes_hint() {
+        // 回归：Ctrl+U 清空输入后 hint 必须关闭——此前清空路径不刷新，
+        // 残留的候选浮层继续显示（文本已空却仍有候选）。
+        let mut app = AppState::default();
+        let key = |code: KeyCode, modifiers: KeyModifiers| KeyEvent {
+            code,
+            modifiers,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        };
+        app.handle_key(&key(KeyCode::Char('/'), KeyModifiers::NONE));
+        assert!(app.command_hint.is_some());
+        app.handle_key(&key(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert!(app.input.text.is_empty());
+        assert!(app.command_hint.is_none(), "Ctrl+U 清空后 hint 关闭");
+        // 恢复输入 `/q` 后候选重新出现。
+        app.handle_key(&key(KeyCode::Char('/'), KeyModifiers::NONE));
+        app.handle_key(&key(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(app.command_hint.is_some(), "重新输入 /q 候选恢复");
+    }
+
+    #[test]
+    fn delete_slash_closes_hint() {
+        // 回归：光标移到行首后 Delete 删除 `/` → hint 关闭（文本不再以 / 开头）。
+        // 前向删除（Delete）在光标末尾是无操作，删除 `/` 前必须先 Home。
+        let mut app = AppState::default();
+        let key = |code: KeyCode| KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        };
+        app.handle_key(&key(KeyCode::Char('/')));
+        app.handle_key(&key(KeyCode::Char('q')));
+        assert!(app.command_hint.is_some());
+        app.handle_key(&key(KeyCode::Home));
+        app.handle_key(&key(KeyCode::Delete));
+        assert_eq!(app.input.text, "q", "Delete 删除行首的 /，留下 q");
+        assert!(app.command_hint.is_none(), "删掉 / 后 hint 关闭");
+    }
+
+    #[test]
+    fn manual_scroll_to_bottom_reenables_following() {
+        // 滚轮/PageDown 滚到最底后恢复 auto_scroll：新消息自动贴底可见。
+        let mut app = AppState {
+            auto_scroll: false,
+            scroll_offset: 100,
+            rendered_lines: 100,
+            ..Default::default()
+        };
+        app.clamp_scroll(25);
+        assert_eq!(app.scroll_offset, 75, "钳制到视口底部");
+        assert!(app.auto_scroll, "手动滚到底后恢复跟随");
+    }
+
+    #[test]
+    fn command_hint_enter_executes_and_clears_input() {
+        // 回归：命令候选 Enter 后输入框必须清空——残留文本会让后续输入
+        // 拼成 `/s/sessions` 这类无效串，表现为“按了键但没反应/未知命令”。
+        let mut app = AppState::default();
+        let key = |code: KeyCode| KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        };
+        app.handle_key(&key(KeyCode::Char('/')));
+        app.handle_key(&key(KeyCode::Char('s')));
+        assert!(app.command_hint.is_some(), "/s 触发候选");
+        match app.handle_key(&key(KeyCode::Enter)) {
+            KeyAction::Submit(p) => assert!(p.starts_with('/'), "执行选中候选: {p}"),
+            _ => panic!("Enter 应执行命令"),
+        }
+        assert!(app.input.text.is_empty(), "执行后输入框清空");
+        assert!(app.command_hint.is_none(), "执行后候选关闭");
+        // 紧接着正常输入新命令，不再拼接旧文本。
+        app.handle_key(&key(KeyCode::Char('/')));
+        app.handle_key(&key(KeyCode::Char('s')));
+        assert_eq!(app.input.text, "/s", "新输入从空框开始");
+    }
+
+    #[test]
+    fn restore_conversation_builds_done_turns() {
+        let mut app = AppState::default();
+        app.restore_conversation(vec![
+            ResumedLine {
+                role: ResumedRole::User,
+                text: "第一个问题".into(),
+            },
+            ResumedLine {
+                role: ResumedRole::Assistant,
+                text: "第一个回答".into(),
+            },
+            ResumedLine {
+                role: ResumedRole::System,
+                text: "info".into(),
+            },
+            ResumedLine {
+                role: ResumedRole::User,
+                text: "第二个问题".into(),
+            },
+            ResumedLine {
+                role: ResumedRole::Assistant,
+                text: "第二个回答".into(),
+            },
+        ]);
+        assert_eq!(app.conversation.turn_count(), 2);
+        assert_eq!(app.conversation.user_text_of(1), Some("第一个问题"));
+        assert_eq!(app.conversation.user_text_of(2), Some("第二个问题"));
+        let texts: Vec<&str> = app
+            .conversation
+            .iter_segments()
+            .map(|(_, s)| match s {
+                crate::model::conversation::Segment::Text { text } => text.as_str(),
+                crate::model::conversation::Segment::System { .. } => "sys",
+                _ => "",
+            })
+            .collect();
+        assert_eq!(texts, vec!["第一个回答", "sys", "第二个回答"]);
+        assert_eq!(app.turn, 2, "状态行回合数与恢复内容一致");
+        assert!(!app.sessions_loaded, "恢复后请求重拉会话列表");
     }
 
     // 迁移占位：原 lib.rs 的输入/滚动测试在 input/editor 模块，见 Task 4。

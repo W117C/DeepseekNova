@@ -339,6 +339,9 @@ impl DelegateEngine {
 }
 
 /// 驱动子 Agent 的 run_stream 并收集最终文本（与 CLI/serve 收集方式一致）。
+/// 返回前做**输出净化**：中和子代理产出中的权限修改指令形状
+/// （`permissions.allow` / `bypassPermissions` / `<settings-json` 等），
+/// 防止被父模型当作可执行指令——这是子代理 → 父上下文的唯一收口点。
 async fn collect_final_text(agent: &Agent, input: RunInput) -> anyhow::Result<String> {
     let mut stream = agent.run_stream(input).await?;
     let mut final_text = String::new();
@@ -355,7 +358,11 @@ async fn collect_final_text(agent: &Agent, input: RunInput) -> anyhow::Result<St
             _ => {}
         }
     }
-    Ok(final_text)
+    let sanitized = deepseeknova_security::sanitize::sanitize_output(&final_text);
+    if sanitized != final_text {
+        tracing::warn!("delegate output sanitized: permission-override shape(s) neutralized");
+    }
+    Ok(sanitized)
 }
 
 /// 头尾截断到 token 预算（chars ≈ tokens×4），中部省略。

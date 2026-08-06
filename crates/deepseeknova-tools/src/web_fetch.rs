@@ -110,7 +110,7 @@ fn validate_url(raw: &str) -> anyhow::Result<url::Url> {
 
 /// Resolve the hostname to IP addresses and reject any that fall into
 /// private, loopback, link-local, or other unsafe ranges.
-async fn validate_host_ssrf(host: &str) -> anyhow::Result<()> {
+pub(crate) async fn validate_host_ssrf(host: &str) -> anyhow::Result<()> {
     // Handle raw IPv4 and IPv6 addresses directly so we don't rely on DNS.
     if let Ok(ip) = IpAddr::from_str(host) {
         ensure_safe_ip(&ip)?;

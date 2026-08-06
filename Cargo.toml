@@ -86,6 +86,7 @@ hex = "0.4"
 url = "2.5"
 ratatui = "0.30"
 crossterm = "0.29"
+unicode-width = "0.2"
 axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors"] }

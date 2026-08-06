@@ -117,6 +117,16 @@ impl MockProvider {
 impl Provider for MockProvider {
     async fn generate(&self, _validated: ValidatedRequest<'_>) -> anyhow::Result<Message> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        // 与 stream 同口径记录最后一条 user 消息，便于断言非流式路径的
+        // prompt 内容（coordinator think/reflect 走 generate）。
+        if let Some(last) = _validated
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == Role::User)
+        {
+            *self.last_prompt.lock().unwrap() = Some(last.content.clone());
+        }
         Ok(Message {
             role: Role::Assistant,
             content: "mock response".to_string(),

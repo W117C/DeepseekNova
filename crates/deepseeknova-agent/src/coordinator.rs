@@ -441,8 +441,8 @@ impl CoordinatorRunner {
     }
 
     /// Attach a permission gate applied before each executor tool call. The
-    /// coordinator is non-interactive, so an `Ask` decision falls back to allow;
-    /// `Deny` blocks the call.
+    /// coordinator is non-interactive, so an `Ask` decision is blocked
+    /// (fail-closed); `Deny` blocks the call.
     pub fn with_permission_gate(mut self, gate: Arc<PermissionGate>) -> Self {
         self.permission = Some(gate);
         self
@@ -593,6 +593,7 @@ async fn run_coordinator(
         permission,
         extensions,
         planner_reasoning,
+        history: Arc::new(std::sync::Mutex::new(Vec::new())),
     });
 
     let think: Arc<dyn ThinkCallback> = callbacks.clone();
@@ -832,6 +833,43 @@ struct CoordinatorCallbacks {
     extensions: Vec<Arc<ExtensionApplier>>,
     /// Planner's reasoning content to pass as context to executor.
     planner_reasoning: Option<String>,
+    /// 已执行步骤的结果历史（工具/委派输出），注入后续 executor 消息，
+    /// 修复"step_1 工具结果在 step_2 不可见"的协调器断链。
+    history: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+/// 历史记录条目数上限：只保留最近 N 条，防止无界增长撑爆后续 prompt。
+const HISTORY_MAX_ENTRIES: usize = 50;
+/// 单条历史记录的字符数上限：工具输出可能单条极大（如整仓 grep、读大文件），
+/// 超过后按字符边界截断，避免一条超大输出整段注入后续每个 prompt。
+const HISTORY_MAX_ENTRY_CHARS: usize = 2000;
+/// 历史记录总字符数上限：工具输出可能单条极大（如整仓 grep），
+/// 超出后从最旧条目开始丢弃，保持顺序并收敛 prompt 体积。
+const HISTORY_MAX_TOTAL_CHARS: usize = 500_000;
+
+impl CoordinatorCallbacks {
+    /// 追加一条历史记录并按容量上限收敛（保留最近条目、保持顺序）。
+    fn push_history(&self, entry: String) {
+        let mut history = self.history.lock().unwrap_or_else(|e| e.into_inner());
+        // 单条先按字符上限截断（保留完整字符，追加可见标记）。
+        let entry = if entry.chars().count() > HISTORY_MAX_ENTRY_CHARS {
+            let head: String = entry.chars().take(HISTORY_MAX_ENTRY_CHARS).collect();
+            format!("{head}…[truncated]")
+        } else {
+            entry
+        };
+        history.push(entry);
+        while history.len() > HISTORY_MAX_ENTRIES {
+            history.remove(0);
+        }
+        loop {
+            let total: usize = history.iter().map(|s| s.chars().count()).sum();
+            if total <= HISTORY_MAX_TOTAL_CHARS || history.len() <= 1 {
+                break;
+            }
+            history.remove(0);
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -849,9 +887,20 @@ impl ThinkCallback for CoordinatorCallbacks {
                 reasoning_content: Some(reasoning.clone()),
             });
         }
+        let mut content = prompt.to_string();
+        let prior: Vec<String> = {
+            let history = self.history.lock().unwrap_or_else(|e| e.into_inner());
+            history.clone()
+        };
+        if !prior.is_empty() {
+            content.push_str("\n\n## Previous step results\n");
+            for h in &prior {
+                content.push_str(&format!("- {h}\n"));
+            }
+        }
         messages.push(Message {
             role: Role::User,
-            content: prompt.to_string(),
+            content,
             name: None,
             tool_calls: None,
             tool_call_id: None,
@@ -882,13 +931,22 @@ impl ToolCallback for CoordinatorCallbacks {
 
         let args_str = serde_json::to_string(args)?;
 
-        // Permission gate (opt-in). Non-interactive, so `Ask` falls back to
-        // allow; `Deny` blocks the call.
+        // Permission gate (opt-in). Coordinator is non-interactive: `Deny`
+        // 与 `Ask` 都阻止调用（Ask 无人工应答，fail-closed）。
         if let Some(gate) = &self.permission {
-            if matches!(gate.check(tool.as_ref(), &args_str), Decision::Deny) {
-                return Ok(format!(
-                    "Error: tool '{tool_name}' blocked by permission policy"
-                ));
+            match gate.check(tool.as_ref(), &args_str).decision() {
+                Decision::Deny => {
+                    return Ok(format!(
+                        "Error: tool '{tool_name}' blocked by permission policy"
+                    ));
+                }
+                Decision::Ask => {
+                    return Ok(format!(
+                        "Error: tool '{tool_name}' requires approval, but the \
+                         coordinator is non-interactive (blocked)"
+                    ));
+                }
+                Decision::Allow => {}
             }
         }
 
@@ -898,7 +956,12 @@ impl ToolCallback for CoordinatorCallbacks {
         for apply in &self.extensions {
             apply(&mut ctx.extensions);
         }
-        tool.execute(&ctx, &args_str).await
+        let result = tool.execute(&ctx, &args_str).await;
+        match &result {
+            Ok(r) => self.push_history(format!("[{tool_name}] {r}")),
+            Err(e) => self.push_history(format!("[{tool_name}] ERROR: {e}")),
+        }
+        result
     }
 }
 
@@ -995,6 +1058,8 @@ impl DelegateCallback for CoordinatorCallbacks {
         if text.is_empty() {
             anyhow::bail!("sub-agent '{sub_agent}' produced no output");
         }
+
+        self.push_history(format!("[delegate:{sub_agent}] {text}"));
 
         Ok(text)
     }
@@ -1291,5 +1356,104 @@ mod tests {
                 assert!(p.contains(token), "planner prompt missing {token}");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn think_includes_prior_tool_results() {
+        use crate::test_utils::MockProvider;
+
+        let mock = Arc::new(MockProvider::text("ok"));
+        let provider: Arc<dyn Provider> = mock.clone();
+        let callbacks = CoordinatorCallbacks {
+            provider,
+            tools: HashMap::new(),
+            sub_agent_runner: None,
+            workspace_root: std::env::current_dir().unwrap_or_default(),
+            security: deepseeknova_security::context::SecurityContext::with_safe_defaults(),
+            permission: None,
+            extensions: Vec::new(),
+            planner_reasoning: None,
+            history: Arc::new(std::sync::Mutex::new(vec!["[ls] file1\nfile2".to_string()])),
+        };
+
+        let out = callbacks.think("Count the files.").await.unwrap();
+        assert_eq!(out, "mock response");
+        let last = mock.last_prompt().unwrap();
+        assert!(
+            last.contains("## Previous step results"),
+            "executor 应看到前序工具结果段"
+        );
+        assert!(
+            last.contains("[ls] file1"),
+            "前序 ls 输出必须进入后续 prompt"
+        );
+    }
+
+    #[test]
+    fn history_keeps_only_most_recent_entries_in_order() {
+        use crate::test_utils::MockProvider;
+
+        let callbacks = CoordinatorCallbacks {
+            provider: Arc::new(MockProvider::text("ok")),
+            tools: HashMap::new(),
+            sub_agent_runner: None,
+            workspace_root: std::env::current_dir().unwrap_or_default(),
+            security: deepseeknova_security::context::SecurityContext::with_safe_defaults(),
+            permission: None,
+            extensions: Vec::new(),
+            planner_reasoning: None,
+            history: Arc::new(std::sync::Mutex::new(Vec::new())),
+        };
+
+        let pushed = HISTORY_MAX_ENTRIES + 20;
+        for i in 0..pushed {
+            callbacks.push_history(format!("[tool] result {i}"));
+        }
+
+        let history = callbacks.history.lock().unwrap();
+        assert_eq!(history.len(), HISTORY_MAX_ENTRIES);
+        // 丢弃最旧的 20 条，第一条应为第 20 条，且顺序保持。
+        assert!(history[0].contains("result 20"));
+        assert!(history
+            .last()
+            .unwrap()
+            .contains(&format!("result {}", pushed - 1)));
+    }
+
+    #[test]
+    fn history_total_char_cap_trims_old_entries() {
+        use crate::test_utils::MockProvider;
+
+        let callbacks = CoordinatorCallbacks {
+            provider: Arc::new(MockProvider::text("ok")),
+            tools: HashMap::new(),
+            sub_agent_runner: None,
+            workspace_root: std::env::current_dir().unwrap_or_default(),
+            security: deepseeknova_security::context::SecurityContext::with_safe_defaults(),
+            permission: None,
+            extensions: Vec::new(),
+            planner_reasoning: None,
+            history: Arc::new(std::sync::Mutex::new(Vec::new())),
+        };
+
+        for i in 0..10 {
+            callbacks.push_history(format!("[tool] short {i}"));
+        }
+        // 单条超大输出：先按条目上限截断，再按总字符上限从旧到新裁剪。
+        callbacks.push_history(format!(
+            "[tool] {}",
+            "x".repeat(HISTORY_MAX_TOTAL_CHARS + 5_000)
+        ));
+
+        let history = callbacks.history.lock().unwrap();
+        assert!(!history.is_empty());
+        assert!(history.last().unwrap().starts_with("[tool] "));
+        let last = history.last().unwrap();
+        assert!(
+            last.chars().count() <= HISTORY_MAX_ENTRY_CHARS + 32,
+            "单条大输出必须先按条目上限截断: {}",
+            last.chars().count()
+        );
+        assert!(last.ends_with("[truncated]"));
     }
 }

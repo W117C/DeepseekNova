@@ -54,7 +54,7 @@ pub async fn retry_with_backoff<T>(
 
 /// Compute exponential backoff with jitter for the given attempt number
 /// (1-based).  E.g. attempt=1 → ~500ms, attempt=2 → ~1s, attempt=3 → ~2s, …
-fn backoff_duration(attempt: u32) -> Duration {
+pub(crate) fn backoff_duration(attempt: u32) -> Duration {
     let exp = BASE_DELAY_MS as f64 * (2.0f64).powi((attempt.saturating_sub(1)) as i32);
     let capped = exp.min(MAX_DELAY_MS as f64);
     let jitter = (rand::random::<f64>() - 0.5) * 2.0 * JITTER_FACTOR * capped;

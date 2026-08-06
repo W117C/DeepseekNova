@@ -1,8 +1,9 @@
 //! # Tools — Built-in agent tools
 //!
-//! 13+ built-in tools for file I/O, globbing, grep, shell execution,
-//! web fetching, task management, memory operations, and MCP bridging.
-//! Each tool implements the `Tool` trait with security-aware execution.
+//! 17 built-in tools for file I/O, globbing, grep, shell execution,
+//! web fetching, task management, memory operations, code graph, Context7
+//! docs, and delegation. Each tool implements the `Tool` trait with
+//! security-aware execution.
 
 pub mod delegate;
 pub mod docs_tools;
@@ -11,11 +12,13 @@ pub mod glob;
 pub mod graph_tools;
 pub mod grep;
 pub mod ls;
+pub mod lsp;
 pub mod memory;
 pub mod shell;
 pub mod snippet;
 pub mod todo;
 pub mod web_fetch;
+pub mod web_search;
 
 pub use delegate::*;
 pub use docs_tools::*;
@@ -24,10 +27,12 @@ pub use glob::*;
 pub use graph_tools::*;
 pub use grep::*;
 pub use ls::*;
+pub use lsp::*;
 pub use memory::*;
 pub use shell::*;
 pub use todo::*;
 pub use web_fetch::*;
+pub use web_search::*;
 
 use deepseeknova_checkpoint::CheckpointManager;
 use deepseeknova_core::Tool;

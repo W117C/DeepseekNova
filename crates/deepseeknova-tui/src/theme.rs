@@ -37,14 +37,15 @@ pub struct Theme {
     pub selection: Style,
 }
 
-/// 默认 Codex 色板（与旧 `style_for` 逐字段等价）。
+/// 默认 DeepSeek 色板：靛蓝主色 #4D6BFE（品牌蓝），
+/// 用户/强调同色系、agent 用柔蓝紫，语义色（成功/失败/警示）保留。
 impl Default for Theme {
     fn default() -> Self {
         Self {
             user: Style::default()
-                .fg(Color::Cyan)
+                .fg(Color::Rgb(77, 107, 254))
                 .add_modifier(Modifier::BOLD),
-            agent: Style::default().fg(Color::Magenta),
+            agent: Style::default().fg(Color::Rgb(122, 140, 255)),
             reasoning: Style::default()
                 .add_modifier(Modifier::DIM)
                 .add_modifier(Modifier::ITALIC),
@@ -54,13 +55,15 @@ impl Default for Theme {
             verification_fail: Style::default().fg(Color::Red),
             system: Style::default().add_modifier(Modifier::DIM),
             error: Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            paused: Style::default().fg(Color::Cyan),
-            accent: Color::Cyan,
+            paused: Style::default().fg(Color::Rgb(77, 107, 254)),
+            accent: Color::Rgb(77, 107, 254),
             dim: Modifier::DIM,
             border: Style::default().add_modifier(Modifier::DIM),
-            title: Style::default().add_modifier(Modifier::BOLD),
+            title: Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
             selection: Style::default()
-                .bg(Color::DarkGray)
+                .bg(Color::Rgb(38, 50, 100))
                 .add_modifier(Modifier::REVERSED),
         }
     }
@@ -89,20 +92,23 @@ impl Theme {
     }
 
     /// diff 行级高亮：`+` 新增=green、`-` 删除=red、`@@` 块头=accent，
-    /// 其余行沿用 `base`；`+++`/`---` 文件头不改色。
+    /// 其余行沿用 `base`；`+++`/`---` 文件头不改色。工具结果行的 UI
+    /// 前缀 `  → ` 不参与行首判定（先剥掉再判断），否则 git diff 输出
+    /// 永远染不上色。
     pub fn diff_spans(&self, text: &str, base: Style) -> Vec<Span<'static>> {
         let mut spans = Vec::new();
         for (i, line) in text.lines().enumerate() {
             if i > 0 {
                 spans.push(Span::styled("\n", base));
             }
-            let style = if line.starts_with("+++") || line.starts_with("---") {
+            let content = line.strip_prefix("  → ").unwrap_or(line);
+            let style = if content.starts_with("+++") || content.starts_with("---") {
                 base
-            } else if line.starts_with("@@") {
+            } else if content.starts_with("@@") {
                 Style::default().fg(self.accent)
-            } else if line.starts_with('+') {
+            } else if content.starts_with('+') {
                 self.verification_ok
-            } else if line.starts_with('-') {
+            } else if content.starts_with('-') {
                 self.verification_fail
             } else {
                 base
@@ -118,25 +124,25 @@ pub fn theme_from_env() -> (Theme, Option<String>) {
     theme_from_name(&std::env::var(THEME_ENV).unwrap_or_default())
 }
 
-/// 按主题名解析（纯函数，便于测试；未知/空回退 codex）。
+/// 按主题名解析（纯函数，便于测试；未知/空回退 deepseek 默认）。
 pub fn theme_from_name(name: &str) -> (Theme, Option<String>) {
     match name {
-        "" | "codex" => (Theme::default(), None),
+        "" | "codex" | "deepseek" => (Theme::default(), None),
         "dark" => (dark_theme(), None),
         "light" => (light_theme(), None),
         other => (
             Theme::default(),
             Some(format!(
-                "未知主题 '{other}'（codex|dark|light），已回退 codex"
+                "未知主题 '{other}'（deepseek|dark|light），已回退 deepseek"
             )),
         ),
     }
 }
 
-/// 深色终端强调版：accent 用亮青色，标题用亮白，对比度更高。
+/// 深色终端强调版：accent 用 DeepSeek 蓝的亮化版，标题用亮白，对比度更高。
 fn dark_theme() -> Theme {
     Theme {
-        accent: Color::LightCyan,
+        accent: Color::Rgb(110, 140, 255),
         title: Style::default()
             .fg(Color::White)
             .add_modifier(Modifier::BOLD),
@@ -180,11 +186,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_matches_codex_semantic_palette() {
+    fn default_matches_deepseek_semantic_palette() {
         let t = Theme::default();
-        assert_eq!(t.user.fg, Some(Color::Cyan));
+        assert_eq!(t.user.fg, Some(Color::Rgb(77, 107, 254)), "DeepSeek 品牌蓝");
         assert!(t.user.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(t.agent.fg, Some(Color::Magenta));
+        assert_eq!(t.agent.fg, Some(Color::Rgb(122, 140, 255)), "agent 柔蓝紫");
+        assert_eq!(t.accent, Color::Rgb(77, 107, 254));
         assert_eq!(t.reasoning.fg, None);
         assert!(t.reasoning.add_modifier.contains(Modifier::DIM));
         assert!(t.reasoning.add_modifier.contains(Modifier::ITALIC));
@@ -202,7 +209,10 @@ mod tests {
             Some(Color::Red)
         );
         assert_eq!(t.style_for(LineKind::Error).fg, Some(Color::Red));
-        assert_eq!(t.style_for(LineKind::Paused).fg, Some(Color::Cyan));
+        assert_eq!(
+            t.style_for(LineKind::Paused).fg,
+            Some(Color::Rgb(77, 107, 254))
+        );
     }
 
     #[test]
@@ -226,6 +236,23 @@ mod tests {
     }
 
     #[test]
+    fn diff_spans_ignores_tool_result_prefix() {
+        // 工具结果行带 `  → ` UI 前缀：剥掉前缀后仍按 diff 行首染色。
+        let t = Theme::default();
+        let base = Style::default();
+        let spans = t.diff_spans("  → +fn new() {}\n  → -fn old() {}\n  → @@ -1 +1 @@", base);
+        assert_eq!(spans[0].content, "  → +fn new() {}");
+        assert_eq!(spans[0].style, t.verification_ok);
+        assert_eq!(spans[2].content, "  → -fn old() {}");
+        assert_eq!(spans[2].style, t.verification_fail);
+        assert_eq!(spans[4].style.fg, Some(t.accent));
+        // 非 diff 前缀行保持 base。
+        let plain = t.diff_spans("  → note\n+real", base);
+        assert_eq!(plain[0].style, base);
+        assert_eq!(plain[2].style, t.verification_ok);
+    }
+
+    #[test]
     fn light_theme_uses_dark_foregrounds() {
         let t = light_theme();
         assert_eq!(t.user.fg, Some(Color::Rgb(0, 90, 150)));
@@ -237,13 +264,14 @@ mod tests {
     #[test]
     fn dark_theme_boosts_accent_and_title() {
         let t = dark_theme();
-        assert_eq!(t.accent, Color::LightCyan);
+        assert_eq!(t.accent, Color::Rgb(110, 140, 255), "DeepSeek 蓝亮化版");
         assert_eq!(t.title.fg, Some(Color::White));
     }
 
     #[test]
     fn env_parsing_routes_three_presets_and_falls_back() {
         let cases: &[(&str, bool)] = &[
+            ("deepseek", false),
             ("codex", false),
             ("dark", false),
             ("light", false),
@@ -253,16 +281,16 @@ mod tests {
         for (val, expect_warning) in cases {
             let (theme, warning) = theme_from_name(val);
             assert_eq!(warning.is_some(), *expect_warning, "val={val:?}");
-            // 有效主题应解析出非默认差异（dark/light 改变 accent），codex 为默认。
+            // 有效主题应解析出非默认差异（dark/light 改变 accent），deepseek/codex 为默认。
             if *val == "dark" {
-                assert_eq!(theme.accent, Color::LightCyan);
+                assert_eq!(theme.accent, Color::Rgb(110, 140, 255));
             } else if *val == "light" {
                 assert_eq!(theme.accent, Color::Rgb(0, 90, 150));
             } else {
                 assert_eq!(theme, Theme::default());
             }
         }
-        // 未设置环境变量时等价于 codex（env 读取壳的语义）。
+        // 未设置环境变量时等价于 deepseek（env 读取壳的语义）。
         let fallback = theme_from_name("");
         assert_eq!(fallback.0, Theme::default());
         assert!(fallback.1.is_none());
