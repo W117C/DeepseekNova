@@ -24,7 +24,7 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 [![Rust](https://img.shields.io/badge/rust-stable%201.97-orange.svg)](https://www.rust-lang.org)
 [![Crates](https://img.shields.io/badge/crates-22-green.svg)](#-22-个-crate)
-[![Tests](https://img.shields.io/badge/tests-1003-brightgreen.svg)](#-技术栈)
+[![Tests](https://img.shields.io/badge/tests-1108-brightgreen.svg)](#-技术栈)
 
 </div>
 
@@ -41,8 +41,17 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 
 ### 🧠 深度推理 + 工具调用
 - 流式推理输出，支持 Reasoning Effort 四级调节（low / medium / high / max）
-- 17 个内置工具实现：文件 I/O、glob、grep、shell、web fetch、任务管理、MCP 桥接、代码图、Context7 文档检索
+- 17 个内置工具 + web 搜索 + LSP 编辑后诊断 + Context7 文档检索：文件 I/O、
+  glob、grep、shell、web fetch、任务管理、MCP 桥接、代码图等
 - 工具调用全链路流式：start → delta → end → result，前端实时渲染
+- **编辑后诊断** — write/edit/move 成功后自动调用语言服务器
+  （rust-analyzer / pyright / gopls / typescript-language-server / clangd）
+  并把诊断注入上下文，模型改完立刻看到编译/类型错误
+
+### 🧭 Auto 模型 + 思考路由
+- `[agent] auto_route = true` 时，每轮新用户消息先用廉价模型决定
+  flash/pro 与 thinking off/high/max，再执行真实调用；工具续步复用决策，
+  路由失败自动回退启发式/默认模型，不影响主流程
 
 ### ⚡ Prefix-Cache 三层架构
 - **会话级缓存** — 跨轮次 prompt prefix 命中，实时统计命中率
@@ -57,8 +66,13 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 
 ### 🔒 安全沙箱 + 权限门控
 - **沙箱执行** — macOS Seatbelt / Linux bubblewrap 隔离
-- **权限策略** — 12 条规则，每条独立开关：目录沙箱、Plan 模式、Shell 确认、网络访问等
-- **安全层** — 路径白名单/黑名单、环境变量隔离、CSP 策略、敏感文件保护
+- **权限策略** — allow/ask/deny 规则门控（deny > ask > allow > 默认模式）+
+  会话缓存 + 可选速率限制；shell 只读命令四层分类器（任意参数安全 / 零参 /
+  精确形式 / 子命令 flag 白名单）免询问放行；普通链式/重定向/命令替换按非只读
+  走权限审批/规则，工具级注入面（`git -c`/`--config-env`、格式串注入、
+  UNC/URL/SMB 路径形态等）硬拒且不可被规则覆盖
+- **安全层** — 路径/命令/域名策略、资源限额、审计日志、敏感文件质量规则
+  （no-commit-secret / no-forbidden-path）
 
 > ⚠️ **Windows 安全边界**：当前沙箱隔离仅支持 macOS (Seatbelt) 和 Linux (bubblewrap)。Windows 平台执行 Shell 工具时使用 `NoOpSandbox`（无隔离），后续计划通过 Job Object / AppContainer 补齐。在 Windows 平台上，请谨慎配置 `allowed_commands` 和路径策略。
 
@@ -114,7 +128,7 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 │    Provider 层       │ │      工具层 (Tools)           │
 │  DeepSeek V4 Pro    │ │  File · Glob · Grep · Shell   │
 │  DeepSeek V4 Flash  │ │  WebFetch · Task · MCP Bridge │
-│  Streaming + Tools  │ │  21 Built-in Tools           │
+│  Streaming + Tools  │ │  17 Built-in Tools           │
 └─────────────────────┘ └──────────────────────────────┘
 ```
 
@@ -125,7 +139,7 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 | `deepseeknova-core` | 核心类型：Runner / Tool trait、Registry、WireEvent |
 | `deepseeknova-agent` | Agent 主循环、Coordinator、Plan-Mode Runner |
 | `deepseeknova-provider` | DeepSeek / OpenAI 兼容 / Anthropic 流式 Provider |
-| `deepseeknova-tools` | 17 个内置工具实现 |
+| `deepseeknova-tools` | 17 个内置工具 + web 搜索 + LSP 诊断 + Context7 文档检索 |
 | `deepseeknova-mcp` | MCP 协议客户端（stdio / HTTP） |
 | `deepseeknova-metrics` | 会话级效能度量 + 评分卡（四维 + protocol/composite）落盘 |
 | `deepseeknova-graph` | 代码图检索引擎（tree-sitter + SQLite FTS5 + PageRank + repo map） |
@@ -190,13 +204,19 @@ model = "deepseek-chat"
 
 ```bash
 # CLI
-deepseeknova chat
-deepseeknova plan --prompt "重构这个模块"
-deepseeknova serve --port 8080
+deepseeknova-cli chat
+deepseeknova-cli plan "重构这个模块"
+deepseeknova-cli serve --addr 127.0.0.1:8080
+deepseeknova-cli serve --acp        # Agent Client Protocol stdio 模式
+deepseeknova-cli eval evals.jsonl   # 跑最小 eval 集（JSONL + must_contain）
 
 # TUI
-deepseeknova chat --tui
+deepseeknova-cli chat --tui
 ```
+
+`deepseeknova-cli serve` 会把每次 run 持久化到工作区 `.deepseeknova/runs/`：
+`GET /v1/runs` 列出任务，`POST /v1/runs/{id}/resume` 恢复（服务重启后
+running 任务自动标记 interrupted，可重新拉起）。
 
 ## 📊 CI 检查项
 
@@ -222,7 +242,7 @@ deepseeknova chat --tui
 | 后端 | Rust + SQLite FTS5 + tokio + axum |
 | 前端 | TUI (ratatui) · CLI (clap) · HTTP API (axum + SSE) |
 | 追踪 | OpenTelemetry (OTLP) |
-| 测试 | 1003 tests · cargo-llvm-cov · CI 三平台 |
+| 测试 | 1108 tests · cargo-llvm-cov · CI 三平台 |
 
 ## 📄 License
 

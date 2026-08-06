@@ -64,7 +64,7 @@ crates/
 ├── deepseeknova-graph/        # 代码图检索引擎（tree-sitter + SQLite FTS5 + PageRank + repo map）
 ├── deepseeknova-checkpoint/   # 检查点
 ├── deepseeknova-store/        # 存储层
-├── deepseeknova-security/     # 安全审计、路径检查、策略、质量规则（QualityPolicy）、失败模式库（failure_pattern）
+├── deepseeknova-security/     # 安全审计、路径检查、策略、质量规则（QualityPolicy）、失败模式库（failure_pattern）、shell 只读分类（readonly）、子代理输出净化（sanitize）
 ├── deepseeknova-scanner/      # 安全扫描（deepsec 式静态规则 + AI 调查 + 报表）
 ├── deepseeknova-sandbox/      # 沙箱（bubblewrap、seatbelt）
 ├── deepseeknova-skills/       # 技能加载（含 fitness 生命周期：使用/成功记录、进化建议、deprecated 过滤）
@@ -147,6 +147,62 @@ make audit          # 安全审计（先检查 cargo-deny，再执行 cargo deny
   一个测试删除目录导致另一个测试扫描到空结果（flaky panic 在 unwrap）
 - [如何避免]：测试临时目录统一用 `tempfile::tempdir()`（持有 TempDir 自动清理），
   不要用时间戳或固定路径
+- [文档注释交叉引用缺前缀]：子模块 doc 注释里写 `[`SandboxTier::X`]` 而未 `use`
+  该类型时，rustdoc 报 "no item named"，make check 的 doc 阶段不阻断但积累警告
+- [如何避免]：doc 注释交叉引用一律用完整路径 `[`crate::Type::X`]`，改完跑
+  `cargo doc --no-deps` 确认零警告
+- [用户可见文案与测试断言耦合]：升级阻断/报错文案（如 permission deny 信息）时，
+  既有测试断言旧字符串导致失败——本轮 `agent_permission_gate_denies_tool` 即中招
+- [如何避免]：改动用户可见文案前先 grep 测试中的文案断言；断言应验证新契约
+  （原因+建议），而非只改字符串
+- [任意参数安全表混入命令执行器]：readonly 分类器把 `env`/`find`/`xargs` 列入
+  "任意参数安全"，导致 `env rm -rf /`、`find . -exec rm {} +` 被免询问放行
+  （双审查同时标 critical）
+- [如何避免]：凡能启动其他程序/执行命令的工具（env/xargs/find -exec、git
+  submodule foreach 等）一律降级为逐 flag 白名单或显式拒绝，绝不进
+  "任意参数安全"表；分类器补"执行器"回归测试
+- [注释声称的强制与实际实现脱节]：`with_frozen_denies` 注释写"执行层仍由共享
+  PermissionGate 强制"，但 SubAgentRunner 路径根本没有执行层（工具调用被丢弃，
+  子代理死循环到 max_steps），审查才暴露
+- [如何避免]：跨层强制（prompt 层 + 执行层）必须两端都落地再写注释；写完注释
+  立即 grep 确认执行路径真实存在 gate/强制点，而非只凭构建意图
+- [新执行段漏 replay 不变量]：C2 给 SubAgentRunner 补工具执行后，只写 Role::Tool
+  消息不写 assistant(tool_calls)，ValidatedRequest 把孤儿 Tool 结果判为
+  OrphanToolResult → 子代理任何工具调用后硬失败（P0 级功能回归）
+- [如何避免]：补工具执行循环时，先对照主 agent 路径确认消息序列不变量
+  （assistant(tool_calls) → 逐条 Tool 结果）；新执行段必须带 replay 级测试，
+  不能只测到 gate 决策
+- [H1 修一方向漏另一方向]：readonly 免询问只对 deny 移到策略后，ask 规则仍被
+  只读短路（用户 ask: [Bash("git *")] 对 git status 失效）——规则优先级语义
+  必须对称处理 deny/ask 两个方向
+- [如何避免]：调整权限判定顺序时枚举全部规则表（deny/ask/allow/mode）的交互，
+  每个方向补正反两例测试；修复 H1 类问题后立即复查对称方向
+- [多词"任意参数安全"前缀含写形态]：readonly 表把 `date -u`/`hostname -f`
+  等带固定参数条目按 `starts_with` 放行，导致 `date -u -s ...`、
+  `hostname -f newname` 被免询问执行——"固定参数"不等于"后续参数任意"
+- [如何避免]：凡命令可因后续位置参数/flag 转为写操作（date/hostname/timedatectl），
+  一律精确 argv 匹配或专项白名单，禁止前缀匹配进任意参数表
+- [布尔 flag 的 `=value` 形态绕过精确拒绝]：`gh auth status --show-token=true`
+  未被 `a == "--show-token"` 命中，token 泄露进 transcript
+- [如何避免]：拒绝/放行布尔 flag 时先归一化 `--flag=value` 与短 flag `=value`
+  形态，再按值判定；补 `=true`/`=false` 正反测试
+- [路径祖先回溯丢弃 `..` 分量]：`is_within_workspace` 对
+  `root/missing/../../outside` 向上回溯时 `file_name()` 对 `..` 返回 None，
+  分量被丢弃后误判为工作区内；配合 create_dir_all 可真实逃逸
+- [如何避免]：回溯剩余段必须显式保留 ParentDir 分量并在拼接后词法折叠；
+  路径守卫补"不存在的中间目录 + `..` 逃逸"回归测试
+- [gh api 隐式 POST 被当只读放行]：`gh api` 未显式 `--method` 时被分类器判为
+  只读，但带 `-f`/`-F`/`--input` 时 gh 会自动切 POST，创建/更新资源免询问执行
+- [如何避免]：gh api 出现写 payload flag 且无显式 GET 时一律归 NotReadOnly，
+  补隐式 POST 正反测试
+- [拒绝即教育建议把通配符当 glob 放大]：`rm *` 被 `simple_glob_match` 按前缀
+  解释，建议规则可放行 `rm -rf /`；中间 glob（`rm *.tmp`）则匹配不上原命令
+- [如何避免]：建议规则一律精确匹配（Rule.exact 字面量相等），用户配置规则
+  保持 glob 语义；补 `rm *`/`rm *.tmp` 正反回归测试
+- [常规 shell 组合硬拒且不可覆盖]：链式/重定向/命令替换判 Dangerous 后
+  allow 规则无法放行，`cat a | head`、`echo x > file` 等常规命令不可执行
+- [如何避免]：普通 shell 组合归 NotReadOnly 走权限审批/规则；Dangerous 仅保留
+  工具级注入面（git -c/--config-env、格式串注入、UNC/URL/SMB 路径形态）
 
 ---
 

@@ -13,7 +13,7 @@ DeepseekNova 是一个 Rust 编写的 AI Agent 框架，包含 22 个 crate。
 | 项 | 现状 | 说明 |
 |----|------|------|
 | **正式名** | `DeepseekNova` | 仓库名、crate 前缀（`deepseeknova-*`）、环境变量前缀（`DEEPSEEKNOVA_`）均使用此名 |
-| **工作区目录名** | `DPronix` | 本地检出目录沿用早期名称，仅为路径名，不代表项目名 |
+| **工作区目录名** | `deepseeknova` | 当前检出目录名（历史上曾为 `DPronix`），仅为路径名，不代表项目名 |
 | **历史路径** | `crates/reasonix-*` → `crates/dpronix-*` → `crates/deepnova-*` → `crates/deepseeknova-*` | 完整重命名链：`reasonix` → `DPronix`（提交 `69509d5`）→ `DeepNova`（提交 `8a95226`）→ `DeepseekNova`（提交 `c5336db`）；另外 `.dpronix/` 已在提交 `7319692` 迁移至 `.deepseeknova/`，环境变量前缀从 `DPRONIX_` 统一为 `DEEPSEEKNOVA_` |
 
 重命名工作已全部完成，当前代码与配置中不再使用旧名称。
@@ -380,7 +380,7 @@ tools_allowed:
 ## 七、项目后置产出 (Post-Project Artifacts) [已实现]
 
 > **状态**：[已实现]（见 §十 P3）。生成能力位于 `deepseeknova-core::artifacts`
-> （wiki/cards/distill，含测试），CLI 入口为 `deepseeknova artifacts wiki|cards`；
+> （wiki/cards/distill，含测试），CLI 入口为 `deepseeknova-cli artifacts wiki|cards`；
 > 记忆沉淀由 runtime 的蒸馏钩子（启发式）与 `DistillationEngine`（库级）提供。
 
 ### 流程
@@ -468,9 +468,11 @@ Phase 5: 沉淀 (Distill) ← 这是大多数 Agent 缺失的
 │  macOS: Seatbelt (sandbox-exec)                  │
 │  Linux: bubblewrap (bwrap)                       │
 │  Windows: NoOpSandbox (无隔离，待实现)              │
+│  三档：ReadOnly / WorkspaceWrite / FullAccess    │
 ├─────────────────────────────────────────────────┤
 │  Layer 2: 权限门控 (Permission)                    │
-│  Allow / Ask / Deny — 12 条独立规则               │
+│  Allow / Ask / Deny 规则 + CheckVerdict          │
+│  会话缓存 + 速率限制 + 只读命令分类器               │
 ├─────────────────────────────────────────────────┤
 │  Layer 3: 安全策略 (Security)                      │
 │  路径白名单/黑名单、命令前缀过滤、域名限制            │
@@ -484,17 +486,19 @@ Phase 5: 沉淀 (Distill) ← 这是大多数 Agent 缺失的
 └─────────────────────────────────────────────────┘
 ```
 
-### 恶意命令黑名单
+### 只读命令分类与危险形态硬拒
 
-`deepseeknova-permission` 内置以下模式检测：
-
-- `rm -rf /*` — 递归删除根目录
-- `mkfs` — 格式化文件系统
-- `dd if=` — 磁盘写入
-- `:(){ :|:& };:` — Fork bomb
-- `chmod -r 777 /` — 权限篡改
-- `> /dev/sda` — 设备写入
-- `shutdown` — 关机
+`deepseeknova-security::readonly` 对 shell 命令做四层分类（任意参数安全 /
+零参 / 精确形式 / 子命令 + flag 白名单），命中只读形态免询问放行；引用感知的
+注入检测把命令替换、未引用链式/重定向、git 全局 `-c`/`--config-env` 与格式串
+注入、`find -exec`、`git submodule foreach` 等执行器形态区分处理：普通 shell
+组合（命令替换、未引用链式/重定向）判为 NotReadOnly 走权限审批/规则；工具级
+注入面（git 全局 `-c`/`--config-env`、格式串注入、UNC/URL/SMB 路径形态）判为
+Dangerous——在 `PermissionGate` 层硬拒（`CheckVerdict::hard_deny`），
+不可通过规则覆盖；执行器形态由专项白名单拒进只读表（走权限流程）。
+显式 deny/ask 规则优先于只读免询问。子代理工具执行前经共享 gate 检查，
+输出经 `sanitize_output` 中和权限修改指令形状（`permissions.allow`、
+`--dangerously-skip-permissions`、`<settings-json>` 等）后再进入父上下文。
 
 ---
 
@@ -545,3 +549,30 @@ Phase 5: 沉淀 (Distill) ← 这是大多数 Agent 缺失的
 
 设计文档：`docs/superpowers/specs/2026-08-05-task-quality-loop-design.md`
 （§12 为实现偏差记录）。
+
+---
+
+## 十二、日常体验包（2026-08-07 已实现）
+
+面向个人开发者的“编码日常”能力，定位与 §十一 互补：治理能力管失败与质量，
+本节管模型与工具的日常效率。均默认可用或默认关闭可配，不改变既有零配置路径。
+
+- **web_search 工具**：四后端（DuckDuckGo 免 key / Tavily / Bing / SearXNG，
+  `[tools.web_search]` 配置）。请求关闭自动重定向，每一跳重新校验域名策略与
+  SSRF（复用 `web_fetch::validate_host_ssrf`）；未知 provider 直接报错。
+- **LSP 编辑后诊断**：`lsp_diagnostics` 是精简 stdio LSP client
+  （rust-analyzer / pyright-langserver / gopls / typescript-language-server /
+  clangd，`[tools.lsp]` 可覆盖服务器与超时）。write/edit/move 执行成功后由
+  Agent 主循环自动调用并把诊断注入 ToolResult；空诊断宽限期 1.5s，避免干净
+  文件等满超时；执行前校验 `FileRead` 能力。
+- **Auto 模型+思考路由**：`[agent] auto_route = true` 时，Agent 每次
+  `run_stream` 开始时调用一次 `AutoRouteDecider`（provider crate），由廉价
+  模型决定 flash/pro 与 thinking off/high/max，整轮使用选定 provider；决策状态
+  按 run 隔离（serve 并发请求不串扰）；失败或显式 `--model`/effort 时回落
+  默认 provider。
+- **serve 持久化任务恢复**：run 落盘 `.deepseeknova/runs/<id>.json`，
+  `GET /v1/runs` 列表、`POST /v1/runs/{id}/resume` 重跑；服务重启把遗留
+  running 标为 interrupted；resume 通过 `DurableRuns::claim` 原子迁移状态防
+  并发重复执行；SSE 客户端断开不取消任务，run 继续跑完并正确落盘。
+- **Windows 运行时警告**：无 OS 级沙箱后端时 CLI 启动即打印显式警告
+  （macOS Seatbelt / Linux bubblewrap 之外平台回落 NoOpSandbox）。

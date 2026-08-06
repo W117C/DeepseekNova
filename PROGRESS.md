@@ -1,5 +1,64 @@
 # PROGRESS — TUI 设计功能完善（任务书执行）
 
+## 日常体验包 + 审查修复（2026-08-07，非任务书轮）
+
+- 功能：web_search（ddg / tavily / bing / searxng）、lsp_diagnostics（写后
+  自动注入诊断）、`[agent] auto_route`（每 run 决策一次、按 run 隔离）、
+  serve durable runs（`/v1/runs` + resume + 原子 claim）、Windows 运行时
+  沙箱警告。
+- 审查：`ocr delegate preview` 61 可审查文件；7 个发现（LSP 空诊断等满超时、
+  auto 路由缓存跨并发 run 串扰、SSE 断开取消任务并误标 Done、web_search 重定向
+  SSRF、未知 provider 静默回落 DDG、LSP 缺 FileRead 门控、resume 竞态）全部
+  修复并补回归测试。
+- 验证：`make check` EXIT=0（fmt / clippy -D warnings / 全 workspace 测试 /
+  doctest / doc 零警告）。
+- 状态：未提交、未 push、无 PR；分支 feat/semantic-retrieval 继续承载全部
+  未提交改动。
+- 遗留（已做）：LSP 端到端 fake-server 测试（空诊断 1.5s 宽限内返回，不再
+  等满超时）；最小 evals（`eval` 子命令 + JSONL `must_contain`）；ACP 适配器
+  （`serve --acp`，initialize/session/new/prompt/cancel/close + 会话多轮历史
+  + `Ask` fail-closed）。
+- 清理：`docs/experiments/`、`scripts/experiments/` 与
+  `docs/superpowers/mockups/` 按用户批准全部删除（未跟踪目录直接删，mockups
+  已 git rm）。
+- 验证：`make check` EXIT=0（含新增 ACP 往返单测、eval 3 单测、LSP 空诊断
+  e2e）；`serve --acp` 进程级冒烟通过（initialize / session/new / close 协议
+  响应正确、按 cwd 建 agent）；真实 LLM 冒烟因 `DEEPSEEK_API_KEY` 缺失
+  blocked，未伪造凭据。
+- 状态：待提交、待推送、待建 PR（分支 feat/semantic-retrieval）。
+
+## 安全边界收尾二轮（2026-08-06，审查修复轮）
+
+非任务书轮：对上一轮收尾后的工作区再做一次审查 + 修复 + 知识收尾。
+
+- 审查：`ocr delegate preview` 55 可审查文件；2 critical + 3 high + 1 medium +
+  1 low，详见 crates/REVIEW.md 二轮分节。
+- 修复：gh api 隐式 POST、建议规则通配符放大（Rule.exact）、file `-C`、
+  裸 printenv、shell 组合 Dangerous→NotReadOnly、coordinator history 上限、
+  删除 dbg_status_test.rs 死文件。
+- 验证：`make check` EXIT=0；security 103 / permission 34 / tools 69+12+7 /
+  agent coordinator 全绿。
+- 文档：GUIDE（权限语义/TUI 快捷键/折叠/审批浮层）、CHANGELOG Unreleased、
+  REVIEW/CLOSEOUT 追加分节、AGENTS.md §5 归档 3 条。
+- 状态：未提交、未 push、无 PR；docs/experiments/ + scripts/experiments/
+  已于 2026-08-07 按用户批准删除。
+
+## 安全边界收尾（2026-08-06，审查修复轮）
+
+非任务书轮：对工作区未提交的安全边界改动做审查 + 修复 + 知识收尾。
+
+- 审查：`ocr delegate preview` 17 可审查文件；3 high + 5 medium + 1 flaky，
+  详见 crates/REVIEW.md 本轮分节。
+- 修复：readonly 分类器写形态误放行（date/hostname）、gh token `=true` 绕过、
+  路径 `..` 逃逸、deny 建议误导、bubblewrap FullAccess、journalctl 漏拒、
+  沙箱工作区默认可写、子代理无 gate 行为一致性、并行测试临时目录撞名。
+- 验证：`make check` EXIT=0（fmt / clippy -D warnings / 1108 passed /
+  doctest / doc）；修复前复现用例独立 harness 实测翻转。
+- 文档：GUIDE sandbox 节、README/README_EN（权限模型/工具数/测试数）、
+  DESIGN §九、CHANGELOG Unreleased、SECURITY.md、AGENTS.md §5 防错清单、
+  crates/CLOSEOUT.md 本轮六事实面。
+- 状态：未提交、未 push、无 PR（提交/推送由用户决定）。
+
 ## 任务书：记忆语义检索（embedder）最小闭环（2026-08-05，dev-loop 轮）— 任务状态
 - [x] 任务 0：基线核验（make check EXIT=0；feat/memory-lifecycle@e941f14 干净；
       core 132 / agent 231 / provider 35 / runtime 52 / cli 32 / config 33+18 /

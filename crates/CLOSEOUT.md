@@ -1,3 +1,95 @@
+# CLOSEOUT — 二轮审查修复（gh api 隐式 POST / 建议规则通配符 / shell 组合降级 / coordinator history，2026-08-06）
+
+---
+
+# CLOSEOUT — 日常体验包 + 遗留全清（web_search / LSP / auto / serve durable / ACP / eval，2026-08-07）
+
+## 六事实面状态
+
+| 事实面 | 状态 | 证据 |
+|--------|------|------|
+| 代码 | changed-and-verified | 分支 feat/semantic-retrieval；日常体验包 + OCR 7 发现修复 + ACP stdio 适配器 + eval 子命令 + LSP 端到端测试；`make check` EXIT=0（fmt / clippy -D warnings / 全 workspace 测试 / doctest / doc 零警告） |
+| 运行态 | verified-current（局部） | `serve --acp` 进程级冒烟通过（initialize / session/new / close 协议响应正确，按会话 cwd 建 agent 并初始化 memory store）；真实 LLM 冒烟因 `DEEPSEEK_API_KEY` 缺失 blocked，未伪造凭据 |
+| 文档 | changed-and-verified | README / GUIDE / CHANGELOG / README_EN / serve+cli README 同步 ACP 与 eval；PROGRESS 与 CLOSEOUT 追加本轮；neat-freak 前序已同步 DESIGN / AGENTS / BUILDING / tool README |
+| 规则 | verified-current | AGENTS.md 无新增漂移；跨 crate 改动（cli/serve/tools/agent/provider）遵守 §1 推理专家协议并全量验证 |
+| 记忆 | not-applicable | 平台记忆为 generated-read-only，本轮无授权写入 |
+| 工作区 | cleaned | `docs/experiments/` + `scripts/experiments/` + `docs/superpowers/mockups/` 按用户批准删除；无 stash、无额外 worktree；改动待提交/推送/建 PR |
+
+## 遗留清单执行情况（用户批准“删除候选都删除，遗留都做一遍”）
+
+- LSP 端到端测试：已做。`LspSession` 重构为可注入 stdin/stdout 的会话，
+  fake in-memory server 覆盖 initialize → didOpen → 空诊断，断言 1.5s
+  宽限内返回（不再等满 `timeout_secs`）。
+- 最小 evals：已做。`deepseeknova-cli eval`（JSONL + `#` 注释 +
+  `must_contain` 断言，md/json 报告），3 个单测。
+- ACP 适配器：已做。`serve --acp` 支持 initialize / session/new /
+  session/prompt / session/cancel / session/close；会话按 cwd 重建 agent 并
+  共享多轮历史；`Ask` 权限 fail-closed；prompt 失败走 JSON-RPC error 信封；
+  stdin EOF 取消在途任务并排空输出。in-memory duplex 往返测试 1 个。
+- 真实冒烟：协议面完成（见运行态）；真实 LLM 调用 blocked（无 API key），
+  待用户提供凭据后补 `deepseeknova-cli run` / `eval` 冒烟。
+- 删除：3 个 mockups 已 `git rm`；未跟踪的 experiments 目录与其中 .DS_Store
+  已删除。
+- 提交/推送/PR：分支上继续开发，完成后推送并建 PR（见状态）。
+
+---
+
+## 六事实面状态
+
+| 事实面 | 状态 | 证据 |
+|--------|------|------|
+| 代码 | changed-and-verified | 分支 feat/semantic-retrieval；未提交 68 项（60 修改 + 7 新增 + 1 删除）；`make check` EXIT=0（fmt/clippy/全 workspace 测试/doctest/doc 零警告）；新增回归测试覆盖 gh api 隐式 POST、file `-C`、printenv、建议规则精确匹配、shell 组合 NotReadOnly、coordinator history 上限 |
+| 运行态 | verified-current（局部） | 无部署/服务面；TUI 已在本机 Terminal 启动冒烟（`chat --tui` 正常渲染并可用真实 API key 进入）；实验运行态产物已删除（用户批准，见 2026-08-07 收尾） |
+| 文档 | changed-and-verified | GUIDE（权限/TUI 快捷键/折叠/审批浮层）、CHANGELOG Unreleased（Changed/Fixed）、README/README_EN/DESIGN/SECURITY 已同步本轮语义；crates/REVIEW.md 追加二轮审查分节 |
+| 规则 | changed-and-verified | AGENTS.md §5 新增 3 条防错清单（gh api 隐式 POST、建议规则通配符、shell 组合硬拒）；无其他规则漂移 |
+| 记忆 | not-applicable | 平台记忆为 Codex generated-read-only，本轮无授权写入 |
+| 工作区 | pending | 全部改动未提交、未 push、无 PR；docs/experiments/ + scripts/experiments/ 与 docs/superpowers/mockups/ 已于 2026-08-07 按用户批准删除；无 stash、无额外 worktree；无其他删除候选（dbg_status_test.rs 已按修复删除） |
+
+## 审查修复闭环
+
+- 审查范围：`ocr delegate preview` 工作区模式 55 可审查文件（8.5k 插入）；
+  AGENTS.md 强制路由 open-code-review-delegate；人工重点审安全/权限/沙箱/provider/
+  子代理/coordinator/TUI 审批路径。
+- 审查结论：2 critical（gh api 隐式 POST、建议规则通配符放大）+ 3 high
+  （file `-C`、裸 printenv、shell 组合硬拒不可覆盖）+ 1 medium（coordinator
+  history 无界）+ 1 low（dbg 死文件）。
+- 修复：全部落地并补回归测试；3 个并行子代理按文件分区执行，父级补 coordinator
+  单条截断并做最终验收；修复后 `make check` EXIT=0。
+
+## 遗留（如实）
+
+- 未提交、未 push、无 PR（提交/推送由用户决定）。
+- docs/experiments/ + scripts/experiments/（未跟踪实验交付物）已按用户批准删除，
+  不在版本库中。
+- 会话级：协作子代理槽位仍有历史残留（test_spawn 等），属会话进程，不占工作区；
+  重启会话即释放。
+
+---
+
+# CLOSEOUT — 安全边界收尾（readonly 分类器 + 权限裁决 + 子代理执行 + 沙箱档位，2026-08-06 审查修复轮）
+
+## 六事实面状态
+
+| 事实面 | 状态 | 证据 |
+|--------|------|------|
+| 代码 | changed-and-verified | 分支 feat/semantic-retrieval；未提交 20 修改 + 2 新增（readonly.rs / sanitize.rs）；`make check` EXIT=0（fmt/clippy -D warnings/全 workspace 1108 passed/doctest/doc 零警告）；新增回归测试覆盖 date/hostname 写形态、gh `--show-token=true`、路径 `..` 逃逸、bubblewrap FullAccess、journalctl 写操作、deny 建议 |
+| 运行态 | not-applicable | 无部署/服务面；本轮为本地库变更，聚焦测试 + 独立 harness 实测复现修复前后行为 |
+| 文档 | changed-and-verified | GUIDE（sandbox 节改 `[sandbox] enabled`、权限示例）、README/README_EN（权限模型、17 工具、1108 tests）、DESIGN §九（三档沙箱/CheckVerdict/只读分类器）、CHANGELOG Unreleased（Added/Fixed）、SECURITY.md（readonly/CheckVerdict/sanitize） |
+| 规则 | changed-and-verified | AGENTS.md §5 新增 4 条防错清单（多词前缀写形态、布尔 flag `=value`、路径 `..` 丢弃 + 既有 H1/执行层条目）；无其他规则漂移 |
+| 记忆 | not-applicable | 无平台记忆写入 |
+| 工作区 | pending | 全部改动未提交；分支未 push、无 PR；无 stash、无额外 worktree；期间出现的未跟踪 PRODUCT.md 已消失（非本轮产物，未处理） |
+
+## 审查修复闭环
+- 审查范围：`ocr delegate preview` 工作区模式 17 可审查文件（3.2k 插入），规则取 system 默认组；人工逐文件审 diff + 全量上下文。
+- 审查结论：3 high（date/hostname 写形态误放行、gh token 布尔绕过、路径 `..` 逃逸）+ 5 medium（deny 建议误导、bubblewrap FullAccess 语义、GUIDE 工作区可写、journalctl 漏拒、子代理无 gate fail-closed）+ 1 flaky（并行测试临时目录撞名）。
+- 修复：全部落地并补回归测试；修复后复跑独立 harness 确认三类安全用例由 ReadOnly/Allow 翻转为 NotReadOnly/Deny。
+
+## 遗留（如实）
+- 无未修问题；未提交、未 push、无 PR（提交/推送由用户决定）。
+- BACKEND_AUDIT.md 为 2026-08-01 历史审计快照（测试数等已过期），未改写；docs/superpowers/plans 按项目惯例存档保留。
+
+---
+
 # CLOSEOUT — 记忆语义检索（embedder）最小闭环（2026-08-05 dev-loop 轮）
 
 ## 六事实面状态

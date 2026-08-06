@@ -13,7 +13,8 @@ in a split-pane TUI:
   when the main model's `context_window` is configured; >80% yellow, >95% red),
   scroll position.
 - **Sidebar** (`Ctrl+\` toggle; auto-hidden on terminals narrower than 90 columns) —
-  会话 / 工具活动 / MCP / 成本 / 技能 panels, `Tab` or `Ctrl+1..5` to switch.
+  会话 / 工具活动 / MCP / 成本 / 技能 panels, `Tab` or `Ctrl+1..5` to switch;
+  会话面板列出磁盘保存的会话（↑↓/j/k 选择、Enter 恢复）。
 - **Input pane** (bottom) — multi-line editing with a visible cursor:
   `Shift+Enter` / `Ctrl+J` inserts a newline, `Home`/`End` move per line,
   horizontal window and vertical scroll both follow the cursor, input history,
@@ -23,6 +24,8 @@ in a split-pane TUI:
 - **Command palette** — `Ctrl+K` 模糊搜索全部命令（与斜杠命令共用注册表）,
   有参数的命令内联子输入.
 - **Hint line** — context-aware per-focus key hints.
+- **Welcome card** — 首次启动（无对话）显示圆角欢迎卡（命令/快捷键/最近会话数）；
+  等待 agent 回复时对话区显示转圈动画。
 
 ### Architecture
 
@@ -61,8 +64,10 @@ unknown values fall back to `codex` with a notice). Programmatic injection via
 - `↑`/`↓` input history (line movement when the input is multi-line);
   `←`/`→` cursor movement; `Home`/`End` per-line (idle); `Home`/`End` scroll when running
 - `j`/`k` select message (navigation focus), `Enter` toggle fold, `y` copy
+- 侧边栏会话面板：`↑`/`↓`（`j`/`k`）选择保存的会话，`Enter` 恢复
 - `Backspace`/`Delete` edit; `Ctrl+U` clear input; `Ctrl+W` delete word before
 - `PageUp`/`PageDown` scroll the conversation pane
+- `鼠标滚轮` scrolls the conversation history (auto re-follows at the bottom)
 
 ### Slash commands
 

@@ -4,6 +4,94 @@
 
 ---
 
+## 轮次：feat/semantic-retrieval（工作区未提交，二轮审查修复，2026-08-06）
+
+### 覆盖声明
+
+- **范围确认**：`ocr delegate preview` 工作区模式输出 55 可审查文件 / 总插入
+  8539 / 删除 938（Markdown 与已删除文件被 OCR 排除，已人工审关键 diff）。
+- **规则**：仓库根无 `ocr.rules.json`，`ocr delegate rule` 使用 system 默认规则；
+  审查按 AGENTS.md 强制路由走 open-code-review-delegate 委派模式。
+- **人工审 diff**：重点审 security/readonly、permission、sandbox、provider、
+  sub_agent、coordinator、TUI 权限审批路径；readonly.rs（1691 行）与
+  sanitize.rs（217 行）全文阅读。
+- **验证**：`make check` EXIT=0（fmt / clippy / 全 workspace 测试 / doctest /
+  doc 零警告）；security 103 / permission 34 / tools 69+12+7 / coordinator
+  history 用例全绿。
+
+### 评论表（二轮审查）
+
+| # | 路径 | 内容 | 严重度 |
+|---|------|------|--------|
+| R1 | readonly.rs | `gh api` 带 `-f`/`-F`/`--input` 且未显式 GET 时判只读，gh 实际自动切 POST（创建/更新资源免询问） | critical |
+| R2 | permission/lib.rs | 建议规则把含 `*` 的命令原文当 glob，`rm *.tmp` 建议可放大放行 `rm -rf /` | critical |
+| R3 | readonly.rs | `file`/`file -f` 放行 `-C`/`--compile`（写 magic.mgc） | high |
+| R4 | readonly.rs | 裸 `printenv` 输出全部环境变量（含 API key）进 transcript | high |
+| R5 | readonly.rs + shell.rs + permission | 链式/重定向/命令替换判 Dangerous 硬拒，allow 规则无法覆盖，常规命令不可执行 | high |
+| R6 | coordinator.rs | 步骤历史无界增长，后续 prompt 线性膨胀 | medium |
+| R7 | tui/render/dbg_status_test.rs | 未挂模块的调试测试死文件 | low |
+
+### 修复轮验证
+
+- R1：api 分支检测写 payload flag，无显式 GET 一律 NotReadOnly；正反测试覆盖
+  `-f`/`-F`/`--input`/`-X POST` 与 `--method GET -f`。
+- R2：`Rule` 新增 `exact` 精确匹配，建议规则不再做 glob 解释；用户配置规则语义不变。
+- R3/R4：`file` 移出任意参数表并新增 `file_allowed` 拒绝 `-C`；`printenv`
+  仅放行显式变量名。
+- R5：普通 shell 组合归 NotReadOnly 走审批/规则，Dangerous 仅保留工具级注入面。
+- R6：history 上限 50 条 / 50 万字符 / 单条 2000 字符截断。
+- R7：删除 dbg_status_test.rs。
+- 复跑：`make check` EXIT=0；修复前复现用例全部翻转为预期结果。
+
+---
+
+## 轮次：feat/semantic-retrieval（工作区未提交，安全边界收尾，2026-08-06）
+
+### 1. 覆盖声明
+
+- **范围确认**：`ocr delegate preview` 工作区模式输出 17 可审查文件 / 总插入
+  3218 / 删除 97（AGENTS/GUIDE/SECURITY/Cargo.lock 被 OCR 按 unsupported_ext
+  排除，已人工审 diff）。
+- **规则**：仓库根无 `ocr.rules.json`，`ocr delegate rule` 使用 system 默认规则。
+- **人工审 diff**：逐文件审工作区 diff；新增 readonly.rs（1650 行）与
+  sanitize.rs（217 行）全文阅读；辅助阅读 permission/sandbox/runtime/sub_agent
+  调用链与 fs 工具路径消毒实现。
+- **测试**：`cargo check --workspace` 通过；permission/security/sandbox/runtime
+  聚焦测试全绿；`make check` EXIT=0（1108 passed / 2 既有 ignored）。
+
+### 2. 评论表（审查轮）
+
+| # | 路径 | 内容 | 严重度 |
+|---|------|------|--------|
+| R1 | readonly.rs | `date -u`/`date +%s`/`hostname -f/-s` 前缀匹配放行写形态（`date -u -s ...`、`hostname -f newname`） | high |
+| R2 | readonly.rs | `gh auth status --show-token=true`/`-t=true` 绕过 token 拒绝 | high |
+| R3 | permission/lib.rs | `is_within_workspace` 回溯丢弃 `..`，`root/missing/../../outside` 误判工作区内 | high |
+| R4 | permission/lib.rs | deny 规则命中仍附无效 allow 建议且无说明 | medium |
+| R5 | sandbox/bubblewrap.rs | FullAccess 档未实现"可写任意路径"，与 seatbelt/文档不一致 | medium |
+| R6 | GUIDE.md | sandbox 节仍写 `tools.sandbox = true`，且"工作区默认可写"当时未实现 | medium |
+| R7 | readonly.rs | `journalctl --setup-keys`/`--update-catalog` 写操作漏拒 | medium |
+| R8 | sub_agent.rs | 无 permission gate 时全部 fail-closed，与主 agent/文档不一致 | medium |
+| R9 | agent.rs（测试） | 并行测试临时目录纳秒撞名 → `git init` flaky | low |
+
+### 3. 修复轮验证
+
+- R1/R2/R7：readonly 表/gh 判定/journalctl 拒绝列表修复；独立 harness 实测
+  `date -u -s ...`、`hostname -f newname`、`gh auth status --show-token=true`
+  均由 ReadOnly 翻转为 NotReadOnly，`=false` 形态仍 ReadOnly。
+- R3：回溯余段保留 `ParentDir` + 拼接后词法折叠；新增
+  `check_denies_dotdot_escape_through_missing_dir` 回归测试。
+- R4：规则 deny 不再生成 allow 建议；`agent_permission_gate_denies_tool` 断言
+  同步收紧。
+- R5：FullAccess 绑定 `/` 读写、移除只读系统绑定；bubblewrap 测试补断言。
+- R6：runtime 把工作区根并入沙箱可写绑定；GUIDE sandbox 节改
+  `[sandbox] enabled = true`。
+- R8：子代理无 gate 时直接执行（与主 agent 权限关闭语义一致）。
+- R9：改用 `tempfile::tempdir()`（agent dev-deps 增加 tempfile）。
+- 复跑：`make check` EXIT=0（fmt / clippy -D warnings / 全 workspace 1108 passed /
+  doctest / doc），修复前复现用例全部翻转为预期结果。
+
+---
+
 ## 轮次：feat/memory-lifecycle（8c7c450..ddfd4b4，记忆生命周期闭环）
 
 ### 1. 覆盖声明
