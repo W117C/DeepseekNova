@@ -36,12 +36,14 @@ A Rust-from-scratch AI agent framework — not a wrapper. Built specifically for
 
 ## 🎯 Key Features
 
-- **Deep reasoning + tool calling** — streaming reasoning output, 4-level reasoning effort, 17 built-in tools
+- **Deep reasoning + tool calling** — streaming reasoning output, 3-level reasoning effort (disabled / high / max; `low`/`medium` fold into high), 17 built-in tools
 - **Daily experience** — `web_search` (DuckDuckGo / Tavily / Bing / SearXNG),
   `lsp_diagnostics` (auto-injected into tool results after write/edit/move),
   auto model+thinking routing (`[agent] auto_route = true`), and durable
   serve runs (`GET /v1/runs` / `POST /v1/runs/{id}/resume`)
-- **Prefix-cache architecture** — cross-turn prompt prefix hits, real-time token tracking, budget control
+- **Prefix-cache support** — DeepSeek V4 API-level automatic prefix caching,
+  per-request cache-hit token tracking, and budget control (cross-turn
+  session-level hit-rate statistics are [planned])
 - **Sandboxed execution** — macOS Seatbelt / Linux bubblewrap isolation;
   allow/ask/deny rule gating (`deny > ask > allow > default mode`) with session
   caching and optional rate limiting; a four-layer read-only shell command
@@ -154,7 +156,7 @@ model = "deepseek-chat"
 | Backend | Rust + SQLite FTS5 + tokio + axum |
 | Frontend | TUI (ratatui) · CLI (clap) · HTTP API (axum + SSE) |
 | Tracing | OpenTelemetry (OTLP) |
-| Tests | 1251 tests · cargo-llvm-cov · 3-platform CI |
+| Tests | 1571 tests · cargo-llvm-cov · 3-platform CI |
 
 ## 📄 License
 

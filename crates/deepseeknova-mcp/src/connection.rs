@@ -1,3 +1,4 @@
+use crate::protocol;
 use crate::types::*;
 use anyhow::Context;
 use serde_json::Value;
@@ -206,19 +207,14 @@ impl McpConnection {
                         };
 
                         if let Some(id) = val.get("id").and_then(|i| i.as_u64()) {
-                            // Response to a pending request
+                            // Response to a pending request — forward the full
+                            // response object (including any `error` field) so
+                            // callers can inspect it (e.g. protocol-version
+                            // negotiation). Result extraction happens in
+                            // [`McpConnection::send_raw`].
                             let mut map = pending_r.write().await;
                             if let Some(p) = map.remove(&id) {
-                                if val.get("error").is_some() {
-                                    let err_msg =
-                                        val["error"]["message"].as_str().unwrap_or("unknown error");
-                                    let _ = p
-                                        .response_tx
-                                        .send(Err(anyhow::anyhow!("MCP error: {err_msg}")));
-                                } else {
-                                    let result = val.get("result").cloned().unwrap_or(Value::Null);
-                                    let _ = p.response_tx.send(Ok(result));
-                                }
+                                let _ = p.response_tx.send(Ok(val.clone()));
                             } else {
                                 warn!("MCP: response for unknown id {id}");
                             }
@@ -276,23 +272,14 @@ impl McpConnection {
     /// Perform the MCP `initialize` handshake and store the server's reported
     /// info and capabilities. Returns an error if the server rejects the
     /// handshake or the response cannot be parsed.
+    ///
+    /// The protocol version is negotiated: the client offers its newest
+    /// supported version and retries with the highest mutually supported one
+    /// when the server reports a version mismatch. The version the server
+    /// echoes back in `InitializeResult.protocolVersion` is authoritative.
     pub(crate) async fn handshake(&self, request_timeout: Duration) -> anyhow::Result<()> {
-        // Perform initialize handshake
-        let init_params = serde_json::to_value(InitializeRequest {
-            protocol_version: "2024-11-05".into(),
-            capabilities: ClientCapabilities {
-                roots: Some(RootsCapability { list_changed: true }),
-                sampling: None,
-                experimental: None,
-            },
-            client_info: ClientInfo {
-                name: "deepseeknova".into(),
-                version: "0.1.0".into(),
-            },
-        })?;
-
         let init_result = self
-            .send_raw("initialize", Some(init_params), request_timeout)
+            .negotiate_initialize(request_timeout)
             .await
             .context("MCP initialize failed")?;
 
@@ -321,15 +308,60 @@ impl McpConnection {
         Ok(())
     }
 
-    /// Send a JSON-RPC request and wait for the response.
-    ///
-    /// The bounded write channel applies backpressure to callers when the
-    /// child's stdin is blocked: [`mpsc::Sender::send`] awaits for buffer
-    /// space rather than letting the queue grow without bound, so no legal
-    /// message is dropped. The whole send-and-wait sequence is bounded by
-    /// `timeout_dur`, so a blocked or dead child still fails cleanly instead
-    /// of hanging the caller.
-    async fn send_raw(
+    /// Send `initialize` to the server, retrying with a lower protocol version
+    /// on a version-mismatch error. Returns the `initialize` `result` value.
+    async fn negotiate_initialize(&self, request_timeout: Duration) -> anyhow::Result<Value> {
+        let mut candidate = protocol::preferred_protocol_version().to_string();
+
+        loop {
+            let init_params = serde_json::to_value(InitializeRequest {
+                protocol_version: candidate.clone(),
+                capabilities: ClientCapabilities {
+                    roots: Some(RootsCapability { list_changed: true }),
+                    sampling: None,
+                    experimental: None,
+                },
+                client_info: ClientInfo {
+                    name: "deepseeknova".into(),
+                    version: env!("CARGO_PKG_VERSION").into(),
+                },
+            })?;
+
+            let resp = self
+                .send_full("initialize", Some(init_params), request_timeout)
+                .await?;
+
+            if let Some(err) = resp.get("error") {
+                if protocol::is_version_mismatch(&resp) {
+                    let supported = protocol::extract_supported_versions(&resp);
+                    if let Some(next) = protocol::highest_mutual(&supported) {
+                        if next != candidate {
+                            warn!("MCP server rejects protocol {candidate}; retrying with {next}");
+                            candidate = next;
+                            continue;
+                        }
+                    }
+                    anyhow::bail!(
+                        "MCP: no mutually supported protocol version (client {:?}, server {supported:?})",
+                        protocol::SUPPORTED_PROTOCOL_VERSIONS
+                    );
+                }
+                let msg = err
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("unknown error");
+                anyhow::bail!("MCP error: {msg}");
+            }
+
+            return Ok(resp.get("result").cloned().unwrap_or(Value::Null));
+        }
+    }
+
+    /// Send a JSON-RPC request and wait for the full response object
+    /// (including any `error` field). Used by [`Self::negotiate_initialize`]
+    /// for protocol negotiation and by [`Self::send_raw`] for result
+    /// extraction.
+    async fn send_full(
         &self,
         method: &str,
         params: Option<Value>,
@@ -376,6 +408,25 @@ impl McpConnection {
         }
     }
 
+    /// Send a JSON-RPC request and return the `result` field, failing when the
+    /// server answers with a JSON-RPC error object.
+    async fn send_raw(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        timeout_dur: Duration,
+    ) -> anyhow::Result<Value> {
+        let resp = self.send_full(method, params, timeout_dur).await?;
+        if let Some(err) = resp.get("error") {
+            let msg = err
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("unknown error");
+            anyhow::bail!("MCP error: {msg}");
+        }
+        Ok(resp.get("result").cloned().unwrap_or(Value::Null))
+    }
+
     /// Public request method used by McpClient.
     pub async fn request(
         &self,
@@ -418,6 +469,7 @@ mod tests {
     use super::*;
     use crate::test_util::{connect_ready, connect_streams, init_result};
     use serde_json::json;
+    use std::sync::Mutex;
     use tokio::io::duplex;
 
     /// The fake-server initialize reply, with the request's `id` filled in.
@@ -659,6 +711,60 @@ mod tests {
         assert!(
             err.chain().any(|c| c.to_string().contains("init denied")),
             "unexpected error: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handshake_retries_with_lower_version_on_mismatch() {
+        // The server rejects 2025-06-18 with a version-mismatch error and
+        // accepts 2025-03-26. The client must retry and settle on the lower
+        // mutually supported version.
+        let attempts: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let attempts_capture = Arc::clone(&attempts);
+        let conn = connect_streams(
+            move |req| {
+                if req["method"] == "initialize" {
+                    let requested = req["params"]["protocolVersion"]
+                        .as_str()
+                        .unwrap_or("?")
+                        .to_string();
+                    attempts_capture.lock().unwrap().push(requested);
+                    if req["params"]["protocolVersion"] == "2025-06-18" {
+                        Some(json!({
+                            "jsonrpc": "2.0",
+                            "error": {
+                                "code": -32602,
+                                "message": "Unsupported protocol version",
+                                "data": {"supported": ["2025-03-26", "2024-11-05"]}
+                            }
+                        }))
+                    } else {
+                        Some(json!({
+                            "jsonrpc": "2.0",
+                            "result": {
+                                "protocolVersion": "2025-03-26",
+                                "capabilities": {"tools": {"listChanged": true}},
+                                "serverInfo": {"name": "fake", "version": "1.0.0"}
+                            }
+                        }))
+                    }
+                } else {
+                    None
+                }
+            },
+            WRITE_CHANNEL_CAPACITY,
+        )
+        .await;
+
+        conn.handshake(Duration::from_secs(5))
+            .await
+            .expect("handshake should retry and succeed");
+
+        let seen = attempts.lock().unwrap();
+        assert_eq!(
+            seen.as_slice(),
+            &["2025-06-18".to_string(), "2025-03-26".to_string()],
+            "client should offer newest first, then the mutually supported version"
         );
     }
 

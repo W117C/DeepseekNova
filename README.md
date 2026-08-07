@@ -24,7 +24,7 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 [![Rust](https://img.shields.io/badge/rust-stable%201.97-orange.svg)](https://www.rust-lang.org)
 [![Crates](https://img.shields.io/badge/crates-22-green.svg)](#-22-个-crate)
-[![Tests](https://img.shields.io/badge/tests-1251-brightgreen.svg)](#-技术栈)
+[![Tests](https://img.shields.io/badge/tests-1571-brightgreen.svg)](#-技术栈)
 
 </div>
 
@@ -52,9 +52,13 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
   flash/pro 与 thinking off/high/max，再执行真实调用；工具续步复用决策，
   路由失败自动回退启发式/默认模型，不影响主流程
 
-### ⚡ Prefix-Cache 三层架构
-- **会话级缓存** — 跨轮次 prompt prefix 命中，实时统计命中率
-- **Token 追踪** — 实时统计输入/输出/推理/缓存 token，精确成本计算
+### ⚡ Prefix-Cache（Provider 级）
+- **API 级前缀缓存** — DeepSeek V4 磁盘级自动前缀缓存（字节级前缀命中
+  即复用）；`cache_hit_tokens` / `cache_miss_tokens` 来自 provider 返回的
+  usage，逐请求透传
+- **会话级命中率统计** — [规划中]：跨轮次 prompt prefix 命中率的实时统计
+  尚未落地（Usage 相关字段当前恒为 0）
+- **Token 追踪** — 单请求级输入/输出/推理/缓存 token 实时统计，精确成本计算
 - **预算控制** — 单会话 Token 上限，超额自动停止
 
 ### 🧭 决策引擎式系统提示词
@@ -245,7 +249,7 @@ running 任务自动标记 interrupted，可重新拉起）。
 | 后端 | Rust + SQLite FTS5 + tokio + axum |
 | 前端 | TUI (ratatui) · CLI (clap) · HTTP API (axum + SSE) |
 | 追踪 | OpenTelemetry (OTLP) |
-| 测试 | 1251 tests · cargo-llvm-cov · CI 三平台 |
+| 测试 | 1571 tests · cargo-llvm-cov · CI 三平台 |
 
 ## 📄 License
 

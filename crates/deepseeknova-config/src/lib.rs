@@ -1331,6 +1331,13 @@ pub struct BudgetConfig {
     /// Memory sub-budget in estimated tokens (default: 32000).
     #[serde(default = "default_budget_memory")]
     pub max_memory_tokens: usize,
+
+    /// Session-level USD spending cap (团队级花费上限). `None` = 不限；
+    /// 与 `max_total_tokens` 并列，两者任一触发即停（先到先停）。USD 由共享
+    /// `CostLedger` 按 `[[models]]` 单价估算；无单价可估时该上限退化为不生效
+    /// （fail-open on unknown cost）。
+    #[serde(default)]
+    pub max_total_cost_usd: Option<f64>,
 }
 
 fn default_budget_total() -> usize {
@@ -1346,6 +1353,7 @@ impl Default for BudgetConfig {
             enabled: true,
             max_total_tokens: default_budget_total(),
             max_memory_tokens: default_budget_memory(),
+            max_total_cost_usd: None,
         }
     }
 }
@@ -1824,6 +1832,11 @@ impl Config {
                         );
                     }
                 }
+            }
+        }
+        if let Some(cost) = self.budget.max_total_cost_usd {
+            if !cost.is_finite() || cost < 0.0 {
+                anyhow::bail!("budget.max_total_cost_usd must be a finite value >= 0, got {cost}");
             }
         }
         Ok(())
@@ -2892,6 +2905,7 @@ mod tests {
         assert!(c.budget.enabled);
         assert_eq!(c.budget.max_total_tokens, 128_000);
         assert_eq!(c.budget.max_memory_tokens, 32_000);
+        assert_eq!(c.budget.max_total_cost_usd, None);
         assert_eq!(c.agent.on_max_steps, "pause");
         assert!(c.agent.l3_compaction);
         assert_eq!(c.agent.compact_model, "");
@@ -2920,6 +2934,40 @@ mod tests {
         assert_eq!(c.budget.max_total_tokens, 64_000);
         assert_eq!(c.budget.max_memory_tokens, 32_000);
         assert!(c.session.enabled);
+    }
+
+    #[test]
+    fn budget_max_total_cost_usd_parses_none_and_some() {
+        // 未配置 → None（不限）。
+        let d = Config::default();
+        assert_eq!(d.budget.max_total_cost_usd, None);
+        let c: Config = toml::from_str("[budget]\nmax_total_tokens = 1000\n").unwrap();
+        assert_eq!(c.budget.max_total_cost_usd, None);
+        // 显式配置 → Some；与 token 上限并列解析。
+        let c: Config =
+            toml::from_str("[budget]\nmax_total_tokens = 64000\nmax_total_cost_usd = 2.5\n")
+                .unwrap();
+        assert_eq!(c.budget.max_total_cost_usd, Some(2.5));
+        assert_eq!(c.budget.max_total_tokens, 64_000);
+        // 零上限合法（跑第一步即停的退化形态）。
+        let c: Config = toml::from_str("[budget]\nmax_total_cost_usd = 0\n").unwrap();
+        assert_eq!(c.budget.max_total_cost_usd, Some(0.0));
+    }
+
+    #[test]
+    fn budget_max_total_cost_usd_validate_rejects_bad_values() {
+        for bad in ["-1.0", "nan", "inf"] {
+            let c: Config =
+                toml::from_str(&format!("[budget]\nmax_total_cost_usd = {bad}\n")).unwrap();
+            let err = c.validate().unwrap_err();
+            assert!(
+                err.to_string().contains("max_total_cost_usd"),
+                "应为 max_total_cost_usd 校验错误: {err}"
+            );
+        }
+        // 合法值通过校验。
+        let c: Config = toml::from_str("[budget]\nmax_total_cost_usd = 12.75\n").unwrap();
+        assert!(c.validate().is_ok());
     }
 
     #[test]

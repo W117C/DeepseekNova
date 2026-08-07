@@ -542,6 +542,31 @@ All notable changes to DeepseekNova will be documented in this file.
   `zh-cn`/`cn`/`中文` 别名），CLI 优先于 `DEEPSEEKNOVA_LANG` 环境变量接线到
   `TuiRunner::with_lang`；两者皆缺省为英文。
 
+---
+
+### Added（并行优化第九批，2026-08-08）
+
+- **MCP streamable HTTP（P2-3）**：HTTP 传输升级——连接时自动探测 legacy SSE
+  vs streamable HTTP（增量读取修正常开 SSE 流阻塞）；`Mcp-Session-Id` 完整
+  生命周期（initialize 捕获 → 后续请求回发 → 服务器换 session 跟随 → 404
+  过期清空）；protocolVersion 协商（支持集 2025-06-18/2025-03-26/2024-11-05，
+  服务器 -32602 + supported 时降级重试，结果以服务器返回为准）；lib.rs
+  "streaming" 声明改为如实（SSE 帧响应消费，不声称长连接推送）。
+- **会话级花费上限（P2-4）**：`[budget] max_total_cost_usd: Option<f64>`
+  （None=不限；校验拒绝负数/NaN/inf）。`CostLedger::total_usd` 查询接口 +
+  `agent::budget::cost::CostBudget`（from_router 便捷构造）。主循环独立成本
+  检查点：超限 → Paused（reason `budget: cost limit $X exceeded (spent $Y)`，
+  保留 `budget:` 前缀对齐 CLI 退出码），token 预算路径逐字节未改。**CLI 已
+  装配**（build_agent_in 返回后 from_router 注入）。跨会话累计（团队级持久化）
+  留待后续。
+- **缓存承诺真实化（P2-6）**：README/README_EN "三层缓存"章节撤稿改为如实
+  （API 级前缀缓存真实 + 会话级命中率统计 [规划中]）；core
+  `session_cache_hit_tokens` 字段 doc 标注"当前恒 0、统计 [规划中]"（serde
+  契约保留，无 BREAKING）；context CacheAwarePromptBuilder/OrderedPromptBuilder
+  标注"库级公开 API，默认 agent 路径未接入"。另修文档漂移：README 测试数
+  1251→1571（实测属性数）、README_EN Reasoning Effort "4-level"→"3-level"
+  对齐。
+
 ## [0.4.0] — 2026-07-19
 
 ### 桌面前端完善

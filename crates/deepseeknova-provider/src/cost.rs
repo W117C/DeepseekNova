@@ -157,6 +157,27 @@ impl CostLedger {
             unmetered_calls,
         }
     }
+
+    /// Cumulative USD estimate across the whole ledger, `None` when no metered
+    /// row has a full (input + output) price pair. Same total as
+    /// [`Self::report`]'s `total_usd` but without allocating a [`CostReport`];
+    /// intended for hot-path (step-boundary) spending-cap checks.
+    pub fn total_usd(&self, prices: &PriceTable) -> Option<f64> {
+        let buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sum = 0.0f64;
+        let mut any = false;
+        for ((_, model), bucket) in buckets.iter() {
+            if let Some(cost) = prices.get(model).and_then(|p| row_cost(bucket, p)) {
+                sum += cost;
+                any = true;
+            }
+        }
+        if any {
+            Some(sum)
+        } else {
+            None
+        }
+    }
 }
 
 /// USD estimate for one bucket. Requires input + output prices; cache-hit
@@ -364,6 +385,43 @@ mod tests {
         assert_eq!(report.unmetered_calls, 1);
         assert_eq!(report.rows[0].bucket.unmetered_calls, 1);
         assert_eq!(report.rows[0].bucket.metered_calls, 0);
+    }
+
+    #[test]
+    fn total_usd_matches_report_total_and_none_without_prices() {
+        let ledger = CostLedger::new();
+        // 无单价 → None（与 report().total_usd 同口径）。
+        assert_eq!(ledger.total_usd(&PriceTable::new()), None);
+
+        ledger.record(
+            ModelRole::Main,
+            "big",
+            &usage(1_000_000, 1_000_000, 500_000),
+        );
+        let mut prices = PriceTable::new();
+        prices.insert(
+            "big".to_string(),
+            ModelPrices {
+                input_per_mtok: Some(2.0),
+                output_per_mtok: Some(8.0),
+                cache_hit_per_mtok: Some(0.2),
+            },
+        );
+        // 0.5M*2.0 + 0.5M*0.2 + 1M*8.0 = 9.1
+        assert_eq!(ledger.total_usd(&prices), Some(9.1));
+        assert_eq!(ledger.total_usd(&prices), ledger.report(&prices).total_usd);
+
+        // 部分单价 → 该行无估算；全部行无估算时整体 None。
+        let mut partial = PriceTable::new();
+        partial.insert(
+            "big".to_string(),
+            ModelPrices {
+                input_per_mtok: Some(2.0),
+                output_per_mtok: None,
+                cache_hit_per_mtok: None,
+            },
+        );
+        assert_eq!(ledger.total_usd(&partial), None);
     }
 
     #[tokio::test]

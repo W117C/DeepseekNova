@@ -251,6 +251,10 @@ impl PromptBuilder {
 // CacheAwarePromptBuilder — DeepSeek V4 prefix cache optimization
 // ---------------------------------------------------------------------------
 ///
+/// **库级公开 API**：供嵌入方自行接线到各自 prompt 构建路径；默认 agent
+/// prompt 路径**未接入**本 builder（真实接入见规划，当前默认 prompt 由
+/// [`PromptBuilder`] 构建）。
+///
 /// DeepSeek V4 uses disk-level automatic prefix caching: identical byte-level
 /// prefixes across requests hit the cache, reducing input token cost by ~90%.
 /// This builder enforces the "stable prefix + volatile suffix" structure.
@@ -415,6 +419,9 @@ pub struct BuilderOrderError {
     pub last: SectionStability,
 }
 
+/// **库级公开 API**：供嵌入方自行接线；默认 agent prompt 路径**未接入**
+/// （真实接入见规划）。
+///
 /// Enhanced prompt builder that enforces stability ordering at the type level.
 pub struct OrderedPromptBuilder {
     sections: Vec<PromptSection>,

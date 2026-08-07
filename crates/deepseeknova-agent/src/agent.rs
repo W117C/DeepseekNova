@@ -106,6 +106,11 @@ pub struct Agent {
     /// step 边界预算守门；None = 关闭。
     budget: Option<crate::budget::controller::PromptBudgetController>,
 
+    /// 会话级 USD 花费上限（团队级花费上限，P2-4）；None = 关闭。与
+    /// `budget` 并列：两者任一触发即停（先到先停）。由运行时从共享
+    /// `ModelRouter` 的 ledger + price table 装配。
+    cost_budget: Option<crate::budget::cost::CostBudget>,
+
     /// 暂停事件附带的会话标注（CLI/desktop 持久化开启时注入）。
     session_label: Option<String>,
 
@@ -444,6 +449,7 @@ impl Agent {
             l3_enabled: true,
             compact_provider: None,
             budget: None,
+            cost_budget: None,
             session_label: None,
             review_provider: None,
             review_settings: None,
@@ -611,6 +617,13 @@ impl Agent {
     /// 启用 step 边界预算守门。
     pub fn with_budget(mut self, b: crate::budget::controller::PromptBudgetController) -> Self {
         self.budget = Some(b);
+        self
+    }
+
+    /// 启用会话级 USD 花费上限（团队级花费上限，P2-4）。与 token 预算并列，
+    /// 任一触发即停；由运行时从共享 `ModelRouter` 装配（`CostBudget::from_router`）。
+    pub fn with_cost_budget(mut self, cb: crate::budget::cost::CostBudget) -> Self {
+        self.cost_budget = Some(cb);
         self
     }
 
@@ -870,6 +883,8 @@ impl Runner for Agent {
                     max_total_tokens: b.max_total_tokens,
                     max_memory_tokens: b.max_memory_tokens,
                 });
+        // CostBudget 实现 Clone（内部 Arc + PriceTable）：直接 clone 带进 spawn。
+        let cost_budget = self.cost_budget.clone();
         let session_label = self.session_label.clone();
         let review_provider = self.review_provider.clone();
         // ReviewSettings 不实现 Clone：与 budget 同法，从 pub 字段重建带进 spawn。
@@ -1041,6 +1056,7 @@ impl Runner for Agent {
                 l3_enabled,
                 compact_provider,
                 budget,
+                cost_budget,
                 session_label,
                 review_provider,
                 review_settings,
@@ -1520,6 +1536,7 @@ async fn run_agent_loop(
     l3_enabled: bool,
     compact_provider: Option<Arc<dyn Provider>>,
     budget: Option<crate::budget::controller::PromptBudgetController>,
+    cost_budget: Option<crate::budget::cost::CostBudget>,
     session_label: Option<String>,
     review_provider: Option<Arc<dyn Provider>>,
     review_settings: Option<crate::review::ReviewSettings>,
@@ -1715,6 +1732,43 @@ async fn run_agent_loop(
                     .ok();
                     return Ok(());
                 }
+            }
+        }
+
+        // 团队级 USD 花费上限（P2-4）：与 token 预算并列，step 边界同样评估，
+        // 任一触发即停（先到先停）。成本无法估算（模型无单价）时退化为不生效。
+        if let Some(ref cb) = cost_budget {
+            if let Some((limit, spent)) = cb.exceeded() {
+                warn!("cost budget exceeded: spent ${spent:.4} >= limit ${limit:.4}");
+                metrics.emit(None);
+                diagnose.record_failure(
+                    "budget",
+                    None,
+                    None,
+                    format!("cost limit exceeded: spent ${spent:.4} >= limit ${limit:.4}"),
+                );
+                // Bugbot #2：Paused 终端分支同样接对抗审查（spec §4.2
+                // 无 unverified 限定）；须在 emit 之前注入。
+                wire_session_adversarial_review(
+                    &mut diagnose,
+                    provider.clone(),
+                    adversarial_review_enabled,
+                    &input.prompt,
+                    &*memory.read().await,
+                    quality_findings,
+                    quality_start_len,
+                )
+                .await;
+                diagnose
+                    .emit("paused", &memory.read().await.get_all())
+                    .await;
+                tx.send(Ok(RunEvent::Paused {
+                    reason: format!("budget: cost limit ${limit:.4} exceeded (spent ${spent:.4})"),
+                    session_id: session_label.clone(),
+                }))
+                .await
+                .ok();
+                return Ok(());
             }
         }
 
@@ -3904,6 +3958,199 @@ mod tests {
             saw_err,
             "error mode must surface a stream error (pre-B2 contract)"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // P2-4 团队级 USD 花费上限（CostBudget）
+    // -----------------------------------------------------------------------
+
+    /// 向一个 ledger 记入一条 big 模型的用量（USD 可由 2.0/8.0/0.2 单价估算）。
+    fn record_cost(
+        ledger: &deepseeknova_provider::cost::CostLedger,
+        prompt: u32,
+        completion: u32,
+        cache_hit: u32,
+    ) {
+        use deepseeknova_provider::cost::ModelRole;
+        ledger.record(
+            ModelRole::Main,
+            "big",
+            &deepseeknova_core::chunk::Usage {
+                prompt_tokens: prompt,
+                completion_tokens: completion,
+                total_tokens: prompt + completion,
+                cache_hit_tokens: cache_hit,
+                cache_miss_tokens: prompt.saturating_sub(cache_hit),
+                reasoning_tokens: 0,
+            },
+        );
+    }
+
+    /// big 模型价格表（2.0 input / 8.0 output / 0.2 cache-hit，$/1M tokens）。
+    fn priced_table() -> deepseeknova_provider::cost::PriceTable {
+        let mut prices = deepseeknova_provider::cost::PriceTable::new();
+        prices.insert(
+            "big".to_string(),
+            deepseeknova_provider::cost::ModelPrices {
+                input_per_mtok: Some(2.0),
+                output_per_mtok: Some(8.0),
+                cache_hit_per_mtok: Some(0.2),
+            },
+        );
+        prices
+    }
+
+    /// USD 超限 → 第一步即 Paused，reason 带成本信息
+    /// （`budget: cost limit $X exceeded (spent $Y)`），对齐现有 `budget: <why>` 语义。
+    #[tokio::test]
+    async fn cost_budget_over_limit_emits_paused_with_cost_reason() {
+        let ledger = Arc::new(deepseeknova_provider::cost::CostLedger::new());
+        // 预置 0.5M prompt(0.25M hit) + 0.25M completion → 2.55 USD；上限 2.0 → 已超。
+        record_cost(&ledger, 500_000, 250_000, 250_000);
+        let agent = Agent::new(Arc::new(MockProvider::text("hi")), 5)
+            .with_cost_budget(crate::budget::cost::CostBudget::new(
+                Arc::clone(&ledger),
+                priced_table(),
+                2.0,
+            ))
+            .with_session_label("cost-sess-1");
+
+        let events = drain(agent, "run").await;
+        let paused: Vec<&String> = events
+            .iter()
+            .filter_map(|e| match e {
+                RunEvent::Paused { reason, session_id } => {
+                    assert_eq!(session_id.as_deref(), Some("cost-sess-1"));
+                    Some(reason)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(paused.len(), 1, "超限应恰好 Paused 一次");
+        assert!(
+            paused[0].starts_with("budget: cost limit"),
+            "reason 应对齐 budget: <why> 语义: {paused:?}"
+        );
+        assert!(paused[0].contains("2.0000"), "应含上限 $X: {}", paused[0]);
+        assert!(paused[0].contains("2.5500"), "应含已花 $Y: {}", paused[0]);
+        assert!(
+            !events.iter().any(|e| matches!(e, RunEvent::Done(_))),
+            "超限后不得再出 Done"
+        );
+    }
+
+    /// 未超限 → 不 Paused，正常跑完（成本检查不影响既有流程）。
+    #[tokio::test]
+    async fn cost_budget_under_limit_continues_to_done() {
+        let ledger = Arc::new(deepseeknova_provider::cost::CostLedger::new());
+        // 预置 1000 prompt → 2.0/1M*1000 = 0.002 USD；上限 10 → 未超。
+        record_cost(&ledger, 1_000, 0, 0);
+        let provider = MockProvider::tool_call("spy", "{}", "ignored", "done");
+        let mut agent = Agent::new(Arc::new(provider), 5).with_cost_budget(
+            crate::budget::cost::CostBudget::new(Arc::clone(&ledger), priced_table(), 10.0),
+        );
+        agent.register_tool(Arc::new(SpyTool {
+            name: "spy",
+            result: "ran".into(),
+        }));
+
+        let events = drain(agent, "do the thing").await;
+        assert!(
+            events.iter().any(|e| matches!(e, RunEvent::Done(_))),
+            "未超限应正常完成"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, RunEvent::Paused { .. })),
+            "未超限不得 Paused"
+        );
+    }
+
+    /// 与 token 预算共存（先到先停）：token 未触发、USD 已超 → 走成本 Paused。
+    #[tokio::test]
+    async fn cost_budget_wins_when_token_budget_still_allows() {
+        let ledger = Arc::new(deepseeknova_provider::cost::CostLedger::new());
+        record_cost(&ledger, 500_000, 250_000, 250_000); // 2.55 USD > 2.0 上限
+        let agent = Agent::new(Arc::new(MockProvider::text("hi")), 5)
+            // token 预算开着但远未触发。
+            .with_budget(crate::budget::controller::PromptBudgetController {
+                max_total_tokens: 1_000_000,
+                max_memory_tokens: 32_000,
+            })
+            .with_cost_budget(crate::budget::cost::CostBudget::new(
+                Arc::clone(&ledger),
+                priced_table(),
+                2.0,
+            ));
+
+        let events = drain(agent, "run").await;
+        let reason = events
+            .iter()
+            .filter_map(|e| match e {
+                RunEvent::Paused { reason, .. } => Some(reason.clone()),
+                _ => None,
+            })
+            .next()
+            .expect("应 Paused");
+        assert!(
+            reason.starts_with("budget: cost limit"),
+            "先到先停：成本超限应先于 token 触发: {reason}"
+        );
+    }
+
+    /// 与 token 预算共存（先到先停）：USD 未超、token 超限 → 走既有 token Paused。
+    #[tokio::test]
+    async fn token_budget_wins_when_cost_budget_still_allows() {
+        let ledger = Arc::new(deepseeknova_provider::cost::CostLedger::new());
+        record_cost(&ledger, 1_000, 0, 0); // 0.002 USD，远低于上限
+                                           // 大 system prompt 把首步 current 顶进 Reject 窗口（< 0.8*max 且 +2048 > max）。
+                                           // 默认 prompt ≈1104 token + 1.1w ASCII ≈3300 token → current ≈4400；max=6000
+                                           // 时 0.8*max=4800 ≥ current、current+2048≈6454 > max → Reject。
+        let agent = Agent::new(Arc::new(MockProvider::text("hi")), 5)
+            .with_appended_system_prompt("a".repeat(11_000))
+            .with_budget(crate::budget::controller::PromptBudgetController {
+                max_total_tokens: 6_000,
+                max_memory_tokens: 1_000,
+            })
+            .with_cost_budget(crate::budget::cost::CostBudget::new(
+                Arc::clone(&ledger),
+                priced_table(),
+                10.0,
+            ));
+
+        let events = drain(agent, "run").await;
+        let reason = events
+            .iter()
+            .filter_map(|e| match e {
+                RunEvent::Paused { reason, .. } => Some(reason.clone()),
+                _ => None,
+            })
+            .next()
+            .expect("token 超限应 Paused");
+        assert!(
+            reason.starts_with("budget:") && !reason.contains("cost limit"),
+            "先到先停：token 超限应先触发（保留既有 reason 语义）: {reason}"
+        );
+    }
+
+    /// 无单价（成本不可估算）→ 上限退化为不生效，正常完成（fail-open）。
+    #[tokio::test]
+    async fn cost_budget_no_price_data_is_noop() {
+        let ledger = Arc::new(deepseeknova_provider::cost::CostLedger::new());
+        record_cost(&ledger, 1_000_000, 0, 0);
+        let agent = Agent::new(Arc::new(MockProvider::text("hi")), 5).with_cost_budget(
+            crate::budget::cost::CostBudget::new(
+                Arc::clone(&ledger),
+                deepseeknova_provider::cost::PriceTable::new(),
+                0.0,
+            ),
+        );
+
+        let events = drain(agent, "run").await;
+        assert!(
+            events.iter().any(|e| matches!(e, RunEvent::Done(_))),
+            "无单价时成本上限不得阻断"
+        );
+        assert!(!events.iter().any(|e| matches!(e, RunEvent::Paused { .. })));
     }
 
     // -----------------------------------------------------------------------
@@ -6622,6 +6869,7 @@ mod tests {
             Vec::new(),
             true,
             true,
+            None,
             None,
             None,
             None,

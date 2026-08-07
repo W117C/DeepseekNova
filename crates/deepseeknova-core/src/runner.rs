@@ -194,7 +194,12 @@ pub enum WireEvent {
         cache_miss_tokens: u32,
         /// DeepSeek-V4 billed reasoning (chain-of-thought) tokens.
         reasoning_tokens: u32,
+        /// 会话级（跨轮次）缓存命中 token 数。当前恒为 0，
+        /// 真实统计见 \[规划中\]（与 [`WireUsageInfo::session_cache_hit_tokens`]
+        /// 的说明一致）。
         session_cache_hit_tokens: u32,
+        /// 会话级（跨轮次）缓存未命中 token 数。当前恒为 0
+        /// （见 [`WireUsageInfo::session_cache_hit_tokens`] 的说明）。
         session_cache_miss_tokens: u32,
     },
     TurnComplete,
@@ -229,11 +234,20 @@ pub struct WireUsageInfo {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub total_tokens: u32,
+    /// 单请求级缓存命中 token 数（来自 provider API 的 usage）。
     pub cache_hit_tokens: u32,
+    /// 单请求级缓存未命中 token 数（来自 provider API 的 usage）。
     pub cache_miss_tokens: u32,
     /// DeepSeek-V4 billed reasoning (chain-of-thought) tokens.
     pub reasoning_tokens: u32,
+    /// 会话级（跨轮次）缓存命中 token 数。
+    ///
+    /// **当前恒为 0**：真实会话级命中率统计 \[规划中\]，尚未落地；
+    /// 该字段仅为向前兼容保留（serde 契约，不破坏消费方/旧数据）。
+    /// 单请求级缓存命中请使用 [`WireUsageInfo::cache_hit_tokens`]。
     pub session_cache_hit_tokens: u32,
+    /// 会话级（跨轮次）缓存未命中 token 数。当前恒为 0
+    /// （见 [`WireUsageInfo::session_cache_hit_tokens`] 的说明）。
     pub session_cache_miss_tokens: u32,
 }
 
@@ -246,6 +260,8 @@ impl From<Usage> for WireUsageInfo {
             cache_hit_tokens: u.cache_hit_tokens,
             cache_miss_tokens: u.cache_miss_tokens,
             reasoning_tokens: u.reasoning_tokens,
+            // 会话级命中率统计 [规划中]：当前恒为 0，
+            // 见 WireUsageInfo::session_cache_hit_tokens 的 doc 说明。
             session_cache_hit_tokens: 0,
             session_cache_miss_tokens: 0,
         }

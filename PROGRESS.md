@@ -122,6 +122,23 @@
   2 处 DelegateConfig 字面量补新字段）。
 - **状态**：待提交。
 
+## 并行优化第九批（2026-08-08，P2 续）
+
+- **P2-3 MCP streamable HTTP**（mcp 独占）：自动探测 legacy SSE vs streamable
+  HTTP（增量读取修常开 SSE 阻塞）；Mcp-Session-Id 完整生命周期（捕获/回发/
+  跟随/404 过期清空）；protocolVersion 协商（2025-06-18/03-26/2024-11-05，
+  -32602 降级重试）；lib.rs 声明修正。60 测试。
+- **P2-4 会话级花费上限**（config/provider/agent）：`[budget] max_total_cost_usd`
+  + CostLedger::total_usd + CostBudget（from_router）+ 主循环独立检查点（超限
+  Paused reason 保留 `budget:` 前缀对齐 CLI 退出码，token 预算路径未改）。
+  **CLI 已装配**（父级 build_agent_in 注入）。跨会话累计留待后续。
+- **P2-6 缓存承诺真实化**（core/context/docs）：README 撤稿（API 级缓存真实 +
+  会话级命中率 [规划中]）；core 字段 doc 诚实化（serde 保留无 BREAKING）；
+  context builder 标注库级 API。另修文档漂移：README 测试数 1251→1571、
+  README_EN Reasoning Effort 4-level→3-level。
+- **验证**：`make check` EXIT=0（含父级补的 CLI 成本装配）。
+- **状态**：待提交。
+
 ## 日常体验包 + 审查修复（2026-08-07，非任务书轮）
 
 - 功能：web_search（ddg / tavily / bing / searxng）、lsp_diagnostics（写后

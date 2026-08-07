@@ -1457,6 +1457,15 @@ fn build_agent_in(
         extra_tools,
         Some(session_skills.clone()),
     )?;
+    // P2-4 花费上限：`[budget] max_total_cost_usd`（会话级 USD 上限，None=不限）。
+    // 经 router 的 ledger + price table 构造（与成本报告同源）。
+    let agent = if let Some(max) = config.budget.max_total_cost_usd {
+        agent.with_cost_budget(deepseeknova_agent::budget::cost::CostBudget::from_router(
+            router, max,
+        ))
+    } else {
+        agent
+    };
     // 任务质量闭环装配：metrics（报告 + 评分卡落盘）、quality（ToolHook 链 +
     // 写后策略评估，`[quality] enabled` 开关）、diagnose（失败诊断报告，与
     // metrics 同目录 `diagnose/` 子目录）。诊断 dir 与 metrics dir 同源。
