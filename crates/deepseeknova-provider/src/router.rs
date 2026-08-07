@@ -107,7 +107,8 @@ impl ModelRouter {
     }
 
     /// Metered provider for an explicit model name (e.g. `/model switch`),
-    /// still accounted under `role`.
+    /// still accounted under `role`. The `[[models]].temperature` entry is
+    /// threaded into the provider so the request body carries it.
     pub fn provider_for_model(
         &self,
         model_name: &str,
@@ -118,13 +119,25 @@ impl ModelRouter {
             .config
             .resolve_provider_for_model(model_name)
             .ok_or_else(|| anyhow::anyhow!("no provider found for model '{model_name}'"))?;
+        // Per-model sampling temperature from [[models]]; `None` (unset) keeps
+        // the provider default — no temperature field in the request body.
+        let temperature = self
+            .config
+            .find_model(model_name)
+            .and_then(|m| m.temperature);
         let key: CacheKey = (
             pcfg.name.clone(),
             model_name.to_string(),
             effort_key(effort),
         );
         let raw = self.cached_or_build(key, || {
-            Ok(factory::create_provider_with_model(pcfg, model_name, effort)?.into())
+            Ok(factory::create_provider_with_model_temperature(
+                pcfg,
+                model_name,
+                temperature,
+                effort,
+            )?
+            .into())
         })?;
         Ok(Arc::new(MeteredProvider::new(
             raw,
@@ -295,5 +308,30 @@ mod tests {
         let t = r.price_table();
         assert_eq!(t.get("big").unwrap().input_per_mtok, Some(2.0));
         assert!(t.get("small").unwrap().input_per_mtok.is_none());
+    }
+
+    /// A model with `temperature` configured must flow through
+    /// `provider_for_model` into the factory (request-body assertions live in
+    /// the factory tests — this guards the router→factory plumbing itself).
+    #[test]
+    fn provider_for_model_threads_model_temperature() {
+        std::env::set_var("DPNOVA_ROUTER_TEMP_KEY", "test");
+        let cfg: deepseeknova_config::Config = toml::from_str(
+            r#"
+            [[providers]]
+            name = "deepseek"
+            kind = "openai"
+            api_key_env = "DPNOVA_ROUTER_TEMP_KEY"
+
+            [[models]]
+            name = "warm"
+            provider = "deepseek"
+            temperature = 0.5
+            "#,
+        )
+        .unwrap();
+        let r = ModelRouter::from_config(&cfg, Arc::new(CostLedger::new())).unwrap();
+        let p = r.provider_for_model("warm", ModelRole::Main, None);
+        assert!(p.is_ok(), "{:?}", p.err());
     }
 }

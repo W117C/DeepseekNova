@@ -81,11 +81,20 @@ deepseeknova-cli init
 
 `deepseeknova-cli init` 会在当前目录创建：
 ```
-├── DEEPSEEKNOVA.md      # 项目上下文模板
-├── deepseeknova.toml    # 项目配置（Config::load 项目层）
+├── AGENTS.md          # 项目级 Agent 指令模板（行业标准文件名，Claude Code / Codex / opencode / DeepseekNova 自动识别）
+├── deepseeknova.toml  # 项目配置（Config::load 项目层）
 └── .deepseeknova/
-    ├── commands/        # 自定义斜杠命令（含 build.md 示例）
-    └── memory/          # 记忆库目录
+    ├── commands/      # 自定义斜杠命令（含 build.md 示例）
+    └── memory/        # 记忆库目录
+```
+
+默认生成行业标准的 `AGENTS.md`，内含项目简介 / 常用命令 / 代码约定骨架，
+供各类 AI 编程工具读取。若 `AGENTS.md` 已存在则跳过并提示。
+
+如需向后兼容的私有文件名，可回退到 `DEEPSEEKNOVA.md`：
+
+```bash
+deepseeknova-cli init --legacy   # 生成 DEEPSEEKNOVA.md
 ```
 
 ### Setup Wizard

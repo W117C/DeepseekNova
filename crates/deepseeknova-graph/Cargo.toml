@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Code graph engine: tree-sitter parsing, SQLite-persisted heterogeneous graph, BM25 + personalized PageRank retrieval, token-budgeted repo maps."
+keywords = ["code-graph", "tree-sitter", "code-search", "pagerank", "code-indexing"]
 readme = "README.md"
 
 [dependencies]

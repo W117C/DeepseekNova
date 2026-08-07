@@ -1,4 +1,5 @@
 use crate::retry::{retry_with_backoff, HttpAttempt};
+use crate::tool_cache::ToolSchemaCache;
 use crate::types::{ChatCompletionResponse, OpenAIFunction, OpenAIRequestTool, StreamResponse};
 use crate::{Provider, ProviderError, ValidatedRequest};
 use anyhow::Context;
@@ -25,6 +26,12 @@ pub struct OpenAIProvider {
     thinking_enabled: bool,
     /// Extra JSON body fields to include in every request
     extra_body: Option<serde_json::Value>,
+    /// Cache of serialised tool-schema arrays, keyed by tool identity, so the
+    /// per-request collect + sort + serialise is skipped when the tool set is
+    /// unchanged.
+    tool_cache: ToolSchemaCache<serde_json::Value>,
+    /// Sampling temperature written into the request body when set.
+    temperature: Option<f32>,
 }
 
 impl OpenAIProvider {
@@ -52,6 +59,8 @@ impl OpenAIProvider {
             reasoning_effort: None,
             thinking_enabled: false,
             extra_body: None,
+            tool_cache: ToolSchemaCache::with_capacity(16),
+            temperature: None,
         })
     }
 
@@ -73,25 +82,33 @@ impl OpenAIProvider {
         self
     }
 
-    fn build_tools(&self, tools: &[&dyn Tool]) -> Option<Vec<OpenAIRequestTool>> {
-        let mut schemas: Vec<_> = tools.iter().map(|t| t.schema()).collect();
-        if schemas.is_empty() {
-            return None;
-        }
-        // Sort by name for cache-stable tool ordering
-        schemas.sort_by(|a, b| a.name.cmp(&b.name));
-        let oai_tools: Vec<OpenAIRequestTool> = schemas
-            .iter()
-            .map(|s| OpenAIRequestTool {
-                ty: "function".to_string(),
-                function: OpenAIFunction {
-                    name: s.name.clone(),
-                    description: s.description.clone(),
-                    parameters: s.parameters.clone(),
-                },
-            })
-            .collect();
-        Some(oai_tools)
+    /// Set the sampling temperature written into every request body.
+    pub fn with_temperature(mut self, temperature: f32) -> Self {
+        self.temperature = Some(temperature);
+        self
+    }
+
+    /// Build the OpenAI `tools` array for `tools`, cached by tool identity so
+    /// an unchanged registry skips the collect + sort + serialise on the hot
+    /// path. Returns `None` for an empty tool set (the field is then omitted).
+    fn build_tools(&self, tools: &[&dyn Tool]) -> Option<serde_json::Value> {
+        self.tool_cache.get_or_build(tools, |ts| {
+            let mut schemas: Vec<_> = ts.iter().map(|t| t.schema()).collect();
+            // Sort by name for cache-stable tool ordering
+            schemas.sort_by(|a, b| a.name.cmp(&b.name));
+            let oai_tools: Vec<OpenAIRequestTool> = schemas
+                .iter()
+                .map(|s| OpenAIRequestTool {
+                    ty: "function".to_string(),
+                    function: OpenAIFunction {
+                        name: s.name.clone(),
+                        description: s.description.clone(),
+                        parameters: s.parameters.clone(),
+                    },
+                })
+                .collect();
+            serde_json::json!(oai_tools)
+        })
     }
 
     fn build_request(
@@ -130,10 +147,13 @@ impl OpenAIProvider {
             req["stream_options"] = serde_json::json!({"include_usage": true});
         }
         if let Some(tools) = self.build_tools(tools) {
-            req["tools"] = serde_json::json!(tools);
+            req["tools"] = tools;
         }
         if let Some(ref effort) = self.reasoning_effort {
             req["reasoning_effort"] = serde_json::json!(effort);
+        }
+        if let Some(temp) = self.temperature {
+            req["temperature"] = serde_json::json!(temp);
         }
         if let Some(serde_json::Value::Object(ref eb_map)) = extra_body {
             for (k, v) in eb_map {
@@ -540,6 +560,95 @@ mod tests {
         async fn execute(&self, _ctx: &ToolContext, _args: &str) -> anyhow::Result<String> {
             Ok("ok".into())
         }
+    }
+
+    fn user_msg(content: &str) -> Message {
+        Message {
+            role: deepseeknova_core::Role::User,
+            content: content.to_string(),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        }
+    }
+
+    /// A configured temperature must appear in the serialised request body.
+    #[test]
+    fn build_request_injects_temperature_when_set() {
+        std::env::set_var("DPNOVA_TEMP_KEY", "sk-test");
+        let provider = OpenAIProvider::new(
+            "https://api.deepseek.com",
+            "deepseek-v4-flash",
+            "DPNOVA_TEMP_KEY",
+            30,
+            0,
+        )
+        .unwrap()
+        .with_temperature(0.7);
+        let msgs = [user_msg("hi")];
+        let tools: Vec<&dyn Tool> = Vec::new();
+        let body = provider.build_request(&msgs, &tools, false);
+        let temp = body["temperature"].as_f64().unwrap();
+        assert!(
+            (temp - 0.7).abs() < 1e-6,
+            "temperature must reach the request body, got {temp}"
+        );
+        std::env::remove_var("DPNOVA_TEMP_KEY");
+    }
+
+    /// Unset temperature must not be serialised at all.
+    #[test]
+    fn build_request_omits_temperature_when_unset() {
+        std::env::set_var("DPNOVA_TEMP_KEY2", "sk-test");
+        let provider = OpenAIProvider::new(
+            "https://api.deepseek.com",
+            "deepseek-v4-flash",
+            "DPNOVA_TEMP_KEY2",
+            30,
+            0,
+        )
+        .unwrap();
+        let msgs = [user_msg("hi")];
+        let tools: Vec<&dyn Tool> = Vec::new();
+        let body = provider.build_request(&msgs, &tools, false);
+        assert!(
+            body.get("temperature").is_none(),
+            "unset temperature must be omitted"
+        );
+        std::env::remove_var("DPNOVA_TEMP_KEY2");
+    }
+
+    /// build_tools must produce one entry per tool (sorted), and return `None`
+    /// for an empty set — the cache must not change the observable payload.
+    #[test]
+    fn build_tools_payload_is_correct_and_cached() {
+        std::env::set_var("DPNOVA_CACHE_KEY", "sk-test");
+        let provider = OpenAIProvider::new(
+            "https://api.deepseek.com",
+            "deepseek-v4-flash",
+            "DPNOVA_CACHE_KEY",
+            30,
+            0,
+        )
+        .unwrap();
+        let tool_a = NoopTool;
+        let tool_b = NoopTool; // distinct object → distinct identity
+        let set_a: Vec<&dyn Tool> = vec![&tool_a];
+        let set_ab: Vec<&dyn Tool> = vec![&tool_a, &tool_b];
+
+        let v_a = provider.build_tools(&set_a).expect("tools should be built");
+        let v_ab = provider
+            .build_tools(&set_ab)
+            .expect("tools should be built");
+        assert_eq!(v_a.as_array().unwrap().len(), 1);
+        assert_eq!(v_ab.as_array().unwrap().len(), 2);
+        assert_eq!(v_ab.as_array().unwrap()[0]["function"]["name"], "noop");
+        assert!(v_a.as_array().unwrap()[0]["function"]["name"].is_string());
+
+        let empty: Vec<&dyn Tool> = Vec::new();
+        assert!(provider.build_tools(&empty).is_none(), "empty set → None");
+        std::env::remove_var("DPNOVA_CACHE_KEY");
     }
 
     /// Verify that SSE text without tool calls is parsed into Chunks.

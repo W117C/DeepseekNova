@@ -12,6 +12,7 @@ use crate::app::focus::HelpOverlay;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::state::{AppState, DisplayMode};
+use crate::i18n::{Key, Tr};
 use crate::model::conversation::{LineKind, Segment};
 use crate::render::input::spinner_frame;
 use crate::theme::Theme;
@@ -124,7 +125,8 @@ fn span_lines(spans: Vec<Span<'static>>) -> Vec<Line<'static>> {
 }
 
 /// 段 → 纯文本（复制用，`AppState::copy_selected` 调用）。
-pub fn segment_plain_text(seg: &Segment) -> String {
+/// 验证行文案按 `tr` 语言取词表。
+pub fn segment_plain_text(seg: &Segment, tr: Tr) -> String {
     match seg {
         Segment::Reasoning { text } => text.clone(),
         Segment::Text { text } => text.clone(),
@@ -152,9 +154,15 @@ pub fn segment_plain_text(seg: &Segment) -> String {
         } => {
             let mark = if *passed { "✓" } else { "✗" };
             if *passed || summary.is_empty() {
-                format!("{mark} 验证: {command}")
+                tr.t_args(
+                    Key::VerificationLabel,
+                    &[("mark", mark), ("command", command)],
+                )
             } else {
-                format!("{mark} 验证: {command} — {summary}")
+                tr.t_args(
+                    Key::VerificationWithSummary,
+                    &[("mark", mark), ("command", command), ("summary", summary)],
+                )
             }
         }
         Segment::System { text, .. } => text.clone(),
@@ -183,7 +191,7 @@ pub fn kind_tag(kind: LineKind) -> &'static str {
 }
 
 /// 折叠摘要文本。
-fn folded_summary(seg: &Segment) -> String {
+fn folded_summary(seg: &Segment, tr: Tr) -> String {
     match seg {
         Segment::Reasoning { text } => {
             // 折叠摘要带首句预览（去换行、截断 40 字符），让用户不展开也知道
@@ -196,17 +204,16 @@ fn folded_summary(seg: &Segment) -> String {
                 preview
             };
             if preview.is_empty() {
-                format!("[推理 ▸ 折叠 {} 字符 · Enter 展开]", seg.char_len())
+                tr.t_args(Key::FoldedReasoning, &[("n", &seg.char_len().to_string())])
             } else {
-                format!(
-                    "[推理 ▸ 折叠 {} 字符 · 「{}」· Enter 展开]",
-                    seg.char_len(),
-                    preview
+                tr.t_args(
+                    Key::FoldedReasoningPreview,
+                    &[("n", &seg.char_len().to_string()), ("preview", &preview)],
                 )
             }
         }
-        Segment::ToolCall { name, .. } => format!("[工具 ▸ {name} 已折叠 · Enter 展开]"),
-        _ => "[已折叠 · Enter 展开]".to_string(),
+        Segment::ToolCall { name, .. } => tr.t_args(Key::FoldedTool, &[("name", name)]),
+        _ => tr.t(Key::FoldedGeneric).to_string(),
     }
 }
 
@@ -258,7 +265,7 @@ pub fn build_conversation_blocks(app: &AppState, theme: &Theme) -> Vec<MessageBl
                     user_text.to_string()
                 };
                 blocks.push(MessageBlock {
-                    header: Some("你".to_string()),
+                    header: Some(app.tr.t(Key::RoleYou).to_string()),
                     header_style: Style::default().fg(theme.accent),
                     lines: span_lines(vec![Span::styled(text, theme.user)]),
                 });
@@ -276,9 +283,9 @@ pub fn build_conversation_blocks(app: &AppState, theme: &Theme) -> Vec<MessageBl
             theme.style_for(kind)
         };
         let text = if folded {
-            folded_summary(seg)
+            folded_summary(seg, app.tr)
         } else {
-            segment_display_text(seg, app.display_mode)
+            segment_display_text(seg, app.display_mode, app.tr)
         };
         // diff 行级高亮仅限工具调用段（含结果预览）：代码改动信息（git
         // diff 等）来自工具输出；模型正文不染色——正常聊天的回答里
@@ -331,7 +338,8 @@ pub fn build_conversation_blocks(app: &AppState, theme: &Theme) -> Vec<MessageBl
             .map(|t| spinner_frame(t.elapsed()))
             .unwrap_or_else(|| spinner_frame(std::time::Duration::ZERO));
         agent_lines.push(Line::from(Span::styled(
-            format!("{frame} 正在思考… Ctrl+C 取消"),
+            app.tr
+                .t_args(Key::ThinkingWait, &[("frame", &frame.to_string())]),
             theme.system,
         )));
     }
@@ -364,12 +372,12 @@ pub fn build_conversation_blocks(app: &AppState, theme: &Theme) -> Vec<MessageBl
 fn welcome_block(app: &AppState, theme: &Theme) -> MessageBlock {
     const W: usize = 50;
     let sessions = if app.sessions_loaded {
-        format!(
-            "最近保存会话: {} 个（侧边栏/会话 面板恢复）",
-            app.saved_sessions.len()
+        app.tr.t_args(
+            Key::WelcomeSessionsCount,
+            &[("n", &app.saved_sessions.len().to_string())],
         )
     } else {
-        "最近保存会话: 侧边栏/会话 面板查看".to_string()
+        app.tr.t(Key::WelcomeSessionsHint).to_string()
     };
     let rule = "─".repeat(W);
     let body = |s: &str| Span::styled(s.to_string(), theme.system);
@@ -390,12 +398,10 @@ fn welcome_block(app: &AppState, theme: &Theme) -> MessageBlock {
     let lines = vec![
         Line::from(Span::styled(format!("╭{rule}╮"), theme.border)),
         welcome_row(vec![title]),
-        welcome_row(vec![body("AI Agent 终端 · 会话自动持久化")]),
+        welcome_row(vec![body(app.tr.t(Key::WelcomeSubtitle))]),
         Line::from(Span::styled(format!("│{}│", " ".repeat(W)), theme.border)),
-        welcome_row(vec![body("输入 /help 查看全部命令")]),
-        welcome_row(vec![body(
-            "Tab 切换焦点 · Ctrl+\\ 侧边栏 · 鼠标滚轮滚动历史",
-        )]),
+        welcome_row(vec![body(app.tr.t(Key::WelcomeHelp))]),
+        welcome_row(vec![body(app.tr.t(Key::WelcomeTips))]),
         welcome_row(vec![body(&sessions)]),
         Line::from(Span::styled(format!("╰{rule}╯"), theme.border)),
     ];
@@ -475,7 +481,8 @@ pub fn render_blocks(f: &mut Frame, area: Rect, blocks: &[MessageBlock], offset:
 }
 
 /// 段 → 显示文本（展开态，含 Raw 前缀与工具调用内联）。
-fn segment_display_text(seg: &Segment, mode: DisplayMode) -> String {
+/// 验证行文案按 `tr` 语言取词表。
+fn segment_display_text(seg: &Segment, mode: DisplayMode, tr: Tr) -> String {
     let raw = |kind: LineKind, text: String| -> String {
         if mode == DisplayMode::Raw {
             format!("[{}] {text}", kind_tag(kind))
@@ -512,10 +519,17 @@ fn segment_display_text(seg: &Segment, mode: DisplayMode) -> String {
             summary,
         } => {
             let mark = if *passed { "✓" } else { "✗" };
-            let mut text = format!("{mark} 验证: {command}");
-            if !passed && !summary.is_empty() {
-                text.push_str(&format!(" — {summary}"));
-            }
+            let text = if *passed || summary.is_empty() {
+                tr.t_args(
+                    Key::VerificationLabel,
+                    &[("mark", mark), ("command", command)],
+                )
+            } else {
+                tr.t_args(
+                    Key::VerificationWithSummary,
+                    &[("mark", mark), ("command", command), ("summary", summary)],
+                )
+            };
             raw(LineKind::Verification { passed: *passed }, text)
         }
         Segment::System { kind, text } => {
@@ -557,8 +571,8 @@ fn input_overlay(status_area: Rect, height: u16) -> Rect {
 
 /// /help 帮助浮层：可滚动面板（Esc/q 关闭，j/k、↑/↓、PageUp/Down 滚动）。
 /// 先用 `Clear` 擦除底下内容，避免与对话文本交叉（@ 补全浮层曾出现
-/// 边框与正文混叠的伪影）。
-fn render_help_overlay(help: &HelpOverlay, theme: &Theme, f: &mut Frame, area: Rect) {
+/// 边框与正文混叠的伪影）。标题与翻页器文案按 `tr` 语言取词表。
+fn render_help_overlay(help: &HelpOverlay, theme: &Theme, tr: Tr, f: &mut Frame, area: Rect) {
     if area.width < 20 || area.height < 4 {
         return;
     }
@@ -566,7 +580,7 @@ fn render_help_overlay(help: &HelpOverlay, theme: &Theme, f: &mut Frame, area: R
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(theme.border)
-        .title(Line::from(Span::styled(" 帮助 · 快捷键", theme.title)));
+        .title(Line::from(Span::styled(tr.t(Key::HelpTitle), theme.title)));
     let inner = block.inner(area);
     let inner_h = inner.height as usize;
     let start = help.scroll.min(help.lines.len().saturating_sub(inner_h));
@@ -586,14 +600,16 @@ fn render_help_overlay(help: &HelpOverlay, theme: &Theme, f: &mut Frame, area: R
         .collect();
     f.render_widget(block, area);
     let pager = if help.lines.len() > inner_h {
-        format!(
-            " · {}-{}/{} 行 · j/k 滚动 · Esc 关闭",
-            start + 1,
-            end,
-            help.lines.len()
+        tr.t_args(
+            Key::HelpPager,
+            &[
+                ("start", &(start + 1).to_string()),
+                ("end", &end.to_string()),
+                ("total", &help.lines.len().to_string()),
+            ],
         )
     } else {
-        " · Esc 关闭".to_string()
+        tr.t(Key::HelpPagerShort).to_string()
     };
     let body = Paragraph::new(lines);
     f.render_widget(body, inner);
@@ -707,14 +723,20 @@ impl AppState {
 
         // ── 提示行 ────────────────────────────────────────
         let hint = Paragraph::new(Span::styled(
-            crate::render::status::hint_for(self.focus),
+            crate::render::status::hint_for(self.focus, self.tr),
             Style::default().add_modifier(Modifier::DIM),
         ));
         f.render_widget(hint, hint_area);
 
         // ── 浮层（审批居中 / @ 补全与 /help 锚定输入框上方）────
         if let Some(approval) = &self.pending_approval {
-            crate::render::approval::render_approval(approval, &theme, f, overlay(conv_area));
+            crate::render::approval::render_approval(
+                approval,
+                self.tr,
+                &theme,
+                f,
+                overlay(conv_area),
+            );
         } else if self.completion.is_some() {
             // 高度随候选数收缩（最多 10 候选 + 2 边框），候选少不占整屏。
             let n = self
@@ -729,7 +751,7 @@ impl AppState {
                 input_overlay(status_area, (n + 2) as u16),
             );
         } else if let Some(help) = &self.help_overlay {
-            render_help_overlay(help, &theme, f, input_overlay(status_area, 20));
+            render_help_overlay(help, &theme, self.tr, f, input_overlay(status_area, 20));
         }
 
         // ── 侧边栏 ────────────────────────────────────────
@@ -763,12 +785,13 @@ mod tests {
 
     #[test]
     fn segment_plain_text_formats_variants() {
+        let tr = Tr::new(crate::i18n::Lang::En);
         assert_eq!(
-            segment_plain_text(&Segment::Text { text: "hi".into() }),
+            segment_plain_text(&Segment::Text { text: "hi".into() }, tr),
             "hi"
         );
         assert_eq!(
-            segment_plain_text(&Segment::Reasoning { text: "r".into() }),
+            segment_plain_text(&Segment::Reasoning { text: "r".into() }, tr),
             "r"
         );
         let tool = Segment::ToolCall {
@@ -778,12 +801,26 @@ mod tests {
             result: Some("hit".into()),
             status: ToolStatus::Ok,
         };
-        assert_eq!(segment_plain_text(&tool), "[✓] grep(x)\n  → hit");
+        assert_eq!(segment_plain_text(&tool, tr), "[✓] grep(x)\n  → hit");
+        // 验证行走词表：英文默认 / 中文可选。
+        let ver = Segment::Verification {
+            command: "cargo check".into(),
+            passed: true,
+            summary: "ok".into(),
+        };
+        assert_eq!(segment_plain_text(&ver, tr), "✓ Verify: cargo check");
+        assert_eq!(
+            segment_plain_text(&ver, Tr::new(crate::i18n::Lang::Zh)),
+            "✓ 验证: cargo check"
+        );
     }
 
     #[test]
     fn blocks_include_user_agent_and_echo() {
-        let mut app = AppState::default();
+        let mut app = AppState {
+            tr: Tr::new(crate::i18n::Lang::Zh),
+            ..Default::default()
+        };
         app.conversation.begin_turn("问题".into());
         app.apply_run_event(RunEvent::TextDelta("答案".into()));
         app.apply_run_event(RunEvent::Done(done_output("")));
@@ -817,7 +854,10 @@ mod tests {
 
     #[test]
     fn folded_reasoning_renders_summary() {
-        let mut app = AppState::default();
+        let mut app = AppState {
+            tr: Tr::new(crate::i18n::Lang::Zh),
+            ..Default::default()
+        };
         app.conversation.begin_turn("q".into());
         let long = format!("推理内容 {}", "x".repeat(80));
         app.apply_run_event(RunEvent::ReasoningDelta {
@@ -1036,7 +1076,10 @@ mod tests {
     #[test]
     fn tool_call_folds_by_default() {
         // 工具调用默认折叠为摘要行，agent 输出保持整洁。
-        let mut app = AppState::default();
+        let mut app = AppState {
+            tr: Tr::new(crate::i18n::Lang::Zh),
+            ..Default::default()
+        };
         app.conversation.begin_turn("q".into());
         app.apply_run_event(RunEvent::ToolCallStart {
             id: "1".into(),
@@ -1079,6 +1122,7 @@ mod tests {
         let mut app = AppState {
             running: true,
             run_started_at: Some(std::time::Instant::now() - std::time::Duration::from_millis(350)),
+            tr: Tr::new(crate::i18n::Lang::Zh),
             ..Default::default()
         };
         app.conversation.begin_turn("q".into());

@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 
 use crate::app::state::AppState;
+use crate::i18n::Key;
 use deepseeknova_core::runner::Runner;
 use deepseeknova_provider::factory::ReasoningEffort;
 use deepseeknova_provider::router::ModelRouter;
@@ -140,7 +141,8 @@ pub trait CommandHandler: Send + Sync {
 /// 一个注册命令。
 pub struct Command {
     pub name: &'static str,
-    pub desc: &'static str,
+    /// 描述的词表键（渲染经 `Tr::t` 取当前语言值）。
+    pub desc: &'static Key,
     /// Ctrl+K 模糊搜索的附加关键词。
     pub keywords: &'static [&'static str],
     pub args_spec: ArgsSpec,
@@ -171,6 +173,7 @@ impl CommandRegistry {
     }
 
     /// 模糊搜索（name/desc/keywords 子串匹配，用于 Ctrl+K 面板）。
+    /// desc 命中按英/中两语言值分别匹配（词表键的 en/zh）。
     pub fn search(query: &str) -> Vec<&'static Command> {
         let q = query.trim().to_lowercase();
         if q.is_empty() {
@@ -180,7 +183,8 @@ impl CommandRegistry {
             .iter()
             .filter(|c| {
                 c.name.to_lowercase().contains(&q)
-                    || c.desc.to_lowercase().contains(&q)
+                    || c.desc.en().to_lowercase().contains(&q)
+                    || c.desc.zh().is_some_and(|z| z.to_lowercase().contains(&q))
                     || c.keywords.iter().any(|k| k.to_lowercase().contains(&q))
             })
             .collect()

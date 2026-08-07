@@ -138,7 +138,11 @@ pub enum Commands {
         action: ArtifactsAction,
     },
     /// Init a new DeepseekNova project
-    Init,
+    Init {
+        /// 生成私有 DEEPSEEKNOVA.md 而非行业标准 AGENTS.md（向后兼容）。
+        #[arg(long)]
+        legacy: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -240,5 +244,25 @@ mod tests {
         );
         let off = Cli::try_parse_from(["deepseeknova", "chat"]).unwrap();
         assert!(!off.secure_defaults, "absent flag must stay false");
+    }
+
+    #[test]
+    fn init_without_legacy_flag_defaults_to_agents_md() {
+        let parsed = Cli::try_parse_from(["deepseeknova", "init"]).unwrap();
+        match parsed.command {
+            Some(Commands::Init { legacy }) => {
+                assert!(!legacy, "default init must target AGENTS.md")
+            }
+            _ => panic!("expected Init command"),
+        }
+    }
+
+    #[test]
+    fn init_legacy_flag_parses() {
+        let parsed = Cli::try_parse_from(["deepseeknova", "init", "--legacy"]).unwrap();
+        match parsed.command {
+            Some(Commands::Init { legacy }) => assert!(legacy, "--legacy must set legacy=true"),
+            _ => panic!("expected Init command"),
+        }
     }
 }

@@ -12,6 +12,7 @@ use deepseeknova_core::chunk::Usage;
 use deepseeknova_core::runner::RunEvent;
 
 use super::focus::{CompletionState, Focus, HelpOverlay, SidebarTab};
+use crate::i18n::{Key, Tr};
 use crate::input::editor::InputState;
 use crate::model::apply::ConversationApply;
 use crate::model::conversation::{Conversation, SegId};
@@ -31,11 +32,11 @@ pub enum DisplayMode {
     Raw,
 }
 
-pub fn display_mode_label(mode: DisplayMode) -> &'static str {
+pub fn display_mode_label(mode: DisplayMode) -> Key {
     match mode {
-        DisplayMode::Normal => "normal（全量）",
-        DisplayMode::Lite => "lite（隐藏推理）",
-        DisplayMode::Raw => "raw（带类型前缀）",
+        DisplayMode::Normal => Key::DisplayModeNormal,
+        DisplayMode::Lite => Key::DisplayModeLite,
+        DisplayMode::Raw => Key::DisplayModeRaw,
     }
 }
 
@@ -132,6 +133,8 @@ pub struct AppState {
     pub echo: Vec<UiLine>,
     /// 当前主题（with_theme / DEEPSEEKNOVA_THEME 解析结果）。
     pub theme: crate::theme::Theme,
+    /// 界面翻译器（语言由 `DEEPSEEKNOVA_LANG` / `TuiRunner::with_lang` 决定）。
+    pub tr: Tr,
     pub input: InputState,
     pub history: Vec<String>,
     pub history_idx: Option<usize>,
@@ -296,7 +299,7 @@ impl AppState {
             self.quit_armed_at = Some(std::time::Instant::now());
             self.echo_line(
                 crate::model::conversation::LineKind::System,
-                "再按 Esc 退出",
+                self.tr.t(Key::PressEscAgain),
             );
             KeyAction::None
         }
@@ -313,7 +316,7 @@ impl AppState {
         if let RunEvent::Usage(usage) = &ev {
             self.usage = Some(usage.clone());
         }
-        self.conversation.apply(ev);
+        self.conversation.apply(ev, self.tr);
     }
 
     /// 清空对话面板（/clear、/new、/resume 共用）。
@@ -358,11 +361,11 @@ impl AppState {
         self.fold.clear();
     }
 
-    /// 当前折叠模式的用户可见摘要（状态栏指示用）：
+    /// 当前折叠模式的用户可见摘要键（状态栏指示用）：
     /// 无显式设置 → 默认；全部折叠/展开 → 全折叠/全展开；混合 → 混合。
-    pub fn fold_label(&self) -> &'static str {
+    pub fn fold_label(&self) -> Key {
         if self.fold.is_empty() {
-            return "默认";
+            return Key::FoldDefault;
         }
         let mut all_folded = true;
         let mut all_open = true;
@@ -374,11 +377,11 @@ impl AppState {
             }
         }
         if all_folded {
-            "全折叠"
+            Key::FoldAllFolded
         } else if all_open {
-            "全展开"
+            Key::FoldAllOpen
         } else {
-            "混合"
+            Key::FoldMixed
         }
     }
 
@@ -438,16 +441,18 @@ impl AppState {
         }) else {
             self.echo_line(
                 crate::model::conversation::LineKind::System,
-                "没有选中的消息（先 j/k 选中）",
+                self.tr.t(Key::NoSelectedMessage),
             );
             return;
         };
-        let text = crate::render::message::segment_plain_text(&seg);
+        let text = crate::render::message::segment_plain_text(&seg, self.tr);
         // 剪贴板能力探测：本期降级为回显（见 spec「明确不做」与 plan Task 12 回退），
         // 文案明确提示「未复制到剪贴板」，避免用户误以为已复制。
         self.echo_line(
             crate::model::conversation::LineKind::System,
-            &format!("📋 {text}（剪贴板不可用，已回显文本）"),
+            &self
+                .tr
+                .t_args(Key::ClipboardUnavailable, &[("text", &text)]),
         );
     }
 
@@ -884,19 +889,23 @@ mod tests {
 
     #[test]
     fn fold_label_reflects_state() {
-        let mut app = AppState::default();
-        assert_eq!(app.fold_label(), "默认");
+        // 折叠模式标签是 i18n 文案：固定中文断言语言无关行为。
+        let mut app = AppState {
+            tr: Tr::new(crate::i18n::Lang::Zh),
+            ..Default::default()
+        };
+        assert_eq!(app.tr.t(app.fold_label()), "默认");
 
         let id = app.conversation.begin_turn("q".into());
         app.fold.insert((id, 0), true);
-        assert_eq!(app.fold_label(), "全折叠");
+        assert_eq!(app.tr.t(app.fold_label()), "全折叠");
         app.fold.clear();
         app.fold.insert((id, 0), false);
-        assert_eq!(app.fold_label(), "全展开");
+        assert_eq!(app.tr.t(app.fold_label()), "全展开");
 
         app.fold.insert((id, 0), true);
         app.fold.insert((id, 1), false);
-        assert_eq!(app.fold_label(), "混合");
+        assert_eq!(app.tr.t(app.fold_label()), "混合");
     }
 
     #[test]
@@ -1018,7 +1027,10 @@ mod tests {
 
     #[test]
     fn clipboard_unavailable_degrades_to_echo() {
-        let mut app = AppState::default();
+        let mut app = AppState {
+            tr: Tr::new(crate::i18n::Lang::Zh),
+            ..Default::default()
+        };
         let id = app.conversation.begin_turn("q".into());
         app.apply_run_event(RunEvent::TextDelta("hello".into()));
         app.apply_run_event(RunEvent::Done(done_output("")));

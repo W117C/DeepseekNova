@@ -7,6 +7,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::app::actions::ActionContext;
 use crate::app::focus::Focus;
 use crate::app::state::AppState;
+use crate::i18n::{Key, Tr};
 use crate::theme::Theme;
 
 /// 状态行分段优先级（数字越大越先保留）。宽度不足时按此顺序丢弃：
@@ -81,10 +82,14 @@ fn tagged_segments(app: &AppState, theme: &Theme, scroll_pct: usize) -> Vec<(u8,
         segments.push((
             PRIO_CTX,
             Span::styled(
-                format!(
-                    " │ ctx [{bar}] {pct}% ({} / {})",
-                    fmt_tokens(used),
-                    fmt_tokens(window)
+                app.tr.t_args(
+                    Key::CtxUsage,
+                    &[
+                        ("bar", &bar),
+                        ("pct", &pct.to_string()),
+                        ("used", &fmt_tokens(used)),
+                        ("window", &fmt_tokens(window)),
+                    ],
                 ),
                 style,
             ),
@@ -96,7 +101,11 @@ fn tagged_segments(app: &AppState, theme: &Theme, scroll_pct: usize) -> Vec<(u8,
     // 折叠模式指示：/fold all|none|reset 后用户能一眼看到当前状态。
     segments.push((
         PRIO_FOLD,
-        Span::styled(format!(" │ 折叠 {}", app.fold_label()), dim),
+        Span::styled(
+            app.tr
+                .t_args(Key::FoldIndicator, &[("state", app.tr.t(app.fold_label()))]),
+            dim,
+        ),
     ));
     // ── 组 3：计数（静默） ───────────────────────────────
     segments.push((
@@ -107,13 +116,15 @@ fn tagged_segments(app: &AppState, theme: &Theme, scroll_pct: usize) -> Vec<(u8,
         segments.push((
             PRIO_USAGE,
             Span::styled(
-                format!(
-                    " │ ↑{} ↓{} Σ{} 推理{} 缓存hit{}",
-                    u.prompt_tokens,
-                    u.completion_tokens,
-                    u.total_tokens,
-                    u.reasoning_tokens,
-                    u.cache_hit_tokens
+                app.tr.t_args(
+                    Key::UsageDetail,
+                    &[
+                        ("up", &u.prompt_tokens.to_string()),
+                        ("down", &u.completion_tokens.to_string()),
+                        ("total", &u.total_tokens.to_string()),
+                        ("reasoning", &u.reasoning_tokens.to_string()),
+                        ("hit", &u.cache_hit_tokens.to_string()),
+                    ],
                 ),
                 dim,
             ),
@@ -122,7 +133,13 @@ fn tagged_segments(app: &AppState, theme: &Theme, scroll_pct: usize) -> Vec<(u8,
     segments.push((
         PRIO_LINES,
         Span::styled(
-            format!(" │ lines {} 滚动{}%", app.render_line_count(), scroll_pct),
+            app.tr.t_args(
+                Key::LinesIndicator,
+                &[
+                    ("lines", &app.render_line_count().to_string()),
+                    ("scroll", &scroll_pct.to_string()),
+                ],
+            ),
             dim,
         ),
     ));
@@ -131,7 +148,7 @@ fn tagged_segments(app: &AppState, theme: &Theme, scroll_pct: usize) -> Vec<(u8,
         segments.push((
             PRIO_QUIT,
             Span::styled(
-                " │ ⚠ 再按 Esc 退出",
+                app.tr.t(Key::QuitWarning),
                 Style::default()
                     .fg(theme
                         .verification_fail
@@ -211,31 +228,32 @@ pub fn fit_status_line(
 
 /// 上下文感知提示行：随焦点显示当前键位。键位文本从 action 注册表
 /// 动态查询（Claude Code `Rw` 同构）——未来 keybindings.json 用户改键后
-/// 提示自动更新，无需改动此处。
-pub fn hint_for(focus: Focus) -> String {
+/// 提示自动更新，无需改动此处。模板文案按 `tr` 语言取。
+pub fn hint_for(focus: Focus, tr: Tr) -> String {
     use crate::app::actions::{chord_for, Action};
     let chord = |action| chord_for(ctx_for(focus), action).unwrap_or_default();
     match focus {
-        Focus::Conversation => format!(
-            "{} 导航 · {} 折叠 · {} 复制 · {} 翻页 · {} 首尾 · Esc 回输入",
-            chord(Action::ConvSelectNext),
-            chord(Action::ConvToggleFold),
-            chord(Action::ConvCopy),
-            chord(Action::ConvScrollPageUp),
-            chord(Action::ConvScrollTop),
+        Focus::Conversation => tr.t_args(
+            Key::HintConversation,
+            &[
+                ("nav", &chord(Action::ConvSelectNext)),
+                ("fold", &chord(Action::ConvToggleFold)),
+                ("copy", &chord(Action::ConvCopy)),
+                ("page", &chord(Action::ConvScrollPageUp)),
+                ("top", &chord(Action::ConvScrollTop)),
+            ],
         ),
-        Focus::Input => {
-            "/ 命令 · Ctrl+T 鼠标 · Ctrl+U 清行 · Ctrl+W 删词 · Shift+Enter 换行 · Esc 取消/再按 Esc 退出"
-                .to_string()
-        }
-        Focus::Sidebar => format!(
-            "{} 选择会话 · Enter 恢复 · {} 切面板 · Esc 关闭",
-            chord(Action::SidebarSelectNext),
-            chord(Action::SidebarNextTab)
+        Focus::Input => tr.t(Key::HintInput).to_string(),
+        Focus::Sidebar => tr.t_args(
+            Key::HintSidebar,
+            &[
+                ("nav", &chord(Action::SidebarSelectNext)),
+                ("tab", &chord(Action::SidebarNextTab)),
+            ],
         ),
-        Focus::Completion => "↑↓ 选择 · Enter 插入 · Esc 关闭补全".to_string(),
-        Focus::Help => "j/k 或 ↑/↓ 滚动 · PageUp/Down 翻页 · Esc/q 关闭".to_string(),
-        Focus::Confirm => "y 确认 · n/Esc 取消".to_string(),
+        Focus::Completion => tr.t(Key::HintCompletion).to_string(),
+        Focus::Help => tr.t(Key::HintHelp).to_string(),
+        Focus::Confirm => tr.t(Key::HintConfirm).to_string(),
     }
 }
 
@@ -276,7 +294,10 @@ mod tests {
     #[test]
     fn status_segments_style_model_and_secondary_info() {
         let theme = Theme::default();
-        let app = AppState::default();
+        let app = AppState {
+            tr: Tr::new(crate::i18n::Lang::Zh),
+            ..Default::default()
+        };
         let segments = status_segments(&app, &theme, 0);
         // 组 1：运行态圆点 + 模型名（accent bold）。
         assert_eq!(segments[0].content, "○");
@@ -298,13 +319,17 @@ mod tests {
 
     #[test]
     fn hint_text_per_focus() {
-        let input_hint = hint_for(Focus::Input);
+        let tr = Tr::new(crate::i18n::Lang::Zh);
+        let input_hint = hint_for(Focus::Input, tr);
         assert!(input_hint.contains("/ 命令"));
         assert!(input_hint.contains("Ctrl+T 鼠标"));
-        assert!(hint_for(Focus::Conversation).contains("导航"));
-        assert!(hint_for(Focus::Conversation).contains("导航"));
-        assert!(hint_for(Focus::Sidebar).contains("切面板"));
-        assert!(hint_for(Focus::Completion).contains("Enter"));
+        assert!(hint_for(Focus::Conversation, tr).contains("导航"));
+        assert!(hint_for(Focus::Sidebar, tr).contains("切面板"));
+        assert!(hint_for(Focus::Completion, tr).contains("Enter"));
+        // 英文模式输出英文模板。
+        let tr_en = Tr::new(crate::i18n::Lang::En);
+        assert!(hint_for(Focus::Input, tr_en).contains("/ commands"));
+        assert!(hint_for(Focus::Conversation, tr_en).contains("navigate"));
     }
 
     #[test]
@@ -402,6 +427,7 @@ mod tests {
                 cache_miss_tokens: 0,
             }),
             rendered_lines: 30,
+            tr: Tr::new(crate::i18n::Lang::Zh),
             ..Default::default()
         };
 

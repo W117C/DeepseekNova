@@ -938,9 +938,9 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
-        Some(Commands::Init) => {
-            info!("init command");
-            init::run_init().await?;
+        Some(Commands::Init { legacy }) => {
+            info!("init command (legacy={legacy})");
+            init::run_init(*legacy).await?;
         }
 
         None => {

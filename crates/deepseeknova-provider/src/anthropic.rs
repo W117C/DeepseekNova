@@ -1,4 +1,5 @@
 use crate::retry::{retry_with_backoff, HttpAttempt};
+use crate::tool_cache::ToolSchemaCache;
 use crate::{Provider, ValidatedRequest};
 use anyhow::Context;
 use async_trait::async_trait;
@@ -35,6 +36,11 @@ pub struct AnthropicProvider {
     reasoning_effort: Option<String>,
     /// Upper bound on generated tokens (Anthropic requires an explicit value).
     max_tokens: u32,
+    /// Cache of built Anthropic tool payloads, keyed by tool identity, so the
+    /// per-request collect + clone is skipped when the tool set is unchanged.
+    tool_cache: ToolSchemaCache<Vec<AnthropicTool>>,
+    /// Sampling temperature written into the request body when set.
+    temperature: Option<f32>,
 }
 
 impl AnthropicProvider {
@@ -63,6 +69,8 @@ impl AnthropicProvider {
             thinking_enabled: false,
             reasoning_effort: None,
             max_tokens: 4096,
+            tool_cache: ToolSchemaCache::with_capacity(16),
+            temperature: None,
         })
     }
 
@@ -81,6 +89,12 @@ impl AnthropicProvider {
     /// Override the maximum number of generated tokens.
     pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
         self.max_tokens = max_tokens;
+        self
+    }
+
+    /// Set the sampling temperature written into every request body.
+    pub fn with_temperature(mut self, temperature: f32) -> Self {
+        self.temperature = Some(temperature);
         self
     }
 
@@ -126,6 +140,7 @@ impl AnthropicProvider {
             stream,
             thinking,
             output_config,
+            temperature: self.temperature,
         }
     }
 
@@ -139,21 +154,33 @@ impl AnthropicProvider {
             .reduce(|a, b| format!("{a}\n\n{b}"))
     }
 
-    /// Build Anthropic-formatted tools.
+    /// Build Anthropic-formatted tools, cached by tool identity so an
+    /// unchanged registry skips the per-request collect + clone.
     fn build_tools(&self, tools: &[&dyn Tool]) -> Option<Vec<AnthropicTool>> {
-        let schemas: Vec<_> = tools.iter().map(|t| t.schema()).collect();
-        if schemas.is_empty() {
-            return None;
-        }
-        let at: Vec<AnthropicTool> = schemas
-            .iter()
-            .map(|s| AnthropicTool {
-                name: s.name.clone(),
-                description: s.description.clone(),
-                input_schema: s.parameters.clone(),
-            })
-            .collect();
-        Some(at)
+        self.tool_cache.get_or_build(tools, |ts| {
+            let schemas: Vec<_> = ts.iter().map(|t| t.schema()).collect();
+            schemas
+                .iter()
+                .map(|s| AnthropicTool {
+                    name: s.name.clone(),
+                    description: s.description.clone(),
+                    input_schema: s.parameters.clone(),
+                })
+                .collect()
+        })
+    }
+
+    /// Test-only serialisation of a request body so factory-level tests can
+    /// assert the request payload (temperature / reasoning effort / thinking)
+    /// without a live HTTP round-trip.
+    #[cfg(test)]
+    pub(crate) fn build_request_json(
+        &self,
+        messages: &[Message],
+        tools: &[&dyn Tool],
+        stream: bool,
+    ) -> serde_json::Value {
+        serde_json::to_value(self.build_request(messages, tools, stream)).unwrap()
     }
 
     /// Send an HTTP request to the Anthropic API with retry logic.
@@ -345,6 +372,9 @@ struct AnthropicRequest {
     /// DeepSeek reasoning effort carrier: `{"effort": "high"}`.
     #[serde(skip_serializing_if = "Option::is_none")]
     output_config: Option<serde_json::Value>,
+    /// Sampling temperature (Anthropic Messages API supports 0.0–1.0).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -782,6 +812,114 @@ mod tests {
         let v = serde_json::to_value(&body).unwrap();
         assert!(v.get("thinking").is_none());
         assert!(v.get("output_config").is_none());
+    }
+
+    /// A configured temperature must reach the serialised Anthropic request.
+    #[test]
+    fn build_request_injects_temperature_when_set() {
+        std::env::set_var("TEST_ANTHRO_KEY_TEMP", "dummy");
+        let provider = AnthropicProvider::new(
+            "https://api.anthropic.com",
+            "claude-sonnet-5-20251001",
+            "TEST_ANTHRO_KEY_TEMP",
+            30,
+            0,
+        )
+        .unwrap()
+        .with_temperature(0.2);
+
+        let msgs = vec![Message {
+            role: Role::User,
+            content: "hi".into(),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        }];
+        let body = provider.build_request(&msgs, &[], false);
+        let v = serde_json::to_value(&body).unwrap();
+        let temp = v["temperature"].as_f64().unwrap();
+        assert!(
+            (temp - 0.2).abs() < 1e-6,
+            "temperature must reach the body, got {temp}"
+        );
+    }
+
+    /// Unset temperature must not be serialised.
+    #[test]
+    fn build_request_omits_temperature_when_unset() {
+        std::env::set_var("TEST_ANTHRO_KEY_TEMP2", "dummy");
+        let provider = AnthropicProvider::new(
+            "https://api.anthropic.com",
+            "claude-sonnet-5-20251001",
+            "TEST_ANTHRO_KEY_TEMP2",
+            30,
+            0,
+        )
+        .unwrap();
+
+        let msgs = vec![Message {
+            role: Role::User,
+            content: "hi".into(),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        }];
+        let body = provider.build_request(&msgs, &[], false);
+        let v = serde_json::to_value(&body).unwrap();
+        assert!(v.get("temperature").is_none(), "unset temperature omitted");
+    }
+
+    /// build_tools must produce one AnthropicTool per tool and `None` for an
+    /// empty set (cache must not change the observable payload).
+    #[test]
+    fn build_tools_payload_is_correct_and_cached() {
+        use deepseeknova_core::tool::ToolContext;
+        use deepseeknova_core::types::ToolSchema;
+        use deepseeknova_core::Tool;
+
+        struct NoopTool;
+        #[async_trait::async_trait]
+        impl Tool for NoopTool {
+            fn schema(&self) -> ToolSchema {
+                ToolSchema {
+                    name: "noop".into(),
+                    description: "does nothing".into(),
+                    parameters: serde_json::json!({"type": "object"}),
+                }
+            }
+            async fn execute(&self, _ctx: &ToolContext, _args: &str) -> anyhow::Result<String> {
+                Ok("ok".into())
+            }
+        }
+
+        std::env::set_var("TEST_ANTHRO_KEY_TOOLS", "dummy");
+        let provider = AnthropicProvider::new(
+            "https://api.anthropic.com",
+            "claude-sonnet-5-20251001",
+            "TEST_ANTHRO_KEY_TOOLS",
+            30,
+            0,
+        )
+        .unwrap();
+
+        let tool_a = NoopTool;
+        let tool_b = NoopTool; // distinct object → distinct identity
+        let set_a: Vec<&dyn Tool> = vec![&tool_a];
+        let set_ab: Vec<&dyn Tool> = vec![&tool_a, &tool_b];
+
+        let v_a = provider.build_tools(&set_a).expect("tools should be built");
+        let v_ab = provider
+            .build_tools(&set_ab)
+            .expect("tools should be built");
+        assert_eq!(v_a.len(), 1);
+        assert_eq!(v_ab.len(), 2);
+        assert_eq!(v_ab[0].name, "noop");
+
+        let empty: Vec<&dyn Tool> = Vec::new();
+        assert!(provider.build_tools(&empty).is_none(), "empty set → None");
+        std::env::remove_var("TEST_ANTHRO_KEY_TOOLS");
     }
 
     /// Non-streaming responses must surface DeepSeek `thinking` content blocks

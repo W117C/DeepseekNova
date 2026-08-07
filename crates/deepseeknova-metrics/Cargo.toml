@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Session-level effectiveness metrics and JSON reports for DeepseekNova agent runs."
+keywords = ["metrics", "scorecard", "evaluation", "telemetry", "agent"]
 documentation = "https://docs.rs/deepseeknova-metrics/0.4.0"
 
 [dependencies]

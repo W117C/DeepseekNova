@@ -25,6 +25,27 @@
   `**/.deepseeknova/security/`）。
 - **状态**：未提交（三批成果 + CHANGELOG/PROGRESS/BLOCKED/文档待统一提交）。
 
+## 并行优化第四批（2026-08-08，调研驱动轮续）
+
+- **前置**：三批成果已提交 b174d72（67 文件 +3647/-1417），工作树干净后启动。
+- **P1-1 AGENTS.md onboarding**：`init` 默认生成行业标准 `AGENTS.md`（已被
+  Claude Code/Codex/opencode 识别），`--legacy` 回退 DEEPSEEKNOVA.md；引导式
+  Next steps；46 测试 + 真实二进制冒烟。
+- **P0 发布就绪收尾**：scanner/graph/metrics 三 crate 补 description/keywords/
+  workspace 依赖；README 截图占位改文字说明；SECURITY 版本表 latest-minor 策略。
+  **实证：版本须 bump 0.5.0**（crates.io 0.4.0 被旧快照占用 19/22，dry-run 实测
+  metrics 编译失败）——bump 待用户确认后执行。
+- **A7 provider 接线**：工具 schema 缓存（ToolSchemaCache）、temperature 接线
+  （ModelRouter→请求体）、anthropic reasoning_effort 门控、telemetry 死代码删除；
+  60 测试。
+- **i18n 双语框架（重启成功）**：上轮 402 中断后重启，词表 100% 复用备份
+  （keys.rs 236 键 + mod.rs），190 处中文迁入词表，162 测试；**全程每 3-5 文件
+  保持可编译**（吸取上轮半成品教训）。词表结构即 Tauri 壳 P2 契约。
+- **验证**：`make check` EXIT=0（复检发现 i18n/mod.rs doc 交叉引用私有项警告，
+  已修，doc 零警告恢复）。
+- **状态**：待提交（34 文件；版本 bump / gh repo edit / docs/superpowers 处置
+  等发布动作待用户裁决）。
+
 ## 日常体验包 + 审查修复（2026-08-07，非任务书轮）
 
 - 功能：web_search（ddg / tavily / bing / searxng）、lsp_diagnostics（写后

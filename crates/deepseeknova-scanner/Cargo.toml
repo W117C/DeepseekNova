@@ -3,10 +3,13 @@ name = "deepseeknova-scanner"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Security scanning for the deepseeknova agent framework: static regex rules, optional one-shot agent investigation, and severity-grouped reports."
+keywords = ["security", "scanner", "static-analysis", "agent", "deepseek"]
 
 [dependencies]
-deepseeknova-core = { path = "../deepseeknova-core" }
-deepseeknova-graph = { path = "../deepseeknova-graph" }
+deepseeknova-core = { workspace = true }
+deepseeknova-graph = { workspace = true }
 anyhow = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }

@@ -18,7 +18,7 @@ pub mod openai;
 pub mod retry;
 pub mod router;
 pub mod scavenge;
-pub mod telemetry;
+pub mod tool_cache;
 pub mod types;
 
 // ---------------------------------------------------------------------------
@@ -167,12 +167,49 @@ pub mod factory {
         cfg: &ProviderConfig,
         task_classification: Option<ReasoningEffort>,
     ) -> anyhow::Result<Box<dyn Provider>> {
+        build_provider(cfg, None, task_classification)
+    }
+
+    /// Create a Provider for a specific model name, overriding the provider
+    /// config's default `model`. Used by the ModelRouter so one provider
+    /// entry can serve multiple named models.
+    pub fn create_provider_with_model(
+        cfg: &ProviderConfig,
+        model_name: &str,
+        task_classification: Option<ReasoningEffort>,
+    ) -> anyhow::Result<Box<dyn Provider>> {
+        create_provider_with_model_temperature(cfg, model_name, None, task_classification)
+    }
+
+    /// Create a Provider for a specific model name with an explicit per-model
+    /// sampling `temperature` (wired from `[[models]].temperature` by the
+    /// [`crate::router::ModelRouter`]). `None` leaves the provider default —
+    /// no `temperature` field is written to the request body.
+    pub fn create_provider_with_model_temperature(
+        cfg: &ProviderConfig,
+        model_name: &str,
+        temperature: Option<f32>,
+        task_classification: Option<ReasoningEffort>,
+    ) -> anyhow::Result<Box<dyn Provider>> {
+        let mut cfg = cfg.clone();
+        cfg.model = Some(model_name.to_string());
+        build_provider(&cfg, temperature, task_classification)
+    }
+
+    /// Shared construction path: resolves effort/thinking once, applies the
+    /// reasoning-effort behaviour uniformly across the anthropic-compatible
+    /// kinds, and injects the optional per-model temperature.
+    fn build_provider(
+        cfg: &ProviderConfig,
+        temperature: Option<f32>,
+        task_classification: Option<ReasoningEffort>,
+    ) -> anyhow::Result<Box<dyn Provider>> {
         let effort = resolve_effort(cfg, task_classification);
         let thinking = effort.thinking();
         let effort_str = effort.effort_str();
-        match cfg.kind.as_str() {
+        let provider: Box<dyn Provider> = match cfg.kind.as_str() {
             "openai" | "openai-compatible" | "" => {
-                let mut provider = crate::openai::OpenAIProvider::new(
+                let mut p = crate::openai::OpenAIProvider::new(
                     cfg.base_url
                         .as_deref()
                         .unwrap_or("https://api.deepseek.com"),
@@ -184,44 +221,27 @@ pub mod factory {
                 .with_thinking(thinking)
                 .with_extra_body(cfg.extra_body.clone());
                 if let Some(effort) = effort_str {
-                    provider = provider.with_reasoning_effort(effort);
+                    p = p.with_reasoning_effort(effort);
                 }
-                Ok(Box::new(provider))
+                if let Some(temp) = temperature {
+                    p = p.with_temperature(temp);
+                }
+                Box::new(p)
             }
-            "anthropic" => {
-                let provider = crate::anthropic::AnthropicProvider::new(
-                    cfg.base_url
-                        .as_deref()
-                        .unwrap_or("https://api.anthropic.com"),
-                    cfg.model.as_deref().unwrap_or("claude-sonnet-5-20251001"),
-                    cfg.api_key_env.as_deref().unwrap_or("ANTHROPIC_API_KEY"),
-                    cfg.timeout_secs,
-                    cfg.max_retries,
-                )?;
-                Ok(Box::new(provider))
-            }
+            // Anthropic Messages API. reasoning_effort is carried in the
+            // DeepSeek-only `output_config` field, so it is applied exactly
+            // like the deepseek-anthropic kind but ONLY when the config
+            // explicitly requests one — a bare `kind = "anthropic"` config
+            // (real Claude) must stay request-identical to before, because
+            // sending `output_config` to api.anthropic.com is rejected (400).
+            "anthropic" => Box::new(build_anthropic(cfg, temperature, effort)?),
             // DeepSeek V4 Anthropic-compatible endpoint.
             // Uses the same Anthropic Messages API format but routes to DeepSeek.
             // Reasoning content is natively handled as thinking blocks — no manual
             // reasoning_content passthrough needed (unlike the OpenAI-compatible path).
-            "deepseek-anthropic" => {
-                let mut provider = crate::anthropic::AnthropicProvider::new(
-                    cfg.base_url
-                        .as_deref()
-                        .unwrap_or("https://api.deepseek.com/anthropic"),
-                    cfg.model.as_deref().unwrap_or("deepseek-v4-flash"),
-                    cfg.api_key_env.as_deref().unwrap_or("DEEPSEEK_API_KEY"),
-                    cfg.timeout_secs,
-                    cfg.max_retries,
-                )?
-                .with_thinking(thinking);
-                if let Some(effort) = effort_str {
-                    provider = provider.with_reasoning_effort(effort);
-                }
-                Ok(Box::new(provider))
-            }
+            "deepseek-anthropic" => Box::new(build_deepseek_anthropic(cfg, temperature, effort)?),
             "ollama" | "local" => {
-                let provider = crate::openai::OpenAIProvider::new(
+                let mut p = crate::openai::OpenAIProvider::new(
                     cfg.base_url
                         .as_deref()
                         .unwrap_or("http://localhost:11434/v1"),
@@ -232,23 +252,70 @@ pub mod factory {
                 )?
                 .with_thinking(cfg.thinking_enabled)
                 .with_extra_body(cfg.extra_body.clone());
-                Ok(Box::new(provider))
+                if let Some(temp) = temperature {
+                    p = p.with_temperature(temp);
+                }
+                Box::new(p)
             }
             other => anyhow::bail!("unknown provider kind: {other}"),
-        }
+        };
+        Ok(provider)
     }
 
-    /// Create a Provider for a specific model name, overriding the provider
-    /// config's default `model`. Used by the ModelRouter so one provider
-    /// entry can serve multiple named models.
-    pub fn create_provider_with_model(
+    /// Anthropic Messages API provider. Reasoning effort (DeepSeek's
+    /// `output_config`) is applied only when the config explicitly sets
+    /// `reasoning_effort` — a bare `kind = "anthropic"` config stays
+    /// request-identical to pre-wiring behaviour (backward compatibility).
+    fn build_anthropic(
         cfg: &ProviderConfig,
-        model_name: &str,
-        task_classification: Option<ReasoningEffort>,
-    ) -> anyhow::Result<Box<dyn Provider>> {
-        let mut cfg = cfg.clone();
-        cfg.model = Some(model_name.to_string());
-        create_provider_for_task(&cfg, task_classification)
+        temperature: Option<f32>,
+        effort: ReasoningEffort,
+    ) -> anyhow::Result<crate::anthropic::AnthropicProvider> {
+        let mut p = crate::anthropic::AnthropicProvider::new(
+            cfg.base_url
+                .as_deref()
+                .unwrap_or("https://api.anthropic.com"),
+            cfg.model.as_deref().unwrap_or("claude-sonnet-5-20251001"),
+            cfg.api_key_env.as_deref().unwrap_or("ANTHROPIC_API_KEY"),
+            cfg.timeout_secs,
+            cfg.max_retries,
+        )?;
+        if cfg.reasoning_effort.is_some() {
+            p = p.with_thinking(effort.thinking());
+            if let Some(e) = effort.effort_str() {
+                p = p.with_reasoning_effort(e);
+            }
+        }
+        if let Some(temp) = temperature {
+            p = p.with_temperature(temp);
+        }
+        Ok(p)
+    }
+
+    /// DeepSeek V4 Anthropic-compatible provider — thinking and reasoning
+    /// effort are always applied (existing behaviour, unchanged).
+    fn build_deepseek_anthropic(
+        cfg: &ProviderConfig,
+        temperature: Option<f32>,
+        effort: ReasoningEffort,
+    ) -> anyhow::Result<crate::anthropic::AnthropicProvider> {
+        let mut p = crate::anthropic::AnthropicProvider::new(
+            cfg.base_url
+                .as_deref()
+                .unwrap_or("https://api.deepseek.com/anthropic"),
+            cfg.model.as_deref().unwrap_or("deepseek-v4-flash"),
+            cfg.api_key_env.as_deref().unwrap_or("DEEPSEEK_API_KEY"),
+            cfg.timeout_secs,
+            cfg.max_retries,
+        )?
+        .with_thinking(effort.thinking());
+        if let Some(e) = effort.effort_str() {
+            p = p.with_reasoning_effort(e);
+        }
+        if let Some(temp) = temperature {
+            p = p.with_temperature(temp);
+        }
+        Ok(p)
     }
 
     // -----------------------------------------------------------------------
@@ -445,6 +512,87 @@ pub mod factory {
             };
             assert!(err.to_string().contains("unknown provider kind"));
             assert!(err.to_string().contains("nonexistent"));
+        }
+
+        fn user_message(content: &str) -> deepseeknova_core::Message {
+            deepseeknova_core::Message {
+                role: deepseeknova_core::Role::User,
+                content: content.to_string(),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            }
+        }
+
+        fn anthropic_cfg(reasoning_effort: Option<&str>) -> ProviderConfig {
+            ProviderConfig {
+                kind: "anthropic".to_string(),
+                name: "claude".to_string(),
+                model: Some("claude-sonnet-5-20251001".to_string()),
+                base_url: None,
+                api_key: None,
+                api_key_env: Some("DPNOVA_ANTHRO_EFFORT_KEY".to_string()),
+                timeout_secs: 30,
+                max_retries: 0,
+                context_window: None,
+                headers: vec![],
+                thinking_enabled: false,
+                reasoning_effort: reasoning_effort.map(str::to_string),
+                extra_body: None,
+            }
+        }
+
+        /// reasoning_effort 必须像 deepseek-anthropic 一样在 anthropic 分支生效
+        /// （对齐行为），且 temperature 一并写入请求体。
+        #[test]
+        fn anthropic_branch_applies_reasoning_effort_when_configured() {
+            std::env::set_var("DPNOVA_ANTHRO_EFFORT_KEY", "test");
+            let cfg = anthropic_cfg(Some("high"));
+            let provider = build_anthropic(&cfg, Some(0.3), ReasoningEffort::High).unwrap();
+            let msgs = [user_message("hi")];
+            let tools: Vec<&dyn deepseeknova_core::Tool> = Vec::new();
+            let v = provider.build_request_json(&msgs, &tools, false);
+            assert_eq!(v["thinking"]["type"], "enabled", "thinking must be on");
+            assert_eq!(
+                v["output_config"]["effort"], "high",
+                "reasoning_effort must reach the anthropic request body"
+            );
+            let temp = v["temperature"].as_f64().unwrap();
+            assert!(
+                (temp - 0.3).abs() < 1e-6,
+                "temperature must be applied, got {temp}"
+            );
+        }
+
+        /// 未配置 reasoning_effort 的裸 anthropic 配置必须保持请求不变
+        /// （向后兼容：不向真实 Anthropic 发送 DeepSeek 专属的 output_config）。
+        #[test]
+        fn anthropic_branch_without_effort_stays_request_identical() {
+            std::env::set_var("DPNOVA_ANTHRO_EFFORT_KEY", "test");
+            let cfg = anthropic_cfg(None);
+            let provider = build_anthropic(&cfg, None, ReasoningEffort::High).unwrap();
+            let msgs = [user_message("hi")];
+            let tools: Vec<&dyn deepseeknova_core::Tool> = Vec::new();
+            let v = provider.build_request_json(&msgs, &tools, false);
+            assert!(
+                v.get("thinking").is_none(),
+                "bare anthropic must not enable thinking"
+            );
+            assert!(
+                v.get("output_config").is_none(),
+                "bare anthropic must not send DeepSeek-only output_config"
+            );
+        }
+
+        /// 工厂的 anthropic 分支（kind="anthropic" + 显式 reasoning_effort）
+        /// 能正常构造 provider（走 build_anthropic 接线）。
+        #[test]
+        fn factory_builds_anthropic_kind_with_effort() {
+            std::env::set_var("DPNOVA_ANTHRO_EFFORT_KEY", "test");
+            let cfg = anthropic_cfg(Some("high"));
+            let provider = create_provider_for_task(&cfg, None);
+            assert!(provider.is_ok(), "{:?}", provider.err());
         }
     }
 }

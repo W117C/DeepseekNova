@@ -7,6 +7,7 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 
+use crate::i18n::{Key, Tr};
 use crate::model::conversation::LineKind;
 
 /// 环境变量名。
@@ -120,21 +121,20 @@ impl Theme {
 }
 
 /// 主题名解析结果：主题 + 可选回退提示（未知值回退 codex 并携带提示文本）。
-pub fn theme_from_env() -> (Theme, Option<String>) {
-    theme_from_name(&std::env::var(THEME_ENV).unwrap_or_default())
+pub fn theme_from_env(tr: Tr) -> (Theme, Option<String>) {
+    theme_from_name(&std::env::var(THEME_ENV).unwrap_or_default(), tr)
 }
 
 /// 按主题名解析（纯函数，便于测试；未知/空回退 deepseek 默认）。
-pub fn theme_from_name(name: &str) -> (Theme, Option<String>) {
+/// 回退提示文案按 `tr` 语言生成。
+pub fn theme_from_name(name: &str, tr: Tr) -> (Theme, Option<String>) {
     match name {
         "" | "codex" | "deepseek" => (Theme::default(), None),
         "dark" => (dark_theme(), None),
         "light" => (light_theme(), None),
         other => (
             Theme::default(),
-            Some(format!(
-                "未知主题 '{other}'（deepseek|dark|light），已回退 deepseek"
-            )),
+            Some(tr.t_args(Key::ThemeUnknownFallback, &[("theme", other)])),
         ),
     }
 }
@@ -306,7 +306,7 @@ mod tests {
             ("", false),
         ];
         for (val, expect_warning) in cases {
-            let (theme, warning) = theme_from_name(val);
+            let (theme, warning) = theme_from_name(val, Tr::new(crate::i18n::Lang::En));
             assert_eq!(warning.is_some(), *expect_warning, "val={val:?}");
             // 有效主题应解析出非默认差异（dark/light 改变 accent），deepseek/codex 为默认。
             if *val == "dark" {
@@ -318,7 +318,7 @@ mod tests {
             }
         }
         // 未设置环境变量时等价于 deepseek（env 读取壳的语义）。
-        let fallback = theme_from_name("");
+        let fallback = theme_from_name("", Tr::new(crate::i18n::Lang::En));
         assert_eq!(fallback.0, Theme::default());
         assert!(fallback.1.is_none());
     }

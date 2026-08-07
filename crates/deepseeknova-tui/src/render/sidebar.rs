@@ -8,6 +8,7 @@ use ratatui::Frame;
 
 use crate::app::focus::SidebarTab;
 use crate::app::state::AppState;
+use crate::i18n::Key;
 use crate::model::conversation::Segment;
 use crate::theme::Theme;
 
@@ -16,7 +17,10 @@ pub fn render_sidebar(app: &AppState, theme: &Theme, f: &mut Frame, area: Rect) 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(theme.border)
-        .title(Line::from(Span::styled("面板", theme.title)));
+        .title(Line::from(Span::styled(
+            app.tr.t(Key::PanelTitle),
+            theme.title,
+        )));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -34,7 +38,7 @@ pub fn render_sidebar(app: &AppState, theme: &Theme, f: &mut Frame, area: Rect) 
             let label = format!(
                 "{}{} ",
                 if *tab == app.sidebar_tab { "▸" } else { " " },
-                tab.label()
+                app.tr.t(tab.label())
             );
             let style = if *tab == app.sidebar_tab {
                 theme.title
@@ -55,12 +59,12 @@ pub fn render_sidebar(app: &AppState, theme: &Theme, f: &mut Frame, area: Rect) 
         SidebarTab::Sessions => render_sessions(app, theme),
         SidebarTab::Tools => render_tools(app, theme),
         SidebarTab::Mcp => vec![Line::from(Span::styled(
-            " 运行 /mcp 查看服务器状态",
+            app.tr.t(Key::SidebarMcpHint),
             theme.system,
         ))],
         SidebarTab::Cost => render_cost(app, theme),
         SidebarTab::Skills => vec![Line::from(Span::styled(
-            " 运行 /skills 查看可用技能",
+            app.tr.t(Key::SidebarSkillsHint),
             theme.system,
         ))],
     };
@@ -76,7 +80,10 @@ fn render_sessions(app: &AppState, theme: &Theme) -> Vec<Line<'static>> {
     // 加载完确实没有历史会话时才给一句轻提示。
     if app.saved_sessions.is_empty() {
         if app.sessions_loaded {
-            lines.push(Line::from(Span::styled(" （暂无历史会话）", theme.system)));
+            lines.push(Line::from(Span::styled(
+                app.tr.t(Key::NoHistorySessions),
+                theme.system,
+            )));
         }
         // 首次加载（一两帧内）保持安静：不显示“加载中”噪声。
     } else {
@@ -87,7 +94,10 @@ fn render_sessions(app: &AppState, theme: &Theme) -> Vec<Line<'static>> {
                 break;
             }
             lines.push(Line::from(Span::styled(
-                format!(" ▾ {night} 夜 · {}", ids.len()),
+                app.tr.t_args(
+                    Key::NightGroupHeader,
+                    &[("night", night), ("n", &ids.len().to_string())],
+                ),
                 theme.title,
             )));
             for id in ids {
@@ -120,7 +130,11 @@ fn render_sessions(app: &AppState, theme: &Theme) -> Vec<Line<'static>> {
                     }
                     None => short_session_id(id, 16),
                 };
-                let suffix = if current { " (当前)" } else { "" };
+                let suffix = if current {
+                    app.tr.t(Key::SessionCurrentSuffix)
+                } else {
+                    ""
+                };
                 let style = if selected {
                     theme.selection
                 } else {
@@ -135,9 +149,9 @@ fn render_sessions(app: &AppState, theme: &Theme) -> Vec<Line<'static>> {
         }
         if app.saved_sessions.len() > shown {
             lines.push(Line::from(Span::styled(
-                format!(
-                    "  …还有 {} 个（/sessions 查看全部）",
-                    app.saved_sessions.len() - shown
+                app.tr.t_args(
+                    Key::MoreSessions,
+                    &[("n", &(app.saved_sessions.len() - shown).to_string())],
                 ),
                 theme.system,
             )));
@@ -147,7 +161,10 @@ fn render_sessions(app: &AppState, theme: &Theme) -> Vec<Line<'static>> {
     // 当前会话内的回合（内存树；恢复/新会话后自动切换）。
     let n = app.conversation.turn_count();
     if n > 0 {
-        lines.push(Line::from(Span::styled(" ── 本次会话 ──", theme.title)));
+        lines.push(Line::from(Span::styled(
+            app.tr.t(Key::CurrentSessionDivider),
+            theme.title,
+        )));
         // 最新在前：turn id 倒序（id 从 1 递增）。
         for id in (1..=n).rev() {
             let user = app
@@ -156,7 +173,7 @@ fn render_sessions(app: &AppState, theme: &Theme) -> Vec<Line<'static>> {
                 .unwrap_or("")
                 .trim();
             let preview = if user.is_empty() {
-                format!("#{id}（空）")
+                app.tr.t_args(Key::TurnEmpty, &[("id", &id.to_string())])
             } else if user.chars().count() > 18 {
                 format!("#{id} {}…", user.chars().take(18).collect::<String>())
             } else {
@@ -232,10 +249,14 @@ fn render_tools(app: &AppState, theme: &Theme) -> Vec<Line<'static>> {
         }
     }
     if stats.is_empty() {
-        return vec![Line::from(Span::styled(" （暂无工具调用）", theme.system))];
+        return vec![Line::from(Span::styled(
+            app.tr.t(Key::NoToolCalls),
+            theme.system,
+        ))];
     }
     let mut lines = vec![Line::from(Span::styled(
-        format!(" 工具活动 · {} 种工具", stats.len()),
+        app.tr
+            .t_args(Key::ToolActivityHeader, &[("n", &stats.len().to_string())]),
         theme.title,
     ))];
     for (name, (ok, fail, running)) in stats {
@@ -259,7 +280,14 @@ fn render_tools(app: &AppState, theme: &Theme) -> Vec<Line<'static>> {
         }
         let total = ok + fail + running;
         lines.push(Line::from(Span::styled(
-            format!(" {name:<12} {} 次  [{}]", total, suffix.join(" ")),
+            app.tr.t_args(
+                Key::ToolCallCountLine,
+                &[
+                    ("name_col", name.as_str()),
+                    ("n", &total.to_string()),
+                    ("suffix", &suffix.join(" ")),
+                ],
+            ),
             style,
         )));
     }
@@ -270,42 +298,53 @@ fn render_cost(app: &AppState, theme: &Theme) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     match app.total_cost_usd {
         Some(cost) => lines.push(Line::from(Span::styled(
-            format!(" 会话成本: ${cost:.6}"),
+            app.tr
+                .t_args(Key::SessionCost, &[("cost", &format!("{cost:.6}"))]),
             theme.title,
         ))),
         None => lines.push(Line::from(Span::styled(
-            " 成本不可用（无 router）",
+            app.tr.t(Key::CostUnavailable),
             theme.system,
         ))),
     }
     if let Some(u) = &app.usage {
         lines.push(Line::from(Span::styled(
-            format!(
-                " ↑{} ↓{} Σ{}",
-                u.prompt_tokens, u.completion_tokens, u.total_tokens
+            app.tr.t_args(
+                Key::UsageBrief,
+                &[
+                    ("up", &u.prompt_tokens.to_string()),
+                    ("down", &u.completion_tokens.to_string()),
+                    ("total", &u.total_tokens.to_string()),
+                ],
             ),
             theme.system,
         )));
     } else {
         lines.push(Line::from(Span::styled(
-            " 运行 /cost 查看明细",
+            app.tr.t(Key::SidebarCostHint),
             theme.system,
         )));
     }
     // 测光·评分卡：六维 █░ 横条 + 分值；无数据时给一句引导。
     match &app.scorecard {
         Some(sc) => {
-            lines.push(Line::from(Span::styled(" 测光·评分卡", theme.title)));
+            lines.push(Line::from(Span::styled(
+                app.tr.t(Key::ScorecardPanelTitle),
+                theme.title,
+            )));
             for row in &sc.rows {
                 let bar = crate::model::scorecard::photometry_bar(row.score);
+                let label = crate::model::scorecard::dim_label_key(&row.dim)
+                    .map(|k| app.tr.t(k).to_string())
+                    .unwrap_or_else(|| row.dim.clone());
                 lines.push(Line::from(Span::styled(
-                    format!(" {:<4} {bar} {:>5.1}", row.dim, row.score),
+                    format!(" {label:<4} {bar} {:>5.1}", row.score),
                     theme.system,
                 )));
             }
         }
         None => lines.push(Line::from(Span::styled(
-            " 测光待完成（运行 /scorecard）",
+            app.tr.t(Key::ScorecardPending),
             theme.system,
         ))),
     }
@@ -360,7 +399,10 @@ mod tests {
     fn empty_sidebar_shows_placeholder() {
         let theme = Theme::default();
         // 首次加载（未拉取磁盘）：保持安静，不显示“加载中”噪声。
-        let loading = AppState::default();
+        let loading = AppState {
+            tr: crate::i18n::Tr::new(crate::i18n::Lang::Zh),
+            ..Default::default()
+        };
         assert!(
             render_sessions(&loading, &theme).is_empty(),
             "未加载完成不渲染占位噪声"
@@ -368,12 +410,16 @@ mod tests {
         // 已加载但确实无会话：显示“暂无保存的会话”。
         let empty = AppState {
             sessions_loaded: true,
+            tr: crate::i18n::Tr::new(crate::i18n::Lang::Zh),
             ..Default::default()
         };
         assert!(render_sessions(&empty, &theme)[0].spans[0]
             .content
             .contains("暂无历史会话"));
-        let app = AppState::default();
+        let app = AppState {
+            tr: crate::i18n::Tr::new(crate::i18n::Lang::Zh),
+            ..Default::default()
+        };
         assert!(render_tools(&app, &theme)[0].spans[0]
             .content
             .contains("暂无"));
@@ -395,6 +441,7 @@ mod tests {
             ],
             current_session: Some("chat-20260806-112831".to_string()),
             saved_session_selected: 0,
+            tr: crate::i18n::Tr::new(crate::i18n::Lang::Zh),
             ..Default::default()
         };
         let theme = Theme::default();
@@ -463,6 +510,7 @@ mod tests {
                 r#"{"scores":{"治理":92.3,"验证":94.7,"反思":88.1,"审查":90.5,"协议":96.2,"综合":92.0}}"#,
             )
             .unwrap()),
+            tr: crate::i18n::Tr::new(crate::i18n::Lang::Zh),
             ..Default::default()
         };
         let theme = Theme::default();
@@ -476,7 +524,10 @@ mod tests {
         assert!(texts.contains("█"), "光度条: {texts}");
         assert!(texts.contains("92.3"), "{texts}");
 
-        let empty = AppState::default();
+        let empty = AppState {
+            tr: crate::i18n::Tr::new(crate::i18n::Lang::Zh),
+            ..Default::default()
+        };
         let empty_lines = render_cost(&empty, &theme);
         let empty_texts: String = empty_lines
             .iter()

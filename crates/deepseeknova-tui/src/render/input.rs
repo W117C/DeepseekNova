@@ -8,6 +8,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
 use crate::app::state::AppState;
+use crate::i18n::Key;
 use crate::input::editor::input_view;
 use crate::input::md_highlight::md_spans;
 use crate::theme::Theme;
@@ -48,7 +49,7 @@ pub fn render_input(app: &AppState, theme: &Theme, f: &mut Frame, area: Rect) {
                     .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("运行中 · Esc/Ctrl+C 取消", theme.system),
+            Span::styled(app.tr.t(Key::InputRunning), theme.system),
         ])]
     } else {
         view.rows
@@ -87,17 +88,14 @@ pub fn render_command_hint(app: &AppState, theme: &Theme, f: &mut Frame, area: R
         return;
     }
     let title = if hint.arg_options.is_some() {
-        "参数"
+        Key::CommandHintTitleArg
     } else {
-        "命令"
+        Key::CommandHintTitleCmd
     };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(theme.border)
-        .title(Line::from(Span::styled(
-            format!("{title} · ↑↓ 选择 · Enter 执行 · Tab 补全 · Esc 关闭"),
-            theme.title,
-        )));
+        .title(Line::from(Span::styled(app.tr.t(title), theme.title)));
     let lines: Vec<Line> = if let Some(opts) = &hint.arg_options {
         // 参数模式：展示该命令的枚举/用法候选（`/fold ` → all|none|reset）。
         let (start, count) = hint_window(opts.len(), hint.selected);
@@ -123,7 +121,7 @@ pub fn render_command_hint(app: &AppState, theme: &Theme, f: &mut Frame, area: R
             .take(count)
             .map(|(i, cmd)| {
                 candidate_row(
-                    format!("/{:<name_w$}  {}", cmd.name, cmd.desc),
+                    format!("/{:<name_w$}  {}", cmd.name, app.tr.t(*cmd.desc)),
                     i == hint.selected,
                     theme,
                 )
@@ -170,7 +168,10 @@ pub fn render_completion(app: &AppState, theme: &Theme, f: &mut Frame, area: Rec
     let block = ratatui::widgets::Block::default()
         .borders(ratatui::widgets::Borders::ALL)
         .border_style(theme.border)
-        .title(Line::from(Span::styled("@ 文件补全", theme.title)));
+        .title(Line::from(Span::styled(
+            app.tr.t(Key::CompletionTitle),
+            theme.title,
+        )));
     let lines: Vec<Line> = candidates
         .iter()
         .enumerate()
@@ -219,6 +220,7 @@ mod tests {
         let app = AppState {
             running: true,
             run_started_at: Some(started),
+            tr: crate::i18n::Tr::new(crate::i18n::Lang::Zh),
             ..Default::default()
         };
         let buf = ratatui::backend::TestBackend::new(40, 3);
@@ -269,6 +271,7 @@ mod tests {
         assert_eq!(hint.visible_rows(), 8, "候选多时 cap 到 8 行");
         let app = AppState {
             command_hint: Some(hint),
+            tr: crate::i18n::Tr::new(crate::i18n::Lang::Zh),
             ..Default::default()
         };
         let buf = ratatui::backend::TestBackend::new(60, 12);
@@ -306,6 +309,7 @@ mod tests {
         assert_eq!(hint.visible_rows(), 3);
         let app = AppState {
             command_hint: Some(hint),
+            tr: crate::i18n::Tr::new(crate::i18n::Lang::Zh),
             ..Default::default()
         };
         let buf = ratatui::backend::TestBackend::new(40, 8);

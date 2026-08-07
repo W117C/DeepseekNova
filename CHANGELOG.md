@@ -420,6 +420,37 @@ All notable changes to DeepseekNova will be documented in this file.
 - **reqwest::Client 共享**：web_fetch/web_search/docs_tools 改为进程级一次构造
   共享（此前每次调用重建）。
 
+---
+
+### Added（并行优化第四批，2026-08-08）
+
+- **i18n 双语框架（TUI）**：新增 `crates/deepseeknova-tui/src/i18n/`（零外部依赖）——
+  `Key` 枚举 236 键 + `Lang`/`Tr`/`interpolate`，英文默认 + 中文可选（fail-safe
+  缺键回退英文）。约 190 处用户可见中文文案迁入词表；`AppState.tr` 注入、
+  `Command.desc` 改 `&'static Key`、命令面板按语言匹配、评分卡维名与审批风险标签
+  保持数据契约（中文 JSON）不变、映射词表键做双语显示。语言选择：
+  `DEEPSEEKNOVA_LANG` 环境变量 + `TuiRunner::with_lang`。**词表结构是 Tauri 壳 P2
+  的共享契约**（键名/`{name}` 占位符/回退语义文档化）。
+- **AGENTS.md-first onboarding**：`init` 默认生成行业标准 `AGENTS.md`（项目简介/
+  常用命令/代码约定骨架，被 Claude Code/Codex/opencode/DeepseekNova 自动识别），
+  已存在则跳过；`init --legacy` 回退生成私有 `DEEPSEEKNOVA.md`；结尾输出引导式
+  Next steps。
+- **provider 配置接线**：工具 schema 序列化结果按工具集缓存（`ToolSchemaCache`，
+  注册/禁用自然失效，消除每次请求 collect+sort+序列化 4.6KB）；`[[models]]
+  temperature` 经 `ModelRouter`→factory→请求体接线（OpenAI-compatible/DeepSeek/
+  Anthropic/Ollama 均支持）；`kind="anthropic"` 显式配置 `reasoning_effort` 时
+  应用 thinking+effort（未配置保持请求不变，避免真实 Claude 400）；删除零消费者
+  `provider::telemetry`（export_telemetry 遗留桩，OTLP 导出在独立 telemetry crate）。
+- **发布元数据补齐**：scanner/graph/metrics 三 crate 补 description/keywords/
+  workspace 依赖版本（scanner 的 path-only 依赖改 `{ workspace = true }`，
+  `cargo package` 不再报错）；README/README_EN 截图空占位改为运行说明；
+  SECURITY.md 版本表更新为 latest-minor 支持策略（0.4.x Current / 0.3.x
+  Backports）。
+- **实证：版本须 bump 至 0.5.0**（未执行，待用户确认）——crates.io 的 0.4.0 已被
+  2026-07-20 旧快照占用 19/22 crate，`cargo publish --dry-run` 实测 metrics 因
+  代码引用当前未发布模块（`core::tool_hook`/`provider::cost`）编译失败，0.4.0
+  重发当前代码不可行。
+
 ## [0.4.0] — 2026-07-19
 
 ### 桌面前端完善

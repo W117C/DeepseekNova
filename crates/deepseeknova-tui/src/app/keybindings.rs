@@ -25,6 +25,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::app::actions::{Action, ActionContext, Binding};
+use crate::i18n::{Key, Tr};
 
 /// 用户覆盖层：`(context, binding) → Some(action) | None(解绑)`。
 #[derive(Debug, Clone, Default)]
@@ -57,51 +58,52 @@ impl Keymap {
         self.overrides.get(&(context, binding)).copied()
     }
 
-    /// 加载并解析；文件不存在返回空覆盖（无诊断）。
-    pub fn load(path: &Path) -> Self {
+    /// 加载并解析；文件不存在返回空覆盖（无诊断）。`tr` 决定诊断文案语言。
+    pub fn load(path: &Path, tr: Tr) -> Self {
         let content = match std::fs::read_to_string(path) {
             Ok(c) => c,
             Err(_) => return Keymap::default(),
         };
-        Self::parse(&content)
+        Self::parse(&content, tr)
     }
 
     /// 解析 keybindings.json 文本 → 覆盖层 + 诊断（纯函数，便于测试）。
-    pub fn parse(content: &str) -> Self {
+    /// 诊断文案按 `tr` 语言生成。
+    pub fn parse(content: &str, tr: Tr) -> Self {
         let mut keymap = Keymap::default();
         let value: serde_json::Value = match serde_json::from_str(content) {
             Ok(v) => v,
             Err(e) => {
-                keymap.diagnostics.push(format!(
-                    "parse_error: JSON 解析失败 — {e}（检查引号与逗号）"
-                ));
+                keymap
+                    .diagnostics
+                    .push(tr.t_args(Key::KeymapParseError, &[("err", &e.to_string())]));
                 return keymap;
             }
         };
         let Some(bindings) = value.get("bindings").and_then(|v| v.as_array()) else {
             keymap
                 .diagnostics
-                .push("parse_error: 缺少 \"bindings\" 数组（示例见模块文档）".to_string());
+                .push(tr.t(Key::KeymapMissingBindings).to_string());
             return keymap;
         };
         for (gi, group) in bindings.iter().enumerate() {
+            let gi = gi.to_string();
             let Some(ctx_name) = group.get("context").and_then(|v| v.as_str()) else {
-                keymap.diagnostics.push(format!(
-                    "invalid_context[#{gi}]: 缺少 \"context\" 字符串字段"
-                ));
+                keymap
+                    .diagnostics
+                    .push(tr.t_args(Key::KeymapMissingContext, &[("gi", &gi)]));
                 continue;
             };
             let Some(context) = ActionContext::from_name(ctx_name) else {
-                keymap.diagnostics.push(format!(
-                    "invalid_context[#{gi}]: 未知 context '{ctx_name}'（可用: \
-                     Input/Conversation/Sidebar/Completion）"
-                ));
+                keymap
+                    .diagnostics
+                    .push(tr.t_args(Key::KeymapUnknownContext, &[("gi", &gi), ("ctx", ctx_name)]));
                 continue;
             };
             let Some(map) = group.get("bindings").and_then(|v| v.as_object()) else {
                 keymap
                     .diagnostics
-                    .push(format!("invalid_context[#{gi}]: 缺少 \"bindings\" 对象"));
+                    .push(tr.t_args(Key::KeymapMissingBindingsObj, &[("gi", &gi)]));
                 continue;
             };
             for (key_spec, target) in map {
@@ -110,42 +112,50 @@ impl Keymap {
                     if let Some(binding) = Binding::parse(key_spec) {
                         keymap.overrides.insert((context, binding), None);
                     } else {
-                        keymap
-                            .diagnostics
-                            .push(format!("parse_error[{ctx_name}]: 无法解析键 '{key_spec}'"));
+                        keymap.diagnostics.push(tr.t_args(
+                            Key::KeymapUnparseableKey,
+                            &[("ctx", ctx_name), ("key", key_spec)],
+                        ));
                     }
                     continue;
                 }
                 let Some(action_name) = target.as_str() else {
-                    keymap.diagnostics.push(format!(
-                        "invalid_action[{ctx_name}]: 键 '{key_spec}' 的值必须是 action 名或 null"
+                    keymap.diagnostics.push(tr.t_args(
+                        Key::KeymapActionOrNull,
+                        &[("ctx", ctx_name), ("key", key_spec)],
                     ));
                     continue;
                 };
                 if let Some(reason) = reserved_reason(key_spec) {
-                    keymap.diagnostics.push(format!(
-                        "reserved[{ctx_name}]: 键 '{key_spec}' 不可重绑 — {reason}"
+                    keymap.diagnostics.push(tr.t_args(
+                        Key::KeymapReserved,
+                        &[
+                            ("ctx", ctx_name),
+                            ("key", key_spec),
+                            ("reason", tr.t(reason)),
+                        ],
                     ));
                     continue;
                 }
                 let Some(binding) = Binding::parse(key_spec) else {
-                    keymap.diagnostics.push(format!(
-                        "parse_error[{ctx_name}]: 无法解析键 '{key_spec}'（支持 \
-                         ctrl/alt/shift/super + 键名或单字符）"
+                    keymap.diagnostics.push(tr.t_args(
+                        Key::KeymapParseKeyHelp,
+                        &[("ctx", ctx_name), ("key", key_spec)],
                     ));
                     continue;
                 };
                 let Some(action) = Action::from_name(action_name) else {
-                    keymap.diagnostics.push(format!(
-                        "invalid_action[{ctx_name}]: 未知 action '{action_name}'（可用 \
-                         chat:submit / conv:scrollTop / modal:dismiss 等，见 /help）"
+                    keymap.diagnostics.push(tr.t_args(
+                        Key::KeymapUnknownAction,
+                        &[("ctx", ctx_name), ("action", action_name)],
                     ));
                     continue;
                 };
                 // duplicate：同 (context, binding) 重复声明（后覆盖前）告警。
                 if keymap.overrides.contains_key(&(context, binding)) {
-                    keymap.diagnostics.push(format!(
-                        "duplicate[{ctx_name}]: 键 '{key_spec}' 重复绑定（后者生效）"
+                    keymap.diagnostics.push(tr.t_args(
+                        Key::KeymapDuplicate,
+                        &[("ctx", ctx_name), ("key", key_spec)],
                     ));
                 }
                 keymap.overrides.insert((context, binding), Some(action));
@@ -156,14 +166,15 @@ impl Keymap {
 }
 
 /// 保留键保护（把 OS/终端约束写进产品，Claude Code 同款，带原因）。
-fn reserved_reason(spec: &str) -> Option<&'static str> {
+/// 返回词表键（原因文案按语言取）。
+fn reserved_reason(spec: &str) -> Option<Key> {
     let norm = spec.to_ascii_lowercase().replace(' ', "");
     match norm.as_str() {
-        "ctrl+c" => Some("终端中断信号，被操作系统保留"),
-        "ctrl+d" => Some("终端 EOF（空行时退出 shell）"),
-        "ctrl+m" => Some("与 Enter 在终端中等价"),
-        "ctrl+z" => Some("SIGTSTP 挂起进程"),
-        "ctrl+\\" | "ctrl+4" => Some("SIGQUIT 终止信号"),
+        "ctrl+c" => Some(Key::ReservedCtrlC),
+        "ctrl+d" => Some(Key::ReservedCtrlD),
+        "ctrl+m" => Some(Key::ReservedCtrlM),
+        "ctrl+z" => Some(Key::ReservedCtrlZ),
+        "ctrl+\\" | "ctrl+4" => Some(Key::ReservedCtrlBackslash),
         _ => None,
     }
 }
@@ -175,7 +186,7 @@ mod tests {
 
     #[test]
     fn parse_empty_file_yields_no_overrides() {
-        let km = Keymap::parse("");
+        let km = Keymap::parse("", Tr::new(crate::i18n::Lang::En));
         assert!(km.overrides.is_empty());
         assert!(!km.diagnostics.is_empty(), "空文件给出 parse_error");
     }
@@ -191,6 +202,7 @@ mod tests {
                     } }
                 ]
             }"#,
+            Tr::new(crate::i18n::Lang::En),
         );
         assert!(km.diagnostics.is_empty(), "无诊断: {:?}", km.diagnostics);
         let b1 = Binding::parse("ctrl+b").unwrap();
@@ -213,6 +225,7 @@ mod tests {
                 {"context":"Nope","bindings":{"g":"conv:scrollTop"}},
                 {"context":"Input","bindings":{"ctrl+q":"nope:action"}}
             ]}"#,
+            Tr::new(crate::i18n::Lang::En),
         );
         assert!(
             km.diagnostics
@@ -234,6 +247,7 @@ mod tests {
             r#"{"bindings":[
                 {"context":"Input","bindings":{"ctrl+c":"chat:submit"}}
             ]}"#,
+            Tr::new(crate::i18n::Lang::Zh),
         );
         assert!(
             km.diagnostics
@@ -261,7 +275,7 @@ mod tests {
 
     #[test]
     fn lookup_falls_through_when_not_overridden() {
-        let km = Keymap::parse(r#"{"bindings":[]}"#);
+        let km = Keymap::parse(r#"{"bindings":[]}"#, Tr::new(crate::i18n::Lang::En));
         assert_eq!(
             km.lookup(ActionContext::Input, Binding::parse("enter").unwrap()),
             None

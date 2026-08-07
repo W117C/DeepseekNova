@@ -6,6 +6,8 @@
 
 use deepseeknova_core::runner::RunEvent;
 
+use crate::i18n::{Key, Tr};
+
 use super::conversation::{
     AssistantTurn, Conversation, Segment, SystemKind, ToolStatus, TurnStatus,
 };
@@ -15,7 +17,7 @@ const ARGS_PREVIEW: usize = 200;
 /// 工具结果单行预览上限（字符）。
 const RESULT_PREVIEW: usize = 400;
 
-/// 把 agent 的 Paused reason 转成对用户可读的中文说明（保留原始原因信息）。
+/// 把 agent 的 Paused reason 转成对用户可读的说明（保留原始原因信息）。
 ///
 /// 已知两种 reason 形态来自 `deepseeknova-agent`：
 /// - `reached max steps (N)`：步数上限，属"任务做了一半被保护性暂停"
@@ -23,32 +25,33 @@ const RESULT_PREVIEW: usize = 400;
 ///
 /// 其余形态原样保留，不猜测。文案必须包含"任务未完成"的因果提示，让用户知道
 /// 这不是 bug，而是保护机制，且是可继续的（/resume）。
-pub fn friendly_pause_reason(reason: &str) -> String {
+pub fn friendly_pause_reason(reason: &str, tr: Tr) -> String {
     let trimmed = reason.trim();
     if let Some(n) = trimmed.strip_prefix("reached max steps (") {
         if let Some(digits) = n.strip_suffix(')') {
             if digits.chars().all(|c| c.is_ascii_digit()) {
-                return format!("已达步骤上限（{digits}），任务未完成");
+                return tr.t_args(Key::PauseMaxSteps, &[("n", digits)]);
             }
         }
     }
     if let Some(why) = trimmed.strip_prefix("budget:") {
-        return format!("已达预算上限：{}", why.trim());
+        return tr.t_args(Key::PauseBudget, &[("why", why.trim())]);
     }
     if trimmed == "max steps" {
-        return "已达步骤上限，任务未完成".to_string();
+        return tr.t(Key::PauseMaxStepsPlain).to_string();
     }
-    format!("任务暂停：{trimmed}")
+    tr.t_args(Key::PauseGeneric, &[("reason", trimmed)])
 }
 
 /// 消息树的单一变更入口。`ConversationApply` 是 [Conversation] 的行为扩展。
 pub trait ConversationApply {
     /// 增量消费一个 RunEvent，更新当前回合的消息树。
-    fn apply(&mut self, ev: RunEvent);
+    /// `tr` 决定系统段文案的语言（会话本身语言无关）。
+    fn apply(&mut self, ev: RunEvent, tr: Tr);
 }
 
 impl ConversationApply for Conversation {
-    fn apply(&mut self, ev: RunEvent) {
+    fn apply(&mut self, ev: RunEvent, tr: Tr) {
         match ev {
             RunEvent::TextDelta(text) => {
                 let Some(turn) = self.current_mut() else {
@@ -162,9 +165,14 @@ impl ConversationApply for Conversation {
                 let passed = if finding.passed { "pass" } else { "fail" };
                 turn.assistant.segments.push(Segment::System {
                     kind: SystemKind::Info,
-                    text: format!(
-                        "🔎 质量检查 [{severity} {passed}] {}: {}",
-                        finding.rule, finding.evidence
+                    text: tr.t_args(
+                        Key::QualityFinding,
+                        &[
+                            ("severity", severity),
+                            ("passed", passed),
+                            ("rule", &finding.rule),
+                            ("evidence", &finding.evidence),
+                        ],
                     ),
                 });
             }
@@ -176,11 +184,13 @@ impl ConversationApply for Conversation {
                 };
                 turn.assistant.flush_text();
                 turn.assistant.flush_reasoning();
+                let phase = format!("{:?}", transition.phase);
+                let outcome = format!("{:?}", transition.outcome);
                 turn.assistant.segments.push(Segment::System {
                     kind: SystemKind::Info,
-                    text: format!(
-                        "🔁 阶段迁移: {:?} ({:?})",
-                        transition.phase, transition.outcome
+                    text: tr.t_args(
+                        Key::PhaseTransition,
+                        &[("phase", &phase), ("outcome", &outcome)],
                     ),
                 });
             }
@@ -192,7 +202,10 @@ impl ConversationApply for Conversation {
                 turn.assistant.flush_reasoning();
                 turn.assistant.segments.push(Segment::System {
                     kind: SystemKind::Info,
-                    text: format!("🚧 门控违规: {} — {}", violation.gate, violation.detail),
+                    text: tr.t_args(
+                        Key::GateViolation,
+                        &[("gate", &violation.gate), ("detail", &violation.detail)],
+                    ),
                 });
             }
             RunEvent::DriftFinding(drift) => {
@@ -201,11 +214,16 @@ impl ConversationApply for Conversation {
                 };
                 turn.assistant.flush_text();
                 turn.assistant.flush_reasoning();
+                let failures = drift.failures.to_string();
                 turn.assistant.segments.push(Segment::System {
                     kind: SystemKind::Info,
-                    text: format!(
-                        "🧭 drift: {} 连续失败 {} 次 — {}",
-                        drift.tool_family, drift.failures, drift.detail
+                    text: tr.t_args(
+                        Key::DriftFinding,
+                        &[
+                            ("family", &drift.tool_family),
+                            ("n", &failures),
+                            ("detail", &drift.detail),
+                        ],
                     ),
                 });
             }
@@ -227,9 +245,12 @@ impl ConversationApply for Conversation {
                     .map(|d| truncate_str(d, 120))
                     .unwrap_or_default();
                 let text = if desc.is_empty() {
-                    format!("🔒 请求授权: {title}")
+                    tr.t_args(Key::ApprovalRequestLine, &[("title", &title)])
                 } else {
-                    format!("🔒 请求授权: {title} — {desc}")
+                    tr.t_args(
+                        Key::ApprovalRequestLineDesc,
+                        &[("title", &title), ("desc", &desc)],
+                    )
                 };
                 turn.assistant.segments.push(Segment::System {
                     kind: SystemKind::Approval,
@@ -244,12 +265,12 @@ impl ConversationApply for Conversation {
                 turn.assistant.mark_unfinished_tools_failed();
                 turn.assistant.segments.push(Segment::System {
                     kind: SystemKind::Paused,
-                    text: format!("⏸ {}", friendly_pause_reason(&reason)),
+                    text: format!("⏸ {}", friendly_pause_reason(&reason, tr)),
                 });
                 if let Some(id) = session_id {
                     turn.assistant.segments.push(Segment::System {
                         kind: SystemKind::Info,
-                        text: format!("输入 /resume {id} 继续任务，或直接输入新指令"),
+                        text: tr.t_args(Key::ResumeHint, &[("id", &id)]),
                     });
                 }
                 turn.status = TurnStatus::Paused;
@@ -302,6 +323,7 @@ pub fn truncate_str(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::i18n::Lang;
     use crate::model::conversation::{Conversation, Segment};
 
     fn new_turn(c: &mut Conversation, prompt: &str) {
@@ -312,16 +334,25 @@ mod tests {
     fn reasoning_flushed_as_whole_segment_before_text() {
         let mut c = Conversation::default();
         new_turn(&mut c, "q");
-        c.apply(RunEvent::ReasoningDelta {
-            text: "think-".into(),
-            signature: None,
-        });
-        c.apply(RunEvent::ReasoningDelta {
-            text: "more".into(),
-            signature: None,
-        });
-        c.apply(RunEvent::TextDelta("answer".into()));
-        c.apply(RunEvent::Done(crate::model::conversation::done_output("")));
+        c.apply(
+            RunEvent::ReasoningDelta {
+                text: "think-".into(),
+                signature: None,
+            },
+            Tr::new(Lang::En),
+        );
+        c.apply(
+            RunEvent::ReasoningDelta {
+                text: "more".into(),
+                signature: None,
+            },
+            Tr::new(Lang::En),
+        );
+        c.apply(RunEvent::TextDelta("answer".into()), Tr::new(Lang::En));
+        c.apply(
+            RunEvent::Done(crate::model::conversation::done_output("")),
+            Tr::new(Lang::En),
+        );
 
         let segs: Vec<&Segment> = c.current().unwrap().assistant.segments.iter().collect();
         assert_eq!(segs.len(), 2, "推理整段 + 正文整段");
@@ -337,17 +368,26 @@ mod tests {
         // 核心乱序场景：推理 → 正文 → 推理 → 正文。
         let mut c = Conversation::default();
         new_turn(&mut c, "q");
-        c.apply(RunEvent::ReasoningDelta {
-            text: "r1".into(),
-            signature: None,
-        });
-        c.apply(RunEvent::TextDelta("t1".into()));
-        c.apply(RunEvent::ReasoningDelta {
-            text: "r2".into(),
-            signature: None,
-        });
-        c.apply(RunEvent::TextDelta("t2".into()));
-        c.apply(RunEvent::Done(crate::model::conversation::done_output("")));
+        c.apply(
+            RunEvent::ReasoningDelta {
+                text: "r1".into(),
+                signature: None,
+            },
+            Tr::new(Lang::En),
+        );
+        c.apply(RunEvent::TextDelta("t1".into()), Tr::new(Lang::En));
+        c.apply(
+            RunEvent::ReasoningDelta {
+                text: "r2".into(),
+                signature: None,
+            },
+            Tr::new(Lang::En),
+        );
+        c.apply(RunEvent::TextDelta("t2".into()), Tr::new(Lang::En));
+        c.apply(
+            RunEvent::Done(crate::model::conversation::done_output("")),
+            Tr::new(Lang::En),
+        );
 
         let segs: Vec<&Segment> = c.current().unwrap().assistant.segments.iter().collect();
         assert_eq!(segs.len(), 4);
@@ -363,9 +403,12 @@ mod tests {
         let mut c = Conversation::default();
         new_turn(&mut c, "q");
         for tok in ["你", "好", "！", "我是", "Deep", "seek"] {
-            c.apply(RunEvent::TextDelta(tok.into()));
+            c.apply(RunEvent::TextDelta(tok.into()), Tr::new(Lang::En));
         }
-        c.apply(RunEvent::Done(crate::model::conversation::done_output("")));
+        c.apply(
+            RunEvent::Done(crate::model::conversation::done_output("")),
+            Tr::new(Lang::En),
+        );
         let segs: Vec<&Segment> = c.current().unwrap().assistant.segments.iter().collect();
         assert_eq!(segs.len(), 1, "连续正文合成一个 Text 段");
         assert!(matches!(
@@ -379,12 +422,18 @@ mod tests {
         // t1 → r2 切换：正文先落段，推理段序在正文之后。
         let mut c = Conversation::default();
         new_turn(&mut c, "q");
-        c.apply(RunEvent::TextDelta("t1".into()));
-        c.apply(RunEvent::ReasoningDelta {
-            text: "r2".into(),
-            signature: None,
-        });
-        c.apply(RunEvent::Done(crate::model::conversation::done_output("")));
+        c.apply(RunEvent::TextDelta("t1".into()), Tr::new(Lang::En));
+        c.apply(
+            RunEvent::ReasoningDelta {
+                text: "r2".into(),
+                signature: None,
+            },
+            Tr::new(Lang::En),
+        );
+        c.apply(
+            RunEvent::Done(crate::model::conversation::done_output("")),
+            Tr::new(Lang::En),
+        );
         let segs: Vec<&Segment> = c.current().unwrap().assistant.segments.iter().collect();
         assert_eq!(segs.len(), 2);
         assert!(matches!(segs[0], Segment::Text { text } if text == "t1"));
@@ -395,28 +444,46 @@ mod tests {
     fn tool_call_flushes_reasoning_and_carries_result() {
         let mut c = Conversation::default();
         new_turn(&mut c, "q");
-        c.apply(RunEvent::ReasoningDelta {
-            text: "prep".into(),
-            signature: None,
-        });
-        c.apply(RunEvent::ToolCallStart {
-            id: "1".into(),
-            name: "grep".into(),
-        });
-        c.apply(RunEvent::ToolCallDelta {
-            id: "1".into(),
-            args_delta: "{\"pat".into(),
-        });
-        c.apply(RunEvent::ToolCallEnd {
-            id: "1".into(),
-            name: "grep".into(),
-            arguments: "{\"pattern\":\"x\"}".into(),
-        });
-        c.apply(RunEvent::ToolResult {
-            call_id: "1".into(),
-            result: "hit".into(),
-        });
-        c.apply(RunEvent::Done(crate::model::conversation::done_output("")));
+        c.apply(
+            RunEvent::ReasoningDelta {
+                text: "prep".into(),
+                signature: None,
+            },
+            Tr::new(Lang::En),
+        );
+        c.apply(
+            RunEvent::ToolCallStart {
+                id: "1".into(),
+                name: "grep".into(),
+            },
+            Tr::new(Lang::En),
+        );
+        c.apply(
+            RunEvent::ToolCallDelta {
+                id: "1".into(),
+                args_delta: "{\"pat".into(),
+            },
+            Tr::new(Lang::En),
+        );
+        c.apply(
+            RunEvent::ToolCallEnd {
+                id: "1".into(),
+                name: "grep".into(),
+                arguments: "{\"pattern\":\"x\"}".into(),
+            },
+            Tr::new(Lang::En),
+        );
+        c.apply(
+            RunEvent::ToolResult {
+                call_id: "1".into(),
+                result: "hit".into(),
+            },
+            Tr::new(Lang::En),
+        );
+        c.apply(
+            RunEvent::Done(crate::model::conversation::done_output("")),
+            Tr::new(Lang::En),
+        );
 
         let segs: Vec<&Segment> = c.current().unwrap().assistant.segments.iter().collect();
         assert_eq!(segs.len(), 2, "推理先落段，工具调用随后");
@@ -443,10 +510,11 @@ mod tests {
     fn done_marks_turn_done_and_flushes() {
         let mut c = Conversation::default();
         new_turn(&mut c, "q");
-        c.apply(RunEvent::TextDelta("final ".into()));
-        c.apply(RunEvent::Done(crate::model::conversation::done_output(
-            "done",
-        )));
+        c.apply(RunEvent::TextDelta("final ".into()), Tr::new(Lang::En));
+        c.apply(
+            RunEvent::Done(crate::model::conversation::done_output("done")),
+            Tr::new(Lang::En),
+        );
         let turn = c.current().unwrap();
         assert_eq!(turn.status, TurnStatus::Done);
         assert_eq!(turn.assistant.segments.len(), 1);
@@ -469,11 +537,12 @@ mod tests {
             "DeepseekNova，",
             "一个终端原生的软件工程代理。",
         ] {
-            c.apply(RunEvent::TextDelta(tok.into()));
+            c.apply(RunEvent::TextDelta(tok.into()), Tr::new(Lang::En));
         }
-        c.apply(RunEvent::Done(crate::model::conversation::done_output(
-            full,
-        )));
+        c.apply(
+            RunEvent::Done(crate::model::conversation::done_output(full)),
+            Tr::new(Lang::En),
+        );
         let turn = c.current().unwrap();
         assert_eq!(turn.assistant.segments.len(), 1, "只落一个正文段");
         assert!(matches!(
@@ -487,9 +556,10 @@ mod tests {
         // 纯非流式（无 TextDelta，仅 Done 携带文本）→ 正常追加。
         let mut c = Conversation::default();
         new_turn(&mut c, "q");
-        c.apply(RunEvent::Done(crate::model::conversation::done_output(
-            "非流式全文",
-        )));
+        c.apply(
+            RunEvent::Done(crate::model::conversation::done_output("非流式全文")),
+            Tr::new(Lang::En),
+        );
         let turn = c.current().unwrap();
         assert!(matches!(
             &turn.assistant.segments[0],
@@ -501,14 +571,20 @@ mod tests {
     fn paused_flushes_and_marks_status() {
         let mut c = Conversation::default();
         new_turn(&mut c, "q");
-        c.apply(RunEvent::ReasoningDelta {
-            text: "r".into(),
-            signature: None,
-        });
-        c.apply(RunEvent::Paused {
-            reason: "reached max steps (10)".into(),
-            session_id: Some("abc".into()),
-        });
+        c.apply(
+            RunEvent::ReasoningDelta {
+                text: "r".into(),
+                signature: None,
+            },
+            Tr::new(Lang::Zh),
+        );
+        c.apply(
+            RunEvent::Paused {
+                reason: "reached max steps (10)".into(),
+                session_id: Some("abc".into()),
+            },
+            Tr::new(Lang::Zh),
+        );
         let turn = c.current().unwrap();
         assert_eq!(turn.status, TurnStatus::Paused);
         assert_eq!(turn.assistant.segments.len(), 3);
@@ -528,19 +604,33 @@ mod tests {
 
     #[test]
     fn friendly_pause_reason_maps_known_and_passes_through() {
+        let tr = Tr::new(Lang::Zh);
         assert_eq!(
-            friendly_pause_reason("reached max steps (40)"),
+            friendly_pause_reason("reached max steps (40)", tr),
             "已达步骤上限（40），任务未完成"
         );
         assert_eq!(
-            friendly_pause_reason("budget: 预算超限"),
+            friendly_pause_reason("budget: 预算超限", tr),
             "已达预算上限：预算超限"
         );
-        assert_eq!(friendly_pause_reason("unexpected"), "任务暂停：unexpected");
+        assert_eq!(
+            friendly_pause_reason("unexpected", tr),
+            "任务暂停：unexpected"
+        );
         // 非数字的 max steps 形态不猜测，原样保留。
         assert_eq!(
-            friendly_pause_reason("reached max steps (x)"),
+            friendly_pause_reason("reached max steps (x)", tr),
             "任务暂停：reached max steps (x)"
+        );
+        // 英文模式输出英文。
+        let tr_en = Tr::new(Lang::En);
+        assert_eq!(
+            friendly_pause_reason("reached max steps (40)", tr_en),
+            "Reached step limit (40), task incomplete"
+        );
+        assert_eq!(
+            friendly_pause_reason("unexpected", tr_en),
+            "Task paused: unexpected"
         );
     }
 
@@ -548,11 +638,14 @@ mod tests {
     fn approval_request_renders_as_system() {
         let mut c = Conversation::default();
         new_turn(&mut c, "q");
-        c.apply(RunEvent::ApprovalRequest {
-            id: "a1".into(),
-            title: "run shell".into(),
-            description: Some("rm -rf".into()),
-        });
+        c.apply(
+            RunEvent::ApprovalRequest {
+                id: "a1".into(),
+                title: "run shell".into(),
+                description: Some("rm -rf".into()),
+            },
+            Tr::new(Lang::Zh),
+        );
         let turn = c.current().unwrap();
         assert!(matches!(
             &turn.assistant.segments[0],
@@ -564,15 +657,21 @@ mod tests {
     fn verification_flushes_reasoning() {
         let mut c = Conversation::default();
         new_turn(&mut c, "q");
-        c.apply(RunEvent::ReasoningDelta {
-            text: "r".into(),
-            signature: None,
-        });
-        c.apply(RunEvent::Verification {
-            command: "cargo check".into(),
-            passed: true,
-            summary: "ok".into(),
-        });
+        c.apply(
+            RunEvent::ReasoningDelta {
+                text: "r".into(),
+                signature: None,
+            },
+            Tr::new(Lang::En),
+        );
+        c.apply(
+            RunEvent::Verification {
+                command: "cargo check".into(),
+                passed: true,
+                summary: "ok".into(),
+            },
+            Tr::new(Lang::En),
+        );
         let segs: Vec<&Segment> = c.current().unwrap().assistant.segments.iter().collect();
         assert_eq!(segs.len(), 2);
         assert!(matches!(segs[0], Segment::Reasoning { .. }));
@@ -585,8 +684,11 @@ mod tests {
     #[test]
     fn events_without_current_turn_are_ignored() {
         let mut c = Conversation::default();
-        c.apply(RunEvent::TextDelta("orphan".into()));
-        c.apply(RunEvent::Done(crate::model::conversation::done_output("x")));
+        c.apply(RunEvent::TextDelta("orphan".into()), Tr::new(Lang::En));
+        c.apply(
+            RunEvent::Done(crate::model::conversation::done_output("x")),
+            Tr::new(Lang::En),
+        );
         assert_eq!(c.turn_count(), 0);
         assert_eq!(c.segment_count(), 0);
     }
@@ -603,14 +705,20 @@ mod tests {
     fn tool_result_truncates_long_output() {
         let mut c = Conversation::default();
         new_turn(&mut c, "q");
-        c.apply(RunEvent::ToolCallStart {
-            id: "1".into(),
-            name: "cat".into(),
-        });
-        c.apply(RunEvent::ToolResult {
-            call_id: "1".into(),
-            result: "z".repeat(1000),
-        });
+        c.apply(
+            RunEvent::ToolCallStart {
+                id: "1".into(),
+                name: "cat".into(),
+            },
+            Tr::new(Lang::En),
+        );
+        c.apply(
+            RunEvent::ToolResult {
+                call_id: "1".into(),
+                result: "z".repeat(1000),
+            },
+            Tr::new(Lang::En),
+        );
         let turn = c.current().unwrap();
         match &turn.assistant.segments[0] {
             Segment::ToolCall { result, status, .. } => {

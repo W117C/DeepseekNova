@@ -28,6 +28,12 @@ A Rust-from-scratch AI agent framework — not a wrapper. Built specifically for
 
 ---
 
+## 📸 Screenshots
+
+> Screenshots pending — run `deepseeknova-cli chat --tui` to try the terminal UI (requires `DEEPSEEK_API_KEY`).
+
+---
+
 ## 🎯 Key Features
 
 - **Deep reasoning + tool calling** — streaming reasoning output, 4-level reasoning effort, 17 built-in tools

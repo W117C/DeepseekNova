@@ -120,8 +120,12 @@ For production or multi-user deployments:
 
 ## Supported Versions
 
+DeepseekNova follows a **latest-minor support policy**: only the most recent minor
+version line receives security fixes. When a new minor version is released, the
+previous line receives backports for critical vulnerabilities only.
+
 | Version | Security Fixes |
 |---|---|
-| 0.3.x | ✅ Current |
-| 0.2.x | ⚠️ Backports for critical vulnerabilities |
-| 0.1.x | ❌ Not supported — upgrade recommended |
+| 0.4.x | ✅ Current |
+| 0.3.x | ⚠️ Backports for critical vulnerabilities |
+| ≤ 0.2.x | ❌ Not supported — upgrade recommended |

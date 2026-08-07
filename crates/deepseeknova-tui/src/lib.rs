@@ -37,10 +37,13 @@
 mod app;
 pub mod approval;
 mod commands;
+pub mod i18n;
 pub mod input;
 mod model;
 mod render;
 mod theme;
+
+pub use i18n::{Key, Lang, Tr};
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -97,6 +100,8 @@ pub struct TuiRunner {
     budget_window: Option<u32>,
     /// 权限审批请求接收端（CLI 注入 agent 的 responder 通道）。
     approval_rx: Option<tokio::sync::mpsc::Receiver<crate::approval::ApprovalRequest>>,
+    /// 界面语言（`DEEPSEEKNOVA_LANG` 解析，缺省英文；`with_lang` 可覆盖）。
+    lang: Lang,
 }
 
 impl TuiRunner {
@@ -123,7 +128,15 @@ impl TuiRunner {
             context_window: None,
             budget_window: None,
             approval_rx: None,
+            lang: Lang::from_env(),
         }
+    }
+
+    /// 编程式注入界面语言（优先级高于 `DEEPSEEKNOVA_LANG` 环境变量）。
+    /// 缺省为英文；`Lang::Zh` 切换到中文。
+    pub fn with_lang(mut self, lang: Lang) -> Self {
+        self.lang = lang;
+        self
     }
 
     /// 注入权限审批请求接收端（与注入 agent 的 `TuiApprovalResponder`
@@ -242,10 +255,12 @@ impl TuiRunner {
     }
 
     async fn run_inner(&mut self, terminal: &mut ratatui::DefaultTerminal) -> anyhow::Result<()> {
+        let lang = self.lang;
+        let tr = Tr::new(lang);
         // 主题：编程式注入优先，否则读环境变量（未知值回退 codex + 提示）。
         let (theme, theme_warning) = match &self.theme {
             Some(t) => (t.clone(), None),
-            None => theme::theme_from_env(),
+            None => theme::theme_from_env(tr),
         };
 
         let runtime = commands::TuiRuntime {
@@ -273,13 +288,14 @@ impl TuiRunner {
             model_label: self.model_label.clone(),
             theme,
             at_files: self.at_files.clone(),
+            tr,
             ..Default::default()
         };
         // 与上方 EnableMouseCapture 保持一致：鼠标捕获默认开启。
         app.mouse_capture = true;
         // 用户键位定制（keybindings.json）：启动时加载，事件循环轮询热重载。
         app.keymap_path = crate::app::keybindings::Keymap::default_path();
-        app.keymap = crate::app::keybindings::Keymap::load(&app.keymap_path);
+        app.keymap = crate::app::keybindings::Keymap::load(&app.keymap_path, tr);
         app.keymap_mtime = std::fs::metadata(&app.keymap_path)
             .ok()
             .and_then(|m| m.modified().ok());
@@ -291,10 +307,12 @@ impl TuiRunner {
         } else if app.keymap_path.exists() {
             app.echo_line(
                 model::conversation::LineKind::System,
-                &format!(
-                    "已加载键位定制 {}（{} 条覆盖）",
-                    app.keymap_path.display(),
-                    app.keymap.override_count()
+                &tr.t_args(
+                    i18n::Key::KeymapLoaded,
+                    &[
+                        ("path", &app.keymap_path.display().to_string()),
+                        ("n", &app.keymap.override_count().to_string()),
+                    ],
                 ),
             );
         }

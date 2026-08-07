@@ -9,10 +9,23 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::approval::ApprovalRequest;
+use crate::i18n::{Key, Tr};
 use crate::theme::Theme;
 
+/// 风险标签词表键（识别 agent Ask 描述前缀 `[风险:只读|非只读|危险]` 的
+/// 中/英两形态）；未知标签回退 None，原样展示。
+fn risk_label_key(label: &str) -> Option<Key> {
+    match label {
+        "只读" | "read-only" => Some(Key::RiskReadonly),
+        "非只读" | "non-read-only" => Some(Key::RiskNonReadonly),
+        "危险" | "dangerous" => Some(Key::RiskDanger),
+        _ => None,
+    }
+}
+
 /// 审批浮层渲染：标题「🔒 请求授权」+ 请求内容 + y/n 提示。
-pub fn render_approval(req: &ApprovalRequest, theme: &Theme, f: &mut Frame, area: Rect) {
+/// 文案按 `tr` 语言取词表。
+pub fn render_approval(req: &ApprovalRequest, tr: Tr, theme: &Theme, f: &mut Frame, area: Rect) {
     let border = Style::default().fg(theme
         .verification_fail
         .fg
@@ -42,26 +55,32 @@ pub fn render_approval(req: &ApprovalRequest, theme: &Theme, f: &mut Frame, area
         }
     }
     if let Some(label) = risk {
-        let style = match label.as_str() {
-            "只读" => Style::default().fg(theme.accent),
-            "非只读" => Style::default().fg(ratatui::style::Color::Yellow),
-            "危险" => border,
+        let style = match risk_label_key(&label) {
+            Some(Key::RiskReadonly) => Style::default().fg(theme.accent),
+            Some(Key::RiskNonReadonly) => Style::default().fg(ratatui::style::Color::Yellow),
+            Some(Key::RiskDanger) => border,
             _ => theme.system,
         };
+        let display = risk_label_key(&label)
+            .map(|k| tr.t(k))
+            .unwrap_or(label.as_str());
         lines.insert(
             1,
-            Line::from(Span::styled(format!(" 风险：{label}"), style)),
+            Line::from(Span::styled(
+                tr.t_args(Key::RiskLabel, &[("label", display)]),
+                style,
+            )),
         );
     }
     lines.push(Line::from(Span::styled(
-        "y 允许 · n 拒绝 · Esc 拒绝",
+        tr.t(Key::ApprovalHint),
         Style::default().fg(theme.accent),
     )));
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border)
-        .title(Line::from(Span::styled("🔒 请求授权", border)));
+        .title(Line::from(Span::styled(tr.t(Key::ApprovalTitle), border)));
     let widget = Paragraph::new(lines)
         .block(block)
         .wrap(Wrap { trim: false });
@@ -86,12 +105,13 @@ mod tests {
     #[test]
     fn renders_without_panic() {
         let theme = Theme::default();
+        let tr = Tr::new(crate::i18n::Lang::En);
         let buf = ratatui::backend::TestBackend::new(40, 10);
         let mut terminal = ratatui::Terminal::new(buf).unwrap();
         terminal
             .draw(|f| {
                 let area = f.area();
-                render_approval(&sample(), &theme, f, area);
+                render_approval(&sample(), tr, &theme, f, area);
             })
             .unwrap();
     }
@@ -106,12 +126,13 @@ mod tests {
             reply,
         };
         let theme = Theme::default();
+        let tr = Tr::new(crate::i18n::Lang::Zh);
         let buf = ratatui::backend::TestBackend::new(50, 12);
         let mut terminal = ratatui::Terminal::new(buf).unwrap();
         terminal
             .draw(|f| {
                 let area = f.area();
-                render_approval(&req, &theme, f, area);
+                render_approval(&req, tr, &theme, f, area);
             })
             .unwrap();
         let text: String = terminal
@@ -126,5 +147,27 @@ mod tests {
         assert!(flat.contains("风险：非只读"), "风险标签: {text}");
         assert!(text.contains("rm"), "mono 命令完整展示: {text}");
         assert!(text.contains("/tmp/x"), "mono 命令完整展示: {text}");
+
+        // 英文模式：风险标签走英文词表。
+        let tr_en = Tr::new(crate::i18n::Lang::En);
+        let buf = ratatui::backend::TestBackend::new(50, 12);
+        let mut terminal = ratatui::Terminal::new(buf).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render_approval(&req, tr_en, &theme, f, area);
+            })
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            text.replace(' ', "").contains("Risk:non-read-only"),
+            "英文风险标签: {text}"
+        );
     }
 }

@@ -32,8 +32,7 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 
 ## 📸 截图
 
-<div align="center">
-</div>
+> 截图待补 —— 可运行 `deepseeknova-cli chat --tui` 体验终端 UI（需先配置 `DEEPSEEK_API_KEY`）。
 
 ---
 

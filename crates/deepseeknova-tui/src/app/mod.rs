@@ -18,6 +18,7 @@ use tokio_stream::StreamExt;
 
 use crate::commands::TuiCaps;
 use crate::commands::{CommandCtx, CommandOutcome, CommandRegistry};
+use crate::i18n::Key;
 use crate::model::conversation::LineKind;
 use state::{AppState, KeyAction};
 
@@ -179,13 +180,13 @@ pub async fn run_loop(
                 .ok()
                 .and_then(|m| m.modified().ok());
             if mtime != app.keymap_mtime && mtime.is_some() {
-                let reloaded = crate::app::keybindings::Keymap::load(&app.keymap_path);
+                let reloaded = crate::app::keybindings::Keymap::load(&app.keymap_path, app.tr);
                 app.keymap_mtime = mtime;
                 if reloaded.diagnostics.is_empty() {
                     app.keymap = reloaded;
                     app.echo_line(
                         crate::model::conversation::LineKind::System,
-                        "键位配置已热重载",
+                        app.tr.t(Key::KeymapReloaded),
                     );
                 } else {
                     for d in &reloaded.diagnostics {
@@ -259,7 +260,10 @@ pub async fn run_loop(
                                     if let Err(e) = edit_external(app, terminal).await {
                                         app.echo_line(
                                             crate::model::conversation::LineKind::Error,
-                                            &format!("外部编辑器失败: {e}"),
+                                            &app.tr.t_args(
+                                                Key::ExternalEditorFailed,
+                                                &[("err", &e.to_string())],
+                                            ),
                                         );
                                     }
                                 }
@@ -280,6 +284,7 @@ pub async fn run_loop(
                                     // 也不影响新消息可见性。
                                     app.auto_scroll = true;
                                     let tx = tx.clone();
+                                    let tr = app.tr;
                                     let runner = caps.runtime.lock().unwrap_or_else(|e| e.into_inner()).runner.clone();
                                     let gen = session.begin();
                                     current_run = Some(tokio::spawn(async move {
@@ -298,7 +303,10 @@ pub async fn run_loop(
                                                                 let _ = tx
                                                                     .send(AppEvent::Error {
                                                                         gen,
-                                                                        text: format!("❌ {e}"),
+                                                                        text: tr.t_args(
+                                                                            Key::RunnerError,
+                                                                            &[("err", &e.to_string())],
+                                                                        ),
                                                                     })
                                                                     .await;
                                                                 continue;
@@ -318,7 +326,10 @@ pub async fn run_loop(
                                                     let _ = tx
                                                         .send(AppEvent::Error {
                                                             gen,
-                                                            text: format!("❌ {e}"),
+                                                            text: tr.t_args(
+                                                                Key::RunnerError,
+                                                                &[("err", &e.to_string())],
+                                                            ),
                                                         })
                                                         .await;
                                                     let _ = tx.send(AppEvent::Done { gen }).await;
@@ -328,7 +339,7 @@ pub async fn run_loop(
                                             let _ = tx
                                                 .send(AppEvent::Error {
                                                     gen,
-                                                    text: "❌ runner 不可用（未注入）".into(),
+                                                    text: tr.t(Key::RunnerUnavailable).to_string(),
                                                 })
                                                 .await;
                                             let _ = tx.send(AppEvent::Done { gen }).await;
@@ -342,7 +353,7 @@ pub async fn run_loop(
                                         app.conversation.mark_current_cancelled();
                                         app.running = false;
                                         app.run_started_at = None;
-                                        app.echo_line(LineKind::System, "已取消（Ctrl+C / Esc）");
+                                        app.echo_line(LineKind::System, app.tr.t(Key::Cancelled));
                                     }
                                 }
                                 KeyAction::None => {}
@@ -398,7 +409,10 @@ pub async fn run_loop(
                                             Ok(()) => {}
                                             Err(e) => app.echo_line(
                                                 LineKind::Error,
-                                                &format!("会话落盘失败: {e}"),
+                                                &app.tr.t_args(
+                                                    Key::SessionPersistFailed,
+                                                    &[("err", &e.to_string())],
+                                                ),
                                             ),
                                         }
                                     }
@@ -437,7 +451,7 @@ async fn handle_command(app: &mut AppState, caps: &TuiCaps, cmd: &str) -> bool {
             command.handler.run(&mut ctx, args).await == CommandOutcome::Quit
         }
         None => {
-            app.show_notice(format!("未知命令: /{name}（/help 查看）"));
+            app.show_notice(app.tr.t_args(Key::UnknownCommand, &[("cmd", name)]));
             false
         }
     }
@@ -473,10 +487,10 @@ async fn edit_external(
     terminal.clear()?;
     let status = match result {
         Ok(s) => s,
-        Err(e) => anyhow::bail!("无法启动编辑器 {editor}: {e}"),
+        Err(e) => anyhow::bail!("failed to launch editor {editor}: {e}"),
     };
     if !status.success() {
-        anyhow::bail!("编辑器退出码 {:?}", status.code());
+        anyhow::bail!("editor exited with code {:?}", status.code());
     }
 
     let edited = std::fs::read_to_string(&path)?;
@@ -545,7 +559,10 @@ mod tests {
             budget_window: None,
             approval_rx: None,
         };
-        let mut app = AppState::default();
+        let mut app = AppState {
+            tr: crate::i18n::Tr::new(crate::i18n::Lang::Zh),
+            ..Default::default()
+        };
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let quit = handle_command(&mut app, &caps, "wat").await;

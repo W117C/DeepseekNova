@@ -7,6 +7,8 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::i18n::Key;
+
 use super::actions::{Action, ActionContext};
 use super::state::{AppState, KeyAction};
 
@@ -50,13 +52,14 @@ impl SidebarTab {
         SidebarTab::Skills,
     ];
 
-    pub fn label(self) -> &'static str {
+    /// 面板标签的词表键（渲染经 `Tr::t` 取当前语言值）。
+    pub fn label(self) -> Key {
         match self {
-            SidebarTab::Sessions => "会话",
-            SidebarTab::Tools => "工具活动",
-            SidebarTab::Mcp => "MCP",
-            SidebarTab::Cost => "成本",
-            SidebarTab::Skills => "技能",
+            SidebarTab::Sessions => Key::TabSessions,
+            SidebarTab::Tools => Key::TabTools,
+            SidebarTab::Mcp => Key::TabMcp,
+            SidebarTab::Cost => Key::TabCost,
+            SidebarTab::Skills => Key::TabSkills,
         }
     }
 
@@ -338,9 +341,9 @@ impl AppState {
         if key.code == KeyCode::Char('t') && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.mouse_capture = !self.mouse_capture;
             if self.mouse_capture {
-                self.show_notice("鼠标捕获已开启：滚轮滚动对话历史（Ctrl+T 切换为选中文本）");
+                self.show_notice(self.tr.t(Key::MouseCaptureOn));
             } else {
-                self.show_notice("鼠标捕获已关闭：可用鼠标选中/复制文本（Ctrl+T 恢复滚轮）");
+                self.show_notice(self.tr.t(Key::MouseCaptureOff));
             }
             return true;
         }
@@ -481,7 +484,10 @@ mod tests {
     #[test]
     fn modal_shortcuts_toggle_sidebar_only() {
         // 命令面板为纯 `/` 触发：Ctrl+K 不再打开任何模态。
-        let mut app = AppState::default();
+        let mut app = AppState {
+            tr: crate::i18n::Tr::new(crate::i18n::Lang::Zh),
+            ..Default::default()
+        };
         assert!(!app.handle_modal_shortcuts(&key(KeyCode::Char('k'), KeyModifiers::CONTROL)));
         assert_eq!(app.focus, Focus::Input, "Ctrl+K 无模态可开");
         assert!(!app.sidebar_visible);

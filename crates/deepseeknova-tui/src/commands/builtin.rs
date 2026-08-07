@@ -7,10 +7,11 @@ use async_trait::async_trait;
 use deepseeknova_provider::cost::ModelRole;
 use deepseeknova_provider::factory::ReasoningEffort;
 
-use super::{ArgsSpec, Command, CommandCtx, CommandHandler, CommandOutcome};
-use crate::app::state::McpStatus;
+use super::{ArgsSpec, Command, CommandCtx, CommandHandler, CommandOutcome, CommandRegistry};
+use crate::app::state::{display_mode_label, McpStatus};
+use crate::i18n::{Key, Tr};
 use crate::model::conversation::LineKind;
-use crate::model::scorecard::Scorecard;
+use crate::model::scorecard::{dim_label_key, Scorecard};
 
 // ── help ────────────────────────────────────────────────────────
 
@@ -21,44 +22,30 @@ impl CommandHandler for HelpCmd {
     async fn run(&self, ctx: &mut CommandCtx<'_>, _args: &str) -> CommandOutcome {
         // /help 改为可滚动浮层：不再往对话面板灌 30+ 行（用户反馈"一直堆在
         // 对话页面里很碍事"）。Esc/q 关闭，j/k、↑/↓、PageUp/Down 滚动。
-        ctx.app.help_overlay = Some(crate::app::focus::HelpOverlay {
-            lines: vec![
-                "  /help          显示帮助",
-                "  /clear         清空对话面板",
-                "  /new           开始新会话",
-                "  /sessions      列出已保存会话",
-                "  /resume <id>   恢复指定会话",
-                "  /model         模型与 effort 热切换",
-                "  /cost          会话成本报表",
-                "  /scorecard     读取最新测光评分卡",
-                "  /skills        列出可用技能",
-                "  /mcp           列出已配置 MCP 服务器",
-                "  /raw           切换显示模式（normal/lite/raw）",
-                "  /fold          折叠控制（all/none/reset）",
-                "  /copy          复制当前选中消息",
-                "  /undo          回滚最近一个快照",
-                "  /undo all      回滚全部快照",
-                "  /undo list     列出快照与状态",
-                "  /quit          退出 TUI（Esc）",
-                "  Ctrl+K         命令面板",
-                "  j/k            Conversation 焦点下消息导航",
-                "  Enter          折叠/展开选中消息",
-                "  y              复制选中消息",
-                "  PageUp/Down    滚动回看",
-                "  ↑/↓            输入历史（多行时移动光标）",
-                "  Shift+Enter    换行（Ctrl+J 同）",
-                "  ←/→/Home/End  输入内移动光标（空闲时）",
-                "  Delete/Backspace 编辑输入",
-                "  Ctrl+U/W       清空输入 / 删前一词",
-                "  Ctrl+C         取消当前运行",
-                "",
-                "  j/k 或 ↑/↓ 滚动 · Esc 或 q 关闭",
-            ]
-            .into_iter()
-            .map(String::from)
-            .collect(),
-            scroll: 0,
-        });
+        // 命令列表由注册表生成（名称 + 词表描述），键位说明走词表。
+        let tr = ctx.app.tr;
+        let mut lines: Vec<String> = CommandRegistry::builtin()
+            .iter()
+            .map(|c| format!("  /{:<12} {}", c.name, tr.t(*c.desc)))
+            .collect();
+        lines.push(String::new());
+        for key in [
+            Key::HelpKeyCmdPalette,
+            Key::HelpKeyNav,
+            Key::HelpKeyEnter,
+            Key::HelpKeyY,
+            Key::HelpKeyPage,
+            Key::HelpKeyHistory,
+            Key::HelpKeyShiftEnter,
+            Key::HelpKeyCursor,
+            Key::HelpKeyEdit,
+            Key::HelpKeyCtrlUW,
+            Key::HelpKeyCtrlC,
+            Key::HelpFooter,
+        ] {
+            lines.push(tr.t(key).to_string());
+        }
+        ctx.app.help_overlay = Some(crate::app::focus::HelpOverlay { lines, scroll: 0 });
         CommandOutcome::Handled
     }
 }
@@ -71,7 +58,7 @@ struct ClearCmd;
 impl CommandHandler for ClearCmd {
     async fn run(&self, ctx: &mut CommandCtx<'_>, _args: &str) -> CommandOutcome {
         ctx.app.clear_display();
-        ctx.app.show_notice("已清空对话面板");
+        ctx.app.show_notice(ctx.app.tr.t(Key::NoticeCleared));
         CommandOutcome::Handled
     }
 }
@@ -83,19 +70,20 @@ struct NewCmd;
 #[async_trait]
 impl CommandHandler for NewCmd {
     async fn run(&self, ctx: &mut CommandCtx<'_>, _args: &str) -> CommandOutcome {
+        let tr = ctx.app.tr;
         match &ctx.caps.session {
             Some(ctrl) => match ctrl.new_session().await {
                 Ok(()) => {
                     ctx.app.clear_display();
                     ctx.app.last_prompt = None;
                     ctx.app.sessions_loaded = false;
-                    ctx.app.show_notice("新会话已开始");
+                    ctx.app.show_notice(tr.t(Key::NoticeNewSession));
                 }
-                Err(e) => ctx.app.show_notice(format!("新建会话失败: {e}")),
+                Err(e) => ctx
+                    .app
+                    .show_notice(tr.t_args(Key::NewSessionFailed, &[("err", &e.to_string())])),
             },
-            None => ctx
-                .app
-                .show_notice("会话管理不可用（未提供 SessionController）"),
+            None => ctx.app.show_notice(tr.t(Key::SessionUnavailable)),
         }
         CommandOutcome::Handled
     }
@@ -106,6 +94,7 @@ struct SessionsCmd;
 #[async_trait]
 impl CommandHandler for SessionsCmd {
     async fn run(&self, ctx: &mut CommandCtx<'_>, _args: &str) -> CommandOutcome {
+        let tr = ctx.app.tr;
         match &ctx.caps.session {
             Some(ctrl) => match ctrl.list_sessions().await {
                 Ok(mut metas) if !metas.is_empty() => {
@@ -113,10 +102,10 @@ impl CommandHandler for SessionsCmd {
                     metas.reverse(); // id 按时间字典序，最新优先
                     let current = ctrl.current_session().await;
                     ctx.app
-                        .echo_line(LineKind::System, "已保存会话（最新优先）:");
+                        .echo_line(LineKind::System, tr.t(Key::SavedSessionsHeader));
                     for m in &metas {
                         let marker = if current.as_deref() == Some(m.id.as_str()) {
-                            "  (当前)"
+                            tr.t(Key::SessionCurrentMarker)
                         } else {
                             ""
                         };
@@ -129,12 +118,12 @@ impl CommandHandler for SessionsCmd {
                             .echo_line(LineKind::System, &format!("  {label}{marker}"));
                     }
                 }
-                Ok(_) => ctx.app.show_notice("（还没有已保存的会话）"),
-                Err(e) => ctx.app.show_notice(format!("列出会话失败: {e}")),
+                Ok(_) => ctx.app.show_notice(tr.t(Key::NoSavedSessions)),
+                Err(e) => ctx
+                    .app
+                    .show_notice(tr.t_args(Key::ListSessionsFailed, &[("err", &e.to_string())])),
             },
-            None => ctx
-                .app
-                .show_notice("会话管理不可用（未提供 SessionController）"),
+            None => ctx.app.show_notice(tr.t(Key::SessionUnavailable)),
         }
         CommandOutcome::Handled
     }
@@ -146,25 +135,24 @@ struct ResumeCmd;
 impl CommandHandler for ResumeCmd {
     async fn run(&self, ctx: &mut CommandCtx<'_>, args: &str) -> CommandOutcome {
         let target = args.trim();
+        let tr = ctx.app.tr;
         match &ctx.caps.session {
             Some(ctrl) if !target.is_empty() => match ctrl.resume(target).await {
                 Ok(lines) => {
                     let count = lines.len();
                     ctx.app.restore_conversation(lines);
                     ctx.app.last_prompt = None;
-                    ctx.app.show_notice(format!(
-                        "已恢复 '{target}' — {} 条消息（进入对话面板，可滚动/折叠）",
-                        count
+                    ctx.app.show_notice(tr.t_args(
+                        Key::ResumeDone,
+                        &[("target", target), ("n", &count.to_string())],
                     ));
                 }
-                Err(e) => ctx.app.show_notice(format!("恢复会话失败: {e}")),
+                Err(e) => ctx
+                    .app
+                    .show_notice(tr.t_args(Key::ResumeFailed, &[("err", &e.to_string())])),
             },
-            Some(_) => ctx
-                .app
-                .show_notice("用法: /resume <session-id>（见 /sessions）"),
-            None => ctx
-                .app
-                .show_notice("会话管理不可用（未提供 SessionController）"),
+            Some(_) => ctx.app.show_notice(tr.t(Key::ResumeUsage)),
+            None => ctx.app.show_notice(tr.t(Key::SessionUnavailable)),
         }
         CommandOutcome::Handled
     }
@@ -178,9 +166,10 @@ fn rebuild_runner(
     effort: Option<ReasoningEffort>,
     model: Option<String>,
 ) {
+    let tr = ctx.app.tr;
     let guard = ctx.caps.runtime.lock().unwrap_or_else(|e| e.into_inner());
     let Some(f) = guard.factory.clone() else {
-        ctx.app.show_notice("模型切换不可用（未提供 agent 工厂）");
+        ctx.app.show_notice(tr.t(Key::ModelSwitchUnavailable));
         return;
     };
     let eff = effort.unwrap_or(guard.current_effort);
@@ -193,13 +182,14 @@ fn rebuild_runner(
             guard.current_effort = eff;
             guard.current_model = mdl.clone();
             guard.model_label = mdl.unwrap_or_else(|| "default".to_string());
-            ctx.app.show_notice(format!(
-                "模型已切换: effort={} model={}",
-                effort_label(eff),
-                guard.model_label
+            ctx.app.show_notice(tr.t_args(
+                Key::ModelSwitched,
+                &[("effort", effort_label(eff)), ("model", &guard.model_label)],
             ));
         }
-        Err(e) => ctx.app.show_notice(format!("模型切换失败: {e}")),
+        Err(e) => ctx
+            .app
+            .show_notice(tr.t_args(Key::ModelSwitchFailed, &[("err", &e.to_string())])),
     }
 }
 
@@ -208,6 +198,7 @@ struct ModelCmd;
 #[async_trait]
 impl CommandHandler for ModelCmd {
     async fn run(&self, ctx: &mut CommandCtx<'_>, args: &str) -> CommandOutcome {
+        let tr = ctx.app.tr;
         let (sub, sub_args) = args.split_once(' ').unwrap_or((args, ""));
         let (current_effort, current_model, baseline_effort, has_router, has_factory) = {
             let g = ctx.caps.runtime.lock().unwrap_or_else(|e| e.into_inner());
@@ -221,22 +212,28 @@ impl CommandHandler for ModelCmd {
         };
         match sub {
             "" | "help" => {
-                ctx.app.echo_line(LineKind::System, "Model commands:");
-                for line in [
-                    "  /model                  显示当前模型与帮助",
-                    "  /model effort <level>   设置 reasoning effort: disabled|high|max",
-                    "  /model thinking         切换 thinking 开/关",
-                    "  /model switch <name>    切换到指定模型",
-                    "  /model use <role> <name> 设置角色指针: main|task|compact|quick",
+                ctx.app
+                    .echo_line(LineKind::System, tr.t(Key::ModelCommandsHeader));
+                for key in [
+                    Key::ModelHelpDisplay,
+                    Key::ModelHelpEffort,
+                    Key::ModelHelpThinking,
+                    Key::ModelHelpSwitch,
+                    Key::ModelHelpUse,
                 ] {
-                    ctx.app.echo_line(LineKind::System, line);
+                    ctx.app.echo_line(LineKind::System, tr.t(key));
                 }
                 ctx.app.echo_line(
                     LineKind::System,
-                    &format!(
-                        "当前: effort={} model={}",
-                        effort_label(current_effort),
-                        current_model.as_deref().unwrap_or("(default)")
+                    &tr.t_args(
+                        Key::ModelCurrent,
+                        &[
+                            ("effort", effort_label(current_effort)),
+                            (
+                                "model",
+                                current_model.as_deref().unwrap_or(tr.t(Key::DefaultLabel)),
+                            ),
+                        ],
                     ),
                 );
                 if has_router {
@@ -253,7 +250,8 @@ impl CommandHandler for ModelCmd {
                                 &format!(
                                     "  {:<8} → {}",
                                     role.label(),
-                                    r.pointer(role).unwrap_or_else(|| "(default)".to_string())
+                                    r.pointer(role)
+                                        .unwrap_or_else(|| tr.t(Key::DefaultLabel).to_string())
                                 ),
                             );
                         }
@@ -262,13 +260,15 @@ impl CommandHandler for ModelCmd {
             }
             "effort" => {
                 if sub_args.is_empty() {
-                    ctx.app.show_notice(format!(
-                        "当前 reasoning effort: {} (基线: {}); 用法: /model effort disabled|high|max",
-                        effort_label(current_effort),
-                        effort_label(baseline_effort)
+                    ctx.app.show_notice(tr.t_args(
+                        Key::EffortCurrent,
+                        &[
+                            ("effort", effort_label(current_effort)),
+                            ("baseline", effort_label(baseline_effort)),
+                        ],
                     ));
                 } else {
-                    match parse_effort_command(sub_args) {
+                    match parse_effort_command(sub_args, tr) {
                         Ok(effort) => rebuild_runner(ctx, Some(effort), None),
                         Err(msg) => ctx.app.show_notice(msg),
                     }
@@ -277,24 +277,23 @@ impl CommandHandler for ModelCmd {
             "thinking" => {
                 let new_effort = toggle_thinking(current_effort, baseline_effort);
                 if new_effort != current_effort {
-                    ctx.app.show_notice(format!(
-                        "thinking {} → {}",
-                        if current_effort.thinking() {
-                            "on"
-                        } else {
-                            "off"
-                        },
-                        if new_effort.thinking() { "on" } else { "off" }
-                    ));
+                    // ThinkingToggle 技术性文案：中英一致（zh 回退英文）。
+                    let from = if current_effort.thinking() {
+                        "on"
+                    } else {
+                        "off"
+                    };
+                    let to = if new_effort.thinking() { "on" } else { "off" };
+                    ctx.app
+                        .show_notice(tr.t_args(Key::ThinkingToggle, &[("from", from), ("to", to)]));
                     rebuild_runner(ctx, Some(new_effort), None);
                 } else {
-                    ctx.app.show_notice("thinking 状态未变");
+                    ctx.app.show_notice(tr.t(Key::ThinkingUnchanged));
                 }
             }
             "switch" => {
                 if sub_args.is_empty() {
-                    ctx.app
-                        .show_notice("用法: /model switch <provider-model-name>");
+                    ctx.app.show_notice(tr.t(Key::ModelSwitchUsage));
                 } else {
                     rebuild_runner(ctx, None, Some(sub_args.to_string()));
                 }
@@ -303,32 +302,33 @@ impl CommandHandler for ModelCmd {
                 let mut parts = sub_args.split_whitespace();
                 let (role_s, model) = (parts.next(), parts.next());
                 if !has_router {
-                    ctx.app
-                        .show_notice("model pointers 不可用（未提供 router）");
+                    ctx.app.show_notice(tr.t(Key::ModelPointersUnavailable));
                     return CommandOutcome::Handled;
                 }
                 let (Some(role_s), Some(model)) = (role_s, model) else {
-                    ctx.app
-                        .show_notice("用法: /model use <main|task|compact|quick> <model-name>");
+                    ctx.app.show_notice(tr.t(Key::ModelUseUsage));
                     return CommandOutcome::Handled;
                 };
                 let Some(role) = ModelRole::parse(role_s) else {
-                    ctx.app.show_notice("未知角色（main|task|compact|quick）");
+                    ctx.app.show_notice(tr.t(Key::UnknownRole));
                     return CommandOutcome::Handled;
                 };
                 {
                     let g = ctx.caps.runtime.lock().unwrap_or_else(|e| e.into_inner());
                     match g.router.as_ref().map(|r| r.set_pointer(role, model)) {
                         Some(Ok(())) => {
-                            ctx.app
-                                .show_notice(format!("pointer {} → {model}", role.label()));
+                            // PointerSet 技术性文案：中英一致（zh 回退英文）。
+                            ctx.app.show_notice(tr.t_args(
+                                Key::PointerSet,
+                                &[("role", role.label()), ("model", model)],
+                            ));
                         }
                         Some(Err(e)) => {
                             ctx.app.show_notice(e.to_string());
                             return CommandOutcome::Handled;
                         }
                         None => {
-                            ctx.app.show_notice("router 不可用");
+                            ctx.app.show_notice(tr.t(Key::RouterUnavailable));
                             return CommandOutcome::Handled;
                         }
                     }
@@ -337,7 +337,7 @@ impl CommandHandler for ModelCmd {
             }
             other => {
                 ctx.app
-                    .show_notice(format!("未知 /model 子命令: {other}（/model help 查看）"));
+                    .show_notice(tr.t_args(Key::UnknownModelSubcommand, &[("cmd", other)]));
             }
         }
         // 保持 model 命令不需要 factory 也能展示帮助；需要 factory 的子命令由 rebuild_runner 降级。
@@ -351,6 +351,7 @@ struct CostCmd;
 #[async_trait]
 impl CommandHandler for CostCmd {
     async fn run(&self, ctx: &mut CommandCtx<'_>, _args: &str) -> CommandOutcome {
+        let tr = ctx.app.tr;
         let Some(r) = ctx
             .caps
             .runtime
@@ -359,13 +360,12 @@ impl CommandHandler for CostCmd {
             .router
             .clone()
         else {
-            ctx.app
-                .show_notice("router 不可用（/cost 需要 ModelRouter）");
+            ctx.app.show_notice(tr.t(Key::CostRouterUnavailable));
             return CommandOutcome::Handled;
         };
         let report = r.ledger().report(&r.price_table());
         if report.rows.is_empty() {
-            ctx.app.show_notice("还没有用量记录");
+            ctx.app.show_notice(tr.t(Key::NoUsageRecords));
             return CommandOutcome::Handled;
         }
         let window = ctx.caps.context_window.map(|w| w as u64);
@@ -404,13 +404,18 @@ impl CommandHandler for CostCmd {
             );
         }
         if let Some(total) = report.total_usd {
-            ctx.app
-                .echo_line(LineKind::System, &format!("总计: ${total:.6}"));
+            ctx.app.echo_line(
+                LineKind::System,
+                &tr.t_args(Key::CostTotal, &[("total", &format!("{total:.6}"))]),
+            );
         }
         if report.unmetered_calls > 0 {
             ctx.app.echo_line(
                 LineKind::System,
-                &format!("（未计量调用: {}）", report.unmetered_calls),
+                &tr.t_args(
+                    Key::UnmeteredCalls,
+                    &[("n", &report.unmetered_calls.to_string())],
+                ),
             );
         }
         CommandOutcome::Handled
@@ -424,6 +429,7 @@ struct ScorecardCmd;
 #[async_trait]
 impl CommandHandler for ScorecardCmd {
     async fn run(&self, ctx: &mut CommandCtx<'_>, _args: &str) -> CommandOutcome {
+        let tr = ctx.app.tr;
         // 优先工作区，其次用户目录；取最新 JSON 评分卡。
         let mut candidates = Vec::new();
         if let Ok(cwd) = std::env::current_dir() {
@@ -440,18 +446,20 @@ impl CommandHandler for ScorecardCmd {
             }
         }
         let Some(sc) = scorecard else {
-            ctx.app
-                .show_notice("未找到测光数据（.deepseeknova/metrics 无评分卡 JSON）");
+            ctx.app.show_notice(tr.t(Key::NoScorecardFound));
             return CommandOutcome::Handled;
         };
         ctx.app.scorecard = Some(sc.clone());
         ctx.app
-            .echo_line(LineKind::System, "测光·评分卡（最近一次 run）");
+            .echo_line(LineKind::System, tr.t(Key::ScorecardHeader));
         for row in &sc.rows {
             let bar = crate::model::scorecard::photometry_bar(row.score);
+            let label = dim_label_key(&row.dim)
+                .map(|k| tr.t(k).to_string())
+                .unwrap_or_else(|| row.dim.clone());
             ctx.app.echo_line(
                 LineKind::System,
-                &format!(" {:<4} {bar} {:>5.1}", row.dim, row.score),
+                &format!(" {label:<4} {bar} {:>5.1}", row.score),
             );
         }
         CommandOutcome::Handled
@@ -465,13 +473,14 @@ struct SkillsCmd;
 #[async_trait]
 impl CommandHandler for SkillsCmd {
     async fn run(&self, ctx: &mut CommandCtx<'_>, _args: &str) -> CommandOutcome {
+        let tr = ctx.app.tr;
         let mut found = false;
         for path in &ctx.caps.skills_paths {
             let loader = deepseeknova_skills::SkillLoader::new(path);
             match loader.load_all() {
                 Ok(skills) if !skills.is_empty() => {
                     if !found {
-                        ctx.app.echo_line(LineKind::System, "可用技能:");
+                        ctx.app.echo_line(LineKind::System, tr.t(Key::SkillsHeader));
                         found = true;
                     }
                     for skill in &skills {
@@ -488,14 +497,17 @@ impl CommandHandler for SkillsCmd {
                     }
                 }
                 Ok(_) => {}
-                Err(e) => ctx
-                    .app
-                    .show_notice(format!("加载技能失败 {}: {e}", path.display())),
+                Err(e) => ctx.app.show_notice(tr.t_args(
+                    Key::SkillsLoadFailed,
+                    &[
+                        ("path", &path.display().to_string()),
+                        ("err", &e.to_string()),
+                    ],
+                )),
             }
         }
         if !found {
-            ctx.app
-                .show_notice("（未找到技能，可创建 .md 文件放到 .deepseeknova/skills/）");
+            ctx.app.show_notice(tr.t(Key::NoSkillsFound));
         }
         CommandOutcome::Handled
     }
@@ -506,24 +518,25 @@ struct McpCmd;
 #[async_trait]
 impl CommandHandler for McpCmd {
     async fn run(&self, ctx: &mut CommandCtx<'_>, _args: &str) -> CommandOutcome {
+        let tr = ctx.app.tr;
         if ctx.caps.mcp_servers.is_empty() {
-            ctx.app.show_notice(
-                "未配置 MCP 服务器\n在 deepseeknova.toml 顶层 mcp_servers 数组配置后重启生效",
-            );
+            ctx.app.show_notice(tr.t(Key::McpNotConfigured));
             return CommandOutcome::Handled;
         }
         let statuses = match &ctx.caps.mcp_probe {
             Some(probe) => probe.probe(&ctx.caps.mcp_servers).await,
             None => Vec::new(),
         };
-        ctx.app
-            .echo_line(LineKind::System, "已配置 MCP 服务器（实时状态）:");
+        ctx.app.echo_line(LineKind::System, tr.t(Key::McpHeader));
         for (i, server) in ctx.caps.mcp_servers.iter().enumerate() {
             let line = match statuses.get(i) {
-                Some(McpStatus::Connected) => format!("  • {} — ✓ 已连接", server.name),
-                Some(McpStatus::Disconnected(reason)) => {
-                    format!("  • {} — ✗ 未连接（{reason}）", server.name)
+                Some(McpStatus::Connected) => {
+                    tr.t_args(Key::McpConnected, &[("name", &server.name)])
                 }
+                Some(McpStatus::Disconnected(reason)) => tr.t_args(
+                    Key::McpDisconnected,
+                    &[("name", &server.name), ("reason", reason)],
+                ),
                 None => format!("  • {}", server.name),
             };
             ctx.app.echo_line(LineKind::System, &line);
@@ -539,33 +552,43 @@ struct UndoCmd;
 #[async_trait]
 impl CommandHandler for UndoCmd {
     async fn run(&self, ctx: &mut CommandCtx<'_>, args: &str) -> CommandOutcome {
+        let tr = ctx.app.tr;
         let Some(ctrl) = &ctx.caps.undo else {
-            ctx.app.show_notice("撤销不可用（未提供 UndoController）");
+            ctx.app.show_notice(tr.t(Key::UndoUnavailable));
             return CommandOutcome::Handled;
         };
         match args.trim() {
             "" => match ctrl.rollback_one().await {
                 Ok(Some(msg)) => ctx.app.show_notice(format!("✓ {msg}")),
-                Ok(None) => ctx.app.show_notice("没有可回滚的快照"),
-                Err(e) => ctx.app.show_notice(format!("撤销失败: {e}")),
+                Ok(None) => ctx.app.show_notice(tr.t(Key::NoRollbackSnapshot)),
+                Err(e) => ctx
+                    .app
+                    .show_notice(tr.t_args(Key::UndoFailed, &[("err", &e.to_string())])),
             },
             "all" => match ctrl.rollback_all().await {
-                Ok(n) => ctx.app.show_notice(format!("已全部回滚 {n} 个快照")),
-                Err(e) => ctx.app.show_notice(format!("撤销失败: {e}")),
+                Ok(n) => ctx
+                    .app
+                    .show_notice(tr.t_args(Key::RolledBackAll, &[("n", &n.to_string())])),
+                Err(e) => ctx
+                    .app
+                    .show_notice(tr.t_args(Key::UndoFailed, &[("err", &e.to_string())])),
             },
             "list" => match ctrl.list().await {
                 Ok(lines) if !lines.is_empty() => {
-                    ctx.app.echo_line(LineKind::System, "快照列表:");
+                    ctx.app
+                        .echo_line(LineKind::System, tr.t(Key::SnapshotListHeader));
                     for line in lines {
                         ctx.app.echo_line(LineKind::System, &format!("  {line}"));
                     }
                 }
-                Ok(_) => ctx.app.show_notice("（没有快照）"),
-                Err(e) => ctx.app.show_notice(format!("列出快照失败: {e}")),
+                Ok(_) => ctx.app.show_notice(tr.t(Key::NoSnapshots)),
+                Err(e) => ctx
+                    .app
+                    .show_notice(tr.t_args(Key::ListSnapshotsFailed, &[("err", &e.to_string())])),
             },
-            other => ctx.app.show_notice(format!(
-                "未知参数: {other}（用法: /undo | /undo all | /undo list）"
-            )),
+            other => ctx
+                .app
+                .show_notice(tr.t_args(Key::UndoUnknownArg, &[("arg", other)])),
         }
         CommandOutcome::Handled
     }
@@ -583,9 +606,12 @@ impl CommandHandler for RawCmd {
             crate::app::state::DisplayMode::Lite => crate::app::state::DisplayMode::Raw,
             crate::app::state::DisplayMode::Raw => crate::app::state::DisplayMode::Normal,
         };
-        ctx.app.show_notice(format!(
-            "显示模式: {}",
-            crate::app::state::display_mode_label(ctx.app.display_mode)
+        ctx.app.show_notice(ctx.app.tr.t_args(
+            Key::DisplayModeNotice,
+            &[(
+                "mode",
+                ctx.app.tr.t(display_mode_label(ctx.app.display_mode)),
+            )],
         ));
         CommandOutcome::Handled
     }
@@ -598,25 +624,28 @@ struct FoldCmd;
 #[async_trait]
 impl CommandHandler for FoldCmd {
     async fn run(&self, ctx: &mut CommandCtx<'_>, args: &str) -> CommandOutcome {
+        let tr = ctx.app.tr;
         match args.trim() {
             "all" => {
                 ctx.app.fold_all(true);
-                ctx.app
-                    .show_notice(format!("已折叠全部消息（当前: {}）", ctx.app.fold_label()));
+                ctx.app.show_notice(
+                    tr.t_args(Key::FoldedAll, &[("state", tr.t(ctx.app.fold_label()))]),
+                );
             }
             "none" => {
                 ctx.app.fold_all(false);
-                ctx.app
-                    .show_notice(format!("已展开全部消息（当前: {}）", ctx.app.fold_label()));
+                ctx.app.show_notice(
+                    tr.t_args(Key::ExpandedAll, &[("state", tr.t(ctx.app.fold_label()))]),
+                );
             }
             "reset" => {
                 ctx.app.fold_reset();
-                ctx.app.show_notice("已重置折叠态（回智能默认）");
+                ctx.app.show_notice(tr.t(Key::FoldReset));
             }
-            "" => ctx.app.show_notice("用法: /fold all | none | reset"),
+            "" => ctx.app.show_notice(tr.t(Key::FoldUsage)),
             other => ctx
                 .app
-                .show_notice(format!("未知参数: {other}（all|none|reset）")),
+                .show_notice(tr.t_args(Key::FoldUnknownArg, &[("arg", other)])),
         }
         CommandOutcome::Handled
     }
@@ -665,7 +694,7 @@ static QUIT: QuitCmd = QuitCmd;
 pub const BUILTIN: &[Command] = &[
     Command {
         name: "help",
-        desc: "显示帮助与全部命令",
+        desc: &Key::CmdHelpDesc,
         keywords: &["帮助", "命令", "h"],
         args_spec: ArgsSpec::None,
         args_hint: None,
@@ -673,7 +702,7 @@ pub const BUILTIN: &[Command] = &[
     },
     Command {
         name: "clear",
-        desc: "清空对话面板",
+        desc: &Key::CmdClearDesc,
         keywords: &["清空"],
         args_spec: ArgsSpec::None,
         args_hint: None,
@@ -681,7 +710,7 @@ pub const BUILTIN: &[Command] = &[
     },
     Command {
         name: "new",
-        desc: "开始新会话",
+        desc: &Key::CmdNewDesc,
         keywords: &["新会话", "会话"],
         args_spec: ArgsSpec::None,
         args_hint: None,
@@ -689,7 +718,7 @@ pub const BUILTIN: &[Command] = &[
     },
     Command {
         name: "sessions",
-        desc: "列出已保存会话",
+        desc: &Key::CmdSessionsDesc,
         keywords: &["会话", "历史"],
         args_spec: ArgsSpec::None,
         args_hint: None,
@@ -697,7 +726,7 @@ pub const BUILTIN: &[Command] = &[
     },
     Command {
         name: "resume",
-        desc: "恢复指定会话",
+        desc: &Key::CmdResumeDesc,
         keywords: &["会话", "恢复"],
         args_spec: ArgsSpec::FreeText,
         args_hint: Some(&["<session-id>"]),
@@ -705,7 +734,7 @@ pub const BUILTIN: &[Command] = &[
     },
     Command {
         name: "model",
-        desc: "模型与 effort 热切换",
+        desc: &Key::CmdModelDesc,
         keywords: &["模型", "effort", "thinking", "switch", "use"],
         args_spec: ArgsSpec::FreeText,
         args_hint: Some(&[
@@ -718,7 +747,7 @@ pub const BUILTIN: &[Command] = &[
     },
     Command {
         name: "cost",
-        desc: "会话成本报表",
+        desc: &Key::CmdCostDesc,
         keywords: &["成本", "价格", "费用", "tokens"],
         args_spec: ArgsSpec::None,
         args_hint: None,
@@ -726,7 +755,7 @@ pub const BUILTIN: &[Command] = &[
     },
     Command {
         name: "scorecard",
-        desc: "读取最新测光评分卡（六维光度表）",
+        desc: &Key::CmdScorecardDesc,
         keywords: &["评分卡", "测光", "质量"],
         args_spec: ArgsSpec::None,
         args_hint: None,
@@ -734,7 +763,7 @@ pub const BUILTIN: &[Command] = &[
     },
     Command {
         name: "skills",
-        desc: "列出可用技能",
+        desc: &Key::CmdSkillsDesc,
         keywords: &["技能", "skills"],
         args_spec: ArgsSpec::None,
         args_hint: None,
@@ -742,7 +771,7 @@ pub const BUILTIN: &[Command] = &[
     },
     Command {
         name: "mcp",
-        desc: "列出已配置 MCP 服务器（实时状态）",
+        desc: &Key::CmdMcpDesc,
         keywords: &["mcp", "服务器"],
         args_spec: ArgsSpec::None,
         args_hint: None,
@@ -750,7 +779,7 @@ pub const BUILTIN: &[Command] = &[
     },
     Command {
         name: "undo",
-        desc: "回滚快照（all/list）",
+        desc: &Key::CmdUndoDesc,
         keywords: &["撤销", "回滚", "快照"],
         args_spec: ArgsSpec::Enum(&["all", "list"]),
         args_hint: Some(&["all", "list"]),
@@ -758,7 +787,7 @@ pub const BUILTIN: &[Command] = &[
     },
     Command {
         name: "raw",
-        desc: "切换显示模式（normal/lite/raw）",
+        desc: &Key::CmdRawDesc,
         keywords: &["显示", "模式", "raw"],
         args_spec: ArgsSpec::None,
         args_hint: None,
@@ -766,7 +795,7 @@ pub const BUILTIN: &[Command] = &[
     },
     Command {
         name: "fold",
-        desc: "折叠控制（all/none/reset）",
+        desc: &Key::CmdFoldDesc,
         keywords: &["折叠", "展开"],
         args_spec: ArgsSpec::Enum(&["all", "none", "reset"]),
         args_hint: Some(&["all", "none", "reset"]),
@@ -774,7 +803,7 @@ pub const BUILTIN: &[Command] = &[
     },
     Command {
         name: "copy",
-        desc: "复制当前选中消息",
+        desc: &Key::CmdCopyDesc,
         keywords: &["复制"],
         args_spec: ArgsSpec::None,
         args_hint: None,
@@ -782,7 +811,7 @@ pub const BUILTIN: &[Command] = &[
     },
     Command {
         name: "quit",
-        desc: "退出 TUI",
+        desc: &Key::CmdQuitDesc,
         keywords: &["退出", "exit", "q"],
         args_spec: ArgsSpec::None,
         args_hint: None,
@@ -792,13 +821,13 @@ pub const BUILTIN: &[Command] = &[
 
 // ── 辅助函数（effort 解析/切换/标签）───────────────────────────
 
-fn parse_effort_command(args: &str) -> Result<ReasoningEffort, String> {
+fn parse_effort_command(args: &str, tr: Tr) -> Result<ReasoningEffort, String> {
     let trimmed = args.trim();
     if trimmed.is_empty() {
-        return Err("未提供 effort 级别".into());
+        return Err(tr.t(Key::EffortMissing).to_string());
     }
     ReasoningEffort::from_config_str(trimmed)
-        .ok_or_else(|| format!("未知 effort 级别: '{trimmed}'"))
+        .ok_or_else(|| tr.t_args(Key::EffortUnknown, &[("effort", trimmed)]))
 }
 
 fn toggle_thinking(current: ReasoningEffort, baseline: ReasoningEffort) -> ReasoningEffort {
@@ -884,7 +913,10 @@ mod tests {
     #[tokio::test]
     async fn clear_wipes_display_and_shows_notice() {
         let caps = empty_caps();
-        let mut app = AppState::default();
+        let mut app = AppState {
+            tr: Tr::new(crate::i18n::Lang::Zh),
+            ..Default::default()
+        };
         app.conversation.begin_turn("q".into());
         app.apply_run_event(RunEvent::TextDelta("x".into()));
         app.apply_run_event(RunEvent::Done(done_output("")));
@@ -911,7 +943,10 @@ mod tests {
     #[tokio::test]
     async fn cost_without_router_reports_unavailable() {
         let caps = empty_caps();
-        let mut app = AppState::default();
+        let mut app = AppState {
+            tr: Tr::new(crate::i18n::Lang::Zh),
+            ..Default::default()
+        };
         run_cmd("cost", "", &mut app, &caps).await;
         assert!(app
             .notice
@@ -965,7 +1000,10 @@ mod tests {
     #[tokio::test]
     async fn model_without_factory_degrades() {
         let caps = empty_caps();
-        let mut app = AppState::default();
+        let mut app = AppState {
+            tr: Tr::new(crate::i18n::Lang::Zh),
+            ..Default::default()
+        };
         run_cmd("model", "switch deepseek-v4-pro", &mut app, &caps).await;
         assert!(app
             .notice

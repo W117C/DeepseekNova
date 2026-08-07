@@ -3,8 +3,26 @@
 use serde_json::Value;
 use std::path::Path;
 
-/// 六维光度表维度（顺序即展示顺序）。
+use crate::i18n::Key;
+
+/// 六维光度表维度（顺序即展示顺序）。值为 JSON 落盘键（数据契约，与
+/// serve/metrics 对齐，保持中文键不变）；显示标签经 [`dim_label_key`]
+/// 映射到词表键实现双语。
 pub const SCORECARD_DIMS: [&str; 6] = ["治理", "验证", "反思", "审查", "协议", "综合"];
+
+/// 维度显示键：把落盘维名映射到稳定词表键（跨语言；未知维回退 None，
+/// 调用方原样展示维名）。
+pub fn dim_label_key(dim: &str) -> Option<Key> {
+    match dim {
+        "治理" | "governance" => Some(Key::ScorecardDimGovernance),
+        "验证" | "verification" => Some(Key::ScorecardDimVerification),
+        "反思" | "reflection" => Some(Key::ScorecardDimReflection),
+        "审查" | "review" => Some(Key::ScorecardDimReview),
+        "协议" | "protocol" => Some(Key::ScorecardDimProtocol),
+        "综合" | "composite" => Some(Key::ScorecardDimComposite),
+        _ => None,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Scorecard {
@@ -129,5 +147,16 @@ mod tests {
         assert_eq!(photometry_bar(92.3), "█████████░");
         assert_eq!(photometry_bar(50.0), "█████░░░░░");
         assert_eq!(photometry_bar(0.0), "░░░░░░░░░░");
+    }
+
+    #[test]
+    fn dim_label_key_maps_chinese_and_english_keys() {
+        assert_eq!(dim_label_key("治理"), Some(Key::ScorecardDimGovernance));
+        assert_eq!(
+            dim_label_key("governance"),
+            Some(Key::ScorecardDimGovernance)
+        );
+        assert_eq!(dim_label_key("综合"), Some(Key::ScorecardDimComposite));
+        assert_eq!(dim_label_key("nope"), None);
     }
 }
