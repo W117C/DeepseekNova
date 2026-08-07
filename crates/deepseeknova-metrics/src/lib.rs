@@ -392,8 +392,8 @@ pub fn update_scorecard_task_rate(
         Err(e) => return Err(e),
     };
     let Ok(mut card) = serde_json::from_str::<Scorecard>(&text) else {
-        eprintln!(
-            "warning: scorecard {} parse failed, task_rate backfill skipped",
+        tracing::warn!(
+            "scorecard {} parse failed, task_rate backfill skipped",
             path.display()
         );
         return Ok(());

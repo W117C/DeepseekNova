@@ -24,7 +24,7 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 [![Rust](https://img.shields.io/badge/rust-stable%201.97-orange.svg)](https://www.rust-lang.org)
 [![Crates](https://img.shields.io/badge/crates-22-green.svg)](#-22-个-crate)
-[![Tests](https://img.shields.io/badge/tests-1108-brightgreen.svg)](#-技术栈)
+[![Tests](https://img.shields.io/badge/tests-1251-brightgreen.svg)](#-技术栈)
 
 </div>
 
@@ -40,7 +40,7 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 ## 🎯 核心特点
 
 ### 🧠 深度推理 + 工具调用
-- 流式推理输出，支持 Reasoning Effort 四级调节（low / medium / high / max）
+- 流式推理输出，支持 Reasoning Effort 三级调节（disabled / high / max；配置串 `low`/`medium` 折叠为 high）
 - 17 个内置工具 + web 搜索 + LSP 编辑后诊断 + Context7 文档检索：文件 I/O、
   glob、grep、shell、web fetch、任务管理、MCP 桥接、代码图等
 - 工具调用全链路流式：start → delta → end → result，前端实时渲染
@@ -85,12 +85,14 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 ### 🧩 MCP 协议原生支持
 - stdio + HTTP 双传输
 - 自动发现 MCP 服务器工具
-- 4 个运行时管理命令（list / add / remove / toggle）
+- `/mcp` 运行时管理命令（列表 + 连接状态探测；add/remove 等管理见
+  [GUIDE.md](GUIDE.md)）
 
 ### 📖 项目知识系统
 - **Wiki 生成器** — 自动文档生成
 - **知识卡片** — 置信度标注的结构化知识
-- **记忆蒸馏** — 跨会话记忆持久化（项目 / 用户 / 全局 / 会话四层）
+- **记忆蒸馏** — 跨会话记忆持久化（短期 / 任务 / 技能 / 用户画像四类：
+  ShortTerm · Task · Skill · UserProfile）
 - **文件检查点** — 事务性快照 + 回滚
 
 ### 🧬 协议执行引擎与自进化（`[protocol]`）
@@ -242,7 +244,7 @@ running 任务自动标记 interrupted，可重新拉起）。
 | 后端 | Rust + SQLite FTS5 + tokio + axum |
 | 前端 | TUI (ratatui) · CLI (clap) · HTTP API (axum + SSE) |
 | 追踪 | OpenTelemetry (OTLP) |
-| 测试 | 1108 tests · cargo-llvm-cov · CI 三平台 |
+| 测试 | 1251 tests · cargo-llvm-cov · CI 三平台 |
 
 ## 📄 License
 

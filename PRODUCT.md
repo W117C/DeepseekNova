@@ -34,7 +34,7 @@ DeepseekNova 是 Rust 编写的 AI Agent 框架（22 个 crate），计划开源
 
 ## Capabilities and Constraints
 
-- TUI 现状：对话流/状态行/输入区/提示行 + 五面板侧边栏、14 个斜杠命令、命令面板、语义化按键系统（keybindings.json 可改键 + 热重载）、审批浮层、消息折叠、diff 高亮、三档主题（`DEEPSEEKNOVA_THEME`）。
+- TUI 现状：对话流/状态行/输入区/提示行 + 五面板侧边栏、15 个斜杠命令、命令面板、语义化按键系统（keybindings.json 可改键 + 热重载）、审批浮层、消息折叠、diff 高亮、三档主题（`DEEPSEEKNOVA_THEME`）。
 - 未提交改动方向（信息层级演进）：瞬态反馈走 6 秒 TTL notice 浮层，永久内容进对话流；Ctrl+T 鼠标捕获切换；ctx 占用口径改为"最近一次请求实际 tokens"。
 - 明确未定的产品事实：**界面文案语言**——当前 TUI 文案为中文（"你"、"正在思考…"、"请求授权"），开源面向国际社区通常英文优先；是否引入 i18n 或切英文，留待用户决定，设计中不得擅自定死。
 

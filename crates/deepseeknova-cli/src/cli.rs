@@ -2,7 +2,7 @@ use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(name = "deepseeknova")]
-#[command(version = "0.1.0")]
+#[command(version = "0.4.0")]
 #[command(about = "A DeepSeek-native AI coding agent for your terminal", long_about = None)]
 pub struct Cli {
     #[command(subcommand)]

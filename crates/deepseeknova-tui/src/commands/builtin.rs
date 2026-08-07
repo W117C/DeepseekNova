@@ -339,7 +339,14 @@ struct CostCmd;
 #[async_trait]
 impl CommandHandler for CostCmd {
     async fn run(&self, ctx: &mut CommandCtx<'_>, _args: &str) -> CommandOutcome {
-        let Some(r) = ctx.caps.runtime.lock().unwrap_or_else(|e| e.into_inner()).router.clone() else {
+        let Some(r) = ctx
+            .caps
+            .runtime
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .router
+            .clone()
+        else {
             ctx.app
                 .show_notice("router 不可用（/cost 需要 ModelRouter）");
             return CommandOutcome::Handled;

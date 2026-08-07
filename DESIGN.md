@@ -418,9 +418,13 @@ tools_allowed:
 
 ---
 
-## 八、Agent 工作规范 (DNA Spec) [规划中/未实现]
+## 八、Agent 工作规范 (DNA Spec) [部分完成]
 
-> **状态**：[规划中/未实现]（见 §十 P4）。本规范尚未接入运行时 system prompt，属于设计目标而非现行工作指令；现行 Agent 指令见 [AGENTS.md](AGENTS.md)。
+> **状态**：[部分完成]（见 §十 P4）。DNA 五阶段门控已作为 `[protocol]`
+> 运行时机制落地（`core/src/protocol.rs` + `agent/src/phase_runner.rs`：
+> plan-before-execute / verify-evidence / distill-on-complex / drift-detection）；
+> 但**本规范本身作为 Agent 工作指令的 system prompt 接入尚未完成**，属设计目标
+> 而非现行工作指令；现行 Agent 指令见 [AGENTS.md](AGENTS.md)。
 
 ```
 Phase 1: 理解 (Understand)
@@ -440,13 +444,13 @@ Phase 3: 执行 (Execute)
 
 Phase 4: 验证 (Verify)
   ├── 自动运行测试
-  ├── 对抗式审查（依赖 adversarial-review skill，见 §六，规划中/未实现）
+  ├── 对抗式审查（依赖 adversarial-review skill，见 §六，已落地）
   └── 与成功标准对比
 
 Phase 5: 沉淀 (Distill) ← 这是大多数 Agent 缺失的
   ├── 提炼可复用的 Skill
   ├── 更新记忆
-  ├── 询问是否生成 Wiki/知识卡片（依赖 §七 后置产出，规划中/未实现）
+  ├── 询问是否生成 Wiki/知识卡片（依赖 §七 后置产出，已实现）
   └── 记录项目经验
 ```
 

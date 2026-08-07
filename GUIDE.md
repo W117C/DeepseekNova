@@ -103,7 +103,7 @@ Configuration is merged from multiple sources (last wins):
 1. **Built-in defaults**
 2. **User config**: `~/.deepseeknova/config.toml`
 3. **Project config**: `./deepseeknova.toml`（项目根，覆盖用户层非默认字段）
-4. **Environment variables**: `DEEPSEEKNOVA_PROVIDER_MODEL`, `DEEPSEEKNOVA_MAX_STEPS`, etc.
+4. **Environment variables**: `DEEPSEEKNOVA_MODEL`, `DEEPSEEKNOVA_MAX_STEPS`, etc.
 
 ### Full Configuration Reference
 
@@ -118,7 +118,7 @@ model = "gpt-4o"
 api_key_env = "OPENAI_API_KEY"
 timeout_secs = 120
 max_retries = 3
-reasoning_effort = "high"         # disabled | low | medium | high | max（DeepSeek 系）
+reasoning_effort = "high"         # disabled | high | max（low/medium 配置串折叠为 high，DeepSeek 系）
 context_window = 128000
 
 # 命名模型与成本分账（可选）：被 model_pointers 与 /model 引用
@@ -380,10 +380,14 @@ drift-detection = "soft"             # 工具族连续失败 ≥3 → DriftFindi
 |---|---|
 | `OPENAI_API_KEY` | OpenAI API key |
 | `ANTHROPIC_API_KEY` | Anthropic API key |
-| `DEEPSEEKNOVA_PROVIDER` | Override provider kind |
 | `DEEPSEEKNOVA_MODEL` | Override model name |
 | `DEEPSEEKNOVA_MAX_STEPS` | Override max steps |
-| `DEEPSEEKNOVA_LOG` | Log level (trace, debug, info, warn, error) |
+| `DEEPSEEKNOVA_EMBED_API_KEY` | Embedder API key（记忆语义检索） |
+| `DEEPSEEKNOVA_THEME` | TUI 主题 |
+
+> 注：CLI 日志固定 INFO 级（`crates/deepseeknova-cli/src/main.rs`），**不读取**
+> `RUST_LOG` 或任何日志环境变量；开启 `[telemetry] enabled=true` 时日志改走
+> OTLP 导出、终端不再打印 INFO 文本（刻意权衡，见 AGENTS.md §3.1）。
 
 ## Tools Reference
 
@@ -1064,7 +1068,8 @@ Read-only tools (`read_file`, `grep`, `glob`, `ls`) are unaffected by sandbox se
 ### Custom Provider
 
 ```toml
-[providers.anthropic]
+[[providers]]
+name = "anthropic"            # 被 [[models]]/plan_mode 引用的唯一名
 kind = "anthropic"
 base_url = "https://api.anthropic.com/v1"
 model = "claude-sonnet-5"
@@ -1075,7 +1080,8 @@ max_tokens = 8192
 ### Copilot Provider
 
 ```toml
-[providers.copilot]
+[[providers]]
+name = "copilot"
 kind = "openai"
 base_url = "https://api.githubcopilot.com"
 model = "gpt-4o"
@@ -1085,17 +1091,19 @@ api_key_env = "GITHUB_TOKEN"
 ### Multiple Providers
 
 ```toml
-[default_provider]
+[[providers]]
+name = "openai"
 kind = "openai"
 model = "gpt-4o"
 
-[providers.anthropic]
+[[providers]]
+name = "anthropic"
 kind = "anthropic"
 model = "claude-sonnet-5"
 
 # Use Anthropic for specific skills or plan mode
 [plan_mode]
-provider = "anthropic"
+provider = "anthropic"        # 引用 [[providers]] 里的 name
 model = "claude-opus-4-8"
 ```
 
