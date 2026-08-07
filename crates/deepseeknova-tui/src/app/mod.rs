@@ -622,6 +622,7 @@ mod tests {
             mcp_servers: vec![],
             mcp_probe: None,
             undo: None,
+            checkpoint: None,
             context_window: None,
             budget_window: None,
             approval_rx: None,

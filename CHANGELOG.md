@@ -475,6 +475,29 @@ All notable changes to DeepseekNova will be documented in this file.
   <name>=<N>`，退出码区分条目失败(1)/CI 门槛失败(2)/两者(3)。评分卡走内存
   捕获 hook，不污染 `.deepseeknova/metrics/` 聚合。
 
+---
+
+### Added（并行优化第六批，2026-08-08）
+
+- **子代理升级（P1-5）**：markdown 前端文件（`---` 头块声明 name/description/
+  tools/model/gate/capabilities/max_turns + 正文为系统提示，扫描
+  `.deepseeknova/agents/*.md`，与既有 TOML 预设双通道兼容）；@-mention
+  （词边界感知解析，`SubAgentRunner` 无结构化行时回退 `@agent` 派发，防邮箱
+  误拆）；**放开禁递归**（默认深度上限 3，`DelegationSink`/`DelegateDepth`/
+  `RecursiveDelegateTool`，超深优雅降级）；**per-agent 模型/权限**
+  （`ModelResolver` trait + `AgentPermission` gate/capabilities 白名单交集）。
+- **会话 UX（P1-9）**：`/rename <title>` 会话命名（`titles.json` 落盘，
+  title 优先显示、无 title 回退 id，TUI/REPL 双入口）；会话级 checkpoint
+  `/checkpoint save|list|rollback`（`SessionCheckpointManager`，快照对话行 +
+  容量 FIFO + JSONL 持久化；回退时同步重写 agent 共享 history 使模型上下文
+  与显示一致；`save_with_files` API 预留文件联合快照）。16 个 i18n 新键。
+- **记忆用户面（P1-11）**：`memory list`（类目/stage/tag/搜索过滤 + 分页）、
+  `memory edit <id> <content>`（保留 lifecycle 元数据，启用嵌入时强制重算
+  向量）、`memory delete <id>`（二次确认，`--yes` 跳过）、`memory replay
+  <query>`（与 recall 同源的检索分解回放：score/bm25/cosine/lifecycle，
+  只读不记召回）。core 记忆引擎新增 `MemoryScoreBreakdown`/`search_breakdown`
+  /`edit`/`replay` 等最小接口（`search_hybrid` 总分管严格不变）。
+
 ## [0.4.0] — 2026-07-19
 
 ### 桌面前端完善

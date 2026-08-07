@@ -1,11 +1,14 @@
+use crate::agent_manifest::{AgentGateMode, AgentPermission};
 use crate::memory::Memory;
+use crate::mention::resolve_mention;
+use crate::recursion::{DelegateDepth, DelegationSink};
 use crate::task_spec::{InputValues, TaskSpec};
 use deepseeknova_core::chunk::{Chunk, Usage};
 use deepseeknova_core::{
     Message, Role, RunEvent, RunEventStream, RunInput, RunOutput, Runner, Tool, ToolContext,
 };
 use deepseeknova_provider::Provider;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -15,6 +18,15 @@ use tracing::{info, warn};
 
 /// Approximate characters-per-token for rough heuristics.
 use crate::tokens::estimate_tokens;
+
+/// 子代理递归深度上限默认值（根派发 depth 1；可再派 depth 2…直至上限）。
+pub const DEFAULT_MAX_DEPTH: usize = 3;
+
+/// per-agent 模型解析：把声明模型名解析为 provider 实例。由上层
+/// （runtime / CLI）基于 provider 工厂实现；未装配时声明模型回退默认 provider。
+pub trait ModelResolver: Send + Sync {
+    fn resolve(&self, name: &str) -> Option<Arc<dyn Provider>>;
+}
 
 // ---------------------------------------------------------------------------
 // SubAgentConfig — independent context for a single sub-agent type
@@ -47,6 +59,10 @@ pub struct SubAgentConfig {
     tools: Vec<Arc<dyn Tool>>,
     /// 执行步数上限。
     max_steps: usize,
+    /// per-agent 模型覆盖（经 [`ModelResolver`] 解析；None = 默认 provider）。
+    pub model: Option<String>,
+    /// per-agent 权限声明（gate 模式 + 能力白名单）。
+    pub permission: AgentPermission,
 }
 
 impl fmt::Debug for SubAgentConfig {
@@ -71,6 +87,8 @@ impl SubAgentConfig {
             frozen_denies: Vec::new(),
             tools: Vec::new(),
             max_steps: 10,
+            model: None,
+            permission: AgentPermission::new(),
         }
     }
 
@@ -103,6 +121,19 @@ impl SubAgentConfig {
     /// 即知晓禁止边界；执行层仍由共享 PermissionGate 强制）。
     pub fn with_frozen_denies(mut self, denies: Vec<String>) -> Self {
         self.frozen_denies = denies;
+        self
+    }
+
+    /// per-agent 模型覆盖。经 [`ModelResolver`] 解析为 provider；未装配
+    /// resolver 或解析失败时回退默认 provider（并 warn）。
+    pub fn with_model(mut self, model: Option<String>) -> Self {
+        self.model = model;
+        self
+    }
+
+    /// per-agent 权限声明：gate 模式 + 能力白名单。
+    pub fn with_permission(mut self, permission: AgentPermission) -> Self {
+        self.permission = permission;
         self
     }
 }
@@ -140,6 +171,13 @@ pub struct SubAgentRunner {
     /// 缺失时 `enforce_capability` 直接报错）与工作区根。
     security: Option<deepseeknova_security::context::SecurityContext>,
     workspace_root: std::path::PathBuf,
+    /// 子代理递归深度上限（根派发 depth 1）。超深派发被拒绝。
+    max_depth: usize,
+    /// per-agent 模型解析器（声明 model 时把名字解析为 provider）。
+    model_resolver: Option<Arc<dyn ModelResolver>>,
+    /// 递归派发出口：供子代理把嵌套调用送回本 runner（由上层在 Arc 包装后
+    /// 经 [`Self::set_delegation_sink`] 装配；未装配时子代理无法递归派发）。
+    delegation_sink: Arc<std::sync::Mutex<Option<Arc<dyn DelegationSink>>>>,
 }
 
 impl SubAgentRunner {
@@ -153,6 +191,9 @@ impl SubAgentRunner {
             permission: None,
             security: None,
             workspace_root: std::env::current_dir().unwrap_or_default(),
+            max_depth: DEFAULT_MAX_DEPTH,
+            model_resolver: None,
+            delegation_sink: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -207,6 +248,26 @@ impl SubAgentRunner {
     pub fn with_workspace_root(mut self, root: impl Into<std::path::PathBuf>) -> Self {
         self.workspace_root = root.into();
         self
+    }
+
+    /// 设置子代理递归深度上限（默认 [`DEFAULT_MAX_DEPTH`]）。
+    /// 根派发 depth 1；`max_depth = 0` 视作 1。
+    pub fn with_max_depth(mut self, depth: usize) -> Self {
+        self.max_depth = depth.max(1);
+        self
+    }
+
+    /// 装配 per-agent 模型解析器（声明 model 的子代理经此取 provider）。
+    pub fn with_model_resolver(mut self, resolver: Arc<dyn ModelResolver>) -> Self {
+        self.model_resolver = Some(resolver);
+        self
+    }
+
+    /// 装配递归派发出口（Arc 包装后回填本 runner 自身，使子代理可再派子代理）。
+    /// 运行时在 `Arc::new(runner)` 之后调用：
+    /// `runner.set_delegation_sink(runner.clone());`
+    pub fn set_delegation_sink(&self, sink: Arc<dyn DelegationSink>) {
+        *self.delegation_sink.lock().unwrap() = Some(sink);
     }
 
     /// Parse the input prompt to extract sub-agent name, goal, and input values.
@@ -270,15 +331,64 @@ impl SubAgentRunner {
             )
         }
     }
-}
 
-#[async_trait::async_trait]
-impl Runner for SubAgentRunner {
-    async fn run_stream(&self, input: RunInput) -> anyhow::Result<RunEventStream> {
+    /// @-mention 解析：返回首个**已知**子代理引用（零个 → None）。
+    /// 多个已知引用 → Err（消歧失败，提示用户一次引用一个）。
+    fn resolve_mention(&self, prompt: &str) -> anyhow::Result<Option<String>> {
+        let known: Vec<String> = self.sub_agents.keys().cloned().collect();
+        Ok(resolve_mention(prompt, &known)?.map(|m| m.name))
+    }
+
+    /// 带深度派发（供递归 sink 使用）：检查深度上限 → 构造提示 → 收集最终文本。
+    /// `depth` 为本次派发深度（根派发 1）；`depth > max_depth` 拒绝。
+    pub async fn run_at_depth(
+        &self,
+        agent: &str,
+        goal: &str,
+        values: &InputValues,
+        depth: usize,
+    ) -> anyhow::Result<String> {
+        let mut stream = self
+            .dispatch_stream(
+                Some(agent.to_string()),
+                goal.to_string(),
+                values.clone(),
+                depth,
+            )
+            .await?;
+        let mut text = String::new();
+        while let Some(ev) = stream.next().await {
+            match ev? {
+                RunEvent::TextDelta(delta) => text.push_str(&delta),
+                RunEvent::Done(out) if !out.text.is_empty() => {
+                    text = out.text;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        if text.is_empty() {
+            anyhow::bail!("sub-agent '{agent}' produced no output");
+        }
+        Ok(text)
+    }
+
+    /// 核心派发：解析配置 → 渲染任务书 → 应用 per-agent 模型/权限 → spawn 循环。
+    async fn dispatch_stream(
+        &self,
+        sub_agent_name: Option<String>,
+        goal: String,
+        parsed_inputs: InputValues,
+        depth: usize,
+    ) -> anyhow::Result<RunEventStream> {
+        // 深度上限：超深拒绝（递归守门；根派发 depth 1）。
+        if depth > self.max_depth {
+            anyhow::bail!(
+                "sub-agent recursion depth exceeded (max {}, depth requested: {depth})",
+                self.max_depth
+            );
+        }
         let (tx, rx) = mpsc::channel(64);
-
-        // Parse input: extract sub-agent name, goal, and input values
-        let (sub_agent_name, goal, parsed_inputs) = Self::parse_input(&input.prompt);
 
         // Resolve sub-agent config
         let config = self.resolve_sub_agent(sub_agent_name)?;
@@ -289,18 +399,61 @@ impl Runner for SubAgentRunner {
             .spec
             .render(&parsed_inputs.merged_with(&config.config_inputs))?;
 
-        // Clone what the spawned task needs
-        let provider = Arc::clone(&self.provider);
+        // per-agent 模型：声明 model 时经 resolver 解析；未声明/解析失败
+        // 回退默认 provider。
+        let provider = match &config.model {
+            Some(m) => match self.model_resolver.as_ref().and_then(|r| r.resolve(m)) {
+                Some(p) => p,
+                None => {
+                    warn!(
+                        sub_agent = %config.name,
+                        model = %m,
+                        "model resolver unavailable for declared model, falling back to default provider"
+                    );
+                    Arc::clone(&self.provider)
+                }
+            },
+            None => Arc::clone(&self.provider),
+        };
         let compact_provider = self
             .compact_provider
             .as_ref()
             .map(Arc::clone)
-            .unwrap_or_else(|| Arc::clone(&self.provider));
-        let permission = self.permission.clone();
-        let security = self.security.clone();
+            .unwrap_or_else(|| Arc::clone(&provider));
+
+        // per-agent gate 模式：
+        // - Inherit → 共享 gate
+        // - None → 绕过 gate（工具直接执行）
+        // - FailClosed → 共享 gate；无共享 gate 时在循环内拒绝一切工具
+        let (permission, fail_closed) = match config.permission.gate {
+            AgentGateMode::Inherit => (self.permission.clone(), false),
+            AgentGateMode::None => (None, false),
+            AgentGateMode::FailClosed => (self.permission.clone(), true),
+        };
+
+        // per-agent 能力白名单：声明非空 → 与基底安全上下文求交（裁剪能力）。
+        let security = if config.permission.capabilities.is_empty() {
+            self.security.clone()
+        } else {
+            self.security.as_ref().map(|base| {
+                let declared: HashSet<_> = config
+                    .permission
+                    .capabilities
+                    .iter()
+                    .map(|c| c.to_capability())
+                    .collect();
+                deepseeknova_security::context::SecurityContext {
+                    capabilities: base.capabilities.intersection(&declared).cloned().collect(),
+                    ..base.clone()
+                }
+            })
+        };
+
+        // Clone what the spawned task needs
         let workspace_root = self.workspace_root.clone();
         let tools = config.tools.clone();
         let max_steps = config.max_steps;
+        let delegation_sink = self.delegation_sink.lock().unwrap().clone();
         let mut system_prompt = config.system_prompt.clone();
         if !config.frozen_denies.is_empty() {
             system_prompt.push_str("\n\n## 禁止操作（父级冻结，不可执行）\n");
@@ -334,6 +487,7 @@ impl Runner for SubAgentRunner {
             sub_agent = %config.name,
             goal = %goal,
             max_steps = max_steps,
+            depth = depth,
             "dispatching sub-agent"
         );
 
@@ -350,6 +504,9 @@ impl Runner for SubAgentRunner {
                 permission,
                 security,
                 workspace_root,
+                depth,
+                delegation_sink,
+                fail_closed,
             )
             .await
             {
@@ -362,6 +519,41 @@ impl Runner for SubAgentRunner {
             inner: rx,
             handle: Some(handle),
         }))
+    }
+}
+
+#[async_trait::async_trait]
+impl DelegationSink for SubAgentRunner {
+    async fn delegate(
+        &self,
+        agent: &str,
+        goal: &str,
+        values: &InputValues,
+        depth: usize,
+    ) -> anyhow::Result<String> {
+        self.run_at_depth(agent, goal, values, depth).await
+    }
+}
+
+#[async_trait::async_trait]
+impl Runner for SubAgentRunner {
+    async fn run_stream(&self, input: RunInput) -> anyhow::Result<RunEventStream> {
+        // Parse input: extract sub-agent name, goal, and input values
+        let (sub_agent_name, goal, parsed_inputs) = Self::parse_input(&input.prompt);
+
+        // @-mention 回退：无结构化 `sub_agent:` 行时，识别已知 @引用触发调度。
+        // 命中则目标为该子代理，goal 为完整 prompt（引用保留，供子代理获知
+        // 被谁唤起）；零命中按默认行为（default 子代理或报错）。
+        let (sub_agent_name, goal) = match sub_agent_name {
+            Some(n) => (Some(n), goal),
+            None => match self.resolve_mention(&input.prompt)? {
+                Some(n) => (Some(n), input.prompt.clone()),
+                None => (None, input.prompt.clone()),
+            },
+        };
+
+        self.dispatch_stream(sub_agent_name, goal, parsed_inputs, 1)
+            .await
     }
 }
 
@@ -409,8 +601,25 @@ async fn run_sub_agent_loop(
     permission: Option<Arc<deepseeknova_permission::PermissionGate>>,
     security: Option<deepseeknova_security::context::SecurityContext>,
     workspace_root: std::path::PathBuf,
+    depth: usize,
+    delegation_sink: Option<Arc<dyn DelegationSink>>,
+    fail_closed: bool,
 ) -> anyhow::Result<()> {
     let cancel = CancellationToken::new();
+
+    // 构建工具执行上下文：工作区 + 安全上下文 + 递归深度 + 递归派发出口。
+    // 递归深度扩展供 `RecursiveDelegateTool` 读取当前深度（再派时 +1）。
+    let build_ctx = |call_id: &str| {
+        let mut ctx = ToolContext::new(call_id.to_string()).with_workspace(workspace_root.clone());
+        if let Some(sec) = &security {
+            ctx.extensions.insert(sec.clone());
+        }
+        ctx.extensions.insert(DelegateDepth(depth));
+        if let Some(sink) = &delegation_sink {
+            ctx.extensions.insert(sink.clone());
+        }
+        ctx
+    };
 
     // Add user goal as the first user message
     memory.add_message(Message {
@@ -583,24 +792,21 @@ async fn run_sub_agent_loop(
                             .as_ref()
                             .map(|g| g.check(tool.as_ref(), arguments));
                         match verdict {
-                            None => {
-                                let mut ctx = ToolContext::new(id.clone())
-                                    .with_workspace(workspace_root.clone());
-                                if let Some(sec) = &security {
-                                    ctx.extensions.insert(sec.clone());
-                                }
+                            // 无共享 gate：默认直接执行；fail_closed 且无 gate →
+                            // 拒绝一切工具（不静默放行）。
+                            None if !fail_closed => {
+                                let ctx = build_ctx(id);
                                 match tool.execute(&ctx, arguments).await {
                                     Ok(out) => out,
                                     Err(e) => format!("Error: {e}"),
                                 }
                             }
+                            None => format!(
+                                "Error: tool '{name}' blocked by permission policy: sub-agent is fail-closed and no permission gate is configured"
+                            ),
                             Some(v) => match v.decision() {
                                 deepseeknova_permission::Decision::Allow => {
-                                    let mut ctx = ToolContext::new(id.clone())
-                                        .with_workspace(workspace_root.clone());
-                                    if let Some(sec) = &security {
-                                        ctx.extensions.insert(sec.clone());
-                                    }
+                                    let ctx = build_ctx(id);
                                     match tool.execute(&ctx, arguments).await {
                                         Ok(out) => out,
                                         Err(e) => format!("Error: {e}"),
@@ -1008,5 +1214,439 @@ mod tests {
             main.call_count() >= 1,
             "main provider should still be used for sub-agent turns"
         );
+    }
+
+    // --- @-mention 调度 ---
+
+    async fn collect_text(runner: &SubAgentRunner, prompt: &str) -> String {
+        let mut stream = runner
+            .run_stream(RunInput {
+                prompt: prompt.to_string(),
+                images: Vec::new(),
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        let mut out = String::new();
+        while let Some(ev) = stream.next().await {
+            if let Ok(RunEvent::TextDelta(d)) = ev {
+                out.push_str(&d);
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn mention_dispatches_to_named_sub_agent() {
+        use crate::test_utils::MockProvider;
+        use std::sync::Mutex;
+
+        // 用 per-agent 模型区分 provider（SubAgentRunner 单默认 provider，
+        // 模型解析是 per-agent 的 provider 覆盖通道）。
+        let coder_p = Arc::new(MockProvider::text("coder answer"));
+        let reviewer_p = Arc::new(MockProvider::text("reviewer answer"));
+        struct Resolver {
+            coder: Arc<MockProvider>,
+            reviewer: Arc<MockProvider>,
+            called: Mutex<Vec<String>>,
+        }
+        impl ModelResolver for Resolver {
+            fn resolve(&self, name: &str) -> Option<Arc<dyn Provider>> {
+                self.called.lock().unwrap().push(name.to_string());
+                match name {
+                    "m-coder" => Some(self.coder.clone() as Arc<dyn Provider>),
+                    "m-reviewer" => Some(self.reviewer.clone() as Arc<dyn Provider>),
+                    _ => None,
+                }
+            }
+        }
+        let resolver = Arc::new(Resolver {
+            coder: coder_p.clone(),
+            reviewer: reviewer_p.clone(),
+            called: Mutex::new(Vec::new()),
+        });
+        let mut runner = SubAgentRunner::new(Arc::new(MockProvider::text("default answer")))
+            .with_model_resolver(resolver.clone());
+        runner.register(
+            SubAgentConfig::new("coder", "you are coder").with_model(Some("m-coder".to_string())),
+        );
+        runner.register(
+            SubAgentConfig::new("reviewer", "you are reviewer")
+                .with_model(Some("m-reviewer".to_string())),
+        );
+
+        let out = collect_text(&runner, "@reviewer please look at the diff").await;
+        assert!(out.contains("reviewer answer"), "got: {out}");
+        assert_eq!(coder_p.call_count(), 0, "coder must not run");
+        assert!(reviewer_p.call_count() >= 1, "reviewer must run");
+        let called = resolver.called.lock().unwrap();
+        assert_eq!(called.as_slice(), ["m-reviewer"], "got: {called:?}");
+    }
+
+    #[tokio::test]
+    async fn mention_preserved_in_goal() {
+        use crate::test_utils::MockProvider;
+        let p = Arc::new(MockProvider::text("ok"));
+        let mut runner = SubAgentRunner::new(p.clone());
+        runner.register(SubAgentConfig::new("coder", "you are coder"));
+        let runner = runner.with_default("coder");
+
+        let _out = collect_text(&runner, "@coder do the thing").await;
+        // @引用触发调度后，goal 保留完整 prompt（子代理获知被谁唤起）
+        let last = p.last_prompt().unwrap();
+        assert!(last.contains("@coder"), "goal should keep mention: {last}");
+        assert!(last.contains("do the thing"), "got: {last}");
+    }
+
+    #[tokio::test]
+    async fn mention_unknown_falls_back_to_default() {
+        use crate::test_utils::MockProvider;
+        let p = Arc::new(MockProvider::text("default answer"));
+        let mut runner = SubAgentRunner::new(p.clone());
+        runner.register(SubAgentConfig::new("coder", "you are coder"));
+        let runner = runner.with_default("coder");
+
+        let out = collect_text(&runner, "@unknownagent do the thing").await;
+        assert!(out.contains("default answer"), "got: {out}");
+    }
+
+    #[tokio::test]
+    async fn mention_ambiguous_errors() {
+        use crate::test_utils::MockProvider;
+        let mut runner = SubAgentRunner::new(Arc::new(MockProvider::text("x")));
+        runner.register(SubAgentConfig::new("coder", "you are coder"));
+        runner.register(SubAgentConfig::new("reviewer", "you are reviewer"));
+
+        let err = runner
+            .run_stream(RunInput {
+                prompt: "@coder and @reviewer both".into(),
+                images: Vec::new(),
+                model_override: None,
+            })
+            .await
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("ambiguous"), "got: {err}");
+    }
+
+    // --- 递归深度上限 ---
+
+    #[tokio::test]
+    async fn run_at_depth_beyond_limit_is_rejected() {
+        use crate::test_utils::MockProvider;
+        let p = Arc::new(MockProvider::text("leaf answer"));
+        let mut runner = SubAgentRunner::new(p).with_max_depth(3);
+        runner.register(SubAgentConfig::new("leaf", "you are leaf"));
+
+        // depth 3 = 允许；depth 4 > max → 拒绝
+        let ok = runner
+            .run_at_depth("leaf", "go", &InputValues::new(), 3)
+            .await
+            .unwrap();
+        assert!(ok.contains("leaf answer"), "got: {ok}");
+
+        let err = runner
+            .run_at_depth("leaf", "go", &InputValues::new(), 4)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("recursion depth exceeded"),
+            "got: {err}"
+        );
+        assert!(
+            err.to_string().contains("3"),
+            "max depth should appear: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn zero_max_depth_is_clamped_to_one() {
+        use crate::test_utils::MockProvider;
+        let runner = SubAgentRunner::new(Arc::new(MockProvider::text("x"))).with_max_depth(0);
+        // 私有字段在测试内可见
+        assert_eq!(runner.max_depth, 1);
+    }
+
+    // --- per-agent 模型覆盖 ---
+
+    /// 记录 resolve 请求的模型名，并返回可观测 provider。
+    struct RecordingResolver {
+        called: std::sync::Mutex<Option<String>>,
+        provider: Arc<crate::test_utils::MockProvider>,
+    }
+    impl ModelResolver for RecordingResolver {
+        fn resolve(&self, name: &str) -> Option<Arc<dyn Provider>> {
+            *self.called.lock().unwrap() = Some(name.to_string());
+            Some(self.provider.clone() as Arc<dyn Provider>)
+        }
+    }
+
+    #[tokio::test]
+    async fn per_agent_model_resolver_is_consulted() {
+        use crate::test_utils::MockProvider;
+        let resolved = Arc::new(MockProvider::text("resolved-model answer"));
+        let resolver = Arc::new(RecordingResolver {
+            called: std::sync::Mutex::new(None),
+            provider: resolved.clone(),
+        });
+        let mut runner = SubAgentRunner::new(Arc::new(MockProvider::text("default answer")))
+            .with_model_resolver(resolver.clone());
+        runner.register(
+            SubAgentConfig::new("m", "you are m").with_model(Some("deepseek-v4-flash".to_string())),
+        );
+        let runner = runner.with_default("m");
+
+        let out = collect_text(&runner, "goal: use your model").await;
+        assert!(out.contains("resolved-model answer"), "got: {out}");
+        let called = resolver.called.lock().unwrap().clone();
+        assert_eq!(called.as_deref(), Some("deepseek-v4-flash"));
+        assert!(
+            resolved.call_count() >= 1,
+            "resolved provider must serve the sub-agent"
+        );
+    }
+
+    #[tokio::test]
+    async fn per_agent_model_without_resolver_falls_back() {
+        use crate::test_utils::MockProvider;
+        let default_p = Arc::new(MockProvider::text("default answer"));
+        let mut runner = SubAgentRunner::new(default_p.clone()); // 无 resolver
+        runner.register(
+            SubAgentConfig::new("m", "you are m").with_model(Some("deepseek-v4-flash".to_string())),
+        );
+        let runner = runner.with_default("m");
+
+        let out = collect_text(&runner, "goal: x").await;
+        assert!(out.contains("default answer"), "got: {out}");
+        assert!(default_p.call_count() >= 1, "default provider must serve");
+    }
+
+    // --- per-agent 权限：能力白名单 + gate 模式 ---
+
+    /// 首轮产出指定工具调用，之后把最近一条 Tool 结果回显为最终文本
+    /// （便于断言工具结果内容）。
+    struct EchoToolProvider {
+        tool_name: String,
+        args: String,
+    }
+    #[async_trait::async_trait]
+    impl Provider for EchoToolProvider {
+        async fn generate(
+            &self,
+            _v: deepseeknova_provider::ValidatedRequest<'_>,
+        ) -> anyhow::Result<Message> {
+            Ok(Message {
+                role: Role::Assistant,
+                content: "echo".into(),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            })
+        }
+        async fn stream(
+            &self,
+            v: deepseeknova_provider::ValidatedRequest<'_>,
+        ) -> anyhow::Result<deepseeknova_core::chunk::ChunkStream> {
+            use deepseeknova_core::chunk::{Chunk, Usage};
+            let tool_count = v.messages.iter().filter(|m| m.role == Role::Tool).count();
+            let chunks: Vec<anyhow::Result<Chunk>> = if tool_count == 0 {
+                vec![
+                    Ok(Chunk::ToolCallStart {
+                        id: "call_1".into(),
+                        name: self.tool_name.clone(),
+                    }),
+                    Ok(Chunk::ToolCallEnd {
+                        id: "call_1".into(),
+                        name: self.tool_name.clone(),
+                        arguments: self.args.clone(),
+                    }),
+                    Ok(Chunk::Done),
+                ]
+            } else {
+                let last = v
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|m| m.role == Role::Tool)
+                    .map(|m| m.content.clone())
+                    .unwrap_or_default();
+                vec![
+                    Ok(Chunk::TextDelta(last)),
+                    Ok(Chunk::Usage(Usage::default())),
+                    Ok(Chunk::Done),
+                ]
+            };
+            Ok(Box::pin(tokio_stream::iter(chunks)))
+        }
+    }
+
+    /// 强制 FileWrite 能力的写工具（与真实 fs 工具同构的门禁调用）。
+    struct CapWriteTool;
+    #[async_trait::async_trait]
+    impl Tool for CapWriteTool {
+        fn schema(&self) -> deepseeknova_core::ToolSchema {
+            deepseeknova_core::ToolSchema {
+                name: "write_file".to_string(),
+                description: "writes a file".into(),
+                parameters: serde_json::json!({}),
+            }
+        }
+        async fn execute(&self, ctx: &ToolContext, _args: &str) -> anyhow::Result<String> {
+            deepseeknova_security::context::enforce_capability(
+                ctx,
+                "write_file",
+                deepseeknova_security::capability::Capability::FileWrite,
+            )?;
+            Ok("written ok".to_string())
+        }
+    }
+
+    struct NoopReadTool;
+    #[async_trait::async_trait]
+    impl Tool for NoopReadTool {
+        fn schema(&self) -> deepseeknova_core::ToolSchema {
+            deepseeknova_core::ToolSchema {
+                name: "read_file".to_string(),
+                description: "reads".into(),
+                parameters: serde_json::json!({}),
+            }
+        }
+        async fn execute(&self, _ctx: &ToolContext, _args: &str) -> anyhow::Result<String> {
+            Ok("read ok".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn per_agent_capability_whitelist_denies_missing_cap() {
+        use crate::agent_manifest::{AgentCapability, AgentGateMode, AgentPermission};
+        use deepseeknova_security::context::SecurityContext;
+
+        let p = Arc::new(EchoToolProvider {
+            tool_name: "write_file".to_string(),
+            args: "{}".into(),
+        });
+        let mut runner =
+            SubAgentRunner::new(p).with_security(SecurityContext::with_safe_defaults());
+        // 声明只含 FileRead → FileWrite 被裁掉 → 写工具执行失败
+        runner.register(
+            SubAgentConfig::new("w", "you write")
+                .with_tools(vec![Arc::new(CapWriteTool)])
+                .with_permission(AgentPermission {
+                    gate: AgentGateMode::Inherit,
+                    capabilities: vec![AgentCapability::FileRead],
+                }),
+        );
+        let runner = runner.with_default("w");
+
+        let out = collect_text(&runner, "goal: write a file").await;
+        assert!(
+            out.contains("Security violation") && out.contains("FileWrite"),
+            "写能力被裁剪应失败回显: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn per_agent_full_capabilities_allows_tool() {
+        use crate::agent_manifest::{AgentCapability, AgentGateMode, AgentPermission};
+        use deepseeknova_security::context::SecurityContext;
+
+        let p = Arc::new(EchoToolProvider {
+            tool_name: "write_file".to_string(),
+            args: "{}".into(),
+        });
+        let mut runner =
+            SubAgentRunner::new(p).with_security(SecurityContext::with_safe_defaults());
+        runner.register(
+            SubAgentConfig::new("w", "you write")
+                .with_tools(vec![Arc::new(CapWriteTool)])
+                .with_permission(AgentPermission {
+                    gate: AgentGateMode::Inherit,
+                    capabilities: vec![AgentCapability::FileWrite],
+                }),
+        );
+        let runner = runner.with_default("w");
+
+        let out = collect_text(&runner, "goal: write a file").await;
+        assert!(out.contains("written ok"), "got: {out}");
+    }
+
+    #[tokio::test]
+    async fn per_agent_fail_closed_without_gate_blocks_all() {
+        use crate::agent_manifest::{AgentGateMode, AgentPermission};
+
+        let p = Arc::new(EchoToolProvider {
+            tool_name: "read_file".to_string(),
+            args: "{}".into(),
+        });
+        let mut runner = SubAgentRunner::new(p); // 无共享 gate
+        runner.register(
+            SubAgentConfig::new("f", "you are f")
+                .with_tools(vec![Arc::new(NoopReadTool)])
+                .with_permission(AgentPermission {
+                    gate: AgentGateMode::FailClosed,
+                    capabilities: vec![],
+                }),
+        );
+        let runner = runner.with_default("f");
+
+        let out = collect_text(&runner, "goal: read something").await;
+        assert!(
+            out.contains("fail-closed") && out.contains("blocked"),
+            "fail-closed 且无 gate 应拒绝一切工具: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn per_agent_gate_none_bypasses_shared_gate() {
+        use crate::agent_manifest::{AgentGateMode, AgentPermission};
+        use deepseeknova_permission::{Decision, PermissionGate, PolicyBuilder, Rule};
+
+        // 共享 gate 拒绝 read_file
+        let gate = Arc::new(PermissionGate::new(
+            PolicyBuilder::new()
+                .default_mode(Decision::Deny)
+                .deny(Rule::new("read_file"))
+                .build(),
+        ));
+
+        // Inherit 模式 → 被共享 gate 拒绝
+        let p_inherit = Arc::new(EchoToolProvider {
+            tool_name: "read_file".to_string(),
+            args: "{}".into(),
+        });
+        let mut inherit_runner = SubAgentRunner::new(p_inherit).with_permission_gate(gate.clone());
+        inherit_runner.register(
+            SubAgentConfig::new("f", "you are f")
+                .with_tools(vec![Arc::new(NoopReadTool)])
+                .with_permission(AgentPermission {
+                    gate: AgentGateMode::Inherit,
+                    capabilities: vec![],
+                }),
+        );
+        let inherit_runner = inherit_runner.with_default("f");
+        let out_inherit = collect_text(&inherit_runner, "goal: read").await;
+        assert!(
+            out_inherit.contains("blocked by permission policy"),
+            "Inherit 应被共享 gate 拒绝: {out_inherit}"
+        );
+
+        // None 模式 → 绕过共享 gate，工具直接执行
+        let p_none = Arc::new(EchoToolProvider {
+            tool_name: "read_file".to_string(),
+            args: "{}".into(),
+        });
+        let mut none_runner = SubAgentRunner::new(p_none).with_permission_gate(gate);
+        none_runner.register(
+            SubAgentConfig::new("f", "you are f")
+                .with_tools(vec![Arc::new(NoopReadTool)])
+                .with_permission(AgentPermission {
+                    gate: AgentGateMode::None,
+                    capabilities: vec![],
+                }),
+        );
+        let none_runner = none_runner.with_default("f");
+        let out_none = collect_text(&none_runner, "goal: read").await;
+        assert!(out_none.contains("read ok"), "None 应绕过 gate: {out_none}");
     }
 }

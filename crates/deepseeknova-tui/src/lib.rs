@@ -53,8 +53,8 @@ use deepseeknova_provider::factory::ReasoningEffort;
 use deepseeknova_provider::router::ModelRouter;
 
 pub use app::state::{
-    McpProbe, McpServerInfo, McpStatus, ResumedLine, ResumedRole, SessionController, SessionMeta,
-    TrustController, UndoController,
+    McpProbe, McpServerInfo, McpStatus, ResumedLine, ResumedRole, SessionCheckpointController,
+    SessionController, SessionMeta, TrustController, UndoController,
 };
 pub use theme::Theme;
 
@@ -89,6 +89,8 @@ pub struct TuiRunner {
     mcp_probe: Option<Arc<dyn McpProbe>>,
     /// 可选撤销控制器：启用 `/undo` `/undo all` `/undo list`。
     undo: Option<Arc<dyn UndoController>>,
+    /// 可选会话级检查点控制器：启用 `/checkpoint save|list|rollback`。
+    checkpoint: Option<Arc<dyn SessionCheckpointController>>,
     /// 编程式注入主题（优先级高于 `DEEPSEEKNOVA_THEME`）。
     theme: Option<Theme>,
     /// `@` 补全候选文件清单（CLI 注入；为空不触发补全）。
@@ -131,6 +133,7 @@ impl TuiRunner {
             mcp_servers: Vec::new(),
             mcp_probe: None,
             undo: None,
+            checkpoint: None,
             theme: None,
             at_files: Vec::new(),
             context_window: None,
@@ -256,6 +259,15 @@ impl TuiRunner {
         self
     }
 
+    /// 提供会话级检查点控制器，启用 `/checkpoint save|list|rollback`。
+    pub fn with_checkpoint_controller(
+        mut self,
+        controller: Arc<dyn SessionCheckpointController>,
+    ) -> Self {
+        self.checkpoint = Some(controller);
+        self
+    }
+
     /// 编程式注入主题（优先级高于 `DEEPSEEKNOVA_THEME` 环境变量）。
     pub fn with_theme(mut self, theme: Theme) -> Self {
         self.theme = Some(theme);
@@ -320,6 +332,7 @@ impl TuiRunner {
             mcp_servers: self.mcp_servers.clone(),
             mcp_probe: self.mcp_probe.clone(),
             undo: self.undo.clone(),
+            checkpoint: self.checkpoint.clone(),
             context_window: self.context_window,
             budget_window: self.budget_window,
             approval_rx: self.approval_rx.take(),

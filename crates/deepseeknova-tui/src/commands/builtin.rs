@@ -109,10 +109,11 @@ impl CommandHandler for SessionsCmd {
                         } else {
                             ""
                         };
-                        let label = if m.preview.is_empty() {
-                            m.id.clone()
-                        } else {
-                            format!("{} — {}", m.id, m.preview)
+                        // title 优先；无命名回退 id（预览空时）。
+                        let label = match (&m.title, m.preview.is_empty()) {
+                            (Some(t), _) => format!("{t}  ({})", m.id),
+                            (None, false) => format!("{} — {}", m.id, m.preview),
+                            (None, true) => m.id.clone(),
                         };
                         ctx.app
                             .echo_line(LineKind::System, &format!("  {label}{marker}"));
@@ -142,10 +143,25 @@ impl CommandHandler for ResumeCmd {
                     let count = lines.len();
                     ctx.app.restore_conversation(lines);
                     ctx.app.last_prompt = None;
-                    ctx.app.show_notice(tr.t_args(
-                        Key::ResumeDone,
-                        &[("target", target), ("n", &count.to_string())],
-                    ));
+                    // 恢复时若有命名 title 一并显示（查列表取，无则回退不带 title 文案）。
+                    let title = match ctrl.list_sessions().await {
+                        Ok(metas) => metas
+                            .into_iter()
+                            .find(|m| m.id == target)
+                            .and_then(|m| m.title),
+                        Err(_) => None,
+                    };
+                    let notice = match title {
+                        Some(t) => tr.t_args(
+                            Key::ResumeDoneTitled,
+                            &[("target", target), ("title", &t), ("n", &count.to_string())],
+                        ),
+                        None => tr.t_args(
+                            Key::ResumeDone,
+                            &[("target", target), ("n", &count.to_string())],
+                        ),
+                    };
+                    ctx.app.show_notice(notice);
                 }
                 Err(e) => ctx
                     .app
@@ -153,6 +169,103 @@ impl CommandHandler for ResumeCmd {
             },
             Some(_) => ctx.app.show_notice(tr.t(Key::ResumeUsage)),
             None => ctx.app.show_notice(tr.t(Key::SessionUnavailable)),
+        }
+        CommandOutcome::Handled
+    }
+}
+
+struct RenameCmd;
+
+#[async_trait]
+impl CommandHandler for RenameCmd {
+    async fn run(&self, ctx: &mut CommandCtx<'_>, args: &str) -> CommandOutcome {
+        let title = args.trim();
+        let tr = ctx.app.tr;
+        match &ctx.caps.session {
+            Some(ctrl) if !title.is_empty() => match ctrl.current_session().await {
+                Some(id) => match ctrl.rename(&id, title).await {
+                    Ok(()) => ctx
+                        .app
+                        .show_notice(tr.t_args(Key::RenameDone, &[("title", title)])),
+                    Err(e) => ctx
+                        .app
+                        .show_notice(tr.t_args(Key::RenameFailed, &[("err", &e.to_string())])),
+                },
+                None => ctx.app.show_notice(tr.t(Key::SessionUnavailable)),
+            },
+            Some(_) => ctx.app.show_notice(tr.t(Key::RenameUsage)),
+            None => ctx.app.show_notice(tr.t(Key::SessionUnavailable)),
+        }
+        CommandOutcome::Handled
+    }
+}
+
+struct CheckpointCmd;
+
+#[async_trait]
+impl CommandHandler for CheckpointCmd {
+    async fn run(&self, ctx: &mut CommandCtx<'_>, args: &str) -> CommandOutcome {
+        let tr = ctx.app.tr;
+        let Some(ctrl) = &ctx.caps.checkpoint else {
+            ctx.app.show_notice(tr.t(Key::CheckpointUnavailable));
+            return CommandOutcome::Handled;
+        };
+        let (sub, sub_args) = args.split_once(' ').unwrap_or((args, ""));
+        match sub {
+            "save" => {
+                let label = sub_args.trim();
+                let label = if label.is_empty() {
+                    None
+                } else {
+                    Some(label.to_string())
+                };
+                let lines = ctx.app.export_conversation_lines();
+                match ctrl.save(label, lines).await {
+                    Ok(id) => ctx
+                        .app
+                        .show_notice(tr.t_args(Key::CheckpointSaved, &[("id", &id)])),
+                    Err(e) => ctx.app.show_notice(
+                        tr.t_args(Key::CheckpointSaveFailed, &[("err", &e.to_string())]),
+                    ),
+                }
+            }
+            "list" => match ctrl.list().await {
+                Ok(lines) if !lines.is_empty() => {
+                    ctx.app
+                        .echo_line(LineKind::System, tr.t(Key::CheckpointListHeader));
+                    for line in lines {
+                        ctx.app.echo_line(LineKind::System, &format!("  {line}"));
+                    }
+                }
+                Ok(_) => ctx.app.show_notice(tr.t(Key::NoCheckpoints)),
+                Err(e) => ctx
+                    .app
+                    .show_notice(tr.t_args(Key::CheckpointListFailed, &[("err", &e.to_string())])),
+            },
+            "rollback" => {
+                let id = sub_args.trim();
+                let id = if id.is_empty() { None } else { Some(id) };
+                match ctrl.rollback(id).await {
+                    Ok(Some(ck)) => {
+                        ctx.app.restore_conversation(
+                            crate::app::state::AppState::resumed_lines_from_checkpoint(&ck),
+                        );
+                        ctx.app.last_prompt = None;
+                        ctx.app.show_notice(tr.t_args(
+                            Key::CheckpointRollbackDone,
+                            &[("id", &ck.id), ("n", &ck.conversation.len().to_string())],
+                        ));
+                    }
+                    Ok(None) => ctx.app.show_notice(tr.t(Key::NoCheckpoints)),
+                    Err(e) => ctx.app.show_notice(
+                        tr.t_args(Key::CheckpointRollbackFailed, &[("err", &e.to_string())]),
+                    ),
+                }
+            }
+            "" => ctx.app.show_notice(tr.t(Key::CheckpointUsage)),
+            other => ctx
+                .app
+                .show_notice(tr.t_args(Key::CheckpointUnknownArg, &[("arg", other)])),
         }
         CommandOutcome::Handled
     }
@@ -744,6 +857,8 @@ static CLEAR: ClearCmd = ClearCmd;
 static NEW: NewCmd = NewCmd;
 static SESSIONS: SessionsCmd = SessionsCmd;
 static RESUME: ResumeCmd = ResumeCmd;
+static RENAME: RenameCmd = RenameCmd;
+static CHECKPOINT: CheckpointCmd = CheckpointCmd;
 static MODEL: ModelCmd = ModelCmd;
 static COST: CostCmd = CostCmd;
 static SCORECARD: ScorecardCmd = ScorecardCmd;
@@ -797,6 +912,22 @@ pub const BUILTIN: &[Command] = &[
         args_spec: ArgsSpec::FreeText,
         args_hint: Some(&["<session-id>"]),
         handler: &RESUME,
+    },
+    Command {
+        name: "rename",
+        desc: &Key::CmdRenameDesc,
+        keywords: &["命名", "重命名", "title"],
+        args_spec: ArgsSpec::FreeText,
+        args_hint: Some(&["<title>"]),
+        handler: &RENAME,
+    },
+    Command {
+        name: "checkpoint",
+        desc: &Key::CmdCheckpointDesc,
+        keywords: &["检查点", "快照", "回退", "rollback", "checkpoint"],
+        args_spec: ArgsSpec::FreeText,
+        args_hint: Some(&["save [label]", "list", "rollback [id]"]),
+        handler: &CHECKPOINT,
     },
     Command {
         name: "model",
@@ -939,6 +1070,7 @@ mod tests {
             mcp_servers: vec![],
             mcp_probe: None,
             undo: None,
+            checkpoint: None,
             context_window: None,
             budget_window: None,
             approval_rx: None,
@@ -962,6 +1094,8 @@ mod tests {
             "new",
             "sessions",
             "resume",
+            "rename",
+            "checkpoint",
             "model",
             "cost",
             "skills",
@@ -1108,6 +1242,7 @@ mod tests {
             mcp_servers: vec![],
             mcp_probe: None,
             undo: None,
+            checkpoint: None,
             context_window: None,
             budget_window: None,
             approval_rx: None,
@@ -1150,5 +1285,294 @@ mod tests {
             .notice
             .as_ref()
             .is_some_and(|(t, _)| t.contains("不可用")));
+    }
+
+    // ── /rename /checkpoint /sessions title ───────────────────────────
+
+    /// 内存版会话控制器（/rename /sessions 测试桩）。
+    struct MockSessionController {
+        current: std::sync::Mutex<Option<String>>,
+        metas: std::sync::Mutex<Vec<crate::app::state::SessionMeta>>,
+        renamed: std::sync::Mutex<Vec<(String, String)>>,
+    }
+
+    impl MockSessionController {
+        fn new(current: Option<String>, metas: Vec<crate::app::state::SessionMeta>) -> Self {
+            Self {
+                current: std::sync::Mutex::new(current),
+                metas: std::sync::Mutex::new(metas),
+                renamed: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl crate::app::state::SessionController for MockSessionController {
+        async fn new_session(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn list_sessions(&self) -> anyhow::Result<Vec<crate::app::state::SessionMeta>> {
+            Ok(self.metas.lock().unwrap().clone())
+        }
+        async fn current_session(&self) -> Option<String> {
+            self.current.lock().unwrap().clone()
+        }
+        async fn rename(&self, id: &str, title: &str) -> anyhow::Result<()> {
+            self.renamed
+                .lock()
+                .unwrap()
+                .push((id.to_string(), title.to_string()));
+            Ok(())
+        }
+        async fn resume(&self, _id: &str) -> anyhow::Result<Vec<crate::app::state::ResumedLine>> {
+            Ok(Vec::new())
+        }
+        async fn record_turn(
+            &self,
+            _prompt: &str,
+            _output_text: &str,
+            _model: Option<String>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// 内存版会话检查点控制器（/checkpoint 测试桩）。
+    #[derive(Default)]
+    struct MockCheckpointController {
+        checkpoints: std::sync::Mutex<Vec<deepseeknova_checkpoint::SessionCheckpoint>>,
+    }
+
+    #[async_trait]
+    impl crate::app::state::SessionCheckpointController for MockCheckpointController {
+        async fn save(
+            &self,
+            label: Option<String>,
+            conversation: Vec<deepseeknova_checkpoint::ConversationLine>,
+        ) -> anyhow::Result<String> {
+            let mut cks = self.checkpoints.lock().unwrap();
+            let id = format!("ck-{}", cks.len());
+            cks.push(deepseeknova_checkpoint::SessionCheckpoint {
+                id: id.clone(),
+                created_at: chrono::Utc::now(),
+                label,
+                conversation,
+                files: Vec::new(),
+            });
+            Ok(id)
+        }
+        async fn list(&self) -> anyhow::Result<Vec<String>> {
+            Ok(self
+                .checkpoints
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|c| c.id.clone())
+                .collect())
+        }
+        async fn rollback(
+            &self,
+            id: Option<&str>,
+        ) -> anyhow::Result<Option<deepseeknova_checkpoint::SessionCheckpoint>> {
+            let mut cks = self.checkpoints.lock().unwrap();
+            let idx = match id {
+                Some(id) => cks.iter().position(|c| c.id == id),
+                None => cks.len().checked_sub(1),
+            };
+            Ok(idx.map(|i| cks.remove(i)))
+        }
+    }
+
+    #[tokio::test]
+    async fn rename_renames_current_session() {
+        let ctrl = Arc::new(MockSessionController::new(
+            Some("chat-20260807-000001".into()),
+            vec![],
+        ));
+        let caps = TuiCaps {
+            session: Some(ctrl.clone() as Arc<dyn crate::app::state::SessionController>),
+            ..empty_caps()
+        };
+        let mut app = AppState {
+            tr: Tr::new(crate::i18n::Lang::Zh),
+            ..Default::default()
+        };
+        run_cmd("rename", "  项目重构  ", &mut app, &caps).await;
+        let renamed = ctrl.renamed.lock().unwrap();
+        assert_eq!(renamed.len(), 1, "rename 应作用于当前会话");
+        assert_eq!(renamed[0].0, "chat-20260807-000001");
+        assert_eq!(renamed[0].1, "项目重构", "参数应 trim");
+        assert!(app
+            .notice
+            .as_ref()
+            .is_some_and(|(t, _)| t.contains("已将会话重命名为")));
+    }
+
+    #[tokio::test]
+    async fn rename_without_title_shows_usage() {
+        let ctrl = Arc::new(MockSessionController::new(Some("chat-x".into()), vec![]));
+        let caps = TuiCaps {
+            session: Some(ctrl.clone() as Arc<dyn crate::app::state::SessionController>),
+            ..empty_caps()
+        };
+        let mut app = AppState {
+            tr: Tr::new(crate::i18n::Lang::Zh),
+            ..Default::default()
+        };
+        run_cmd("rename", "   ", &mut app, &caps).await;
+        assert!(app.notice.as_ref().is_some_and(|(t, _)| t.contains("用法")));
+        assert!(ctrl.renamed.lock().unwrap().is_empty(), "空参数不改名");
+    }
+
+    #[tokio::test]
+    async fn rename_without_session_degrades() {
+        let caps = empty_caps();
+        let mut app = AppState {
+            tr: Tr::new(crate::i18n::Lang::Zh),
+            ..Default::default()
+        };
+        run_cmd("rename", "标题", &mut app, &caps).await;
+        assert!(app
+            .notice
+            .as_ref()
+            .is_some_and(|(t, _)| t.contains("会话管理不可用")));
+    }
+
+    #[tokio::test]
+    async fn resume_shows_title_when_named() {
+        let metas = vec![crate::app::state::SessionMeta {
+            id: "chat-20260807-000001".into(),
+            preview: "旧预览".into(),
+            title: Some("项目重构".into()),
+        }];
+        let ctrl = Arc::new(MockSessionController::new(Some("chat-x".into()), metas));
+        let caps = TuiCaps {
+            session: Some(ctrl.clone() as Arc<dyn crate::app::state::SessionController>),
+            ..empty_caps()
+        };
+        let mut app = AppState {
+            tr: Tr::new(crate::i18n::Lang::Zh),
+            ..Default::default()
+        };
+        run_cmd("resume", "chat-20260807-000001", &mut app, &caps).await;
+        assert!(
+            app.notice
+                .as_ref()
+                .is_some_and(|(t, _)| t.contains("已恢复") && t.contains("项目重构")),
+            "恢复时显示命名 title: {:?}",
+            app.notice
+        );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_save_list_rollback_roundtrip_restores_conversation() {
+        let ctrl = Arc::new(MockCheckpointController::default());
+        let caps = TuiCaps {
+            checkpoint: Some(
+                ctrl.clone() as Arc<dyn crate::app::state::SessionCheckpointController>
+            ),
+            ..empty_caps()
+        };
+        let mut app = AppState {
+            tr: Tr::new(crate::i18n::Lang::Zh),
+            ..Default::default()
+        };
+        // 第一轮 → save。
+        app.conversation.begin_turn("第一问".into());
+        app.apply_run_event(RunEvent::TextDelta("第一答".into()));
+        app.apply_run_event(RunEvent::Done(done_output("")));
+        run_cmd("checkpoint", "save 阶段一", &mut app, &caps).await;
+        assert!(app
+            .notice
+            .as_ref()
+            .is_some_and(|(t, _)| t.contains("检查点已保存")));
+        // 第二轮 → 记录继续对话后的状态。
+        app.conversation.begin_turn("第二问".into());
+        app.apply_run_event(RunEvent::TextDelta("第二答".into()));
+        app.apply_run_event(RunEvent::Done(done_output("")));
+        assert_eq!(app.conversation.turn_count(), 2);
+        // list 展示检查点。
+        run_cmd("checkpoint", "list", &mut app, &caps).await;
+        assert!(
+            app.echo.iter().any(|l| l.text.contains("ck-")),
+            "list 应含检查点 id: {:?}",
+            app.echo
+        );
+        // rollback（最新）→ 回到快照点的 1 个回合。
+        run_cmd("checkpoint", "rollback", &mut app, &caps).await;
+        assert_eq!(app.conversation.turn_count(), 1, "回退后回到快照点");
+        assert_eq!(app.conversation.user_text_of(1), Some("第一问"));
+        assert!(app
+            .notice
+            .as_ref()
+            .is_some_and(|(t, _)| t.contains("已回退到检查点")));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_without_caps_degrades() {
+        let caps = empty_caps();
+        let mut app = AppState {
+            tr: Tr::new(crate::i18n::Lang::Zh),
+            ..Default::default()
+        };
+        run_cmd("checkpoint", "save", &mut app, &caps).await;
+        assert!(app
+            .notice
+            .as_ref()
+            .is_some_and(|(t, _)| t.contains("不可用")));
+    }
+
+    #[tokio::test]
+    async fn sessions_list_prefers_title_over_preview_and_id() {
+        let metas = vec![
+            crate::app::state::SessionMeta {
+                id: "chat-20260807-000001".into(),
+                preview: "旧预览".into(),
+                title: Some("项目重构".into()),
+            },
+            crate::app::state::SessionMeta {
+                id: "chat-20260806-000001".into(),
+                preview: String::new(),
+                title: None,
+            },
+            crate::app::state::SessionMeta {
+                id: "chat-20260805-000001".into(),
+                preview: "有预览无标题".into(),
+                title: None,
+            },
+        ];
+        let ctrl = Arc::new(MockSessionController::new(
+            Some("chat-20260807-000001".into()),
+            metas,
+        ));
+        let caps = TuiCaps {
+            session: Some(ctrl.clone() as Arc<dyn crate::app::state::SessionController>),
+            ..empty_caps()
+        };
+        let mut app = AppState {
+            tr: Tr::new(crate::i18n::Lang::Zh),
+            ..Default::default()
+        };
+        run_cmd("sessions", "", &mut app, &caps).await;
+        let echo: String = app
+            .echo
+            .iter()
+            .map(|l| l.text.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(echo.contains("项目重构"), "title 显示: {echo}");
+        assert!(
+            echo.contains("chat-20260807-000001"),
+            "title 旁带 id: {echo}"
+        );
+        assert!(
+            echo.contains("chat-20260806-000001"),
+            "无 title 回退 id: {echo}"
+        );
+        assert!(
+            echo.contains("有预览无标题"),
+            "无 title 有预览回退预览: {echo}"
+        );
+        assert!(echo.contains("(当前)"), "当前标记: {echo}");
     }
 }

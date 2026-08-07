@@ -20,6 +20,7 @@ deepseeknova-core = { workspace = true }
 deepseeknova-permission = { workspace = true }
 deepseeknova-provider = { workspace = true }
 deepseeknova-skills = { workspace = true }
+deepseeknova-checkpoint = { workspace = true }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
 dirs = { workspace = true }
@@ -27,3 +28,4 @@ dirs = { workspace = true }
 [dev-dependencies]
 async-trait = { workspace = true }
 tempfile = { workspace = true }
+chrono = { workspace = true }

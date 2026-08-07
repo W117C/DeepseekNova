@@ -69,6 +69,30 @@ pub struct MemorySearchResult {
     pub snippet: String,
 }
 
+/// 召回分数分解（`memory replay` 展示用；与检索打分严格同源）。
+///
+/// 各分量为**对总分的加性贡献**，恒满足 `score == bm25 + cosine + lifecycle`：
+/// - `bm25`：FTS 分量。混合检索下为 `0.5 * 归一化 bm25`；纯 FTS 下为原始 bm25。
+/// - `cosine`：余弦分量（`0.5 * max(cosine, 0)`）；无嵌入时为 0。
+/// - `lifecycle`：生命周期惩罚（负数，`= -rank_weight * lifecycle_factor`）。
+#[derive(Debug, Clone)]
+pub struct MemoryScoreBreakdown {
+    pub entry: MemoryEntry,
+    pub snippet: String,
+    /// 最终融合分（与 `recall` / `search*` 的 score 完全一致）。
+    pub score: f64,
+    /// bm25 分量对总分的贡献。
+    pub bm25: f64,
+    /// 余弦分量对总分的贡献。
+    pub cosine: f64,
+    /// 生命周期惩罚对总分的贡献（负数）。
+    pub lifecycle: f64,
+    /// 本次检索使用的融合权重。
+    pub weight: f64,
+    /// true = 混合检索（bm25 + 余弦）；false = 纯 FTS + 生命周期。
+    pub hybrid: bool,
+}
+
 /// 持久化的 lifecycle 元数据行（伴随 memory_fts.id）。
 #[derive(Debug, Clone)]
 pub struct MetaRow {
@@ -288,6 +312,19 @@ impl MemoryStore {
     ) -> Result<Vec<MemorySearchResult>> {
         let db = self.db.lock().unwrap_or_else(|e| e.into_inner());
         run_memory_search(&db, query, Some(category), limit, DEFAULT_RANK_WEIGHT)
+    }
+
+    /// 纯 FTS 路径的分数分解（无嵌入后端时 `memory replay` 走此路）。
+    /// 结果集/排序/总分与 [`Self::search_with_weight`] 完全一致，仅额外暴露
+    /// bm25 与生命周期惩罚两个加性分量。
+    pub fn search_breakdown(
+        &self,
+        query: &str,
+        limit: usize,
+        rank_weight: f64,
+    ) -> Result<Vec<MemoryScoreBreakdown>> {
+        let db = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        search_breakdown_locked(&db, query, limit, rank_weight)
     }
 
     /// Delete a memory by ID.
@@ -736,6 +773,8 @@ impl MemoryStore {
     /// 计入一次，避免旧实现把带生命周期分数的 FTS 再归一造成双重计权。
     /// provider 为 None、查询嵌入失败或库中无同模型嵌入时，行为与
     /// [`Self::search_with_weight`] 一致（纯 FTS + 生命周期权重）。
+    ///
+    /// 实现委托 [`Self::search_hybrid_breakdown`]，保证总分与分解严格同源。
     pub fn search_hybrid_with_weight(
         &self,
         query: &str,
@@ -744,6 +783,28 @@ impl MemoryStore {
         model: &str,
         rank_weight: f64,
     ) -> Result<Vec<MemorySearchResult>> {
+        let hits = self.search_hybrid_breakdown(query, limit, provider, model, rank_weight)?;
+        Ok(hits
+            .into_iter()
+            .map(|h| MemorySearchResult {
+                entry: h.entry,
+                score: h.score,
+                snippet: h.snippet,
+            })
+            .collect())
+    }
+
+    /// 混合检索的分数分解（`memory replay` 用）。结果集/排序/总分与
+    /// [`Self::search_hybrid_with_weight`] 完全一致，仅额外暴露 bm25 / 余弦 /
+    /// 生命周期惩罚三个加性分量（见 [`MemoryScoreBreakdown`]）。
+    pub fn search_hybrid_breakdown(
+        &self,
+        query: &str,
+        limit: usize,
+        provider: Option<&dyn EmbeddingProvider>,
+        model: &str,
+        rank_weight: f64,
+    ) -> Result<Vec<MemoryScoreBreakdown>> {
         // 查询向量在拿锁前计算：嵌入是潜在慢 HTTP 调用，不能持 SQLite 锁
         // （否则其它记忆读写会被阻塞最多一个超时）。失败/缺 provider →
         // 纯 FTS + 生命周期权重（与 search_with_weight 一致）。
@@ -753,7 +814,7 @@ impl MemoryStore {
         };
         let db = self.db.lock().unwrap_or_else(|e| e.into_inner());
         let Some(qv) = qv else {
-            return run_memory_search(&db, query, None, limit, rank_weight);
+            return search_breakdown_locked(&db, query, limit, rank_weight);
         };
         let fts = run_memory_search(&db, query, None, limit.saturating_mul(2), 0.0)?;
 
@@ -807,9 +868,21 @@ impl MemoryStore {
         }
 
         // 4. 拉取条目（嵌入独有 id 也要有完整记录）。
-        let mut entries: HashMap<String, MemorySearchResult> = HashMap::new();
+        let mut entries: HashMap<String, MemoryScoreBreakdown> = HashMap::new();
         for r in fts {
-            entries.insert(r.entry.id.clone(), r);
+            entries.insert(
+                r.entry.id.clone(),
+                MemoryScoreBreakdown {
+                    entry: r.entry,
+                    snippet: r.snippet,
+                    score: 0.0,
+                    bm25: 0.0,
+                    cosine: 0.0,
+                    lifecycle: 0.0,
+                    weight: rank_weight,
+                    hybrid: true,
+                },
+            );
         }
         for chunk in ids.chunks(200) {
             let placeholders = vec!["?"; chunk.len()].join(",");
@@ -823,7 +896,19 @@ impl MemoryStore {
                 .query_map(rusqlite::params_from_iter(refs), memory_row)?
                 .flatten()
             {
-                entries.insert(r.entry.id.clone(), r);
+                entries.insert(
+                    r.entry.id.clone(),
+                    MemoryScoreBreakdown {
+                        entry: r.entry,
+                        snippet: r.snippet,
+                        score: 0.0,
+                        bm25: 0.0,
+                        cosine: 0.0,
+                        lifecycle: 0.0,
+                        weight: rank_weight,
+                        hybrid: true,
+                    },
+                );
             }
         }
 
@@ -856,8 +941,10 @@ impl MemoryStore {
             }
         }
 
-        // 5. 融合打分并排序。
-        let mut out: Vec<MemorySearchResult> = ids
+        // 5. 融合打分并排序。各分量均为对总分的加性贡献：
+        //    bm25 = 0.5 * 归一化 bm25；cosine = 0.5 * max(cos, 0)；
+        //    lifecycle = -rank_weight * lf；score = bm25 + cosine + lifecycle。
+        let mut out: Vec<MemoryScoreBreakdown> = ids
             .iter()
             .filter_map(|id| entries.get(id).cloned())
             .collect();
@@ -869,7 +956,10 @@ impl MemoryStore {
                 .map(|(_, c)| *c as f64)
                 .unwrap_or(0.0);
             let lf = lifecycle.get(&r.entry.id).copied().unwrap_or(0.0);
-            r.score = 0.5 * (s / max_s) + 0.5 * c.max(0.0) - rank_weight * lf;
+            r.bm25 = 0.5 * (s / max_s);
+            r.cosine = 0.5 * c.max(0.0);
+            r.lifecycle = -rank_weight * lf;
+            r.score = r.bm25 + r.cosine + r.lifecycle;
         }
         out.sort_by(|a, b| {
             b.score
@@ -932,6 +1022,65 @@ fn lifecycle_factor(importance: f64, stage: &str, last_recalled_at: Option<i64>,
         _ => 0.0,
     };
     (1.0 - importance) * stage_mult - recency
+}
+
+/// 纯 FTS 路径的分数分解实现（持锁调用；结果集/排序/总分与
+/// `run_memory_search(..., rank_weight)` 完全一致）。
+/// 分解不变量：`score = bm25 + cosine + lifecycle`（cosine 恒为 0）。
+fn search_breakdown_locked(
+    db: &rusqlite::Connection,
+    query: &str,
+    limit: usize,
+    rank_weight: f64,
+) -> Result<Vec<MemoryScoreBreakdown>> {
+    let fused = run_memory_search(db, query, None, limit, rank_weight)?;
+    // 生命周期因子表（与 run_memory_search 的 SQL 语义同款）。
+    let now = Utc::now().timestamp();
+    let mut lifecycle: HashMap<String, f64> = HashMap::new();
+    for chunk in fused.chunks(200) {
+        let placeholders = vec!["?"; chunk.len()].join(",");
+        let sql = format!(
+            "SELECT f.id, COALESCE(m.stage, 'candidate'), \
+             COALESCE(m.importance, f.importance), m.last_recalled_at \
+             FROM memory_fts f LEFT JOIN memory_meta m ON m.id = f.id \
+             WHERE f.id IN ({placeholders})"
+        );
+        let mut stmt = db.prepare(&sql)?;
+        let refs: Vec<&str> = chunk.iter().map(|r| r.entry.id.as_str()).collect();
+        let rows = stmt.query_map(rusqlite::params_from_iter(refs), |row| {
+            let id: String = row.get(0)?;
+            let stage: String = row.get(1)?;
+            let importance: f64 = row.get(2)?;
+            let last_recalled_at: Option<i64> = row.get(3)?;
+            Ok((id, stage, importance, last_recalled_at))
+        })?;
+        for row in rows {
+            let (id, stage, importance, last_recalled_at) = row?;
+            lifecycle.insert(
+                id,
+                lifecycle_factor(importance, &stage, last_recalled_at, now),
+            );
+        }
+    }
+    Ok(fused
+        .into_iter()
+        .map(|r| {
+            let lf = lifecycle.get(&r.entry.id).copied().unwrap_or(0.0);
+            let life = -rank_weight * lf;
+            // fused 总分 = 原始 bm25 - rank_weight*lf ⇒ 还原原始 bm25。
+            let bm25 = r.score - life;
+            MemoryScoreBreakdown {
+                entry: r.entry,
+                snippet: r.snippet,
+                score: r.score,
+                bm25,
+                cosine: 0.0,
+                lifecycle: life,
+                weight: rank_weight,
+                hybrid: false,
+            }
+        })
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -1759,5 +1908,96 @@ mod tests {
         assert_eq!(get("verified"), 1);
         assert_eq!(get("archived"), 1);
         assert_eq!(get("permanent"), 0);
+    }
+
+    #[test]
+    fn search_breakdown_matches_search_with_weight() {
+        // P1-11 replay：纯 FTS 分解的结果集/排序/总分必须与 recall 严格一致。
+        let store = MemoryStore::open_in_memory().unwrap();
+        store
+            .store(&make_entry(
+                "rust borrow checker",
+                MemoryCategory::Task,
+                vec![],
+                "t",
+                0.9,
+            ))
+            .unwrap();
+        store
+            .store(&make_entry(
+                "python web framework",
+                MemoryCategory::Task,
+                vec![],
+                "t",
+                0.5,
+            ))
+            .unwrap();
+        let w = 0.3;
+        let fused = store.search_with_weight("rust borrow", 10, w).unwrap();
+        let breakdown = store.search_breakdown("rust borrow", 10, w).unwrap();
+        assert_eq!(fused.len(), breakdown.len());
+        for (f, b) in fused.iter().zip(&breakdown) {
+            assert_eq!(f.entry.id, b.entry.id, "结果集必须一致");
+            assert!(
+                (f.score - b.score).abs() < 1e-9,
+                "总分必须与 recall 一致: {} vs {}",
+                f.score,
+                b.score
+            );
+            // 分解自洽：score = bm25 + cosine + lifecycle
+            assert!(
+                (b.score - (b.bm25 + b.cosine + b.lifecycle)).abs() < 1e-9,
+                "分解必须自洽: {b:?}"
+            );
+            assert_eq!(b.cosine, 0.0, "纯 FTS 无余弦分量");
+            assert!(!b.hybrid, "纯 FTS 路径 hybrid 标记必须为 false");
+            assert!(b.bm25 > 0.0, "命中条目 bm25 分量应大于 0");
+            assert!(b.lifecycle <= 0.0, "生命周期惩罚为负数");
+        }
+    }
+
+    #[test]
+    fn search_hybrid_breakdown_matches_search_hybrid_with_weight() {
+        // P1-11 replay：混合检索分解的结果集/排序/总分必须与 recall 严格一致，
+        // 且能区分 bm25 / 余弦 / 生命周期三个来源。
+        let store = MemoryStore::open_in_memory().unwrap();
+        let e = make_entry(
+            "ferris crab language",
+            MemoryCategory::Task,
+            vec![],
+            "t",
+            0.5,
+        );
+        store.store(&e).unwrap();
+        store
+            .upsert_embedding(&e.id, &[0.9, 0.1], "test-model")
+            .unwrap();
+        let w = 0.3;
+        let fused = store
+            .search_hybrid_with_weight("rust", 10, Some(&FakeEmbed), "test-model", w)
+            .unwrap();
+        let breakdown = store
+            .search_hybrid_breakdown("rust", 10, Some(&FakeEmbed), "test-model", w)
+            .unwrap();
+        assert_eq!(fused.len(), breakdown.len());
+        for (f, b) in fused.iter().zip(&breakdown) {
+            assert_eq!(f.entry.id, b.entry.id);
+            assert!(
+                (f.score - b.score).abs() < 1e-9,
+                "总分必须与 recall 一致: {} vs {}",
+                f.score,
+                b.score
+            );
+        }
+        // 语义独有命中：bm25=0（无 FTS 共词）、余弦>0、生命周期为负惩罚。
+        let b = &breakdown[0];
+        assert!(b.hybrid, "有 embedder 应走混合检索");
+        assert_eq!(b.bm25, 0.0, "无 FTS 共词时 bm25 归一化分应为 0");
+        assert!(b.cosine > 0.0, "语义独有命中应贡献余弦分: {b:?}");
+        assert!(b.lifecycle <= 0.0);
+        assert!(
+            (b.score - (b.bm25 + b.cosine + b.lifecycle)).abs() < 1e-9,
+            "混合分解必须自洽: {b:?}"
+        );
     }
 }

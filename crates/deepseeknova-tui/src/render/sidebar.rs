@@ -433,10 +433,12 @@ mod tests {
                 crate::app::state::SessionMeta {
                     id: "chat-20260806-112831".to_string(),
                     preview: "查看一下这个仓库".to_string(),
+                    title: None,
                 },
                 crate::app::state::SessionMeta {
                     id: "chat-20260805-180304".to_string(),
                     preview: String::new(),
+                    title: None,
                 },
             ],
             current_session: Some("chat-20260806-112831".to_string()),
@@ -468,18 +470,22 @@ mod tests {
             crate::app::state::SessionMeta {
                 id: "chat-20260807-160000".to_string(),
                 preview: String::new(),
+                title: None,
             },
             crate::app::state::SessionMeta {
                 id: "chat-20260807-130000".to_string(),
                 preview: String::new(),
+                title: None,
             },
             crate::app::state::SessionMeta {
                 id: "chat-20260806-220000".to_string(),
                 preview: String::new(),
+                title: None,
             },
             crate::app::state::SessionMeta {
                 id: "plain".to_string(),
                 preview: String::new(),
+                title: None,
             },
         ];
         let groups = group_by_night(&metas);

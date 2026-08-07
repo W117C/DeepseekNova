@@ -90,6 +90,8 @@ pub trait SessionController: Send + Sync {
     /// 已保存会话（含首句预览，供侧边栏区分会话），最新优先。
     async fn list_sessions(&self) -> anyhow::Result<Vec<SessionMeta>>;
     async fn current_session(&self) -> Option<String>;
+    /// 重命名会话 title（`/rename <title>` 作用于当前会话）。
+    async fn rename(&self, id: &str, title: &str) -> anyhow::Result<()>;
     async fn resume(&self, id: &str) -> anyhow::Result<Vec<ResumedLine>>;
     async fn record_turn(
         &self,
@@ -99,11 +101,14 @@ pub trait SessionController: Send + Sync {
     ) -> anyhow::Result<()>;
 }
 
-/// 侧边栏会话列表的一条：id + 首句预览（预览空时渲染回退 id）。
+/// 侧边栏会话列表的一条：id + 首句预览 + 用户命名 title。
+/// 渲染时 title 优先；无 title 回退 id（preview 空时）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionMeta {
     pub id: String,
     pub preview: String,
+    /// 用户命名（`/rename`）；`None` 表示未命名，回退显示 id。
+    pub title: Option<String>,
 }
 
 /// 恢复会话中的一条消息。
@@ -126,6 +131,31 @@ pub trait UndoController: Send + Sync {
     async fn list(&self) -> anyhow::Result<Vec<String>>;
     async fn rollback_one(&self) -> anyhow::Result<Option<String>>;
     async fn rollback_all(&self) -> anyhow::Result<usize>;
+}
+
+/// 会话级检查点控制器（`/checkpoint save|list|rollback`）。
+///
+/// 由 CLI 用 deepseeknova-checkpoint 的
+/// [`SessionCheckpointManager`](deepseeknova_checkpoint::SessionCheckpointManager)
+/// 实现。
+/// 快照内容为对话行（用户/助手/系统），回退时除返回对话给 TUI 恢复显示外，
+/// 实现方还应同步重写 agent 共享 history，使模型上下文与恢复后显示一致。
+#[async_trait]
+pub trait SessionCheckpointController: Send + Sync {
+    /// 保存一个会话检查点（快照当前对话 + 可选标签），返回检查点 id。
+    async fn save(
+        &self,
+        label: Option<String>,
+        conversation: Vec<deepseeknova_checkpoint::ConversationLine>,
+    ) -> anyhow::Result<String>;
+    /// 检查点列表（最新优先），每行含 id/时间/消息数（渲染展示用）。
+    async fn list(&self) -> anyhow::Result<Vec<String>>;
+    /// 按 id（或最新，`None`）回退：恢复文件快照并返回检查点内容；
+    /// 未知 id / 无检查点返回 `Ok(None)`。
+    async fn rollback(
+        &self,
+        id: Option<&str>,
+    ) -> anyhow::Result<Option<deepseeknova_checkpoint::SessionCheckpoint>>;
 }
 
 /// 工作区信任控制器（由 CLI 用 config 的 `TrustStore` 实现）。
@@ -674,6 +704,65 @@ impl AppState {
         self.turn = self.conversation.turn_count();
         // 恢复后会话 id 已切换，让事件循环尽快重拉侧边栏列表。
         self.sessions_loaded = false;
+    }
+
+    /// 导出当前会话为可持久化的会话行（`/checkpoint save` 用）。
+    ///
+    /// 保真口径与 `/resume` 一致：用户正文、助手正文与推理、系统事件；
+    /// 工具调用与验证段省略（恢复时按用户/助手/系统重建回合）。空回合
+    /// （无已落段）一并省略。导出结果经
+    /// [`SessionCheckpointController::save`] 落盘，回退时用
+    /// [`Self::restore_conversation`] 重建。
+    pub fn export_conversation_lines(&self) -> Vec<deepseeknova_checkpoint::ConversationLine> {
+        use deepseeknova_checkpoint::{ConversationLine, ConversationRole};
+        let mut lines = Vec::new();
+        let mut seen_turns = std::collections::HashSet::new();
+        for (seg_id, seg) in self.conversation.iter_segments() {
+            let turn_id = seg_id.0;
+            if seen_turns.insert(turn_id) {
+                if let Some(text) = self.conversation.user_text_of(turn_id) {
+                    lines.push(ConversationLine::new(
+                        ConversationRole::User,
+                        text.to_string(),
+                    ));
+                }
+            }
+            match seg {
+                crate::model::conversation::Segment::Text { text }
+                | crate::model::conversation::Segment::Reasoning { text } => {
+                    lines.push(ConversationLine::new(
+                        ConversationRole::Assistant,
+                        text.clone(),
+                    ));
+                }
+                crate::model::conversation::Segment::System { text, .. } => {
+                    lines.push(ConversationLine::new(
+                        ConversationRole::System,
+                        text.clone(),
+                    ));
+                }
+                _ => {}
+            }
+        }
+        lines
+    }
+
+    /// 把检查点对话行还原为 [`ResumedLine`]（`/checkpoint rollback` 恢复显示用）。
+    pub fn resumed_lines_from_checkpoint(
+        ck: &deepseeknova_checkpoint::SessionCheckpoint,
+    ) -> Vec<ResumedLine> {
+        use deepseeknova_checkpoint::ConversationRole;
+        ck.conversation
+            .iter()
+            .map(|l| ResumedLine {
+                role: match l.role {
+                    ConversationRole::User => ResumedRole::User,
+                    ConversationRole::Assistant => ResumedRole::Assistant,
+                    ConversationRole::System => ResumedRole::System,
+                },
+                text: l.text.clone(),
+            })
+            .collect()
     }
 
     /// 编辑器按键（Input 焦点）：保留旧版全部编辑语义。
@@ -1253,6 +1342,83 @@ mod tests {
         assert_eq!(texts, vec!["第一个回答", "sys", "第二个回答"]);
         assert_eq!(app.turn, 2, "状态行回合数与恢复内容一致");
         assert!(!app.sessions_loaded, "恢复后请求重拉会话列表");
+    }
+
+    #[tokio::test]
+    async fn export_conversation_lines_keeps_user_assistant_system() {
+        let mut app = AppState::default();
+        app.conversation.begin_turn("问题".into());
+        app.apply_run_event(RunEvent::ReasoningDelta {
+            text: "思考".into(),
+            signature: None,
+        });
+        app.apply_run_event(RunEvent::TextDelta("回答".into()));
+        app.apply_run_event(RunEvent::ToolCallStart {
+            id: "t1".into(),
+            name: "grep".into(),
+        });
+        app.apply_run_event(RunEvent::Done(done_output("")));
+        app.conversation.push_system(
+            crate::model::conversation::SystemKind::Info,
+            "系统事件".into(),
+        );
+
+        use deepseeknova_checkpoint::ConversationRole;
+        let lines = app.export_conversation_lines();
+        let roles: Vec<ConversationRole> = lines.iter().map(|l| l.role).collect();
+        assert_eq!(
+            roles,
+            vec![
+                ConversationRole::User,
+                ConversationRole::Assistant,
+                ConversationRole::Assistant,
+                ConversationRole::System
+            ],
+            "推理并入助手文本、工具调用省略、系统事件保留: {roles:?}"
+        );
+        assert_eq!(lines[0].text, "问题");
+        assert!(
+            lines[1].text.contains("思考"),
+            "推理保留: {}",
+            lines[1].text
+        );
+        assert_eq!(lines[2].text, "回答");
+        assert_eq!(lines[3].text, "系统事件");
+
+        // 导出 → 检查点落盘 → 回退 → restore 往返：回合数/正文一致。
+        let dir = tempfile::tempdir().unwrap();
+        let mut mgr = deepseeknova_checkpoint::SessionCheckpointManager::new()
+            .with_persistence(dir.path().join("ck.jsonl"));
+        let id = mgr.save(lines, Some("阶段一".into())).await.unwrap();
+        assert!(id.starts_with("ck-"));
+        let popped = mgr
+            .rollback(Some(&id))
+            .await
+            .unwrap()
+            .expect("应弹出检查点");
+
+        let mut app2 = AppState::default();
+        app2.restore_conversation(AppState::resumed_lines_from_checkpoint(&popped));
+        assert_eq!(app2.conversation.turn_count(), 1);
+        assert_eq!(app2.conversation.user_text_of(1), Some("问题"));
+        let texts: Vec<String> = app2
+            .conversation
+            .iter_segments()
+            .map(|(_, s)| match s {
+                crate::model::conversation::Segment::Text { text } => text.clone(),
+                crate::model::conversation::Segment::System { text, .. } => format!("[{text}]"),
+                _ => String::new(),
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            vec![
+                "思考".to_string(),
+                "回答".to_string(),
+                "[系统事件]".to_string()
+            ],
+            "助手正文 + 系统事件均保留"
+        );
     }
 
     // 迁移占位：原 lib.rs 的输入/滚动测试在 input/editor 模块，见 Task 4。

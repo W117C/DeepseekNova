@@ -119,6 +119,8 @@ pub struct TuiCaps {
     pub mcp_probe: Option<Arc<dyn crate::app::state::McpProbe>>,
     /// 撤销控制器（`/undo`）。
     pub undo: Option<Arc<dyn crate::app::state::UndoController>>,
+    /// 会话级检查点控制器（`/checkpoint save|list|rollback`）。
+    pub checkpoint: Option<Arc<dyn crate::app::state::SessionCheckpointController>>,
     /// 主模型上下文窗口上限（tokens），由 CLI 从 config 注入；
     /// `None` 时状态行与 `/cost` 不显示占用率百分比。
     pub context_window: Option<u32>,

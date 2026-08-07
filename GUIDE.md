@@ -503,6 +503,30 @@ stage / recency，权重 `rank_lifecycle_weight`，=0 时与纯 bm25 等价）�
 旧记忆用 `deepseeknova-cli memory embed-backfill` 显式回填（跳过 archived）；
 `memory stats` 输出 `embedded=N/total=M` 显示覆盖率。
 
+**记忆用户面（CLI）**：除 agent 的 `remember`/`recall`/`forget` 工具外，可用
+`deepseeknova-cli memory` 直接浏览与管理记忆库：
+
+```text
+memory list    [--category task|skill|user_profile|all] [--stage candidate|verified|
+                permanent|archived] [--tag <tag>] [--search <kw>] [--limit N] [--offset N]
+                分页列出记忆（id/类目/stage/importance/recall_count/最近召回时间 +
+                内容摘要）；`--stage` 按生命周期阶段、`--tag` 按标签精确匹配、
+                `--search` 按内容子串过滤。
+memory edit    <id> <content...>   改写内容（保留 id/tags/source 与 lifecycle 元数据；
+                                    启用嵌入时强制重算向量，旧向量不残留）。
+memory delete  <id> [--yes]         删除记忆，**二次确认**（不可逆）；--yes 跳过确认。
+memory replay  <query> [--top-k N]  召回回放：执行一次与 recall 完全同源的混合检索，
+                                    展示每条命中的 id/内容与分数分解
+                                    （score = bm25 + cosine + lifecycle，mode=hybrid|fts），
+                                    让你看到"为什么召回这条"；回放是只读诊断，
+                                    不记召回命中率、不晋级 lifecycle。
+memory search  <query>              按相关度检索（同 recall 路径，会记召回/晋级）。
+memory forget  <id>                 按 id 直接删除（无确认，脚本用）。
+memory stats / embed-backfill / cleanup   统计 / 嵌入回填 / 衰减清理。
+```
+
+编辑/删除按内容摘要即可定位；`memory list --search` 与 `--tag` 可组合缩小范围。
+
 ### Task Management
 
 | Tool | Description | Read-only |

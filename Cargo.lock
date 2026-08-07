@@ -991,7 +991,9 @@ version = "0.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "chrono",
  "crossterm",
+ "deepseeknova-checkpoint",
  "deepseeknova-core",
  "deepseeknova-permission",
  "deepseeknova-provider",

@@ -7,13 +7,16 @@
 //! - `stats`：可观测性快照，驱动 P2 决策。
 
 use crate::memory::embedding::EmbeddingProvider;
+use crate::memory::lifecycle::{LifecycleMeta, MemoryLifecycleStage};
 use crate::memory::redact::redact;
 use crate::memory::skill::{TaskObservation, TaskOutcome};
 use crate::memory::store::{
-    make_entry, MemoryCategory, MemoryEntry, MemorySearchResult, MemoryStore, DEFAULT_RANK_WEIGHT,
+    make_entry, MemoryCategory, MemoryEntry, MemoryScoreBreakdown, MemorySearchResult, MemoryStore,
+    DEFAULT_RANK_WEIGHT,
 };
 use anyhow::Result;
 use chrono::Utc;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -105,7 +108,7 @@ impl MemoryEngine {
     /// 尽力而为：为单条记忆生成并持久化嵌入。同模型已有向量则跳过；
     /// provider 缺失/失败只 warn，绝不回滚写入或打断调用方（fail-open）。
     fn embed_entry(&self, id: &str, content: &str) {
-        let (Some(p), Some(model)) = (&self.embedder, &self.embed_model) else {
+        let (Some(_), Some(model)) = (&self.embedder, &self.embed_model) else {
             return;
         };
         if let Ok(Some((_, existing))) = self.store.get_embedding(id) {
@@ -113,6 +116,15 @@ impl MemoryEngine {
                 return;
             }
         }
+        self.reembed_entry(id, content);
+    }
+
+    /// 无条件重算嵌入（区别于 [`Self::embed_entry`]：同模型已有向量也会刷新）。
+    /// 供 `edit` 使用——内容变更后旧向量已失配，必须强制覆盖。
+    fn reembed_entry(&self, id: &str, content: &str) {
+        let (Some(p), Some(model)) = (&self.embedder, &self.embed_model) else {
+            return;
+        };
         match p.embed(content) {
             Ok(v) => {
                 if let Err(e) = self.store.upsert_embedding(id, &v, model) {
@@ -171,6 +183,26 @@ impl MemoryEngine {
         Ok(results)
     }
 
+    /// 召回回放（P1-11：CLI `memory replay` 后端）：执行与 [`Self::recall_with_weight`]
+    /// **完全同源**的检索路径，但额外返回每条命中的分数分解
+    /// （bm25 / 余弦 / 生命周期惩罚，见 [`MemoryScoreBreakdown`]）。
+    /// 与 recall 不同：**不**记召回命中率、**不**执行 record_recall 晋级——
+    /// 回放是只读诊断，"观察"不应改变生命周期状态。
+    pub fn replay(
+        &self,
+        query: &str,
+        top_k: usize,
+        rank_weight: f64,
+    ) -> Result<Vec<MemoryScoreBreakdown>> {
+        match (&self.embedder, &self.embed_model) {
+            (Some(p), Some(m)) => {
+                self.store
+                    .search_hybrid_breakdown(query, top_k, Some(p.as_ref()), m, rank_weight)
+            }
+            _ => self.store.search_breakdown(query, top_k, rank_weight),
+        }
+    }
+
     /// 显式记住（id=key 确定性 upsert）。返回 key 是否已存在。
     pub fn remember(&self, key: &str, value: &str, tags: Vec<String>) -> Result<bool> {
         let existed = self.store.meta(key)?.is_some();
@@ -184,6 +216,43 @@ impl MemoryEngine {
         self.store.store(&entry)?;
         self.embed_entry(&entry.id, &entry.content);
         Ok(existed)
+    }
+
+    /// 编辑一条记忆的内容（P1-11：CLI `memory edit` 后端）。
+    /// 保留 id/tags/source/category/importance 与 lifecycle 元数据
+    /// （stage/recall_count/last_recalled_at 不被重置）；内容按
+    /// `redact_secrets` 脱敏后写回，并**强制重算**嵌入（若启用）。
+    /// 返回 id 是否存在。
+    pub fn edit(&self, id: &str, new_content: &str) -> Result<bool> {
+        let mut found: Option<MemoryEntry> = None;
+        for cat in [
+            MemoryCategory::Task,
+            MemoryCategory::Skill,
+            MemoryCategory::UserProfile,
+        ] {
+            for e in self.store.list_category(cat)? {
+                if e.id == id {
+                    found = Some(e);
+                    break;
+                }
+            }
+            if found.is_some() {
+                break;
+            }
+        }
+        let Some(mut entry) = found else {
+            return Ok(false);
+        };
+        entry.content = if self.redact_secrets {
+            redact(new_content)
+        } else {
+            new_content.to_string()
+        };
+        // store() 为 id 幂等 upsert：fts/cjk/meta 三表原子更新，
+        // meta 行冲突时仅刷新 importance（stage/recall/embedding 保留）。
+        self.store.store(&entry)?;
+        self.reembed_entry(&entry.id, &entry.content);
+        Ok(true)
     }
 
     /// 反思闭环的教训落库（薄封装：统一走 [`Self::record_knowledge`]）。
@@ -406,6 +475,30 @@ impl MemoryEngine {
     /// 列出某类记忆（CLI）。
     pub fn list(&self, category: MemoryCategory) -> Result<Vec<MemoryEntry>> {
         self.store.list_category(category)
+    }
+
+    /// 列出某类记忆并附 lifecycle 元数据（P1-11：CLI `memory list` 展示
+    /// stage / importance / recency 用）。meta 缺失的条目以候选身份兜底。
+    pub fn list_with_lifecycle(
+        &self,
+        category: MemoryCategory,
+    ) -> Result<Vec<(MemoryEntry, LifecycleMeta)>> {
+        let entries = self.store.list_category(category)?;
+        let lifecycle: HashMap<String, LifecycleMeta> =
+            self.store.all_lifecycle()?.into_iter().collect();
+        Ok(entries
+            .into_iter()
+            .map(|e| {
+                let meta = lifecycle.get(&e.id).cloned().unwrap_or(LifecycleMeta {
+                    stage: MemoryLifecycleStage::Candidate,
+                    recall_count: 0,
+                    last_recalled_at: None,
+                    created_at: e.created_at,
+                    importance: e.importance,
+                });
+                (e, meta)
+            })
+            .collect())
     }
 }
 
@@ -970,5 +1063,118 @@ mod tests {
         assert_eq!(eng.stats().unwrap().embedded, 2);
         // 二次回填应为无操作。
         assert_eq!(eng.backfill_embeddings().unwrap(), (0, 0));
+    }
+
+    // ── P1-11 用户面：list/edit/replay ──────────────────────────────────
+
+    #[test]
+    fn list_with_lifecycle_includes_stage_and_recency() {
+        let eng = MemoryEngine::open_in_memory(true).unwrap();
+        eng.remember("k", "note", vec![]).unwrap();
+        eng.recall("note", 5).unwrap(); // 晋级 verified + 记录召回时间
+        let items = eng.list_with_lifecycle(MemoryCategory::Task).unwrap();
+        assert_eq!(items.len(), 1);
+        let (e, meta) = &items[0];
+        assert_eq!(e.id, "k");
+        assert_eq!(meta.stage.as_str(), "verified");
+        assert_eq!(meta.recall_count, 1);
+        assert!(
+            meta.last_recalled_at.is_some(),
+            "recall 后必须记录最近召回时间"
+        );
+        // 其它类目为空。
+        assert!(eng
+            .list_with_lifecycle(MemoryCategory::Skill)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn edit_updates_content_and_reembeds() {
+        let eng = MemoryEngine::open_in_memory_with_embedder(
+            true,
+            Some(Arc::new(FakeEmbed)),
+            Some("test-model".to_string()),
+        )
+        .unwrap();
+        eng.remember("k", "ferris crab language", vec![]).unwrap();
+        // 编辑前：嵌入为 ferris 对应的 [0.9, 0.1]。
+        assert!(eng.edit("k", "rust borrow checker").unwrap());
+        // 内容已更新。
+        let hits = eng.recall("rust", 5).unwrap();
+        assert!(
+            hits.iter()
+                .any(|h| h.entry.id == "k" && h.entry.content.contains("rust borrow")),
+            "edit 后新内容必须可召回"
+        );
+        // 嵌入已强制重算：新内容（rust → [1.0, 0.0]）覆盖旧向量。
+        let (vec, model) = eng.store.get_embedding("k").unwrap().expect("嵌入存在");
+        assert_eq!(model, "test-model");
+        assert!(vec[0] > vec[1], "重算后向量应反映新内容而非旧内容: {vec:?}");
+    }
+
+    #[test]
+    fn edit_preserves_lifecycle_meta() {
+        let eng = MemoryEngine::open_in_memory(true).unwrap();
+        eng.remember("k", "original content", vec![]).unwrap();
+        eng.recall("original", 5).unwrap(); // verified
+        assert!(eng.edit("k", "new content here").unwrap());
+        let items = eng.list_with_lifecycle(MemoryCategory::Task).unwrap();
+        let (e, meta) = items.iter().find(|(e, _)| e.id == "k").unwrap();
+        assert_eq!(e.content, "new content here");
+        assert_eq!(
+            meta.stage.as_str(),
+            "verified",
+            "edit 不得重置 lifecycle stage"
+        );
+        assert_eq!(meta.recall_count, 1, "edit 不得清零 recall_count");
+        // 缺失 id → false。
+        assert!(!eng.edit("nope", "x").unwrap());
+    }
+
+    #[test]
+    fn replay_hybrid_breaks_down_scores() {
+        let eng = MemoryEngine::open_in_memory_with_embedder(
+            true,
+            Some(Arc::new(FakeEmbed)),
+            Some("test-model".to_string()),
+        )
+        .unwrap();
+        eng.remember("k", "ferris crab language", vec![]).unwrap();
+        let hits = eng.replay("rust", 5, 0.3).unwrap();
+        assert_eq!(hits.len(), 1, "语义独有命中必须被召回");
+        let h = &hits[0];
+        assert!(h.hybrid, "有 embedder 应走混合检索");
+        assert_eq!(h.entry.id, "k");
+        assert_eq!(h.bm25, 0.0, "无 FTS 共词时 bm25 分量应为 0");
+        assert!(h.cosine > 0.0, "语义独有命中应贡献余弦分: {h:?}");
+        assert!(h.lifecycle <= 0.0, "生命周期惩罚为负数");
+        assert!(
+            (h.score - (h.bm25 + h.cosine + h.lifecycle)).abs() < 1e-9,
+            "分解必须自洽: {h:?}"
+        );
+    }
+
+    #[test]
+    fn replay_fts_path_has_zero_cosine_and_no_state_mutation() {
+        let eng = MemoryEngine::open_in_memory(true).unwrap();
+        eng.remember("k", "rust borrow checker", vec![]).unwrap();
+        let hits = eng.replay("rust", 5, 0.3).unwrap();
+        assert_eq!(hits.len(), 1);
+        let h = &hits[0];
+        assert!(!h.hybrid, "无 embedder 应走纯 FTS");
+        assert_eq!(h.cosine, 0.0);
+        assert!(h.bm25 > 0.0);
+        assert!(
+            (h.score - (h.bm25 + h.lifecycle)).abs() < 1e-9,
+            "FTS 分解必须自洽: {h:?}"
+        );
+        // 回放是只读诊断：不得记召回、不得晋级 lifecycle。
+        let (e, meta) = &eng.list_with_lifecycle(MemoryCategory::Task).unwrap()[0];
+        assert_eq!(meta.stage.as_str(), "candidate", "replay 不得晋级 stage");
+        assert_eq!(meta.recall_count, 0, "replay 不得记 recall_count");
+        assert_eq!(e.content, "rust borrow checker");
+        let (calls, nonempty) = eng.store.recall_counters().unwrap();
+        assert_eq!((calls, nonempty), (0, 0), "replay 不得污染召回命中率统计");
     }
 }

@@ -3,7 +3,9 @@ use deepseeknova_core::runner::{RunEvent, RunInput, Runner};
 use deepseeknova_core::{Message, Role};
 use deepseeknova_provider::factory::ReasoningEffort;
 use deepseeknova_store::{SessionStore, StoredOutput};
+use std::collections::HashMap;
 use std::io::{BufRead, IsTerminal, Write};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio_stream::StreamExt;
 
@@ -23,6 +25,75 @@ pub struct ChatPersistence {
     pub turn: u64,
     /// Shared conversation history the agent appends to and `/resume` rewrites.
     pub history: Arc<tokio::sync::Mutex<Vec<Message>>>,
+    /// 会话标题存储（`/rename` 命名，落盘到 sessions 根目录 titles.json）。
+    pub titles: SessionTitles,
+}
+
+/// 会话标题的磁盘存储：sessions 根目录下的 `titles.json`（id → title）。
+///
+/// 与 JSONL 会话文件分离，避免触碰 `StoredTurn` 格式；`list_sessions` 只
+/// 匹配 `.jsonl` 后缀，`titles.json` 不会混入会话列表。
+#[derive(Debug, Default)]
+pub struct SessionTitles {
+    path: PathBuf,
+    titles: HashMap<String, String>,
+}
+
+impl SessionTitles {
+    /// 从磁盘加载（文件不存在 → 空标题表）。
+    pub fn load(path: PathBuf) -> Self {
+        let titles = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        Self { path, titles }
+    }
+
+    /// 查询会话标题（未命名返回 `None`）。
+    pub fn get(&self, id: &str) -> Option<&str> {
+        self.titles.get(id).map(String::as_str)
+    }
+
+    /// 设置会话标题并落盘（改名）。
+    pub fn set(&mut self, id: &str, title: &str) -> anyhow::Result<()> {
+        self.titles.insert(id.to_string(), title.to_string());
+        self.save()
+    }
+
+    fn save(&self) -> anyhow::Result<()> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        std::fs::write(&self.path, serde_json::to_string_pretty(&self.titles)?)?;
+        Ok(())
+    }
+}
+
+impl ChatPersistence {
+    /// 会话标题（未命名返回 `None`）。
+    pub fn session_title(&self, id: &str) -> Option<&str> {
+        self.titles.get(id)
+    }
+
+    /// 重命名会话（`/rename <title>` 作用于当前会话）。
+    pub fn rename(&mut self, id: &str, title: &str) -> anyhow::Result<()> {
+        self.titles.set(id, title)
+    }
+
+    /// 会话列表（最新优先），每条为 `(id, 首句预览, title)`。
+    pub fn list_sessions_with_titles(
+        &self,
+    ) -> anyhow::Result<Vec<(String, String, Option<String>)>> {
+        Ok(self
+            .store
+            .list_sessions_with_preview()?
+            .into_iter()
+            .map(|(id, preview)| {
+                let title = self.titles.get(&id).map(str::to_string);
+                (id, preview, title)
+            })
+            .collect())
+    }
 }
 
 /// Display mode for agent output.
@@ -666,26 +737,45 @@ async fn handle_slash_command(
             println!("Use /mcp status to check connected servers (coming soon).");
         }
 
-        // ── Sessions (list / resume) ──────────────────────────
+        // ── Sessions (list / resume / rename) ─────────────────────────
         "sessions" => match persist.as_ref() {
-            Some(p) => match p.store.list_sessions() {
+            Some(p) => match p.list_sessions_with_titles() {
                 Ok(ids) if !ids.is_empty() => {
-                    let mut ids = ids;
-                    ids.sort();
-                    ids.reverse(); // newest first (ids are lexicographically timed)
                     println!("Saved sessions (newest first):");
-                    for id in &ids {
+                    for (id, preview, title) in &ids {
                         let marker = if *id == p.session_id {
                             "  (current)"
                         } else {
                             ""
                         };
-                        println!("  {id}{marker}");
+                        // title 优先；无命名回退 id（预览空时）。
+                        let label = match (title, preview.is_empty()) {
+                            (Some(t), _) => format!("{t}  ({id})"),
+                            (None, false) => format!("{id} — {preview}"),
+                            (None, true) => id.clone(),
+                        };
+                        println!("  {label}{marker}");
                     }
                 }
                 Ok(_) => println!("(no saved sessions yet)"),
                 Err(e) => eprintln!("failed to list sessions: {e}"),
             },
+            None => println!("session persistence is disabled"),
+        },
+
+        "rename" => match persist {
+            Some(p) => {
+                let title = args.trim();
+                if title.is_empty() {
+                    eprintln!("Usage: /rename <title>  (renames the current session)");
+                } else {
+                    let current_id = p.session_id.clone();
+                    match p.rename(&current_id, title) {
+                        Ok(()) => println!("session renamed to '{title}'"),
+                        Err(e) => eprintln!("failed to rename session: {e}"),
+                    }
+                }
+            }
             None => println!("session persistence is disabled"),
         },
 
@@ -708,8 +798,13 @@ async fn handle_slash_command(
                             drop(hist);
                             p.session_id = target.to_string();
                             p.turn = turns.len() as u64;
+                            // 恢复时显示命名（有则显，无则略）。
+                            let title = p
+                                .session_title(target)
+                                .map(|t| format!(" — '{t}'"))
+                                .unwrap_or_default();
                             println!(
-                                "resumed '{target}' — {restored} messages across {} turns",
+                                "resumed '{target}'{title} — {restored} messages across {} turns",
                                 turns.len()
                             );
                         }
@@ -740,6 +835,7 @@ async fn handle_slash_command(
             println!("  /mcp              — MCP server status");
             println!("  /sessions         — list saved sessions");
             println!("  /resume <id>      — restore a saved session's history");
+            println!("  /rename <title>   — name the current session");
             println!("  /undo             — revert changes (coming soon)");
             println!("  /help             — show this help");
             println!();
@@ -1130,5 +1226,57 @@ mod tests {
         assert_eq!(effort_label(ReasoningEffort::Disabled), "disabled");
         assert_eq!(effort_label(ReasoningEffort::High), "high");
         assert_eq!(effort_label(ReasoningEffort::Max), "max");
+    }
+
+    // ── 会话命名（SessionTitles / rename）────────────────────────────
+
+    #[test]
+    fn session_titles_set_get_and_persist_across_instances() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("titles.json");
+        let mut titles = SessionTitles::load(path.clone());
+        assert_eq!(titles.get("chat-a"), None, "未命名返回 None");
+        titles.set("chat-a", "项目重构").unwrap();
+        assert_eq!(titles.get("chat-a"), Some("项目重构"));
+        // 新实例（跨进程）从磁盘读取标题。
+        let reloaded = SessionTitles::load(path.clone());
+        assert_eq!(reloaded.get("chat-a"), Some("项目重构"));
+    }
+
+    #[test]
+    fn chat_persistence_rename_and_list_titles() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf()).unwrap();
+        let input = RunInput {
+            prompt: "hello".into(),
+            images: vec![],
+            model_override: None,
+        };
+        let turn = SessionStore::build_turn(&input, 1, vec![], None);
+        store.append("chat-a", &turn).unwrap();
+        store.append("chat-b", &turn).unwrap();
+
+        let mut p = ChatPersistence {
+            store,
+            session_id: "chat-a".into(),
+            turn: 1,
+            history: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            titles: SessionTitles::load(dir.path().join("titles.json")),
+        };
+        assert_eq!(p.session_title("chat-a"), None);
+        p.rename("chat-a", "核心重构").unwrap();
+        assert_eq!(p.session_title("chat-a"), Some("核心重构"));
+
+        let metas = p.list_sessions_with_titles().unwrap();
+        let a = metas
+            .iter()
+            .find(|(id, _, _)| id == "chat-a")
+            .expect("chat-a 在列表中");
+        assert_eq!(a.2.as_deref(), Some("核心重构"), "改名生效并出现在列表");
+        let b = metas
+            .iter()
+            .find(|(id, _, _)| id == "chat-b")
+            .expect("chat-b 在列表中");
+        assert_eq!(b.2, None, "未命名会话 title 为 None");
     }
 }

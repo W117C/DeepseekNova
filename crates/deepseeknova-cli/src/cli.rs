@@ -174,19 +174,56 @@ pub enum Commands {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
 pub enum MemoryAction {
-    /// 列出某类记忆（task/skill/user_profile）。
+    /// 列出记忆（分页；--stage/--tag/--search 过滤，--category 限定类目）。
     List {
+        /// 类目：task|skill|user_profile|all（默认 task）。
         #[arg(long, default_value = "task")]
         category: String,
+        /// 每页条数（默认 20）。
         #[arg(long, default_value_t = 20)]
         limit: usize,
+        /// 跳过前 N 条（分页）。
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+        /// 按生命周期阶段过滤：candidate|verified|permanent|archived。
+        #[arg(long)]
+        stage: Option<String>,
+        /// 按标签过滤（任一标签精确匹配即保留）。
+        #[arg(long)]
+        tag: Option<String>,
+        /// 按关键字过滤（内容子串匹配，大小写敏感）。
+        #[arg(long)]
+        search: Option<String>,
     },
     /// 按相关度检索记忆。
     Search { query: Vec<String> },
-    /// 按 id/key 删除一条记忆。
+    /// 编辑一条记忆的内容（保留 lifecycle；启用嵌入时强制重算向量）。
+    Edit {
+        /// 记忆 id。
+        id: String,
+        /// 新内容（多个词以空格连接）。
+        content: Vec<String>,
+    },
+    /// 删除一条记忆（二次确认，不可逆；--yes 跳过确认）。
+    Delete {
+        /// 记忆 id。
+        id: String,
+        /// 跳过二次确认直接删除。
+        #[arg(long)]
+        yes: bool,
+    },
+    /// 按 id/key 删除一条记忆（无二次确认）。
     Forget { id: String },
+    /// 召回回放：执行一次与 recall 同源的混合检索，展示每条命中的
+    /// id/内容与分数分解（bm25 / 余弦 / 生命周期惩罚）。
+    Replay {
+        query: Vec<String>,
+        /// 最大命中条数（默认 10）。
+        #[arg(long)]
+        top_k: Option<usize>,
+    },
     /// 打印统计（召回命中率、reinforce 比例、stage 分布）——P2 决策依据。
     Stats,
     /// 为尚无向量的旧记忆生成嵌入（embedder=none/缺 key 时无操作）。
@@ -339,5 +376,137 @@ mod tests {
             "governance>=abc"
         ])
         .is_err());
+    }
+
+    // ── memory 用户面（P1-11）解析 ─────────────────────────────────────
+
+    #[test]
+    fn memory_list_parses_filters() {
+        let parsed = Cli::try_parse_from([
+            "deepseeknova",
+            "memory",
+            "list",
+            "--category",
+            "all",
+            "--stage",
+            "verified",
+            "--tag",
+            "rust",
+            "--search",
+            "borrow",
+            "--limit",
+            "5",
+            "--offset",
+            "10",
+        ])
+        .unwrap();
+        match parsed.command {
+            Some(Commands::Memory { action }) => match action {
+                MemoryAction::List {
+                    category,
+                    limit,
+                    offset,
+                    stage,
+                    tag,
+                    search,
+                } => {
+                    assert_eq!(category, "all");
+                    assert_eq!(limit, 5);
+                    assert_eq!(offset, 10);
+                    assert_eq!(stage.as_deref(), Some("verified"));
+                    assert_eq!(tag.as_deref(), Some("rust"));
+                    assert_eq!(search.as_deref(), Some("borrow"));
+                }
+                other => panic!("expected List, got {other:?}"),
+            },
+            _ => panic!("expected Memory command"),
+        }
+        // 无过滤参数时全部为默认。
+        let bare = Cli::try_parse_from(["deepseeknova", "memory", "list"]).unwrap();
+        match bare.command {
+            Some(Commands::Memory {
+                action:
+                    MemoryAction::List {
+                        category,
+                        limit,
+                        offset,
+                        stage,
+                        tag,
+                        search,
+                    },
+            }) => {
+                assert_eq!(category, "task");
+                assert_eq!(limit, 20);
+                assert_eq!(offset, 0);
+                assert!(stage.is_none() && tag.is_none() && search.is_none());
+            }
+            _ => panic!("expected List defaults"),
+        }
+    }
+
+    #[test]
+    fn memory_edit_parses_id_and_content() {
+        let parsed =
+            Cli::try_parse_from(["deepseeknova", "memory", "edit", "k", "new", "content"]).unwrap();
+        match parsed.command {
+            Some(Commands::Memory {
+                action: MemoryAction::Edit { id, content },
+            }) => {
+                assert_eq!(id, "k");
+                assert_eq!(content, vec!["new", "content"]);
+            }
+            _ => panic!("expected Edit"),
+        }
+        // 缺 id 解析失败。
+        assert!(Cli::try_parse_from(["deepseeknova", "memory", "edit"]).is_err());
+    }
+
+    #[test]
+    fn memory_delete_parses_id_and_yes() {
+        let parsed =
+            Cli::try_parse_from(["deepseeknova", "memory", "delete", "k", "--yes"]).unwrap();
+        match parsed.command {
+            Some(Commands::Memory {
+                action: MemoryAction::Delete { id, yes },
+            }) => {
+                assert_eq!(id, "k");
+                assert!(yes, "--yes 必须置位");
+            }
+            _ => panic!("expected Delete"),
+        }
+        let no_flag = Cli::try_parse_from(["deepseeknova", "memory", "delete", "k"]).unwrap();
+        match no_flag.command {
+            Some(Commands::Memory {
+                action: MemoryAction::Delete { yes, .. },
+            }) => {
+                assert!(!yes, "缺 --yes 默认需二次确认");
+            }
+            _ => panic!("expected Delete"),
+        }
+    }
+
+    #[test]
+    fn memory_replay_parses_query_and_top_k() {
+        let parsed =
+            Cli::try_parse_from(["deepseeknova", "memory", "replay", "rust", "--top-k", "5"])
+                .unwrap();
+        match parsed.command {
+            Some(Commands::Memory {
+                action: MemoryAction::Replay { query, top_k },
+            }) => {
+                assert_eq!(query, vec!["rust"]);
+                assert_eq!(top_k, Some(5));
+            }
+            _ => panic!("expected Replay"),
+        }
+        let bare = Cli::try_parse_from(["deepseeknova", "memory", "replay", "rust"]).unwrap();
+        match bare.command {
+            Some(Commands::Memory {
+                action: MemoryAction::Replay { top_k, .. },
+            }) => {
+                assert!(top_k.is_none(), "缺 --top-k 时由调用方取默认 10");
+            }
+            _ => panic!("expected Replay"),
+        }
     }
 }

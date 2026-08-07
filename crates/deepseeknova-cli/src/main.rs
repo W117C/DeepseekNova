@@ -3,6 +3,7 @@ mod cli;
 mod eval;
 mod init;
 mod mcp_probe;
+mod memory_cmd;
 mod setup;
 mod tui_undo;
 
@@ -539,6 +540,15 @@ async fn main() -> anyhow::Result<()> {
                 });
                 let history: Arc<tokio::sync::Mutex<Vec<deepseeknova_core::Message>>> =
                     Arc::new(tokio::sync::Mutex::new(Vec::new()));
+                // /checkpoint：会话级检查点（对话快照），独立持久化文件
+                //（checkpoints.session.jsonl）避免与 /undo 的快照混写。
+                let checkpoint_controller = Arc::new(TuiCheckpointController {
+                    path: std::env::current_dir()
+                        .unwrap_or_default()
+                        .join(&config.checkpoint.path)
+                        .with_extension("session.jsonl"),
+                    history: history.clone(),
+                });
                 // 会话管理：/new /sessions /resume + 回合落盘（与 REPL 同一持久化）。
                 let session_controller =
                     build_chat_persistence(sessions_root(&config), history.clone(), false)
@@ -614,6 +624,7 @@ async fn main() -> anyhow::Result<()> {
                     .with_mcp_servers(mcp_server_infos)
                     .with_mcp_probe(Arc::new(mcp_probe::CliMcpProbe::default()))
                     .with_undo_controller(undo_controller)
+                    .with_checkpoint_controller(checkpoint_controller)
                     .with_approval_rx(approval_rx);
                 if let Some(ctrl) = session_controller {
                     tui = tui.with_session_controller(ctrl);
@@ -878,14 +889,15 @@ async fn main() -> anyhow::Result<()> {
             println!("{:#?}", config);
         }
 
-        // ── Memory (审查/检索/删除/统计) ─────────────────────────────────
+        // ── Memory (审查/检索/编辑/删除/回放/统计) ───────────────────────
         Some(Commands::Memory { action }) => {
-            use deepseeknova_core::memory::store::MemoryCategory;
             let db = std::env::current_dir()
                 .unwrap_or_default()
                 .join(&config.memory.db_path);
             let memory_embedder =
                 deepseeknova_provider::embeddings::try_memory_embedder(&config.memory);
+            // 移动进引擎前先捕获：`memory edit` 结果提示是否重算了嵌入。
+            let embedder_enabled = memory_embedder.is_some();
             let memory_embed_model = memory_embedder
                 .as_ref()
                 .map(|_| config.memory.embed_model.clone());
@@ -896,16 +908,23 @@ async fn main() -> anyhow::Result<()> {
                 memory_embed_model,
             )?;
             match action {
-                cli::MemoryAction::List { category, limit } => {
-                    let cat = match category.as_str() {
-                        "skill" => MemoryCategory::Skill,
-                        "user_profile" => MemoryCategory::UserProfile,
-                        _ => MemoryCategory::Task,
-                    };
-                    for e in engine.list(cat)?.into_iter().take(*limit) {
-                        let preview: String = e.content.chars().take(100).collect();
-                        println!("[{}] ({}) {}", e.id, e.source, preview);
-                    }
+                cli::MemoryAction::List {
+                    category,
+                    limit,
+                    offset,
+                    stage,
+                    tag,
+                    search,
+                } => {
+                    memory_cmd::run_list(
+                        &engine,
+                        category,
+                        *limit,
+                        *offset,
+                        stage.as_deref(),
+                        tag.as_deref(),
+                        search.as_deref(),
+                    )?;
                 }
                 cli::MemoryAction::Search { query } => {
                     let q = query.join(" ");
@@ -916,6 +935,12 @@ async fn main() -> anyhow::Result<()> {
                         println!("{}. [{}] {}", i + 1, r.entry.id, preview);
                     }
                 }
+                cli::MemoryAction::Edit { id, content } => {
+                    memory_cmd::run_edit(&engine, id, content, embedder_enabled)?;
+                }
+                cli::MemoryAction::Delete { id, yes } => {
+                    memory_cmd::run_delete(&engine, id, *yes)?;
+                }
                 cli::MemoryAction::Forget { id } => {
                     println!(
                         "{}",
@@ -925,6 +950,14 @@ async fn main() -> anyhow::Result<()> {
                             "not found"
                         }
                     );
+                }
+                cli::MemoryAction::Replay { query, top_k } => {
+                    memory_cmd::run_replay(
+                        &engine,
+                        query,
+                        top_k.unwrap_or(10),
+                        config.memory.rank_lifecycle_weight,
+                    )?;
                 }
                 cli::MemoryAction::Stats => {
                     let s = engine.stats()?;
@@ -1458,6 +1491,10 @@ async fn build_chat_persistence(
     history: Arc<tokio::sync::Mutex<Vec<deepseeknova_core::Message>>>,
     resume: bool,
 ) -> Option<chat::ChatPersistence> {
+    // 会话标题独立存储（sessions 根目录 titles.json），在消费 root 前取路径。
+    let titles = root
+        .as_ref()
+        .map(|r| chat::SessionTitles::load(r.join("titles.json")));
     let store = match deepseeknova_store::SessionStore::new(root?) {
         Ok(s) => s,
         Err(e) => {
@@ -1504,6 +1541,7 @@ async fn build_chat_persistence(
         session_id,
         turn,
         history,
+        titles: titles?,
     })
 }
 
@@ -1549,11 +1587,16 @@ impl deepseeknova_tui::SessionController for TuiSessionController {
 
     async fn list_sessions(&self) -> anyhow::Result<Vec<deepseeknova_tui::SessionMeta>> {
         let p = self.persist.lock().await;
-        let metas = p.store.list_sessions_with_preview()?;
+        let metas = p.list_sessions_with_titles()?;
         Ok(metas
             .into_iter()
-            .map(|(id, preview)| deepseeknova_tui::SessionMeta { id, preview })
+            .map(|(id, preview, title)| deepseeknova_tui::SessionMeta { id, preview, title })
             .collect())
+    }
+
+    async fn rename(&self, id: &str, title: &str) -> anyhow::Result<()> {
+        let mut p = self.persist.lock().await;
+        p.rename(id, title)
     }
 
     async fn current_session(&self) -> Option<String> {
@@ -1637,6 +1680,78 @@ impl deepseeknova_tui::SessionController for TuiSessionController {
         );
         p.store.append(&p.session_id, &stored_turn)?;
         Ok(())
+    }
+}
+
+/// TUI `/checkpoint` 控制器：deepseeknova-checkpoint 的会话级检查点
+/// （对话快照，`/checkpoint save|list|rollback`）。持久化路径与 `/undo`
+/// 的 CheckpointManager 分离（同名目录不同扩展），避免混写。
+/// 回退时除把对话内容返回给 TUI 恢复显示外，还同步重写 agent 共享
+/// history，使模型上下文与恢复后的会话一致。
+struct TuiCheckpointController {
+    path: std::path::PathBuf,
+    history: Arc<tokio::sync::Mutex<Vec<deepseeknova_core::Message>>>,
+}
+
+#[async_trait::async_trait]
+impl deepseeknova_tui::SessionCheckpointController for TuiCheckpointController {
+    async fn save(
+        &self,
+        label: Option<String>,
+        conversation: Vec<deepseeknova_checkpoint::ConversationLine>,
+    ) -> anyhow::Result<String> {
+        let mut ck = deepseeknova_checkpoint::SessionCheckpointManager::load_from(&self.path)?;
+        ck.save(conversation, label).await
+    }
+
+    async fn list(&self) -> anyhow::Result<Vec<String>> {
+        let ck = deepseeknova_checkpoint::SessionCheckpointManager::load_from(&self.path)?;
+        Ok(ck
+            .list()
+            .into_iter()
+            .map(|m| {
+                let label = m.label.map(|l| format!(" [{l}]")).unwrap_or_default();
+                format!("{} · {} msgs{}", m.id, m.message_count, label)
+            })
+            .collect())
+    }
+
+    async fn rollback(
+        &self,
+        id: Option<&str>,
+    ) -> anyhow::Result<Option<deepseeknova_checkpoint::SessionCheckpoint>> {
+        let mut ck = deepseeknova_checkpoint::SessionCheckpointManager::load_from(&self.path)?;
+        match ck.rollback(id).await? {
+            Some(ckp) => {
+                // 同步重写 agent 共享历史：模型上下文与恢复后的显示一致。
+                let mut hist = self.history.lock().await;
+                hist.clear();
+                for line in &ckp.conversation {
+                    let role = match line.role {
+                        deepseeknova_checkpoint::ConversationRole::User => {
+                            deepseeknova_core::Role::User
+                        }
+                        deepseeknova_checkpoint::ConversationRole::Assistant => {
+                            deepseeknova_core::Role::Assistant
+                        }
+                        deepseeknova_checkpoint::ConversationRole::System => {
+                            deepseeknova_core::Role::System
+                        }
+                    };
+                    hist.push(deepseeknova_core::Message {
+                        role,
+                        content: line.text.clone(),
+                        name: None,
+                        tool_calls: None,
+                        tool_call_id: None,
+                        reasoning_content: None,
+                    });
+                }
+                drop(hist);
+                Ok(Some(ckp))
+            }
+            None => Ok(None),
+        }
     }
 }
 

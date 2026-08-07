@@ -69,6 +69,10 @@ pub enum Key {
     CmdFoldDesc,
     CmdCopyDesc,
     CmdQuitDesc,
+    /// /rename 命令描述。
+    CmdRenameDesc,
+    /// /checkpoint 命令描述。
+    CmdCheckpointDesc,
 
     // ── /help 浮层（commands::builtin）────────────────────
     HelpKeyCmdPalette,
@@ -103,10 +107,38 @@ pub enum Key {
     ListSessionsFailed,
     /// 恢复会话完成（`{target}`、`{n}`）。
     ResumeDone,
+    /// 恢复会话完成（带命名 title；`{target}`、`{title}`、`{n}`）。
+    ResumeDoneTitled,
     /// 恢复会话失败（`{err}`）。
     ResumeFailed,
     /// /resume 用法。
     ResumeUsage,
+    /// /rename 用法。
+    RenameUsage,
+    /// 重命名成功（`{title}`）。
+    RenameDone,
+    /// 重命名失败（`{err}`）。
+    RenameFailed,
+    /// 会话级检查点不可用。
+    CheckpointUnavailable,
+    /// /checkpoint 用法。
+    CheckpointUsage,
+    /// 检查点已保存（`{id}`）。
+    CheckpointSaved,
+    /// 保存检查点失败（`{err}`）。
+    CheckpointSaveFailed,
+    /// 检查点列表头。
+    CheckpointListHeader,
+    /// 列出检查点失败（`{err}`）。
+    CheckpointListFailed,
+    /// 还没有会话检查点。
+    NoCheckpoints,
+    /// 已回退到检查点（`{id}`、`{n}`）。
+    CheckpointRollbackDone,
+    /// 回退检查点失败（`{err}`）。
+    CheckpointRollbackFailed,
+    /// /checkpoint 未知参数（`{arg}`）。
+    CheckpointUnknownArg,
     /// 模型切换不可用。
     ModelSwitchUnavailable,
     /// 模型已切换（`{effort}`、`{model}`）。
@@ -502,6 +534,8 @@ impl Key {
             CmdFoldDesc => "Fold control (all/none/reset)",
             CmdCopyDesc => "Copy the selected message",
             CmdQuitDesc => "Quit TUI",
+            CmdRenameDesc => "Rename the current session",
+            CmdCheckpointDesc => "Save / list / roll back session checkpoints",
 
             // /help 浮层
             HelpKeyCmdPalette => "  Ctrl+K         Command palette",
@@ -527,8 +561,22 @@ impl Key {
             NoSavedSessions => "(no saved sessions yet)",
             ListSessionsFailed => "Failed to list sessions: {err}",
             ResumeDone => "Resumed '{target}' — {n} messages (in conversation pane, scroll/fold)",
+            ResumeDoneTitled => "Resumed '{target}' ('{title}') — {n} messages (in conversation pane, scroll/fold)",
             ResumeFailed => "Failed to resume session: {err}",
             ResumeUsage => "Usage: /resume <session-id> (see /sessions)",
+            RenameUsage => "Usage: /rename <title>",
+            RenameDone => "Session renamed to '{title}'",
+            RenameFailed => "Failed to rename session: {err}",
+            CheckpointUnavailable => "Session checkpoint unavailable (no CheckpointController)",
+            CheckpointUsage => "Usage: /checkpoint save [label] | /checkpoint list | /checkpoint rollback [id]",
+            CheckpointSaved => "Checkpoint saved: {id}",
+            CheckpointSaveFailed => "Failed to save checkpoint: {err}",
+            CheckpointListHeader => "Session checkpoints (newest first):",
+            CheckpointListFailed => "Failed to list checkpoints: {err}",
+            NoCheckpoints => "(no session checkpoints yet)",
+            CheckpointRollbackDone => "Rolled back to checkpoint '{id}' ({n} messages)",
+            CheckpointRollbackFailed => "Failed to roll back checkpoint: {err}",
+            CheckpointUnknownArg => "Unknown /checkpoint argument: {arg} (usage: /checkpoint save [label] | list | rollback [id])",
             ModelSwitchUnavailable => "Model switch unavailable (no agent factory)",
             ModelSwitched => "Model switched: effort={effort} model={model}",
             ModelSwitchFailed => "Failed to switch model: {err}",
@@ -761,6 +809,8 @@ impl Key {
             CmdFoldDesc => "折叠控制（all/none/reset）",
             CmdCopyDesc => "复制当前选中消息",
             CmdQuitDesc => "退出 TUI",
+            CmdRenameDesc => "重命名当前会话",
+            CmdCheckpointDesc => "会话检查点（保存/列表/回退）",
 
             // /help 浮层
             HelpKeyCmdPalette => "  Ctrl+K         命令面板",
@@ -786,8 +836,22 @@ impl Key {
             NoSavedSessions => "（还没有已保存的会话）",
             ListSessionsFailed => "列出会话失败: {err}",
             ResumeDone => "已恢复 '{target}' — {n} 条消息（进入对话面板，可滚动/折叠）",
+            ResumeDoneTitled => "已恢复 '{target}'（'{title}'）— {n} 条消息（进入对话面板，可滚动/折叠）",
             ResumeFailed => "恢复会话失败: {err}",
             ResumeUsage => "用法: /resume <session-id>（见 /sessions）",
+            RenameUsage => "用法: /rename <title>",
+            RenameDone => "已将会话重命名为 '{title}'",
+            RenameFailed => "重命名会话失败: {err}",
+            CheckpointUnavailable => "会话检查点不可用（未注入 CheckpointController）",
+            CheckpointUsage => "用法: /checkpoint save [标签] | /checkpoint list | /checkpoint rollback [id]",
+            CheckpointSaved => "检查点已保存: {id}",
+            CheckpointSaveFailed => "保存检查点失败: {err}",
+            CheckpointListHeader => "会话检查点（最新优先）:",
+            CheckpointListFailed => "列出检查点失败: {err}",
+            NoCheckpoints => "（还没有会话检查点）",
+            CheckpointRollbackDone => "已回退到检查点 '{id}'（{n} 条消息）",
+            CheckpointRollbackFailed => "回退检查点失败: {err}",
+            CheckpointUnknownArg => "未知 /checkpoint 参数: {arg}（用法: /checkpoint save [标签] | list | rollback [id]）",
             ModelSwitchUnavailable => "模型切换不可用（未提供 agent 工厂）",
             ModelSwitched => "模型已切换: effort={effort} model={model}",
             ModelSwitchFailed => "模型切换失败: {err}",

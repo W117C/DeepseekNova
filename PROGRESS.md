@@ -64,6 +64,28 @@
   field_reassign_with_default、P1-2 `dimension.<name>` doc HTML 标签警告）。
 - **状态**：待提交。
 
+## 并行优化第六批（2026-08-08）
+
+- **P1-5 子代理升级**（agent crate 独占）：markdown 前端文件（agent_manifest.rs，
+  `---` 头块 + `.deepseeknova/agents/*.md` 扫描，与 TOML 预设双通道兼容）；
+  @-mention（mention.rs，词边界感知防邮箱误拆）；放开禁递归（recursion.rs，
+  深度上限默认 3，DelegationSink/DelegateDepth/RecursiveDelegateTool，超深
+  优雅降级）；per-agent 模型/权限（ModelResolver + AgentPermission 交集）。
+  303+1+4 测试。**待父级串联**：runtime 硬剔除 `"delegate"` 工具需按
+  allow_recursion 装配 RecursiveDelegateTool；config 接入 agents 目录/深度/
+  per-agent 配置；主对话 @-mention 入口拦截。
+- **P1-9 会话 UX**：`/rename` 会话命名（titles.json，title 优先回退 id）；
+  会话级 checkpoint `/checkpoint save|list|rollback`（SessionCheckpointManager，
+  对话快照 + 回退重写 agent history；save_with_files API 预留文件部分）。
+  16 i18n 新键。checkpoint 25 / tui 180 / cli 73 测试。
+- **P1-11 记忆用户面**：`memory list/edit/delete/replay`（浏览过滤分页 /
+  编辑保留 lifecycle 重嵌 / 删除二次确认 / 与 recall 同源的检索分解回放）。
+  core 记忆引擎最小新增接口（search_breakdown/edit/replay，hybrid 总分
+  严格不变）。core 146 / cli 71 / tools 117 测试 + 真实 CLI 冒烟。
+- **验证**：`make check` EXIT=0（复检修 4 处 P1-5/P1-9 doc 注释：agent_manifest/
+  recursion 冗余链接、tui SessionCheckpointManager 未解析链接）。
+- **状态**：待提交。
+
 ## 日常体验包 + 审查修复（2026-08-07，非任务书轮）
 
 - 功能：web_search（ddg / tavily / bing / searxng）、lsp_diagnostics（写后

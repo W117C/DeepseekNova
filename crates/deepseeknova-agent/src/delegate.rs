@@ -1,18 +1,30 @@
 //! # DelegateEngine — 模型自主 spawn 子代理（Claude Code Task-tool 式）
 //!
-//! 子代理是受限工具集的 [`Agent`] 实例：独立上下文、真正执行工具、只回传封顶摘要、
-//! 工具集不含 `delegate`（禁递归）。并发受信号量限制，满员时排队等待。
+//! 子代理是受限工具集的 [`Agent`] 实例：独立上下文、真正执行工具、只回传封顶摘要。
+//! 并发受信号量限制，满员时排队等待。
+//!
+//! 递归：引擎支持子代理再派子代理，但受**深度上限**约束（默认 3，
+//! [`crate::sub_agent::DEFAULT_MAX_DEPTH`]）。根派发（`run` / `run_with_inputs`）
+//! 为 depth 1；带深度派发走 [`DelegateEngine::run_at_depth`]，超深即拒绝。
+//! 子代理工具集中的递归委派工具（`RecursiveDelegateTool`）把当前深度经
+//! [`DelegateDepth`](crate::recursion::DelegateDepth) 传回引擎，形成有界递归。
+//! 既有预设默认不含 `delegate` 工具（工具面由运行时装配），"禁递归"由"深度
+//! 上限的有界递归"取代。
 //!
 //! 任务书：每个预设持有 [`TaskSpec`]（可参数化 + RULES 约束）。inputs 来源为
 //! delegate 工具调用方显式传值（见 `deepseeknova_tools::delegate`）；渲染结果
 //! （task + RULES）合并进 `RunInput.prompt` —— 子 Agent 的 system_prompt 在
-//! 构造期注入，无法按次渲染。
+//! 构造期注入，无法按次渲染。per-agent 模型覆盖经 `RunInput.model_override`
+//! 透传给子 Agent（自动路由跳过、运行时按 model 指针选 provider）。
 
 use crate::agent::Agent;
+use crate::agent_manifest::AgentPermission;
 use crate::attribution::{
     compose_retry_feedback, run_attribution, AttributionBudget, AttributionSettings, Verdict,
     MAX_ATTRIBUTIONS_PER_RUN, MAX_ATTRIBUTION_INPUT_CHARS,
 };
+use crate::recursion::DelegationSink;
+use crate::sub_agent::DEFAULT_MAX_DEPTH;
 use crate::task_spec::{InputValues, TaskSpec};
 use deepseeknova_core::{RunEvent, RunInput, Runner};
 use std::collections::HashMap;
@@ -20,7 +32,8 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio_stream::StreamExt;
 
-/// 一个内置子代理预设。`spec.tools` 为工具 schema 名白名单（均不含 "delegate"）。
+/// 一个内置子代理预设。`spec.tools` 为工具 schema 名白名单（默认不含
+/// `delegate`；`allow_recursion` 为真时递归工具可加入工具面）。
 #[derive(Debug, Clone)]
 pub struct DelegatePreset {
     pub name: String,
@@ -30,6 +43,12 @@ pub struct DelegatePreset {
     pub spec: TaskSpec,
     /// 配置层默认参数值（`[delegate] agents[].inputs`），调用方传值优先。
     pub config_inputs: InputValues,
+    /// per-agent 模型覆盖（透传 `RunInput.model_override`）。
+    pub model: Option<String>,
+    /// per-agent 权限声明（gate 模式 + 能力白名单）。
+    pub permission: AgentPermission,
+    /// 允许该预设的子代理再派子代理（工具面需含递归委派工具）。
+    pub allow_recursion: bool,
 }
 
 impl DelegatePreset {
@@ -46,7 +65,28 @@ impl DelegatePreset {
             system_prompt: system_prompt.into(),
             spec: TaskSpec::simple(name, "", tools, max_steps),
             config_inputs: InputValues::new(),
+            model: None,
+            permission: AgentPermission::new(),
+            allow_recursion: false,
         }
+    }
+
+    /// 显式允许递归（子代理工具面加入递归委派工具后有界递归）。
+    pub fn with_recursion(mut self, allowed: bool) -> Self {
+        self.allow_recursion = allowed;
+        self
+    }
+
+    /// per-agent 模型覆盖。
+    pub fn with_model(mut self, model: Option<String>) -> Self {
+        self.model = model;
+        self
+    }
+
+    /// per-agent 权限声明。
+    pub fn with_permission(mut self, permission: AgentPermission) -> Self {
+        self.permission = permission;
+        self
     }
 }
 
@@ -132,8 +172,12 @@ pub struct DelegateEngine {
     /// 预设任务书注册表（agent 名 → (spec, config_inputs)）。未注册的子代理
     /// 按旧行为处理：prompt 即 goal 原样，不做渲染。
     specs: HashMap<String, (TaskSpec, InputValues)>,
+    /// 预设 per-agent 模型注册表（agent 名 → model override）。
+    models: HashMap<String, Option<String>>,
     semaphore: Arc<Semaphore>,
     output_cap_tokens: usize,
+    /// 子代理递归深度上限（根派发 depth 1）。超深派发被拒绝。
+    max_depth: usize,
     /// 失败归因设置；None = 关闭（旧行为：失败直接上抛，无重试）。
     attribution: Option<Arc<AttributionSettings>>,
     /// 归因预算（跨委派调用累计，防烧 token）。
@@ -169,11 +213,19 @@ impl DelegateEngine {
         Self {
             agents,
             specs: HashMap::new(),
+            models: HashMap::new(),
             semaphore: Arc::new(Semaphore::new(max_concurrent.max(1))),
             output_cap_tokens,
+            max_depth: DEFAULT_MAX_DEPTH,
             attribution: None,
             attributions_used: Arc::new(AttributionBudget::new(MAX_ATTRIBUTIONS_PER_RUN)),
         }
+    }
+
+    /// 设置递归深度上限（默认 [`DEFAULT_MAX_DEPTH`]）。`0` 视作 1。
+    pub fn with_max_depth(mut self, depth: usize) -> Self {
+        self.max_depth = depth.max(1);
+        self
     }
 
     /// 启用失败归因重试：子代理失败 → LLM 归因 → `Retry`（追加反馈重试，
@@ -190,6 +242,11 @@ impl DelegateEngine {
     /// 注册一个预设的任务书与配置层默认参数值（构建 Agent 时同步调用）。
     pub fn register_spec(&mut self, name: String, spec: TaskSpec, config_inputs: InputValues) {
         self.specs.insert(name, (spec, config_inputs));
+    }
+
+    /// 注册预设的 per-agent 模型覆盖（供委派时透传 `RunInput.model_override`）。
+    pub fn register_model(&mut self, name: String, model: Option<String>) {
+        self.models.insert(name, model);
     }
 
     /// 已注册的子代理名（供工具做友好错误提示）。
@@ -229,10 +286,29 @@ impl DelegateEngine {
         goal: &str,
         values: InputValues,
     ) -> anyhow::Result<String> {
+        self.run_at_depth(agent, goal, values, 1).await
+    }
+
+    /// 带深度委派（供递归 sink 使用）：`depth` 为本次派发深度（根派发 1）。
+    /// `depth > max_depth` → 拒绝（递归守门）。其余行为与
+    /// [`Self::run_with_inputs`] 一致。
+    pub async fn run_at_depth(
+        &self,
+        agent: &str,
+        goal: &str,
+        values: InputValues,
+        depth: usize,
+    ) -> anyhow::Result<String> {
+        if depth > self.max_depth {
+            anyhow::bail!(
+                "sub-agent recursion depth exceeded (max {}, depth requested: {depth})",
+                self.max_depth
+            );
+        }
         // 无归因设置：维持旧行为（失败直接上抛，不重试）。
         let Some(cfg) = self.attribution.as_ref() else {
             return self
-                .delegate_once(agent, goal, &values)
+                .delegate_once(agent, goal, &values, depth)
                 .await
                 .map_err(DelegateError::into_anyhow);
         };
@@ -249,7 +325,10 @@ impl DelegateEngine {
                 Some(fb) => format!("{goal}\n\n{fb}"),
                 None => goal.to_string(),
             };
-            match self.delegate_once(&current_agent, &prompt, &values).await {
+            match self
+                .delegate_once(&current_agent, &prompt, &values, depth)
+                .await
+            {
                 Ok(text) => return Ok(text),
                 // 渲染类错误：参数问题，重试必错 → 直接上抛，不耗预算、不归因。
                 Err(DelegateError::Render(e)) => return Err(e),
@@ -292,15 +371,23 @@ impl DelegateEngine {
         }
     }
 
-    /// 单次委派尝试（无归因重试）：渲染任务书 → 信号量排队 → 收集封顶文本。
-    /// 渲染类错误（`spec.render` 失败）与执行类错误分开标记，供调用方决定
-    /// 是否进入归因循环；`collect_final_text` 透传子代理 run_stream 的 Err。
+    /// 单次委派尝试（无归因重试）：深度守门 → 渲染任务书 → 信号量排队 →
+    /// 收集封顶文本。渲染类错误（`spec.render` 失败）与执行类错误分开标记，
+    /// 供调用方决定是否进入归因循环；`collect_final_text` 透传子代理
+    /// run_stream 的 Err。
     async fn delegate_once(
         &self,
         agent: &str,
         goal: &str,
         values: &InputValues,
+        depth: usize,
     ) -> Result<String, DelegateError> {
+        if depth > self.max_depth {
+            return Err(DelegateError::Execute(anyhow::anyhow!(
+                "sub-agent recursion depth exceeded (max {}, depth requested: {depth})",
+                self.max_depth
+            )));
+        }
         let sub = self.agents.get(agent).cloned().ok_or_else(|| {
             DelegateError::Execute(anyhow::anyhow!("unknown sub-agent '{agent}'"))
         })?;
@@ -326,15 +413,31 @@ impl DelegateEngine {
                 DelegateError::Execute(anyhow::anyhow!("delegate semaphore closed"))
             })?;
 
+        // per-agent 模型覆盖：预设声明 model → 透传 RunInput.model_override
+        //（子 Agent 自动路由跳过，运行时按 model 指针选 provider）。
+        let model_override = self.models.get(agent).cloned().unwrap_or(None);
         let input = RunInput {
             prompt,
             images: vec![],
-            model_override: None,
+            model_override,
         };
         let text = collect_final_text(sub.as_ref(), input)
             .await
             .map_err(DelegateError::Execute)?;
         Ok(cap_output(&text, self.output_cap_tokens))
+    }
+}
+
+#[async_trait::async_trait]
+impl DelegationSink for DelegateEngine {
+    async fn delegate(
+        &self,
+        agent: &str,
+        goal: &str,
+        values: &InputValues,
+        depth: usize,
+    ) -> anyhow::Result<String> {
+        self.run_at_depth(agent, goal, values.clone(), depth).await
     }
 }
 
@@ -390,15 +493,110 @@ mod tests {
     use std::sync::Mutex;
 
     #[test]
-    fn presets_never_include_delegate_tool() {
-        // 禁递归的可测形式：任何预设的工具集都不含 "delegate"。
+    fn presets_default_to_no_recursion_tool() {
+        // 内置预设默认不含 "delegate"（工具面由运行时装配）；需要递归时显式
+        // `with_recursion(true)` 并加入递归委派工具——深度由引擎上限约束。
         for p in builtin_presets() {
             assert!(
                 !p.spec.tools.iter().any(|t| t == "delegate"),
-                "preset {} must not include delegate",
+                "preset {} must not include delegate by default",
+                p.name
+            );
+            assert!(
+                !p.allow_recursion,
+                "preset {} recursion off by default",
                 p.name
             );
         }
+    }
+
+    #[test]
+    fn presets_can_opt_into_recursion() {
+        let p = builtin_presets()
+            .into_iter()
+            .next()
+            .unwrap()
+            .with_recursion(true)
+            .with_model(Some("deepseek-v4-flash".into()));
+        assert!(p.allow_recursion);
+        assert_eq!(p.model.as_deref(), Some("deepseek-v4-flash"));
+    }
+
+    #[test]
+    fn engine_default_max_depth_is_three() {
+        let engine = DelegateEngine::new(HashMap::new(), 2, 2000);
+        assert_eq!(engine.max_depth, 3);
+        let clamped = DelegateEngine::new(HashMap::new(), 2, 2000).with_max_depth(0);
+        assert_eq!(clamped.max_depth, 1);
+    }
+
+    #[tokio::test]
+    async fn run_at_depth_beyond_limit_is_rejected() {
+        let mut agents: HashMap<String, Arc<Agent>> = HashMap::new();
+        agents.insert(
+            "leaf".into(),
+            Arc::new(
+                Agent::new(Arc::new(MockProvider::text("leaf done")), 3).with_system_prompt("leaf"),
+            ),
+        );
+        let engine = DelegateEngine::new(agents, 2, 2000).with_max_depth(3);
+
+        let ok = engine
+            .run_at_depth("leaf", "go", InputValues::new(), 3)
+            .await
+            .unwrap();
+        assert!(ok.contains("leaf done"), "got: {ok}");
+
+        let err = engine
+            .run_at_depth("leaf", "go", InputValues::new(), 4)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("recursion depth exceeded"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_with_inputs_uses_root_depth() {
+        // run_with_inputs = depth 1（根派发），不被 max_depth 拦（≥1）。
+        let mut agents: HashMap<String, Arc<Agent>> = HashMap::new();
+        agents.insert(
+            "leaf".into(),
+            Arc::new(
+                Agent::new(Arc::new(MockProvider::text("leaf done")), 3).with_system_prompt("leaf"),
+            ),
+        );
+        let engine = DelegateEngine::new(agents, 2, 2000).with_max_depth(1);
+        let out = engine
+            .run_with_inputs("leaf", "go", InputValues::new())
+            .await
+            .unwrap();
+        assert!(out.contains("leaf done"), "got: {out}");
+    }
+
+    #[tokio::test]
+    async fn delegate_sink_forwards_depth() {
+        use crate::task_spec::InputValues;
+        let mut agents: HashMap<String, Arc<Agent>> = HashMap::new();
+        agents.insert(
+            "leaf".into(),
+            Arc::new(
+                Agent::new(Arc::new(MockProvider::text("leaf done")), 3).with_system_prompt("leaf"),
+            ),
+        );
+        let engine = DelegateEngine::new(agents, 2, 2000).with_max_depth(3);
+        let sink: Arc<dyn crate::recursion::DelegationSink> = Arc::new(engine);
+
+        // depth 4 经 sink 转发 → 被引擎拒绝
+        let err = sink
+            .delegate("leaf", "go", &InputValues::new(), 4)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("recursion depth exceeded"),
+            "{err}"
+        );
     }
 
     #[test]

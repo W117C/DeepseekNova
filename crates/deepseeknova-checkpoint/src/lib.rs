@@ -168,22 +168,7 @@ impl CheckpointManager {
 
     /// Take a snapshot of the file at `path`.
     pub async fn snapshot_file(&mut self, path: &Path) -> anyhow::Result<()> {
-        let (content, hash) = if path.exists() {
-            let bytes = tokio::fs::read(path).await?;
-            let content = String::from_utf8_lossy(&bytes).to_string();
-            let hash = hex::encode(Sha256::digest(&bytes));
-            (content, hash)
-        } else {
-            (String::new(), hex::encode(Sha256::digest(b"")))
-        };
-
-        self.snapshots.push(Snapshot {
-            path: path.to_path_buf(),
-            content,
-            hash,
-            created_at: chrono::Utc::now(),
-        });
-
+        self.snapshots.push(snapshot_state(path).await?);
         self.enforce_capacity()?;
         self.persist_incremental()?;
         Ok(())
@@ -217,22 +202,7 @@ impl CheckpointManager {
     async fn rollback_inner(&mut self) -> anyhow::Result<Option<(PathBuf, String)>> {
         match self.snapshots.pop() {
             Some(snap) => {
-                if snap.content.is_empty() {
-                    // File was absent before — remove it if it now exists
-                    if snap.path.exists() {
-                        tokio::fs::remove_file(&snap.path).await?;
-                    }
-                } else {
-                    // Restore original content atomically
-                    let ext = snap
-                        .path
-                        .extension()
-                        .map(|e| format!(".{}.rollback", e.to_string_lossy()))
-                        .unwrap_or_else(|| ".rollback".to_string());
-                    let tmp = snap.path.with_extension(&ext[1..]);
-                    tokio::fs::write(&tmp, snap.content.as_bytes()).await?;
-                    tokio::fs::rename(&tmp, &snap.path).await?;
-                }
+                restore_state(&snap).await?;
                 tracing::info!(
                     "rolled back {} (hash {})",
                     snap.path.display(),
@@ -341,6 +311,306 @@ impl Default for CheckpointManager {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ---------------------------------------------------------------------------
+// 共享快照原语（CheckpointManager 与 SessionCheckpointManager 共用）
+// ---------------------------------------------------------------------------
+
+/// 读取文件当前状态并计算 SHA-256，构造一条 [`Snapshot`]。
+/// 文件不存在时按空内容快照（回滚时删除现有文件）。
+async fn snapshot_state(path: &Path) -> anyhow::Result<Snapshot> {
+    let (content, hash) = if path.exists() {
+        let bytes = tokio::fs::read(path).await?;
+        let content = String::from_utf8_lossy(&bytes).to_string();
+        let hash = hex::encode(Sha256::digest(&bytes));
+        (content, hash)
+    } else {
+        (String::new(), hex::encode(Sha256::digest(b"")))
+    };
+    Ok(Snapshot {
+        path: path.to_path_buf(),
+        content,
+        hash,
+        created_at: chrono::Utc::now(),
+    })
+}
+
+/// 把一条快照状态恢复到文件系统：文件原本不存在 → 删除现有文件；
+/// 否则原子写（临时文件 + rename）。非 UTF-8 文件内容经
+/// [`String::from_utf8_lossy`] 有损，与 [`CheckpointManager`] 的既有口径一致。
+async fn restore_state(snap: &Snapshot) -> anyhow::Result<()> {
+    if snap.content.is_empty() {
+        // File was absent before — remove it if it now exists
+        if snap.path.exists() {
+            tokio::fs::remove_file(&snap.path).await?;
+        }
+    } else {
+        // Restore original content atomically
+        let ext = snap
+            .path
+            .extension()
+            .map(|e| format!(".{}.rollback", e.to_string_lossy()))
+            .unwrap_or_else(|| ".rollback".to_string());
+        let tmp = snap.path.with_extension(&ext[1..]);
+        tokio::fs::write(&tmp, snap.content.as_bytes()).await?;
+        tokio::fs::rename(&tmp, &snap.path).await?;
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// SessionCheckpointManager — 会话级检查点（对话 + 可选文件快照）
+// ---------------------------------------------------------------------------
+
+/// 会话级检查点里的一条对话消息角色。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConversationRole {
+    User,
+    Assistant,
+    System,
+}
+
+/// 会话级检查点中的一行对话（角色 + 文本）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationLine {
+    pub role: ConversationRole,
+    pub text: String,
+}
+
+impl ConversationLine {
+    /// 构造一条会话行。
+    pub fn new(role: ConversationRole, text: impl Into<String>) -> Self {
+        Self {
+            role,
+            text: text.into(),
+        }
+    }
+}
+
+/// 一个会话级检查点：对话快照（`conversation`）+ 可选文件快照（`files`）。
+///
+/// `files` 用于"对话 + 必要文件状态"联合回退。TUI `/checkpoint save` 当前
+/// 仅快照对话（文件回退成本高，见 DESIGN 注明）；`files` 字段为程序化调用
+/// （[`SessionCheckpointManager::save_with_files`]）预留。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionCheckpoint {
+    pub id: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    /// 用户可选标签（`/checkpoint save <label>`）。
+    pub label: Option<String>,
+    pub conversation: Vec<ConversationLine>,
+    pub files: Vec<Snapshot>,
+}
+
+/// 会话级检查点容量上限的默认值：超出后按 FIFO 淘汰最旧检查点。
+pub const DEFAULT_MAX_SESSION_CHECKPOINTS: usize = 20;
+
+/// 会话级检查点管理器：把对话（+ 可选文件）快照成命名检查点，支持列表
+/// 与按 id（或最新）回退。持久化 JSONL，每次变更全量重写——检查点受
+/// [`Self::max_checkpoints`] 上限约束（默认 20），单次操作量级很小。
+pub struct SessionCheckpointManager {
+    checkpoints: Vec<SessionCheckpoint>,
+    persist_path: Option<PathBuf>,
+    max_checkpoints: usize,
+}
+
+impl SessionCheckpointManager {
+    pub fn new() -> Self {
+        Self {
+            checkpoints: Vec::new(),
+            persist_path: None,
+            max_checkpoints: DEFAULT_MAX_SESSION_CHECKPOINTS,
+        }
+    }
+
+    /// 从 JSONL 文件恢复检查点（文件不存在 → 空管理器）。
+    pub fn load_from(path: &Path) -> anyhow::Result<Self> {
+        let mut manager = Self::new();
+        manager.persist_path = Some(path.to_path_buf());
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(manager),
+            Err(e) => return Err(e.into()),
+        };
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            manager.checkpoints.push(serde_json::from_str(line)?);
+        }
+        Ok(manager)
+    }
+
+    /// 开启持久化（路径父目录自动创建）。
+    pub fn with_persistence(mut self, path: PathBuf) -> Self {
+        self.persist_path = Some(path);
+        self
+    }
+
+    /// 设置检查点容量上限（默认 [`crate::DEFAULT_MAX_SESSION_CHECKPOINTS`]）。
+    /// 超出后按 FIFO 淘汰最旧检查点；`0` 表示任何新增检查点都会被立即淘汰。
+    pub fn with_max_checkpoints(mut self, max: usize) -> Self {
+        self.max_checkpoints = max;
+        self
+    }
+
+    /// 当前检查点容量上限。
+    pub fn max_checkpoints(&self) -> usize {
+        self.max_checkpoints
+    }
+
+    /// 全量重写持久化文件（JSONL，truncate + 重写）。未配置持久化时为空操作。
+    fn persist(&mut self) -> anyhow::Result<()> {
+        let Some(path) = &self.persist_path else {
+            return Ok(());
+        };
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        let mut f = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(path)?;
+        for ck in &self.checkpoints {
+            writeln!(f, "{}", serde_json::to_string(ck)?)?;
+        }
+        Ok(())
+    }
+
+    /// 超过容量上限时按 FIFO 淘汰最旧检查点（内存 + 持久化同步）。
+    fn enforce_capacity(&mut self) -> anyhow::Result<()> {
+        let evicted = self.checkpoints.len().saturating_sub(self.max_checkpoints);
+        if evicted > 0 {
+            self.checkpoints.drain(..evicted);
+            self.persist()?;
+        }
+        Ok(())
+    }
+
+    /// 保存一个会话检查点（对话快照，无文件）。返回生成的检查点 id。
+    pub async fn save(
+        &mut self,
+        conversation: Vec<ConversationLine>,
+        label: Option<String>,
+    ) -> anyhow::Result<String> {
+        self.save_with_files(conversation, label, &[]).await
+    }
+
+    /// 保存对话 + 文件快照（联合回退）。`paths` 中的文件在保存时快照内容。
+    pub async fn save_with_files(
+        &mut self,
+        conversation: Vec<ConversationLine>,
+        label: Option<String>,
+        paths: &[&Path],
+    ) -> anyhow::Result<String> {
+        let mut files = Vec::new();
+        for path in paths {
+            files.push(snapshot_state(path).await?);
+        }
+        let id = self.next_id();
+        self.checkpoints.push(SessionCheckpoint {
+            id: id.clone(),
+            created_at: chrono::Utc::now(),
+            label,
+            conversation,
+            files,
+        });
+        self.enforce_capacity()?;
+        self.persist()?;
+        Ok(id)
+    }
+
+    /// 生成检查点 id（`ck-YYYYMMDD-HHMMSS`，字典序即时间序）。
+    fn next_id(&self) -> String {
+        format!("ck-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S"))
+    }
+
+    /// 检查点列表元信息（最新优先）。
+    pub fn list(&self) -> Vec<CheckpointMeta> {
+        let mut metas: Vec<CheckpointMeta> = self
+            .checkpoints
+            .iter()
+            .map(|c| CheckpointMeta {
+                id: c.id.clone(),
+                created_at: c.created_at,
+                label: c.label.clone(),
+                message_count: c.conversation.len(),
+                file_count: c.files.len(),
+            })
+            .collect();
+        metas.reverse();
+        metas
+    }
+
+    /// 按 id（或最新，`id = None`）回退：恢复该检查点的文件快照并弹出，
+    /// 返回检查点内容供调用方恢复对话。未知 id 返回 `Ok(None)`。
+    pub async fn rollback(
+        &mut self,
+        id: Option<&str>,
+    ) -> anyhow::Result<Option<SessionCheckpoint>> {
+        let idx = match id {
+            Some(id) => match self.checkpoints.iter().position(|c| c.id == id) {
+                Some(i) => Some(i),
+                None => return Ok(None),
+            },
+            None => self.checkpoints.len().checked_sub(1),
+        };
+        let Some(idx) = idx else {
+            return Ok(None);
+        };
+        let ck = self.checkpoints.remove(idx);
+        // 文件恢复：单条失败不阻塞对话回退（调用方已拿到对话内容）。
+        for snap in &ck.files {
+            if let Err(e) = restore_state(snap).await {
+                tracing::warn!(
+                    "session checkpoint file rollback failed for {}: {e}",
+                    snap.path.display()
+                );
+            }
+        }
+        self.persist()?;
+        Ok(Some(ck))
+    }
+
+    /// 全部检查点引用（原始顺序，最旧在前）。
+    pub fn checkpoints(&self) -> &[SessionCheckpoint] {
+        &self.checkpoints
+    }
+
+    /// 活动检查点数。
+    pub fn len(&self) -> usize {
+        self.checkpoints.len()
+    }
+
+    /// 是否没有活动检查点。
+    pub fn is_empty(&self) -> bool {
+        self.checkpoints.is_empty()
+    }
+
+    /// 丢弃全部检查点，不恢复任何内容。
+    pub fn clear(&mut self) {
+        self.checkpoints.clear();
+        self.persist().ok();
+    }
+}
+
+impl Default for SessionCheckpointManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// 检查点列表元信息（TUI `/checkpoint list` 展示用）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckpointMeta {
+    pub id: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub label: Option<String>,
+    pub message_count: usize,
+    pub file_count: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -747,5 +1017,144 @@ mod tests {
         assert_eq!(ck.snapshots()[0].path, PathBuf::from("legacy.txt"));
         assert_eq!(ck.snapshots()[0].hash, "deadbeef0123456789");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── 会话级检查点（SessionCheckpointManager）──────────────────────
+
+    fn sample_conversation() -> Vec<ConversationLine> {
+        vec![
+            ConversationLine::new(ConversationRole::User, "第一问"),
+            ConversationLine::new(ConversationRole::Assistant, "第一答"),
+            ConversationLine::new(ConversationRole::User, "第二问"),
+        ]
+    }
+
+    #[tokio::test]
+    async fn session_checkpoint_save_list_rollback_roundtrip() {
+        let dir = temp_dir();
+        let ck_path = dir.join("session-ck.jsonl");
+        let mut ck = SessionCheckpointManager::new().with_persistence(ck_path.clone());
+
+        let id = ck
+            .save(sample_conversation(), Some("阶段一".into()))
+            .await
+            .unwrap();
+        assert!(id.starts_with("ck-"), "id 形状: {id}");
+        assert_eq!(ck.len(), 1);
+
+        let metas = ck.list();
+        assert_eq!(metas.len(), 1);
+        assert_eq!(metas[0].id, id);
+        assert_eq!(metas[0].message_count, 3);
+        assert_eq!(metas[0].label.as_deref(), Some("阶段一"));
+
+        // 回退（最新）→ 返回检查点内容。
+        let popped = ck.rollback(None).await.unwrap().expect("应弹出检查点");
+        assert_eq!(popped.id, id);
+        assert_eq!(popped.conversation, sample_conversation());
+        assert!(ck.is_empty());
+        // 回退后持久化文件同步为空。
+        assert!(SessionCheckpointManager::load_from(&ck_path)
+            .unwrap()
+            .is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn session_checkpoint_persists_across_instances() {
+        let dir = temp_dir();
+        let ck_path = dir.join("session-persist.jsonl");
+        {
+            let mut ck = SessionCheckpointManager::new().with_persistence(ck_path.clone());
+            ck.save(sample_conversation(), None).await.unwrap();
+            ck.save(
+                vec![ConversationLine::new(ConversationRole::Assistant, "x")],
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        let mut ck2 = SessionCheckpointManager::load_from(&ck_path).unwrap();
+        assert_eq!(ck2.len(), 2, "检查点应跨进程存活");
+        let rolled = ck2.rollback(None).await.unwrap().unwrap();
+        assert_eq!(rolled.conversation.len(), 1, "最新（第二条）先回退");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn session_checkpoint_rollback_by_id() {
+        let dir = temp_dir();
+        let mut ck = SessionCheckpointManager::new();
+        let id_a = ck.save(sample_conversation(), None).await.unwrap();
+        let id_b = ck
+            .save(
+                vec![ConversationLine::new(ConversationRole::User, "b")],
+                None,
+            )
+            .await
+            .unwrap();
+        // 按 id 回退旧的 → 弹出 id_a；id_b 仍在。
+        let popped = ck.rollback(Some(&id_a)).await.unwrap().unwrap();
+        assert_eq!(popped.id, id_a);
+        assert_eq!(ck.len(), 1);
+        assert_eq!(ck.checkpoints()[0].id, id_b);
+        // 未知 id → Ok(None)。
+        assert!(ck.rollback(Some("ck-unknown")).await.unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn session_checkpoint_capacity_evicts_fifo() {
+        let dir = temp_dir();
+        let ck_path = dir.join("session-cap.jsonl");
+        let mut ck = SessionCheckpointManager::new()
+            .with_persistence(ck_path.clone())
+            .with_max_checkpoints(2);
+        let mut ids = Vec::new();
+        for i in 0..3 {
+            let conv = vec![ConversationLine::new(
+                ConversationRole::User,
+                format!("q{i}"),
+            )];
+            ids.push(ck.save(conv, None).await.unwrap());
+        }
+        // 手动顺序执行：0→1→2，超限淘汰 0，保留 1、2。
+        assert_eq!(ck.len(), 2);
+        assert_eq!(ck.checkpoints()[0].id, ids[1]);
+        assert_eq!(ck.checkpoints()[1].id, ids[2]);
+        // 持久化文件一致。
+        let reloaded = SessionCheckpointManager::load_from(&ck_path).unwrap();
+        assert_eq!(reloaded.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn session_checkpoint_with_files_rolls_back_files() {
+        let dir = temp_dir();
+        let file = dir.join("doc.txt");
+        write_file(&file, "v1");
+        let mut ck = SessionCheckpointManager::new();
+        ck.save_with_files(sample_conversation(), None, &[&file])
+            .await
+            .unwrap();
+        write_file(&file, "v2");
+        let popped = ck.rollback(None).await.unwrap().unwrap();
+        assert_eq!(popped.files.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "v1",
+            "文件随检查点恢复"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn session_checkpoint_default_capacity_bounded() {
+        assert_eq!(
+            SessionCheckpointManager::new().max_checkpoints(),
+            DEFAULT_MAX_SESSION_CHECKPOINTS
+        );
+        assert!(SessionCheckpointManager::new().is_empty());
     }
 }

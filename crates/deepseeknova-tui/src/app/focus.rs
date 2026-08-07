@@ -458,10 +458,12 @@ mod tests {
                 crate::app::state::SessionMeta {
                     id: "chat-a".into(),
                     preview: "第一个".into(),
+                    title: None,
                 },
                 crate::app::state::SessionMeta {
                     id: "chat-b".into(),
                     preview: "第二个".into(),
+                    title: None,
                 },
             ],
             ..Default::default()
