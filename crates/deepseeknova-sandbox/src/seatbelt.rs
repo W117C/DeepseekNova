@@ -1,3 +1,9 @@
+//! macOS Seatbelt 沙箱后端（`sandbox-exec`）。
+//!
+//! 网络策略现状：**仅支持整网开关**（追加 `(allow network*)` 放行全部网络）。
+//! 域名级白名单需 DNS 解析后按 IP 过滤（SBPL 无域名匹配原语，`(remote tcp)`
+//! 只匹配 IP/端口），属后续实现，见 [`crate::NetworkPolicy`]。
+
 use crate::Sandbox;
 
 /// macOS sandbox using `sandbox-exec` with a seatbelt profile.
@@ -347,5 +353,19 @@ mod tests {
         );
         assert!(sb.profile.contains("(allow file-write*)"));
         assert!(sb.profile.contains("(allow network*)"));
+    }
+
+    #[test]
+    fn network_policy_domains_do_not_reach_profile() {
+        // 负断言：配置面（NetworkPolicy）→ 平台面的唯一通道是 allow_network
+        // bool。域名白名单不得写入 seatbelt profile（域名级过滤尚未实现），
+        // 防止后续误把未验证的域名规则偷偷注入 profile。
+        let policy = crate::NetworkPolicy::new(true, vec!["api.github.com".to_string()]);
+        let sb = SeatbeltSandbox::with_policy(&[], policy.allow_network);
+        assert!(sb.profile.contains("(allow network*)"));
+        assert!(
+            !sb.profile.contains("api.github.com"),
+            "域名不得写入 platform profile（域名级过滤未实现）"
+        );
     }
 }

@@ -14,7 +14,8 @@
 10. [Plan Mode](#plan-mode)
 11. [Sub-Agents](#sub-agents)
 12. [Sandbox](#sandbox)
-13. [Advanced Configuration](#advanced-configuration)
+13. [Worktrees (CLI)](#worktrees-cli)
+14. [Advanced Configuration](#advanced-configuration)
 
 ## Concepts
 
@@ -1226,6 +1227,70 @@ When `[sandbox] enabled = true`, shell commands run in an OS-level sandbox
 - **Windows**: `NoOpSandbox`（无隔离，待实现 Job Object / AppContainer）
 
 Read-only tools (`read_file`, `grep`, `glob`, `ls`) are unaffected by sandbox settings.
+
+## Worktrees (CLI)
+
+`worktree` 子命令用 **git worktree** 提供隔离的并行会话：在同一仓库上并行跑
+多个 agent 会话时，每个会话在一个独立工作副本中修改文件，互不干扰——适合
+"Agent 框架"定位下的并行开发、多任务验收或 A/B 实验。
+
+```bash
+deepseeknova-cli worktree new [--name <name>] [--base <ref>]   # 创建隔离副本
+deepseeknova-cli worktree list                                  # 列出全部 worktree
+deepseeknova-cli worktree switch <name>                         # 打印目标目录（供 cd）
+deepseeknova-cli worktree delete <name> [--force]               # 删除 worktree
+deepseeknova-cli worktree clean                                 # 清理全部 CLI 创建的 worktree
+```
+
+### 创建与进入（new / switch）
+
+`worktree new` 在主工作树根的 `.deepseeknova/worktrees/<name>` 下执行
+`git worktree add -b <name> <path> HEAD`：`--name` 缺省生成 `wt-<时间戳>-<序号>`
+（同时作为新分支名）；`--base <ref>` 指定基础 ref（分支 / tag / commit，缺省
+`HEAD`）。创建成功后 CLI 打印进入指引：
+
+```bash
+✓ worktree `feat-x` created at /path/to/repo/.deepseeknova/worktrees/feat-x
+  branch: feat-x (base: HEAD)
+
+Start an isolated session inside it:
+  cd /path/to/repo/.deepseeknova/worktrees/feat-x
+  deepseeknova-cli chat --tui       # interactive (or `run "<task>"` for one-shot)
+```
+
+`worktree switch <name>` 打印目标目录供 `cd` 进入（CLI 无法改变父进程的工作目录）。
+`worktree list` 列出全部 worktree（路径 / 分支 / `*` 当前标记 / `[cli]` 标记，
+`[cli]` 表示由本 CLI 管理）。
+
+### 会话隔离语义
+
+每个 worktree 是一个**独立的工作副本**，其中启动的会话其运行时状态
+（`graph.db` 代码图索引、`memory.db` 记忆库、`metrics/` 评分卡与诊断、
+`checkpoints.json` 等）按**工作区根**落盘——即落在该 worktree 自己的
+`.deepseeknova/` 下，天然互不干扰：
+
+- 工作区根的 `.deepseeknova/` 已被仓库 `.gitignore` 的 `.deepseeknova/*` 覆盖，
+  创建 worktree 不会污染主工作树 `git status`，会话状态也不会被误提交。
+- 两个会话并行修改同名文件时，各改各的工作副本，互不覆盖。
+- 与现有会话管理的关系：`chat --tui` 的 `/new` `/sessions` `/resume` 与
+  `[session]` JSONL store（默认 `~/.deepseeknova/sessions`）管理的是**对话历史**；
+  worktree 隔离的是**文件系统工作区**。两者互补：同一 worktree 内多会话仍共享
+  该工作副本，跨 worktree 的会话则连工作副本都隔离。
+
+### 删除与清理（delete / clean）
+
+`worktree delete <name>` 先检查 worktree 内是否有未提交 / 未跟踪变更，有则
+**拒绝**并提示先提交或暂存（`--force` 丢弃变更强制删除）。删除成功后新分支
+（`<name>`）**保留**，输出会提示用 `git branch -D <name>` 自行清理。
+
+`worktree clean` 清理主根 `.deepseeknova/worktrees/` 下所有由本 CLI 创建的
+worktree：干净的直接删除，有未提交变更的跳过并列出原因。目录中 git 未登记的
+残留（如中途失败的创建）仅提示，不自动删除。
+
+> 全部 git 交互（`git worktree add/list/remove`、`git rev-parse`、
+> `git status --porcelain` 等）经 `std::process::Command` 执行，非零退出码透传
+> git stderr；在非 git 目录中运行会得到清晰报错（提示先 `git init`）。worktree
+> 名须可同时作为目录名与 git 分支名（拒绝 `/`、`..`、空白字符等）。
 
 ## Advanced Configuration
 

@@ -1,3 +1,9 @@
+//! Linux bubblewrap 沙箱后端（`bwrap`）。
+//!
+//! 网络策略现状：**仅支持整网开关**（`--share-net` 共享宿主网络 /
+//! `--unshare-net` 隔离网络）。域名级白名单需 DNS 解析后按 IP 过滤，
+//! 属后续实现，见 [`crate::NetworkPolicy`]。
+
 use crate::Sandbox;
 
 /// Linux sandbox using `bwrap` (bubblewrap).

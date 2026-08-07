@@ -150,6 +150,22 @@
 - **验证**：`make check` EXIT=0。
 - **状态**：待提交。
 
+## 并行优化第十批（2026-08-08，P2 大项收尾）
+
+- **P2-7 worktree 并行会话**（cli + GUIDE）：`worktree new|list|switch|delete|
+  clean` 子命令 + git worktree 封装（主根 `.deepseeknova/worktrees/`、非 git
+  检测、分支名校验、`/var`→`/private/var` canonicalize）+ 会话隔离语义
+  （worktree 内 graph/memory/审计按 workspace_root 落盘天然隔离）。11 测试 +
+  e2e 冒烟。cli 100 测试全绿。
+- **P2-1 沙箱平台无关增强**（sandbox + config）：`[sandbox] network_allow_domains`
+  域名白名单配置接口 + `NetworkPolicy` 类型（warn-not-fail 校验）。诚实约束：
+  seatbelt/bwrap 仅支持整网开关（域名级过滤标注后续）；Windows Job Object/
+  AppContainer 后端不在 macOS 写（无法验证运行时隔离），方案文档落 sandbox
+  crate doc。sandbox 22 / config 53 测试。
+- **验证**：`make check` EXIT=0（复检修 cli worktree doc 3+2 处 HTML 标签/断链
+  警告）。
+- **状态**：待提交。
+
 ## 日常体验包 + 审查修复（2026-08-07，非任务书轮）
 
 - 功能：web_search（ddg / tavily / bing / searxng）、lsp_diagnostics（写后

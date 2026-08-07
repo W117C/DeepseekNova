@@ -7,7 +7,9 @@ mod mcp_probe;
 mod memory_cmd;
 mod setup;
 mod tui_undo;
+mod worktree;
 
+use anyhow::Context;
 use async_trait::async_trait;
 use clap::Parser;
 use cli::{Cli, Commands};
@@ -1122,6 +1124,30 @@ async fn main() -> anyhow::Result<()> {
                 let target = audit::parse_audit_target(args)?;
                 let report = audit::build_report(&config, &workspace_root, target);
                 audit::render_report(&report, format)?;
+            }
+        }
+
+        // ── Worktree（git worktree 隔离的并行会话，P2-7）────────────────
+        Some(Commands::Worktree { action }) => {
+            let cwd = std::env::current_dir().context("cannot determine current directory")?;
+            match action {
+                cli::WorktreeAction::New { name, base } => {
+                    let wt = worktree::run_new(&cwd, name.as_deref(), base.as_deref())?;
+                    println!("✓ worktree `{}` created at {}", wt.name, wt.path.display());
+                    println!("  branch: {} (base: {})", wt.name, wt.base);
+                    println!();
+                    println!("Start an isolated session inside it:");
+                    println!("  cd {}", wt.path.display());
+                    println!("  deepseeknova-cli chat --tui       # interactive (or `run \"<task>\"` for one-shot)");
+                }
+                cli::WorktreeAction::List => println!("{}", worktree::run_list(&cwd)?),
+                cli::WorktreeAction::Switch { name } => {
+                    println!("{}", worktree::run_switch(&cwd, name)?)
+                }
+                cli::WorktreeAction::Delete { name, force } => {
+                    println!("{}", worktree::run_delete(&cwd, name, *force)?)
+                }
+                cli::WorktreeAction::Clean => println!("{}", worktree::run_clean(&cwd)?),
             }
         }
 

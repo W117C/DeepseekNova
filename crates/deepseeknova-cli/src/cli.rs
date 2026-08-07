@@ -195,6 +195,12 @@ pub enum Commands {
         #[arg(long)]
         workspace: Option<String>,
     },
+    /// git worktree 隔离的并行会话（P2-7）。每个 worktree 是主仓库的一个
+    /// 独立工作副本，会话状态（.deepseeknova/）按工作区根落盘，天然隔离。
+    Worktree {
+        #[command(subcommand)]
+        action: WorktreeAction,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -292,6 +298,36 @@ pub enum ArtifactsAction {
         #[arg(long)]
         source: Option<String>,
     },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum WorktreeAction {
+    /// 创建 git worktree（默认 .deepseeknova/worktrees/`<name>`）用于隔离会话。
+    New {
+        /// Worktree 名（缺省 wt-<时间戳>-<序号>；同时作为新分支名）。
+        #[arg(long)]
+        name: Option<String>,
+        /// 基础 ref（分支/tag/commit，缺省 HEAD）。
+        #[arg(long)]
+        base: Option<String>,
+    },
+    /// 列出全部 git worktree（路径 / 分支 / 当前标记 / \[cli\] 标记）。
+    List,
+    /// 打印指定 worktree 的目录供 cd 进入（CLI 不能改变父进程 cwd）。
+    Switch {
+        /// Worktree 名。
+        name: String,
+    },
+    /// 删除 worktree（有未提交变更时拒绝；--force 强制丢弃变更删除）。
+    Delete {
+        /// Worktree 名。
+        name: String,
+        /// 有未提交/未跟踪变更时仍强制删除（丢弃变更）。
+        #[arg(long)]
+        force: bool,
+    },
+    /// 清理所有由本 CLI 创建的 worktree（有未提交变更的跳过）。
+    Clean,
 }
 
 #[cfg(test)]
@@ -600,6 +636,94 @@ mod tests {
                 assert_eq!(args, vec!["ls", "-la"]);
             }
             _ => panic!("expected Audit command"),
+        }
+    }
+
+    // ── worktree 子命令（并行会话隔离，P2-7）解析 ──────────────────────
+
+    #[test]
+    fn worktree_new_parses_name_and_base() {
+        let parsed = Cli::try_parse_from([
+            "deepseeknova",
+            "worktree",
+            "new",
+            "--name",
+            "feat",
+            "--base",
+            "main",
+        ])
+        .unwrap();
+        match parsed.command {
+            Some(Commands::Worktree { action }) => match action {
+                WorktreeAction::New { name, base } => {
+                    assert_eq!(name.as_deref(), Some("feat"));
+                    assert_eq!(base.as_deref(), Some("main"));
+                }
+                other => panic!("expected New, got {other:?}"),
+            },
+            _ => panic!("expected Worktree command"),
+        }
+        // 无参数时 name/base 均为 None（由实现取缺省）。
+        let bare = Cli::try_parse_from(["deepseeknova", "worktree", "new"]).unwrap();
+        match bare.command {
+            Some(Commands::Worktree {
+                action: WorktreeAction::New { name, base },
+            }) => {
+                assert!(name.is_none() && base.is_none());
+            }
+            _ => panic!("expected New defaults"),
+        }
+    }
+
+    #[test]
+    fn worktree_delete_parses_name_and_force() {
+        let parsed =
+            Cli::try_parse_from(["deepseeknova", "worktree", "delete", "feat", "--force"]).unwrap();
+        match parsed.command {
+            Some(Commands::Worktree {
+                action: WorktreeAction::Delete { name, force },
+            }) => {
+                assert_eq!(name, "feat");
+                assert!(force, "--force 必须置位");
+            }
+            _ => panic!("expected Delete"),
+        }
+        let no_flag = Cli::try_parse_from(["deepseeknova", "worktree", "delete", "feat"]).unwrap();
+        match no_flag.command {
+            Some(Commands::Worktree {
+                action: WorktreeAction::Delete { force, .. },
+            }) => {
+                assert!(!force, "缺 --force 默认拒绝有变更的 worktree");
+            }
+            _ => panic!("expected Delete"),
+        }
+    }
+
+    #[test]
+    fn worktree_list_switch_clean_parse() {
+        for argv in [
+            vec!["deepseeknova", "worktree", "list"],
+            vec!["deepseeknova", "worktree", "clean"],
+        ] {
+            let parsed = Cli::try_parse_from(argv).unwrap();
+            match parsed.command {
+                Some(Commands::Worktree { action }) => {
+                    assert!(matches!(
+                        action,
+                        WorktreeAction::List | WorktreeAction::Clean
+                    ));
+                }
+                _ => panic!("expected Worktree command"),
+            }
+        }
+        let parsed = Cli::try_parse_from(["deepseeknova", "worktree", "switch", "feat"]).unwrap();
+        match parsed.command {
+            Some(Commands::Worktree {
+                action: WorktreeAction::Switch { name },
+            }) => {
+                assert_eq!(name, "feat");
+            }
+            _ => panic!("expected Switch"),
         }
     }
 }

@@ -1114,6 +1114,16 @@ pub struct SandboxConfig {
     #[serde(default)]
     pub writable_paths: Vec<String>,
 
+    /// 网络白名单域名（可选）。非空表示沙箱内网络只允许这些域名；空 = 维持
+    /// `allow_network` bool 的整网开关现状。
+    ///
+    /// 平台消费方式：seatbelt/bwrap 当前仅支持整网开关（seatbelt 追加
+    /// `(allow network*)`、bwrap `--share-net`/`--unshare-net`），域名级
+    /// 过滤需 DNS 解析后按 IP 过滤，属后续实现（见 deepseeknova-sandbox 的
+    /// `NetworkPolicy` 文档）。本字段当前只做配置接口 + 格式校验。
+    #[serde(default)]
+    pub network_allow_domains: Vec<String>,
+
     /// Command timeout in seconds.
     #[serde(default = "default_sandbox_timeout")]
     pub timeout_secs: u64,
@@ -1130,7 +1140,41 @@ impl Default for SandboxConfig {
             allow_network: false,
             readonly_paths: Vec::new(),
             writable_paths: Vec::new(),
+            network_allow_domains: Vec::new(),
             timeout_secs: default_sandbox_timeout(),
+        }
+    }
+}
+
+impl SandboxConfig {
+    /// 返回格式非法的网络白名单域名（空串、含空白、含路径分隔符 `/` `\`）。
+    ///
+    /// 纯校验函数：调用方决定 warn 还是 fail。本 crate 在 [`Config::validate`]
+    /// 中对非法项仅 warn 不 fail（fail-open，与现有语义一致）。
+    pub fn invalid_network_allow_domains(&self) -> Vec<&str> {
+        self.network_allow_domains
+            .iter()
+            .filter(|d| {
+                d.trim().is_empty()
+                    || d.contains(char::is_whitespace)
+                    || d.contains('/')
+                    || d.contains('\\')
+            })
+            .map(String::as_str)
+            .collect()
+    }
+
+    /// 对格式非法的网络白名单域名打 warn（不 fail）。
+    ///
+    /// 域名白名单是增强性安全配置：非法条目不会让配置加载失败（fail-open），
+    /// 仅提示用户修正。当前平台后端（seatbelt/bwrap）尚未消费域名白名单，
+    /// 非法条目不构成注入面，warn 即可。
+    fn warn_invalid_network_allow_domains(&self) {
+        for d in self.invalid_network_allow_domains() {
+            eprintln!(
+                "[config] warn: sandbox.network_allow_domains 条目 '{d}' 格式非法 \
+                 （空/含空白/含路径分隔符），已忽略该条目的域名过滤语义"
+            );
         }
     }
 }
@@ -1806,6 +1850,9 @@ impl Config {
     /// and prices must be non-negative. Called by [`Config::load`]; callers
     /// constructing configs programmatically may call it directly.
     pub fn validate(&self) -> anyhow::Result<()> {
+        // 域名白名单校验：非法条目仅 warn 不 fail（fail-open，增强性配置
+        // 不阻断配置加载）。
+        self.sandbox.warn_invalid_network_allow_domains();
         let names: Vec<&str> = self.models.iter().map(|m| m.name.as_str()).collect();
         for (role, ptr) in self.model_pointers.entries() {
             if let Some(model) = ptr {
@@ -2154,6 +2201,9 @@ impl SandboxConfig {
         if !other.writable_paths.is_empty() {
             self.writable_paths = other.writable_paths;
         }
+        if !other.network_allow_domains.is_empty() {
+            self.network_allow_domains = other.network_allow_domains;
+        }
         self.timeout_secs = other.timeout_secs;
     }
 }
@@ -2451,6 +2501,87 @@ mod tests {
         assert_eq!(base.security.limits.max_execution_time_secs, Some(60));
         // 未覆盖的字段保持未设置
         assert!(base.security.limits.max_file_size.is_none());
+    }
+
+    #[test]
+    fn sandbox_network_allow_domains_defaults_empty() {
+        // 默认：域名白名单为空 → 维持 allow_network bool 整网开关现状。
+        let cfg = Config::default();
+        assert!(cfg.sandbox.network_allow_domains.is_empty());
+        assert!(cfg.sandbox.invalid_network_allow_domains().is_empty());
+    }
+
+    #[test]
+    fn sandbox_network_allow_domains_parses_from_toml() {
+        // 合法域名白名单解析。
+        let c: Config = toml::from_str(
+            "[sandbox]\nenabled = true\nallow_network = false\nnetwork_allow_domains = [\"api.github.com\", \"example.com\"]\n",
+        )
+        .unwrap();
+        assert!(c.sandbox.enabled);
+        assert!(!c.sandbox.allow_network);
+        assert_eq!(
+            c.sandbox.network_allow_domains,
+            vec!["api.github.com".to_string(), "example.com".to_string()]
+        );
+        assert!(c.validate().is_ok(), "合法域名不得使校验失败");
+    }
+
+    #[test]
+    fn sandbox_network_allow_domains_merge_overrides_when_non_empty() {
+        let mut base = Config::default();
+        let override_cfg = Config {
+            sandbox: crate::SandboxConfig {
+                network_allow_domains: vec!["api.openai.com".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        base.merge(override_cfg);
+        assert_eq!(
+            base.sandbox.network_allow_domains,
+            vec!["api.openai.com".to_string()]
+        );
+        // 空清单不覆盖既有值（与 readonly/writable_paths 合并语义一致）。
+        let empty_cfg = Config {
+            sandbox: crate::SandboxConfig {
+                network_allow_domains: Vec::new(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        base.merge(empty_cfg);
+        assert_eq!(
+            base.sandbox.network_allow_domains,
+            vec!["api.openai.com".to_string()]
+        );
+    }
+
+    #[test]
+    fn sandbox_network_allow_domains_validation_warns_not_fails() {
+        // 非法条目（空串/含空白/含路径分隔符）被标记，但 validate 仍 Ok（fail-open）。
+        let c = Config {
+            sandbox: crate::SandboxConfig {
+                network_allow_domains: vec![
+                    "api.github.com".into(),
+                    "".into(),
+                    "has space.com".into(),
+                    "bad/path.com".into(),
+                    "bad\\path.com".into(),
+                ],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let invalid = c.sandbox.invalid_network_allow_domains();
+        assert_eq!(
+            invalid,
+            vec!["", "has space.com", "bad/path.com", "bad\\path.com"]
+        );
+        assert!(
+            c.validate().is_ok(),
+            "非法域名只能 warn，不得让配置校验失败（fail-open）"
+        );
     }
 
     #[test]

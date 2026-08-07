@@ -580,6 +580,28 @@ All notable changes to DeepseekNova will be documented in this file.
   进程级共享 runtime）。超时兜底不变。生产调用点迁移清单留待后续（graph/
   memory 写入与查询向量路径，涉及同步 rusqlite 函数签名）。
 
+---
+
+### Added（并行优化第十批，2026-08-08）
+
+- **worktree 并行会话（P2-7）**：`deepseeknova-cli worktree new|list|switch|
+  delete|clean`——主根 `.deepseeknova/worktrees/<name>` 下 `git worktree add`
+  隔离副本（`.gitignore` 已覆盖，不污染主工作树）；`new` 缺省名
+  `wt-<ts>-<seq>`、`--base` 指定 ref、成功打印"cd 进入启动隔离会话"指引；
+  `list` 路径/分支/当前标记/`[cli]` 归属；`delete` 先查未提交变更（有则拒，
+  `--force` 丢弃）；`clean` 清理全部 CLI worktree。会话隔离语义：worktree 内
+  启动的会话其 graph.db/memory/审计/metrics 按 workspace_root 落盘到该
+  worktree 自己的 `.deepseeknova/`，天然互不干扰。git 交互统一封装（非 git
+  仓库/分支名校验/主根解析/`/var`→`/private/var` canonicalize 归一化）。
+  11 个测试（含真实 git tempdir 往返）+ e2e 冒烟。
+- **沙箱平台无关增强（P2-1 mac 可验证部分）**：`[sandbox] network_allow_domains`
+  域名白名单配置接口 + sandbox crate 类型化 `NetworkPolicy`（默认禁网 + 空
+  白名单；`requests_domain_filtering()` 供上层提示后端不支持）。warn-not-fail
+  校验（空/含空白/含路径分隔符条目警告不阻断）。诚实约束：seatbelt/bwrap
+  当前仅支持整网开关（SBPL 无域名原语，域名级过滤需 DNS 解析后按 IP，属
+  后续）；Windows Job Object/AppContainer 后端因无法在 macOS 验证运行时
+  隔离，仅落方案文档（sandbox crate doc），实现待 Windows 环境。
+
 ## [0.4.0] — 2026-07-19
 
 ### 桌面前端完善
