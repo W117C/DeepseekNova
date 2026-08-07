@@ -191,7 +191,7 @@
 | 文档 | changed-and-verified | GUIDE（配色/上下文占用/斜杠命令）、CHANGELOG、BUILDING（前端构建）、AGENTS.md（桌面端非 cargo 说明）、BLOCKED、REVIEW、PROGRESS、任务书 `docs/superpowers/plans/2026-08-07-frontend-tui-plan.md` |
 | 规则 | verified-current | AGENTS.md 无新增防错条目需求（跨 permission/agent/tui 改动按 §1 记录于 REVIEW 覆盖声明）；未新增依赖（前端 devDeps 属脚手架） |
 | 记忆 | not-applicable | 平台记忆 generated-read-only，无写入 |
-| 工作区 | changed-and-verified | 已提交 `fdefbd9`（含上一轮 P0 未提交改动 + 设计资产 + 本轮）；未 push（由用户决定）；`repro_tmp.rs` 用户调试文件未提交、保留；`obs-comp-d-combined-agnes-v2.png` 为删除候选（未确认不删）；无 stash |
+| 工作区 | changed-and-verified | 已提交 `fdefbd9`（含上一轮 P0 未提交改动 + 设计资产 + 本轮）；未 push（由用户决定）；`repro_tmp.rs` 用户调试文件与 `obs-comp-d-combined-agnes-v2.png` 已按用户确认清除；无 stash |
 
 ## 本轮交付物核对（dev-loop 六件证据）
 1. 任务书：`docs/superpowers/plans/2026-08-07-frontend-tui-plan.md`（六节齐全，≤4000 字符）。
@@ -201,12 +201,12 @@
    1 medium（端到端断言盲区）记录接受、2 low 接受；修复后全量 `make check` EXIT=0。
 4. 收尾报告：本文件。
 5. BLOCKED.md：Tauri 壳 P1 / 桌面后续页 / 文案语言 / logo / 风险接线 e2e /
-   repro_tmp.rs / agnes-v2 删除候选；无执行阻塞。
+   无执行阻塞。
 6. 提交：`fdefbd9`（不 push，是否推送由用户决定）。
 
 ## 遗留（如实）
 - Tauri 壳（P1）与桌面后续页面（P3/P4）未做，BLOCKED 已记。
-- `repro_tmp.rs` 为用户调试文件，保留未提交；`obs-comp-d-combined-agnes-v2.png`
-  为被否决稿备份（删除候选，未确认不删）。
+- `repro_tmp.rs`（临时复现测试）与 `obs-comp-d-combined-agnes-v2.png`（被否决稿
+  备份）已按用户确认清除；前者移入废纸篓，后者经 git 历史可恢复。
 - 风险标签缺少 agent 集成级“responder 收到前缀”断言（R2，记录接受）。
 - 未跑 `make audit`（cargo-deny 未预装时目标会提示；本轮以 `make check` 为验收）。

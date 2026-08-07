@@ -40,8 +40,6 @@ mod commands;
 pub mod input;
 mod model;
 mod render;
-#[cfg(test)]
-mod repro_tmp;
 mod theme;
 
 use std::path::PathBuf;

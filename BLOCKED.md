@@ -12,10 +12,10 @@
 - **Logo/应用图标**：无现存资产，实现期先用文字标。
 - **风险标签接线端到端测试**：`responder.request` 收到带 `[风险:…]` 前缀描述
   的 agent 集成断言未补（本轮有纯函数 + 权限分类 + TUI 渲染测试覆盖）。
-- **`crates/deepseeknova-tui/src/repro_tmp.rs`**：未跟踪的用户调试文件，非本轮
-  产物，保留不提交；是否删除由用户决定。
-- **`.impeccable/mocks/obs-comp-d-combined-agnes-v2.png`**：被否决的 Agnes 文生图
-  备份，删除候选（未确认前不删）。
+- ~~`crates/deepseeknova-tui/src/repro_tmp.rs`~~（2026-08-07 已清：临时复现测试，
+  文件头注明“用完即删”，已移入废纸篓并移除 `mod repro_tmp;`）
+- ~~`.impeccable/mocks/obs-comp-d-combined-agnes-v2.png`~~（2026-08-07 已清：
+  被否决的 Agnes 文生图备份，git rm 可经历史恢复）
 
 ### 执行阻塞
 - 无（本轮无阻塞；全量验证以 `make check` EXIT=0 为准）。
