@@ -658,7 +658,15 @@ mod tests {
 
     #[test]
     fn uri_from_workspace_path_is_file_scheme() {
-        let uri = uri_from_path(Path::new("/tmp/ws/src/main.rs")).unwrap();
+        // 用平台真实的临时路径：硬编码 POSIX 路径（如 `/tmp/ws/...`）在
+        // Windows 上不是有效绝对路径（无盘符），`Url::from_file_path`
+        // 返回 Err 导致测试失败。URI 序列化统一用正斜杠，故结尾断言
+        // `src/main.rs` 跨平台成立。
+        let ws = std::env::temp_dir()
+            .join("dnv-lsp-uri-test")
+            .join("src")
+            .join("main.rs");
+        let uri = uri_from_path(&ws).unwrap();
         assert!(uri.starts_with("file:///"));
         assert!(uri.ends_with("src/main.rs"));
     }
