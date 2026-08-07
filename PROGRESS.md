@@ -107,6 +107,21 @@
   doc 链接警告）。
 - **状态**：待提交。
 
+## 并行优化第八批（2026-08-08，功能接线串联轮）
+
+- **子代理递归装配（P1-5 遗留）**：`[delegate] allow_recursion` + `max_depth`
+  （默认 3）；`build_sub_agent_runner` 装配 RecursiveDelegateTool +
+  set_delegation_sink（SubAgentRunner 增 Clone，克隆体共享 sink 槽）；默认
+  false 保持禁递归。engine 路径递归深度传播待 Agent 主循环注入
+  DelegateDepth（已知后续）。
+- **graph 语义检索接线（P2-2 遗留）**：runtime 从 `[memory] embedder="remote"`
+  复用 RemoteEmbedder 喂 `GraphIndex::open_with_embedder`，fail-open 回落 FTS。
+- **i18n CLI 接线**：`[ui] lang`（en/zh 及别名）→ `TuiRunner::with_lang`，
+  优先于 `DEEPSEEKNOVA_LANG` env。
+- **验证**：`make check` EXIT=0（修 fmt 签名格式、UiConfig derivable_impls、
+  2 处 DelegateConfig 字面量补新字段）。
+- **状态**：待提交。
+
 ## 日常体验包 + 审查修复（2026-08-07，非任务书轮）
 
 - 功能：web_search（ddg / tavily / bing / searxng）、lsp_diagnostics（写后

@@ -81,6 +81,11 @@ pub struct Config {
     #[serde(default)]
     pub metrics: MetricsConfig,
 
+    /// 界面语言（TUI/桌面）：`"en"` 默认 / `"zh"` 中文。缺省读取
+    /// `DEEPSEEKNOVA_LANG` 环境变量。
+    #[serde(default)]
+    pub ui: UiConfig,
+
     /// Role-based model pointers (main/task/compact/quick).
     #[serde(default)]
     pub model_pointers: ModelPointersConfig,
@@ -682,6 +687,15 @@ pub struct DelegateConfig {
     /// 预设覆盖/新增（按 name 匹配内置预设覆盖其字段；未匹配则新增）。
     #[serde(default)]
     pub agents: Vec<DelegateAgentOverride>,
+    /// 允许子代理再派子代理（递归委派）。默认 false（保持既有禁递归现状）。
+    /// 开启后 coordinator 子代理（SubAgentRunner 路径）可递归派发，深度受
+    /// `max_depth` 约束，超深优雅降级。主 agent 的 delegate 引擎路径递归
+    /// 深度传播仍依赖后续 Agent 主循环注入 `DelegateDepth`（见 P1-5 遗留）。
+    #[serde(default)]
+    pub allow_recursion: bool,
+    /// 递归深度上限（`allow_recursion = true` 时生效；默认 3）。
+    #[serde(default = "default_delegate_max_depth")]
+    pub max_depth: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -712,6 +726,9 @@ fn default_delegate_concurrency() -> usize {
 fn default_delegate_output_cap() -> usize {
     2000
 }
+fn default_delegate_max_depth() -> usize {
+    3
+}
 
 impl Default for DelegateConfig {
     fn default() -> Self {
@@ -720,6 +737,8 @@ impl Default for DelegateConfig {
             max_concurrent: 2,
             output_cap_tokens: 2000,
             agents: Vec::new(),
+            allow_recursion: false,
+            max_depth: 3,
         }
     }
 }
@@ -1262,6 +1281,15 @@ impl Default for MetricsConfig {
 // ---------------------------------------------------------------------------
 // Session（长任务会话持久化）
 // ---------------------------------------------------------------------------
+
+/// 界面语言配置（TUI/桌面共享词表的语言选择）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UiConfig {
+    /// 界面语言代码：`en`（默认）/ `zh`（也接受 `zh-cn`/`cn`/`中文` 别名）。
+    /// `None` 时回退 `DEEPSEEKNOVA_LANG` 环境变量（缺省英文）。
+    #[serde(default)]
+    pub lang: Option<String>,
+}
 
 /// Session persistence configuration (long-task resume).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2742,6 +2770,8 @@ mod tests {
                         value: "src/lib.rs".into(),
                     }]),
                 }],
+                allow_recursion: false,
+                max_depth: 3,
             },
             ..Default::default()
         };
@@ -2775,6 +2805,8 @@ mod tests {
                     max_steps: None,
                     inputs: None,
                 }],
+                allow_recursion: false,
+                max_depth: 3,
             },
             ..Default::default()
         };

@@ -523,7 +523,24 @@ All notable changes to DeepseekNova will be documented in this file.
   写入即嵌入（节点 name/signature/doc），SCHEMA 增量加 `node_embeddings`
   表**不 bump 版本**（旧索引零破坏），按行记 model 防跨模型向量空间污染。
   `GraphIndex::open_with_embedder`/`search_hybrid[_with_weight|_breakdown]`。
-  运行时装配（从 memory config 构造 embedder 喂给 graph）待父级后续轮。
+  runtime 已从 memory config 接线（`try_memory_embedder`）。
+
+---
+
+### Added（并行优化第八批，2026-08-08，功能接线串联轮）
+
+- **子代理递归装配（P1-5 遗留）**：`[delegate] allow_recursion = true` +
+  `max_depth`（默认 3）开启 coordinator 子代理递归委派——runtime
+  `build_sub_agent_runner` 装配 `RecursiveDelegateTool`（深度守门）并
+  `set_delegation_sink`（`SubAgentRunner` 增 `Clone`，克隆体共享 sink 槽）；
+  默认 false 完全保持既有禁递归行为。主 agent delegate 引擎路径递归深度
+  传播仍待 Agent 主循环注入 `DelegateDepth`（已知后续项）。
+- **graph 语义检索接线（P2-2 遗留）**：runtime 打开代码图索引时从
+  `[memory] embedder = "remote"` 复用 `RemoteEmbedder` 喂给
+  `GraphIndex::open_with_embedder`；缺 key/网络错 fail-open 回落纯 FTS。
+- **界面语言配置（i18n CLI 接线）**：新增 `[ui] lang = "en" | "zh"`（接受
+  `zh-cn`/`cn`/`中文` 别名），CLI 优先于 `DEEPSEEKNOVA_LANG` 环境变量接线到
+  `TuiRunner::with_lang`；两者皆缺省为英文。
 
 ## [0.4.0] — 2026-07-19
 

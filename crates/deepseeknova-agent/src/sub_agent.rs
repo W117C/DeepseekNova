@@ -156,6 +156,11 @@ impl SubAgentConfig {
 ///
 /// If no `sub_agent:` prefix is found, the runner dispatches to a
 /// default sub-agent named `"default"` if one is registered.
+///
+/// `Clone` 为运行时递归接线提供：`runner.clone()` 与 `delegation_sink` 槽共享
+/// 同一 `Arc<Mutex>`，故 `set_delegation_sink(Arc::new(runner.clone()))` 后
+/// 原 runner 与克隆体可互相递归派发。
+#[derive(Clone)]
 pub struct SubAgentRunner {
     provider: Arc<dyn Provider>,
     /// Provider used for history compaction; falls back to `provider`.

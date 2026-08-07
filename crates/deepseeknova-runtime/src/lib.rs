@@ -502,7 +502,16 @@ pub fn build_agent_with_role_providers(
     // stalls build_agent's return or the tokio worker pool. A refresh failure
     // only warns — the agent still runs, graph tools just degrade gracefully.
     if config.graph.enabled {
-        match deepseeknova_graph::GraphIndex::open(&workspace_root, config.graph.max_file_size) {
+        // P2-2 语义检索接线：复用记忆侧 embedder（`[memory] embedder = "remote"`）。
+        // 缺 key/网络错 fail-open 回落纯 FTS（try_memory_embedder 返回 None 时
+        // open_with_embedder 等价 open）。
+        let embedder = deepseeknova_provider::embeddings::try_memory_embedder(&config.memory);
+        match deepseeknova_graph::GraphIndex::open_with_embedder(
+            &workspace_root,
+            config.graph.max_file_size,
+            embedder,
+            "graph-embed",
+        ) {
             Ok(index) => {
                 let handle: deepseeknova_tools::GraphHandle =
                     Arc::new(std::sync::Mutex::new(index));
@@ -1942,16 +1951,33 @@ pub fn build_sub_agent_runner(
     };
 
     let mut runner = deepseeknova_agent::SubAgentRunner::new(task_provider);
+    let allow_recursion = config.delegate.allow_recursion;
+    let max_depth = config.delegate.max_depth.max(1);
     for p in merged_delegate_presets(config) {
-        // 禁递归：即便配置误加 "delegate" 也剔除。
-        let sub_tools: Vec<Arc<dyn Tool>> = base
-            .iter()
-            .filter(|t| {
-                let n = t.schema().name;
-                n != "delegate" && p.spec.tools.iter().any(|allow| allow == &n)
-            })
-            .cloned()
-            .collect();
+        let sub_tools: Vec<Arc<dyn Tool>> = if allow_recursion {
+            // 递归开启：子代理可再派子代理（RecursiveDelegateTool 自带深度守门）。
+            let mut tools: Vec<Arc<dyn Tool>> = base
+                .iter()
+                .filter(|t| {
+                    let n = t.schema().name;
+                    p.spec.tools.iter().any(|allow| allow == &n)
+                })
+                .cloned()
+                .collect();
+            tools.push(Arc::new(deepseeknova_agent::RecursiveDelegateTool::new(
+                max_depth,
+            )));
+            tools
+        } else {
+            // 禁递归（默认）：即便配置误加 "delegate" 也剔除。
+            base.iter()
+                .filter(|t| {
+                    let n = t.schema().name;
+                    n != "delegate" && p.spec.tools.iter().any(|allow| allow == &n)
+                })
+                .cloned()
+                .collect()
+        };
         runner.register(
             deepseeknova_agent::SubAgentConfig::new(p.name.clone(), p.system_prompt.clone())
                 // P2 修复：把预设的任务书（含 inputs 声明与 task 模板）接入
@@ -1965,6 +1991,10 @@ pub fn build_sub_agent_runner(
                 .with_max_steps(p.spec.max_steps)
                 .with_config_inputs(p.config_inputs.clone()),
         );
+    }
+    if allow_recursion {
+        // 装配递归派发出口：子代理再派子代理时经本 runner 自身（深度守门）。
+        runner.set_delegation_sink(Arc::new(runner.clone()));
     }
     if let Some(threshold) = derive_compaction_threshold(config) {
         runner = runner.with_compaction_threshold(threshold);

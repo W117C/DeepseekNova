@@ -646,6 +646,11 @@ async fn main() -> anyhow::Result<()> {
                     )))
                     .with_workspace_root(workspace_root)
                     .with_project_rule_count(config.permissions.rules.len());
+                // 界面语言：`[ui] lang` 配置优先，缺省回退 `DEEPSEEKNOVA_LANG` 环境
+                // 变量（TUI 内部 `Lang::from_env`），两者皆缺省为英文。
+                if let Some(lang) = resolve_ui_lang(&config) {
+                    tui = tui.with_lang(lang);
+                }
                 // @ 文件补全候选：工作区文件清单（GUIDE 声称"由 CLI 注入"）。
                 tui = tui.with_at_files(collect_at_files());
                 tui.run().await?;
@@ -1206,6 +1211,17 @@ async fn main() -> anyhow::Result<()> {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// 解析界面语言：`[ui] lang` 配置优先（`en`/`zh` 及别名），`None` 回退
+/// 环境变量路径（TUI 内部 `Lang::from_env` 已读 `DEEPSEEKNOVA_LANG`）。
+fn resolve_ui_lang(config: &deepseeknova_config::Config) -> Option<deepseeknova_tui::i18n::Lang> {
+    let raw = config.ui.lang.as_ref()?;
+    let norm = raw.trim().to_ascii_lowercase().replace('-', "_");
+    Some(match norm.as_str() {
+        "zh" | "zh_cn" | "cn" | "chinese" | "中文" => deepseeknova_tui::i18n::Lang::Zh,
+        _ => deepseeknova_tui::i18n::Lang::En,
+    })
+}
 
 /// 收集工作区文件路径，供 TUI 的 `@` 文件补全注入候选。
 ///

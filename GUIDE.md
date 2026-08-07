@@ -294,6 +294,8 @@ explore_code）对执行器可用，只读工具对规划器开放；`[graph] en
 enabled = true                     # false = 不注册 delegate 工具
 max_concurrent = 2                 # 并发子代理上限，满员排队
 output_cap_tokens = 2000           # 回传摘要 token 上限
+allow_recursion = false            # 允许子代理再派子代理（coordinator 子代理递归）
+max_depth = 3                      # 递归深度上限（allow_recursion=true 时生效）
 
 [[delegate.agents]]
 name = "coder"
@@ -304,6 +306,10 @@ tools = ["read_file", "write_file", "edit_file", "bash"]
 name = "path"
 value = "src/lib.rs"
 ```
+
+> `allow_recursion = true` 开启后，coordinator 子代理可再派子代理，深度受
+> `max_depth` 约束、超深优雅降级。主 agent 的 delegate 工具路径递归仍待
+> 后续轮（深度传播需 Agent 主循环注入）。
 
 ### 失败归因重试（`[attribution]`）
 
@@ -502,6 +508,21 @@ stage / recency，权重 `rank_lifecycle_weight`，=0 时与纯 bm25 等价）�
 但同义的记忆；缺 key、网络错或解析错一律 fail-open（warn 日志 + 回落纯 FTS）。
 旧记忆用 `deepseeknova-cli memory embed-backfill` 显式回填（跳过 archived）；
 `memory stats` 输出 `embedded=N/total=M` 显示覆盖率。
+
+**代码图语义检索（可选）**：同一 `embedder = "remote"` 生效后，代码图索引
+（`search_code` 等图工具）自动启用语义检索（写入即嵌入 + `w*bm25 +
+(1-w)*余弦` 融合，默认 w=0.5）；缺 key/网络错 fail-open 回落纯 FTS。旧索引
+无需重建（SCHEMA 增量加向量表，打开即迁移）。
+
+### 界面语言（`[ui]`）
+
+```toml
+[ui]
+lang = "en"   # en（默认）| zh（接受 zh-cn/cn/中文 别名）
+```
+
+`lang` 缺省回退 `DEEPSEEKNOVA_LANG` 环境变量（`zh`/`zh-cn`/`cn`/`中文` →
+中文，其余/缺省 → 英文），两者皆缺省为英文。TUI 与桌面共享同一词表结构。
 
 **记忆用户面（CLI）**：除 agent 的 `remember`/`recall`/`forget` 工具外，可用
 `deepseeknova-cli memory` 直接浏览与管理记忆库：
