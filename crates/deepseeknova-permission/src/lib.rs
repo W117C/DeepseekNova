@@ -510,6 +510,25 @@ impl PermissionGate {
         }
     }
 
+    /// shell 工具的只读分类查询（additive API）。
+    ///
+    /// 返回 `ReadOnlyKind`（只读 / 非只读 / 危险），供 agent Ask 审批路径
+    /// 生成风险标签；非 shell 工具或参数无法解析命令时返回 `None`。
+    /// 与 [`PermissionGate::check`] 内部使用的分类器同源，不重复判定逻辑。
+    pub fn shell_readonly_kind(
+        &self,
+        tool_name: &str,
+        args: &str,
+    ) -> Option<deepseeknova_security::readonly::ReadOnlyKind> {
+        use deepseeknova_security::readonly::classify_readonly;
+        if !is_shell_tool(tool_name) {
+            return None;
+        }
+        let args_value: Value = serde_json::from_str(args).ok()?;
+        let cmd = extract_command(&args_value)?;
+        Some(classify_readonly(&cmd))
+    }
+
     /// Clear the session cache (e.g., on new session).
     pub fn clear_cache(&self) {
         if let Ok(mut cache) = self.session_cache.lock() {
@@ -1201,6 +1220,34 @@ mod tests {
         // 非只读命令仍走策略（Ask）
         let v = gate.check(&tool, r#"{"command": "rm -rf /tmp/x"}"#);
         assert_eq!(v.decision(), Decision::Ask);
+    }
+
+    #[test]
+    fn shell_readonly_kind_exposes_classification_for_approval_risk_label() {
+        use deepseeknova_security::readonly::ReadOnlyKind;
+        let gate = allow_all_gate();
+        // 只读 / 非只读 / 危险三态
+        assert_eq!(
+            gate.shell_readonly_kind("bash", r#"{"command": "git status"}"#),
+            Some(ReadOnlyKind::ReadOnly)
+        );
+        assert_eq!(
+            gate.shell_readonly_kind("Bash", r#"{"command": "rm -rf /tmp/x"}"#),
+            Some(ReadOnlyKind::NotReadOnly)
+        );
+        assert_eq!(
+            gate.shell_readonly_kind(
+                "shell",
+                r#"{"command": "git -c core.pager='sh -x' status"}"#
+            ),
+            Some(ReadOnlyKind::Dangerous)
+        );
+        // 非 shell 工具 / 不可解析参数 → None
+        assert_eq!(
+            gate.shell_readonly_kind("grep", r#"{"command": "x"}"#),
+            None
+        );
+        assert_eq!(gate.shell_readonly_kind("bash", "not-json"), None);
     }
 
     #[test]

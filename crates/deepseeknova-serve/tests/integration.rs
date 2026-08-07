@@ -763,3 +763,367 @@ async fn scorecard_endpoint_rejects_encoded_path_traversal() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------
+// Multi-turn session endpoints (real Server router)
+// ---------------------------------------------------------------------------
+
+/// Start the real server router (no metrics/runs) on an ephemeral port, with
+/// the given session manager and optional auth token.
+async fn start_sessions_server(
+    manager: Option<Arc<deepseeknova_serve::SessionManager>>,
+    token: Option<String>,
+) -> u16 {
+    let runner: Arc<dyn Runner> = Arc::new(ServeMockRunner);
+    let mut server = Server::new(runner);
+    if let Some(manager) = manager {
+        server = server.with_sessions(manager);
+    }
+    server = server.with_auth_token(token);
+    let app = server.into_router();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    addr
+}
+
+/// A session manager whose factory returns the canned mock runner.
+fn mock_sessions_manager(dir: &std::path::Path) -> Arc<deepseeknova_serve::SessionManager> {
+    let factory: deepseeknova_serve::SessionRunnerFactory =
+        Arc::new(|_history| Ok(Arc::new(ServeMockRunner) as Arc<dyn Runner>));
+    Arc::new(deepseeknova_serve::SessionManager::open(dir.to_path_buf(), factory).unwrap())
+}
+
+#[tokio::test]
+async fn sessions_endpoints_disabled_without_manager() {
+    let port = start_sessions_server(None, None).await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let client = helpers::http::localhost_client();
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/v1/sessions"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn sessions_crud_create_list_history_delete() {
+    let dir = tempfile::tempdir().unwrap();
+    let port = start_sessions_server(Some(mock_sessions_manager(dir.path())), None).await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let client = helpers::http::localhost_client();
+
+    // 初始为空列表。
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/v1/sessions"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let list: Vec<Value> = resp.json().await.unwrap();
+    assert!(list.is_empty(), "fresh store must list no sessions");
+
+    // 创建两个会话，返回 id。
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let resp = client
+            .post(format!("http://127.0.0.1:{port}/v1/sessions"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body: Value = resp.json().await.unwrap();
+        let id = body["id"].as_str().unwrap().to_string();
+        assert!(!id.is_empty());
+        ids.push(id);
+    }
+    assert_ne!(ids[0], ids[1], "two creates must yield distinct ids");
+
+    // 列表返回两个 summary（新会话 0 回合、无标题）。
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/v1/sessions"))
+        .send()
+        .await
+        .unwrap();
+    let list: Vec<Value> = resp.json().await.unwrap();
+    assert_eq!(list.len(), 2);
+    for s in &list {
+        assert_eq!(s["turns"], 0);
+    }
+
+    // 历史为空数组。
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/v1/sessions/{}", ids[0]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let turns: Vec<Value> = resp.json().await.unwrap();
+    assert!(turns.is_empty());
+
+    // 删除 → 列表只剩一个；重复删除 → 404。
+    let resp = client
+        .delete(format!("http://127.0.0.1:{port}/v1/sessions/{}", ids[0]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let resp = client
+        .delete(format!("http://127.0.0.1:{port}/v1/sessions/{}", ids[0]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+
+    // 未知会话的历史 → 404。
+    let resp = client
+        .get(format!(
+            "http://127.0.0.1:{port}/v1/sessions/does-not-exist"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn sessions_chat_streams_and_persists_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = mock_sessions_manager(dir.path());
+    let port = start_sessions_server(Some(manager.clone()), None).await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let client = helpers::http::localhost_client();
+
+    // 创建会话。
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/v1/sessions"))
+        .send()
+        .await
+        .unwrap();
+    let id: String = resp.json::<Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // 发一回合：mock runner 产出 text + done。
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/v1/sessions/{id}/chat"))
+        .json(&ChatRequest {
+            prompt: "hello session".to_string(),
+            images: None,
+            model: None,
+        })
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("event: done"),
+        "SSE must carry a done event: {body}"
+    );
+
+    // 历史已落盘：1 回合，用户 prompt + 助手最终正文。
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/v1/sessions/{id}"))
+        .send()
+        .await
+        .unwrap();
+    let turns: Vec<Value> = resp.json().await.unwrap();
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0]["input"]["prompt"], "hello session");
+    assert_eq!(turns[0]["output"]["text"], "Hello World");
+
+    // 列表 summary 反映回合数。
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/v1/sessions"))
+        .send()
+        .await
+        .unwrap();
+    let list: Vec<Value> = resp.json().await.unwrap();
+    assert_eq!(list[0]["turns"], 1);
+    assert_eq!(list[0]["title"], "hello session");
+}
+
+#[tokio::test]
+async fn sessions_chat_validates_and_404s() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = mock_sessions_manager(dir.path());
+    let port = start_sessions_server(Some(manager.clone()), None).await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let client = helpers::http::localhost_client();
+
+    // 未知会话 → 404。
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/v1/sessions/nope/chat"))
+        .json(&ChatRequest {
+            prompt: "hi".to_string(),
+            images: None,
+            model: None,
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+
+    // 空 prompt → 400。
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/v1/sessions/anything/chat"))
+        .json(&ChatRequest {
+            prompt: "   ".to_string(),
+            images: None,
+            model: None,
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn sessions_chat_busy_returns_conflict() {
+    // 阻塞型 runner：持有 channel，直到测试放行。
+    struct BlockingRunner(tokio::sync::mpsc::UnboundedSender<()>);
+    #[async_trait::async_trait]
+    impl Runner for BlockingRunner {
+        async fn run_stream(&self, _input: RunInput) -> anyhow::Result<RunEventStream> {
+            let _ = self.0.send(());
+            // 挂起直到测试结束（oneshot 永不完成）。
+            let (_tx, rx) = tokio::sync::oneshot::channel::<()>();
+            let _ = rx.await;
+            unreachable!()
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let (release_tx, _release_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let blocking_runner = Arc::new(BlockingRunner(release_tx));
+    let factory: deepseeknova_serve::SessionRunnerFactory =
+        Arc::new(move |_history| Ok(Arc::clone(&blocking_runner) as Arc<dyn Runner>));
+    let manager = Arc::new(
+        deepseeknova_serve::SessionManager::open(dir.path().to_path_buf(), factory).unwrap(),
+    );
+    let port = start_sessions_server(Some(manager.clone()), None).await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let client = helpers::http::localhost_client();
+
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/v1/sessions"))
+        .send()
+        .await
+        .unwrap();
+    let id: String = resp.json::<Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // 第一发挂起（占用 busy）。
+    let first = tokio::spawn({
+        let client = client.clone();
+        let url = format!("http://127.0.0.1:{port}/v1/sessions/{id}/chat");
+        async move {
+            client
+                .post(&url)
+                .json(&ChatRequest {
+                    prompt: "first".to_string(),
+                    images: None,
+                    model: None,
+                })
+                .send()
+                .await
+                .unwrap()
+        }
+    });
+
+    // 等第一发进入 run_stream。
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // 第二发 → 409。
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/v1/sessions/{id}/chat"))
+        .json(&ChatRequest {
+            prompt: "second".to_string(),
+            images: None,
+            model: None,
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::CONFLICT);
+
+    // 释放挂起连接，避免泄漏。
+    first.abort();
+}
+
+#[tokio::test]
+async fn auth_token_guards_v1_but_not_health() {
+    let dir = tempfile::tempdir().unwrap();
+    let port = start_sessions_server(
+        Some(mock_sessions_manager(dir.path())),
+        Some("sekret".to_string()),
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let client = helpers::http::localhost_client();
+
+    // 无 token → 401。
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/v1/sessions"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // 错误 token → 401。
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/v1/sessions"))
+        .bearer_auth("wrong")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // 正确 token → 200。
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/v1/sessions"))
+        .bearer_auth("sekret")
+        .send()
+        .await
+        .unwrap();
+    if resp.status() != reqwest::StatusCode::OK {
+        panic!(
+            "auth GET failed: {} {:?}",
+            resp.status(),
+            resp.text().await.unwrap()
+        );
+    }
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    // 写路径同样受保护。
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/v1/sessions"))
+        .bearer_auth("sekret")
+        .send()
+        .await
+        .unwrap();
+    if resp.status() != reqwest::StatusCode::OK {
+        panic!(
+            "auth POST failed: {} {:?}",
+            resp.status(),
+            resp.text().await.unwrap()
+        );
+    }
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    // /health 免认证。
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/health"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+}

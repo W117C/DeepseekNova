@@ -142,6 +142,20 @@ impl SessionStore {
         Ok(self.len(session_id)? == 0)
     }
 
+    /// Create the session file if it does not exist yet (a zero-turn session),
+    /// so it shows up in [`SessionStore::list_sessions`] before the first turn
+    /// is appended. Existing files are left untouched.
+    ///
+    /// 注意：`session_id` 由调用方保证可信（本 crate 不做白名单校验）；暴露给
+    /// 外部输入的调用点（如 HTTP 端点）必须先做 id 白名单过滤再传入。
+    pub fn touch(&self, session_id: &str) -> anyhow::Result<()> {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.session_path(session_id))?;
+        Ok(())
+    }
+
     /// Delete a session file.
     pub fn delete(&self, session_id: &str) -> anyhow::Result<()> {
         let path = self.session_path(session_id);
@@ -164,6 +178,35 @@ impl SessionStore {
             }
         }
         Ok(sessions)
+    }
+
+    /// List sessions with display metadata (turn count, first prompt as
+    /// title, file mtime), newest first. Reads every session file in full;
+    /// intended for local stores with a modest number of sessions.
+    pub fn list_summaries(&self) -> anyhow::Result<Vec<SessionSummary>> {
+        let mut summaries = Vec::new();
+        for id in self.list_sessions()? {
+            let path = self.session_path(&id);
+            let updated_at_ms = std::fs::metadata(&path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            // 单个损坏文件不应让整个列表失败：解析失败按零回合会话展示。
+            let turns = self.load(&id).unwrap_or_default();
+            let title = turns
+                .first()
+                .map(|t| t.input.prompt.chars().take(80).collect::<String>());
+            summaries.push(SessionSummary {
+                id,
+                turns: turns.len(),
+                updated_at_ms,
+                title,
+            });
+        }
+        summaries.sort_by_key(|s| std::cmp::Reverse(s.updated_at_ms));
+        Ok(summaries)
     }
 
     /// Get the last N turns from a session.
@@ -202,6 +245,20 @@ impl SessionStore {
                 .collect(),
         }
     }
+}
+
+/// Display metadata for one stored session, see [`SessionStore::list_summaries`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSummary {
+    /// Session id (filename stem).
+    pub id: String,
+    /// Number of persisted turns.
+    pub turns: usize,
+    /// File modification time in Unix milliseconds (0 when unavailable).
+    pub updated_at_ms: u64,
+    /// First turn's prompt truncated to 80 chars; `None` for empty sessions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 /// Generate a fresh chat session id of the form `chat-YYYYMMDD-HHMMSS` (UTC).
@@ -527,6 +584,50 @@ mod tests {
         assert!(sm.reasoning_content.is_none());
         let m: Message = (&sm).into();
         assert!(m.tool_calls.is_none());
+    }
+
+    #[test]
+    fn touch_creates_listable_empty_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf()).unwrap();
+
+        store.touch("chat-empty").unwrap();
+        assert!(store
+            .list_sessions()
+            .unwrap()
+            .contains(&"chat-empty".to_string()));
+        assert!(store.load("chat-empty").unwrap().is_empty());
+
+        // touch 已有会话不得清空内容。
+        let turn = SessionStore::build_turn(&sample_input(), 1, vec![], None);
+        store.append("chat-empty", &turn).unwrap();
+        store.touch("chat-empty").unwrap();
+        assert_eq!(store.load("chat-empty").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn list_summaries_reports_title_turns_and_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf()).unwrap();
+
+        store.touch("chat-a").unwrap();
+        let input = RunInput {
+            prompt: "第一轮的提问内容".to_string(),
+            images: vec![],
+            model_override: None,
+        };
+        let turn = SessionStore::build_turn(&input, 1, vec![], None);
+        store.append("chat-b", &turn).unwrap();
+
+        let summaries = store.list_summaries().unwrap();
+        assert_eq!(summaries.len(), 2);
+        let a = summaries.iter().find(|s| s.id == "chat-a").unwrap();
+        assert_eq!(a.turns, 0);
+        assert!(a.title.is_none());
+        let b = summaries.iter().find(|s| s.id == "chat-b").unwrap();
+        assert_eq!(b.turns, 1);
+        assert_eq!(b.title.as_deref(), Some("第一轮的提问内容"));
+        assert!(b.updated_at_ms > 0);
     }
 
     #[test]

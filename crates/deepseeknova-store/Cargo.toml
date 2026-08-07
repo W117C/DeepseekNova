@@ -19,3 +19,4 @@ deepseeknova-core = { workspace = true }
 
 [dev-dependencies]
 deepseeknova-context = { workspace = true }
+tempfile = { workspace = true }

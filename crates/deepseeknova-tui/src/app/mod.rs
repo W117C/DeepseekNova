@@ -104,21 +104,43 @@ pub async fn run_loop(
     let mut last_keymap_check = std::time::Instant::now();
     let mut sessions_refreshing = false;
     let mut last_sessions_refresh = std::time::Instant::now() - std::time::Duration::from_secs(10);
+    // 鼠标捕获初始态：与 AppState 当前值保持一致（生产路径 lib.rs run()
+    // 启动时已 EnableMouseCapture 并注入 true）。
+    let mut last_mouse_capture = app.mouse_capture;
 
     loop {
-        // 状态栏常驻成本与上下文占用：每帧从 router ledger 取会话累计值。
+        // 临时命令反馈超时自动清除（不进入对话面板永久 echo）。
+        if app.notice_expired() {
+            app.notice = None;
+        }
+        // Ctrl+T 切换鼠标捕获：状态变化时同步终端模式（滚轮滚动对话 vs
+        // 鼠标选中复制文本）。
+        if app.mouse_capture != last_mouse_capture {
+            last_mouse_capture = app.mouse_capture;
+            if app.mouse_capture {
+                let _ =
+                    crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture);
+            } else {
+                let _ =
+                    crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
+            }
+        }
+        // 状态栏常驻成本与上下文占用：成本仍取 router ledger 会话累计值；
+        // 上下文占用取最近一次请求的实际占用（usage.prompt_tokens 即本次
+        // 实际发送的输入，含历史重发与 cache hit；completion 含推理输出）。
+        // 与 Claude Code 等工具口径一致：显示当前窗口放了多少，而不是会话
+        // 累计消耗——累计值只增不减，聊几句就"爆"，且 compaction 后不回落。
         if let Some(r) = &caps.runtime.lock().unwrap().router {
             let report = r.ledger().report(&r.price_table());
             app.total_cost_usd = report.total_usd;
-            // 上下文占用分子 = 会话累计 prompt + completion（含 cache 输入，
-            // 输出也占窗口）；分母来自 config 注入。compaction 后 ledger 不减，
-            // 占用率偏保守（显示偏高），属已知口径。
-            let used: u64 = report
-                .rows
-                .iter()
-                .map(|row| row.bucket.prompt_tokens + row.bucket.completion_tokens)
-                .sum();
-            app.context_usage = caps.context_window.map(|w| (used, w as u64));
+            app.context_usage = app.usage.as_ref().and_then(|u| {
+                caps.context_window.map(|w| {
+                    (
+                        u64::from(u.prompt_tokens) + u64::from(u.completion_tokens),
+                        w as u64,
+                    )
+                })
+            });
         }
         terminal.draw(|f| app.draw(f))?;
 
@@ -398,7 +420,7 @@ async fn handle_command(app: &mut AppState, caps: &TuiCaps, cmd: &str) -> bool {
             command.handler.run(&mut ctx, args).await == CommandOutcome::Quit
         }
         None => {
-            app.echo_line(LineKind::Error, &format!("未知命令: /{name}（/help 查看）"));
+            app.show_notice(format!("未知命令: /{name}（/help 查看）"));
             false
         }
     }
@@ -490,7 +512,10 @@ mod tests {
         rt.block_on(async {
             let quit = handle_command(&mut app, &caps, "wat").await;
             assert!(!quit);
-            assert!(app.echo.iter().any(|l| l.text.contains("未知命令")));
+            assert!(app
+                .notice
+                .as_ref()
+                .is_some_and(|(t, _)| t.contains("未知命令")));
         });
     }
 }

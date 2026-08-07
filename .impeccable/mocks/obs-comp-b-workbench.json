@@ -1,0 +1,9 @@
+{
+  "approved": true,
+  "approved_at": "2026-08-07",
+  "approval": "用户在观测台构图轮选定 B（观测工作台）作为桌面端主窗口北极星，并同轮选定 A（观测日志）作为观测日志视图（全部 runs 归档/日志页）的构图（见 obs-comp-a-log.png）；C（红光联锁焦点版）落选——C 的整卡红光语法被否决，审批卡按克制的危险语义（细红边框 + 风险标签）在世界内设计。",
+  "world": "Nova Observatory 新星观测台",
+  "surface": "desktop main window (first viewport)",
+  "structure": "观测工作台拓扑（继承已废止 canon 构图 C 的信息架构）：左侧观测日志会话栏 + 顶部观测之夜 runs 条带 + 中央划线对话流 + 右侧双图框面板（本次观测＝run 事件星座图；测光·评分卡＝六维光度表）",
+  "prompt": "High-fidelity dark-mode desktop UI mockup, landscape. AI coding agent WORKBENCH as astronomical observatory: run telemetry as star constellation chart, quality scores as photometry table. World: night #0B1020, subtle graticule hairlines, thin 1px rounded chart frames, ink #EDF1FB, accent #4D6BFE, amber #E8A33D annotations, flat matte, no glow, tabular typography. Layout: (1) left sidebar one-fifth: DeepseekNova, indigo 新会话 button, night-grouped observation log with magnitude star dots. (2) observing-nights strip on top: chips green ✓ 已完成 / amber ⏸ 已中断 ↻ / indigo ● 运行中, link 全部 runs →. (3) center: ruled observation chat stream with ▸ 推理过程 row and tool table row; thin rounded composer with ❯ and model chip. (4) right panel one-quarter, two chart-frame boxes: 本次观测 = run events as indigo constellation path over faint graticule with tiny monospace node labels; 测光·评分卡 = six-row photometry table 治理/验证/反思/审查/协议/综合 with thin indigo bars and monospace scores, 综合 emphasized."
+}

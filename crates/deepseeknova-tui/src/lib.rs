@@ -40,6 +40,8 @@ mod commands;
 pub mod input;
 mod model;
 mod render;
+#[cfg(test)]
+mod repro_tmp;
 mod theme;
 
 use std::path::PathBuf;
@@ -262,6 +264,8 @@ impl TuiRunner {
             at_files: self.at_files.clone(),
             ..Default::default()
         };
+        // 与上方 EnableMouseCapture 保持一致：鼠标捕获默认开启。
+        app.mouse_capture = true;
         // 用户键位定制（keybindings.json）：启动时加载，事件循环轮询热重载。
         app.keymap_path = crate::app::keybindings::Keymap::default_path();
         app.keymap = crate::app::keybindings::Keymap::load(&app.keymap_path);

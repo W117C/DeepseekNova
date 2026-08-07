@@ -10,7 +10,7 @@ fn default_config_roundtrip() {
     let toml_str = toml::to_string(&cfg).unwrap();
     let parsed: Config = toml::from_str(&toml_str).unwrap();
     assert!(parsed.default_model.is_none());
-    assert_eq!(parsed.agent.max_steps, 10);
+    assert_eq!(parsed.agent.max_steps, 25);
 }
 
 #[test]

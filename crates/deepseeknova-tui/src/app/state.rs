@@ -19,6 +19,9 @@ use crate::model::conversation::{Conversation, SegId};
 /// 回显通道的行上限（命令反馈滚动，防无界增长）。
 const MAX_ECHO: usize = 500;
 
+/// 临时命令反馈（状态变更类命令）在状态行上方的存活时长。
+pub const NOTICE_TTL: std::time::Duration = std::time::Duration::from_secs(6);
+
 /// 对话面板显示模式（`/raw` 循环切换）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DisplayMode {
@@ -132,10 +135,15 @@ pub struct AppState {
     pub usage: Option<Usage>,
     /// 会话累计成本（美元），由 router ledger 每帧刷新。
     pub total_cost_usd: Option<f64>,
-    /// 会话累计上下文占用 `(used_tokens, window_tokens)`，由事件循环每帧
-    /// 从 router ledger + `TuiCaps.context_window` 刷新；无 router 或
-    /// 未配置 window 时为 None（状态行不显示占用率）。
+    /// 最近一次 `/scorecard` 加载的测光评分卡（侧边栏 Cost 面板展示）。
+    pub scorecard: Option<crate::model::scorecard::Scorecard>,
+    /// 最近一次请求的实际上下文占用 `(used_tokens, window_tokens)`，
+    /// 由事件循环每帧从 `usage` + `TuiCaps.context_window` 刷新；无 router
+    /// 或未配置 window 时为 None（状态行不显示占用率）。
     pub context_usage: Option<(u64, u64)>,
+    /// 临时命令反馈（如 `/fold`、`/raw` 的状态变更提示），渲染在状态行
+    /// 上方，超时自动消失；不进入对话面板的永久 echo 通道。
+    pub notice: Option<(String, std::time::Instant)>,
     pub scroll_offset: usize,
     /// 上一帧估算的对话区物理行数（wrap 后），滚动钳制/百分比口径。
     pub rendered_lines: usize,
@@ -151,6 +159,10 @@ pub struct AppState {
     /// 折叠态（独立存储，不嵌消息树）。
     pub fold: HashMap<SegId, bool>,
     pub sidebar_visible: bool,
+    /// 鼠标捕获开关：开启时应用消费滚轮滚动对话历史，终端文本无法用
+    /// 鼠标选中复制；Ctrl+T 切换。启动时由 TUI 注入为 true（与
+    /// EnableMouseCapture 状态一致）。
+    pub mouse_capture: bool,
     pub sidebar_tab: SidebarTab,
     pub completion: Option<CompletionState>,
     /// 斜杠命令行内候选（输入 `/` 开头时触发，Claude Code 风格）。
@@ -196,6 +208,18 @@ impl AppState {
         if self.echo.len() > MAX_ECHO {
             self.echo.drain(0..self.echo.len() - MAX_ECHO);
         }
+    }
+
+    /// 显示一条临时命令反馈（状态变更类命令用），NOTICE_TTL 后自动消失。
+    pub fn show_notice(&mut self, text: impl Into<String>) {
+        self.notice = Some((text.into(), std::time::Instant::now()));
+    }
+
+    /// 临时反馈是否已超过存活时长（事件循环每帧检查后清除）。
+    pub fn notice_expired(&self) -> bool {
+        self.notice
+            .as_ref()
+            .is_some_and(|(_, shown_at)| shown_at.elapsed() >= NOTICE_TTL)
     }
 
     /// 斜杠命令行内候选刷新：输入以 `/` 开头时展示模糊匹配候选
@@ -322,6 +346,30 @@ impl AppState {
     /// 重置折叠态（`/fold reset`：清空显式设置，回智能默认）。
     pub fn fold_reset(&mut self) {
         self.fold.clear();
+    }
+
+    /// 当前折叠模式的用户可见摘要（状态栏指示用）：
+    /// 无显式设置 → 默认；全部折叠/展开 → 全折叠/全展开；混合 → 混合。
+    pub fn fold_label(&self) -> &'static str {
+        if self.fold.is_empty() {
+            return "默认";
+        }
+        let mut all_folded = true;
+        let mut all_open = true;
+        for folded in self.fold.values() {
+            if *folded {
+                all_open = false;
+            } else {
+                all_folded = false;
+            }
+        }
+        if all_folded {
+            "全折叠"
+        } else if all_open {
+            "全展开"
+        } else {
+            "混合"
+        }
     }
 
     /// 选中下一段；越界回第一段。
@@ -743,6 +791,7 @@ mod tests {
     use crate::model::conversation::{done_output, LineKind};
     use crossterm::event::KeyEventKind;
     use deepseeknova_core::runner::RunEvent;
+    use std::time::Duration;
 
     #[test]
     fn echo_line_caps_at_max() {
@@ -751,6 +800,36 @@ mod tests {
             app.echo_line(LineKind::System, &format!("x{i}"));
         }
         assert_eq!(app.echo.len(), MAX_ECHO);
+    }
+
+    #[test]
+    fn notice_expires_after_ttl() {
+        let mut app = AppState::default();
+        app.show_notice("临时反馈");
+        assert!(app.notice.is_some());
+        assert!(!app.notice_expired());
+        app.notice = Some((
+            "临时反馈".to_string(),
+            std::time::Instant::now() - NOTICE_TTL - Duration::from_secs(1),
+        ));
+        assert!(app.notice_expired(), "超过 TTL 后应判定过期");
+    }
+
+    #[test]
+    fn fold_label_reflects_state() {
+        let mut app = AppState::default();
+        assert_eq!(app.fold_label(), "默认");
+
+        let id = app.conversation.begin_turn("q".into());
+        app.fold.insert((id, 0), true);
+        assert_eq!(app.fold_label(), "全折叠");
+        app.fold.clear();
+        app.fold.insert((id, 0), false);
+        assert_eq!(app.fold_label(), "全展开");
+
+        app.fold.insert((id, 0), true);
+        app.fold.insert((id, 1), false);
+        assert_eq!(app.fold_label(), "混合");
     }
 
     #[test]

@@ -1,0 +1,7 @@
+{
+  "approved": false,
+  "superseded": "2026-08-07 用户将视觉方向从品类标准改为新星观测台，本构图批准作废；其信息架构（runs 条带 + 评分卡一等公民）迁移进观测台世界的新构图轮。",
+  "surface": "desktop main window (first viewport)",
+  "structure": "工作台拓扑：左侧会话栏 + 顶部 runs 条带（已完成/已中断可恢复/运行中 chips）+ 中央对话流 + 右侧质量面板上下分区（工具活动时间轴 / 六维评分卡横条：治理·验证·反思·审查·协议·综合）",
+  "prompt": "High-fidelity dark-mode desktop application UI mockup, landscape. AI coding agent WORKBENCH app where run telemetry and quality scoring are first-class. (1) LEFT SIDEBAR one-fifth: DeepseekNova header, indigo 新会话 button, session list. (2) RUNS STRIP under top edge spanning center+right: rounded run chips green ✓ 已完成 09:41, amber ⏸ 已中断 11:02 with resume ↻, indigo ● 运行中, gray link 全部 runs →. (3) CENTER CHAT COLUMN: agent message, collapsed ▸ 推理过程, compact tool row ⚙ read_file ✓; bottom composer with model chip. (4) RIGHT QUALITY PANEL one-quarter, two stacked sections: 工具活动 vertical monospace timeline; 评分卡 six labeled horizontal metric bars 治理/验证/反思/审查/协议/综合 with indigo bars and numeric scores, 综合 emphasized. World: charcoal #16181D, hairline #2A2D34, accent #4D6BFE, green/amber/red status-only, sans + mono, 8px corners, flat matte."
+}

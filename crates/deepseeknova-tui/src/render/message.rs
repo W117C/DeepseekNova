@@ -353,7 +353,7 @@ fn welcome_block(app: &AppState, theme: &Theme) -> MessageBlock {
     let rule = "─".repeat(W);
     let body = |s: &str| Span::styled(s.to_string(), theme.system);
     let title = Span::styled(
-        "DeepseekNova",
+        "⌒ DeepseekNova",
         Style::default()
             .fg(theme.accent)
             .add_modifier(Modifier::BOLD),
@@ -571,6 +571,23 @@ impl AppState {
             self, &theme, scroll_pct,
         )));
         f.render_widget(status, status_area);
+
+        // 临时命令反馈（状态变更类命令）：画在状态行上方，超时自动消失，
+        // 不进入对话面板的永久 echo 通道。
+        if let Some((text, _)) = &self.notice {
+            let lines: Vec<Line> = text
+                .lines()
+                .map(|l| Line::from(Span::styled(l.to_string(), theme.system)))
+                .collect();
+            let height = lines.len().min(status_area.y.max(1) as usize).max(1);
+            let notice_area = Rect {
+                x: status_area.x,
+                y: status_area.y.saturating_sub(height as u16),
+                width: status_area.width,
+                height: height as u16,
+            };
+            f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), notice_area);
+        }
 
         // ── 输入区 ────────────────────────────────────────
         crate::render::input::render_input(self, &theme, f, input_area);
@@ -932,6 +949,7 @@ mod tests {
         assert!(!blocks.is_empty());
         let texts: String = blocks.iter().flat_map(block_texts).collect();
         assert!(texts.contains("DeepseekNova"), "欢迎卡标题: {texts}");
+        assert!(texts.contains('⌒'), "欢迎卡圆顶字形: {texts}");
         assert!(texts.contains("/help"), "欢迎卡命令提示: {texts}");
         assert!(texts.contains('╭'), "欢迎卡圆角边框: {texts}");
 

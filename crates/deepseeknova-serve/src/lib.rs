@@ -20,12 +20,15 @@
 //! ```
 
 mod acp;
+mod sessions;
 
 pub use acp::{run_acp_io, serve_acp, AcpRunnerFactory};
+pub use sessions::{Busy, SessionManager, SessionRunnerFactory};
 
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::sse::{Event, Sse};
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use deepseeknova_core::runner::{ApprovalResponder, RunEvent, RunInput, Runner};
@@ -227,6 +230,11 @@ pub struct Server {
     metrics_dir: Option<PathBuf>,
     /// Durable run store; `None` disables `/v1/runs` and run persistence.
     runs: Option<Arc<DurableRuns>>,
+    /// Multi-turn session manager; `None` disables `/v1/sessions*` endpoints.
+    sessions: Option<Arc<SessionManager>>,
+    /// Bearer token required on every `/v1/*` route; `None` = no auth.
+    /// `/health` stays unauthenticated so liveness probes work.
+    auth_token: Option<Arc<str>>,
 }
 
 impl Server {
@@ -236,6 +244,8 @@ impl Server {
             pending: new_pending_approvals(),
             metrics_dir: None,
             runs: None,
+            sessions: None,
+            auth_token: None,
         }
     }
 
@@ -248,6 +258,8 @@ impl Server {
             pending,
             metrics_dir: None,
             runs: None,
+            sessions: None,
+            auth_token: None,
         }
     }
 
@@ -292,15 +304,42 @@ impl Server {
         self.metrics_dir.as_ref()
     }
 
+    /// Enable multi-turn session endpoints backed by a [`SessionManager`]
+    /// (persisted in the same JSONL store the CLI/TUI use). The factory
+    /// builds a fresh runner per session with its shared conversation
+    /// history, so consecutive prompts in one session keep context.
+    pub fn with_sessions(mut self, sessions: Arc<SessionManager>) -> Self {
+        self.sessions = Some(sessions);
+        self
+    }
+
+    /// Require `Authorization: Bearer <token>` on every `/v1/*` route.
+    /// `None` (default) keeps the server open — only use on trusted
+    /// loopback. `/health` is exempt so probes keep working.
+    pub fn with_auth_token(mut self, token: Option<String>) -> Self {
+        self.auth_token = token.map(Arc::from);
+        self
+    }
+
     /// Start the server and block until it shuts down.
     pub async fn serve(self, addr: &str) -> anyhow::Result<()> {
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        tracing::info!("deepseeknova serve listening on {addr}");
+        axum::serve(listener, self.into_router()).await?;
+        Ok(())
+    }
+
+    /// Build the axum router for this server (no listener). Extracted from
+    /// [`Self::serve`] so integration tests can bind an ephemeral port.
+    pub fn into_router(self) -> axum::Router {
         let cors = CorsLayer::new()
             .allow_origin(Any)
             .allow_methods(Any)
             .allow_headers(Any);
 
-        let app = Router::new()
-            .route("/health", get(health))
+        let auth = self.auth_token.clone();
+        // /v1 子路由被 auth layer 包裹；/health 留在外侧，保持探活免认证。
+        let v1 = Router::new()
             .route("/v1/chat", post(chat))
             .route("/v1/runs", get(list_runs))
             .route("/v1/runs/{id}/resume", post(resume_run))
@@ -308,13 +347,47 @@ impl Server {
             .route("/v1/sessions/{id}/diagnose", get(session_diagnose))
             .route("/v1/sessions/{id}/scorecard", get(session_scorecard))
             .route("/v1/metrics/scorecards", get(metrics_scorecards))
+            .route("/v1/sessions", get(sessions_list).post(sessions_create))
+            .route(
+                "/v1/sessions/{id}",
+                get(sessions_history).delete(sessions_delete),
+            )
+            .route("/v1/sessions/{id}/chat", post(sessions_chat))
             .layer(cors)
             .with_state(Arc::new(self));
 
-        let listener = tokio::net::TcpListener::bind(addr).await?;
-        tracing::info!("deepseeknova serve listening on {addr}");
-        axum::serve(listener, app).await?;
-        Ok(())
+        let v1 = match auth {
+            Some(token) => v1.layer(axum::middleware::from_fn_with_state(
+                token,
+                require_bearer_token,
+            )),
+            None => v1,
+        };
+
+        Router::new().route("/health", get(health)).merge(v1)
+    }
+}
+
+/// Middleware guarding every `/v1/*` route when `--token` is configured.
+/// `/health` sits outside the layered router, so it stays probe-friendly.
+async fn require_bearer_token(
+    State(token): State<Arc<str>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let ok = request
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v == format!("Bearer {token}"));
+    if ok {
+        next.run(request).await
+    } else {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "unauthorized" })),
+        )
+            .into_response()
     }
 }
 
@@ -397,109 +470,11 @@ fn stream_input(state: Arc<Server>, input: RunInput, run_id: Option<String>) -> 
             Ok(mut stream) => {
                 use tokio_stream::StreamExt;
                 while let Some(event) = stream.next().await {
-                    let sse_event = match event {
-                        Ok(RunEvent::TextDelta(text)) => {
-                            Ok(Event::default().event("text").data(text))
-                        }
-                        Ok(RunEvent::ReasoningDelta { text, .. }) => {
-                            Ok(Event::default().event("reasoning").data(text))
-                        }
-                        Ok(RunEvent::ToolCallStart { id, name }) => Ok(Event::default()
-                            .event("tool_start")
-                            .data(serde_json::json!({ "id": id, "name": name }).to_string())),
-                        Ok(RunEvent::ToolCallEnd {
-                            id,
-                            name,
-                            arguments,
-                        }) => Ok(Event::default().event("tool_end").data(
-                            serde_json::json!({ "id": id, "name": name, "arguments": arguments })
-                                .to_string(),
-                        )),
-                        Ok(RunEvent::ToolResult { call_id, result }) => {
-                            Ok(Event::default().event("tool_result").data(
-                                serde_json::json!({ "call_id": call_id, "result": result })
-                                    .to_string(),
-                            ))
-                        }
-                        Ok(RunEvent::Usage(u)) => Ok(Event::default()
-                            .event("usage")
-                            .data(serde_json::to_string(&u).unwrap_or_default())),
-                        Ok(RunEvent::Done(output)) => {
-                            done_text = output.text.clone();
-                            let json = serde_json::json!({
-                                "text": output.text,
-                                "tool_calls": output.tool_calls.iter().map(|tc| serde_json::json!({
-                                    "id": tc.id,
-                                    "name": tc.function.name,
-                                    "arguments": tc.function.arguments,
-                                })).collect::<Vec<_>>(),
-                                "usage": output.usage,
-                            });
-                            Ok(Event::default().event("done").data(json.to_string()))
-                        }
-                        Ok(RunEvent::TurnComplete) => {
-                            continue;
-                        }
-                        Ok(RunEvent::ToolCallDelta { .. }) => {
-                            continue; // accumulated into ToolCallEnd
-                        }
-                        Ok(RunEvent::ApprovalRequest {
-                            id,
-                            title,
-                            description,
-                        }) => {
-                            let json = serde_json::json!({
-                                "id": id,
-                                "title": title,
-                                "description": description,
-                            });
-                            Ok(Event::default()
-                                .event("approval_request")
-                                .data(json.to_string()))
-                        }
-                        Ok(RunEvent::Paused { reason, session_id }) => {
-                            paused = true;
-                            let json = serde_json::json!({
-                                "reason": reason,
-                                "session_id": session_id,
-                            });
-                            Ok(Event::default().event("paused").data(json.to_string()))
-                        }
-                        Ok(RunEvent::Verification {
-                            command,
-                            passed,
-                            summary,
-                        }) => {
-                            let json = serde_json::json!({
-                                "command": command,
-                                "passed": passed,
-                                "summary": summary,
-                            });
-                            Ok(Event::default()
-                                .event("verification")
-                                .data(json.to_string()))
-                        }
-                        Ok(RunEvent::QualityFinding(finding)) => Ok(Event::default()
-                            .event("quality_finding")
-                            .data(serde_json::to_string(&finding).unwrap_or_default())),
-                        // 协议增强：阶段迁移 / 门控违规 / drift 事件最小序列化透传
-                        // （前端可按 kind 渲染；WireEvent 字段名为
-                        // transition/violation/drift，见 core::runner）。
-                        Ok(RunEvent::PhaseTransition { transition }) => Ok(Event::default()
-                            .event("phase_transition")
-                            .data(serde_json::to_string(&transition).unwrap_or_default())),
-                        Ok(RunEvent::GateViolation(violation)) => Ok(Event::default()
-                            .event("gate_violation")
-                            .data(serde_json::to_string(&violation).unwrap_or_default())),
-                        Ok(RunEvent::DriftFinding(drift)) => Ok(Event::default()
-                            .event("drift_finding")
-                            .data(serde_json::to_string(&drift).unwrap_or_default())),
-                        Err(e) => {
-                            let text = e.to_string();
-                            failed = Some(text.clone());
-                            Ok(Event::default().event("error").data(text))
-                        }
-                    };
+                    let sse_event =
+                        match map_run_event(event, &mut done_text, &mut failed, &mut paused) {
+                            Some(e) => e,
+                            None => continue, // skipped (accumulated) events
+                        };
                     if !client_gone && tx.unbounded_send(sse_event).is_err() {
                         // 客户端断开：停止发送但继续消费 stream，让 run 跑完并
                         // 正确落盘，而不是取消任务、把半截结果标成 Done。
@@ -525,6 +500,111 @@ fn stream_input(state: Arc<Server>, input: RunInput, run_id: Option<String>) -> 
     });
 
     Sse::new(rx)
+}
+
+/// Map one runner event to its SSE wire form. `None` marks events that are
+/// accumulated into a later event (`TurnComplete`, `ToolCallDelta`) and
+/// should be skipped by the caller. State (`done_text` / `failed` / `paused`)
+/// is threaded through so stream enders can finalize durable records.
+fn map_run_event(
+    event: Result<RunEvent, anyhow::Error>,
+    done_text: &mut String,
+    failed: &mut Option<String>,
+    paused: &mut bool,
+) -> Option<Result<Event, Infallible>> {
+    match event {
+        Ok(RunEvent::TextDelta(text)) => Some(Ok(Event::default().event("text").data(text))),
+        Ok(RunEvent::ReasoningDelta { text, .. }) => {
+            Some(Ok(Event::default().event("reasoning").data(text)))
+        }
+        Ok(RunEvent::ToolCallStart { id, name }) => Some(Ok(Event::default()
+            .event("tool_start")
+            .data(serde_json::json!({ "id": id, "name": name }).to_string()))),
+        Ok(RunEvent::ToolCallEnd {
+            id,
+            name,
+            arguments,
+        }) => Some(Ok(Event::default().event("tool_end").data(
+            serde_json::json!({ "id": id, "name": name, "arguments": arguments }).to_string(),
+        ))),
+        Ok(RunEvent::ToolResult { call_id, result }) => Some(Ok(Event::default()
+            .event("tool_result")
+            .data(serde_json::json!({ "call_id": call_id, "result": result }).to_string()))),
+        Ok(RunEvent::Usage(u)) => Some(Ok(Event::default()
+            .event("usage")
+            .data(serde_json::to_string(&u).unwrap_or_default()))),
+        Ok(RunEvent::Done(output)) => {
+            *done_text = output.text.clone();
+            let json = serde_json::json!({
+                "text": output.text,
+                "tool_calls": output.tool_calls.iter().map(|tc| serde_json::json!({
+                    "id": tc.id,
+                    "name": tc.function.name,
+                    "arguments": tc.function.arguments,
+                })).collect::<Vec<_>>(),
+                "usage": output.usage,
+            });
+            Some(Ok(Event::default().event("done").data(json.to_string())))
+        }
+        Ok(RunEvent::TurnComplete) => None,
+        Ok(RunEvent::ToolCallDelta { .. }) => None, // accumulated into ToolCallEnd
+        Ok(RunEvent::ApprovalRequest {
+            id,
+            title,
+            description,
+        }) => {
+            let json = serde_json::json!({
+                "id": id,
+                "title": title,
+                "description": description,
+            });
+            Some(Ok(Event::default()
+                .event("approval_request")
+                .data(json.to_string())))
+        }
+        Ok(RunEvent::Paused { reason, session_id }) => {
+            *paused = true;
+            let json = serde_json::json!({
+                "reason": reason,
+                "session_id": session_id,
+            });
+            Some(Ok(Event::default().event("paused").data(json.to_string())))
+        }
+        Ok(RunEvent::Verification {
+            command,
+            passed,
+            summary,
+        }) => {
+            let json = serde_json::json!({
+                "command": command,
+                "passed": passed,
+                "summary": summary,
+            });
+            Some(Ok(Event::default()
+                .event("verification")
+                .data(json.to_string())))
+        }
+        Ok(RunEvent::QualityFinding(finding)) => Some(Ok(Event::default()
+            .event("quality_finding")
+            .data(serde_json::to_string(&finding).unwrap_or_default()))),
+        // 协议增强：阶段迁移 / 门控违规 / drift 事件最小序列化透传
+        // （前端可按 kind 渲染；WireEvent 字段名为
+        // transition/violation/drift，见 core::runner）。
+        Ok(RunEvent::PhaseTransition { transition }) => Some(Ok(Event::default()
+            .event("phase_transition")
+            .data(serde_json::to_string(&transition).unwrap_or_default()))),
+        Ok(RunEvent::GateViolation(violation)) => Some(Ok(Event::default()
+            .event("gate_violation")
+            .data(serde_json::to_string(&violation).unwrap_or_default()))),
+        Ok(RunEvent::DriftFinding(drift)) => Some(Ok(Event::default()
+            .event("drift_finding")
+            .data(serde_json::to_string(&drift).unwrap_or_default()))),
+        Err(e) => {
+            let text = e.to_string();
+            *failed = Some(text.clone());
+            Some(Ok(Event::default().event("error").data(text)))
+        }
+    }
 }
 
 /// Write a `running` record before the run starts (or reset a resumed one).
@@ -712,6 +792,166 @@ async fn metrics_scorecards(
         "count": aggregate.count,
         "aggregate": aggregate,
     })))
+}
+
+// ── Multi-turn session endpoints ──────────────────────────────
+
+/// Resolve the session manager or 404 when sessions are not configured.
+fn sessions_state(state: &Server) -> Result<Arc<SessionManager>, (StatusCode, String)> {
+    state
+        .sessions
+        .clone()
+        .ok_or((StatusCode::NOT_FOUND, "sessions not configured".into()))
+}
+
+/// `GET /v1/sessions` — list stored sessions (newest first).
+async fn sessions_list(
+    State(state): State<Arc<Server>>,
+) -> Result<Json<Vec<deepseeknova_store::SessionSummary>>, (StatusCode, String)> {
+    let sessions = sessions_state(&state)?;
+    sessions
+        .list()
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+/// `POST /v1/sessions` — create a fresh empty session, returns its id.
+async fn sessions_create(
+    State(state): State<Arc<Server>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let sessions = sessions_state(&state)?;
+    let id = sessions
+        .create()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({ "id": id })))
+}
+
+/// `GET /v1/sessions/{id}` — stored turns of one session (oldest first).
+async fn sessions_history(
+    State(state): State<Arc<Server>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<Vec<deepseeknova_store::StoredTurn>>, (StatusCode, String)> {
+    let sessions = sessions_state(&state)?;
+    let turns = sessions
+        .history(&id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "session not found".into()))?;
+    Ok(Json(turns))
+}
+
+/// `DELETE /v1/sessions/{id}` — delete a session. 409 when a prompt is
+/// currently in flight.
+async fn sessions_delete(
+    State(state): State<Arc<Server>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let sessions = sessions_state(&state)?;
+    let deleted = sessions
+        .delete(&id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|_| (StatusCode::CONFLICT, "session busy".into()))?;
+    if deleted {
+        Ok(Json(serde_json::json!({ "deleted": true })))
+    } else {
+        Err((StatusCode::NOT_FOUND, "session not found".into()))
+    }
+}
+
+/// `POST /v1/sessions/{id}/chat` — run one prompt in a session, streaming the
+/// same SSE event set as `/v1/chat` but bound to the session's runner (which
+/// carries the shared conversation history). On `done` the turn is persisted
+/// (user prompt + assistant final text, mirroring the TUI controller).
+/// 409 when another prompt is already running in this session.
+async fn sessions_chat(
+    State(state): State<Arc<Server>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(req): Json<ChatRequest>,
+) -> Result<RunSse, (StatusCode, String)> {
+    if req.prompt.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "prompt must not be empty".into()));
+    }
+    const MAX_PROMPT_LEN: usize = 32_000;
+    if req.prompt.len() > MAX_PROMPT_LEN {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("prompt exceeds max length ({MAX_PROMPT_LEN} chars)"),
+        ));
+    }
+
+    let sessions = sessions_state(&state)?;
+    let claimed = sessions
+        .claim_for_chat(&id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let Some(claimed) = claimed else {
+        return Err((StatusCode::NOT_FOUND, "session not found".into()));
+    };
+    let (session, guard) = claimed.map_err(|_| (StatusCode::CONFLICT, "session busy".into()))?;
+
+    let input = RunInput {
+        prompt: req.prompt,
+        images: req.images.unwrap_or_default(),
+        model_override: req.model,
+    };
+    Ok(stream_session_input(state, id, session, guard, input))
+}
+
+/// SSE runner for one prompt inside a live session. The [`sessions::BusyGuard`]
+/// is held for the whole stream (released when it ends), and the completed
+/// turn is persisted so the session survives restarts.
+fn stream_session_input(
+    state: Arc<Server>,
+    id: String,
+    session: Arc<sessions::LiveSession>,
+    guard: sessions::BusyGuard,
+    input: RunInput,
+) -> RunSse {
+    let (tx, rx) = futures::channel::mpsc::unbounded::<Result<Event, Infallible>>();
+    let sessions = state.sessions.clone();
+
+    tokio::spawn(async move {
+        let mut done_text = String::new();
+        let mut failed: Option<String> = None;
+        let mut paused = false;
+        let mut client_gone = false;
+        match session.runner.run_stream(input.clone()).await {
+            Ok(mut stream) => {
+                use tokio_stream::StreamExt;
+                while let Some(event) = stream.next().await {
+                    let sse_event =
+                        match map_run_event(event, &mut done_text, &mut failed, &mut paused) {
+                            Some(e) => e,
+                            None => continue,
+                        };
+                    if !client_gone && tx.unbounded_send(sse_event).is_err() {
+                        client_gone = true;
+                    }
+                }
+            }
+            Err(e) => {
+                let text = e.to_string();
+                failed = Some(text.clone());
+                let _ = tx.unbounded_send(Ok(Event::default().event("error").data(text)));
+            }
+        }
+        // 回合完成时落盘（口径与 TUI controller 一致：仅成功回合记录）。
+        if failed.is_none() && !paused {
+            if let Some(manager) = sessions {
+                manager.record_turn(
+                    &session,
+                    &id,
+                    &input.prompt,
+                    &done_text,
+                    input.model_override.clone(),
+                );
+            }
+        }
+        drop(guard); // release the session busy flag
+    });
+
+    Sse::new(rx)
 }
 
 // ── Request / Response types ───────────────────────────────────

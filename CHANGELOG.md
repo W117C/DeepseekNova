@@ -35,6 +35,15 @@ All notable changes to DeepseekNova will be documented in this file.
   - `eval` 子命令：从 JSONL（支持 `#` 注释）逐条跑真实 prompt 并断言
     `must_contain` 子串，输出 md/json 报告，适合做最小回归评估集。
   - Windows 运行时沙箱警告：无 OS 级沙箱时启动即打印显式警告（不只在 README）。
+  - 桌面端纯前端脚手架（`crates/deepseeknova-desktop/frontend`）：Vite 6 +
+    SolidJS + TypeScript + Tailwind CSS 4，首屏按「新星观测台 A×B 合并构图」
+    实现双顶带 / 夜次分组观测日志栏 / 划线对话流 / 时间轴星座图 / 六维测光
+    评分卡；含 14 条 vitest 纯函数测试。
+  - TUI 观测台演进：浅色档对齐「印刷星图」token（`#3B55D9` 深化品牌蓝、
+    `#D8DDEC` 墨线、`#DDE4FB` 选中底）；侧边栏会话按夜次分组并显示
+    `◉/●/·` 星等三档；审批浮层展示风险标签（只读/非只读/危险）与完整
+    mono 命令；新增 `/scorecard` 命令与侧边栏测光六维表；欢迎卡缀圆顶字形
+    `⌒`；权限层新增 `PermissionGate::shell_readonly_kind` 供审批风险标签取数。
 
 ### Fixed
 

@@ -1340,6 +1340,22 @@ fn render_suggestions(suggestions: &[RuleSuggestion]) -> String {
     lines.join("\n")
 }
 
+/// Ask 审批描述的风险前缀（观测台规范：只读 / 非只读 / 危险）。
+/// 非 shell 工具或参数不可解析时返回 `None`（保持旧描述不变）。
+fn approval_risk_prefix(
+    gate: Option<&PermissionGate>,
+    tool_name: &str,
+    args: &str,
+) -> Option<String> {
+    let kind = gate?.shell_readonly_kind(tool_name, args)?;
+    let label = match kind {
+        deepseeknova_security::readonly::ReadOnlyKind::ReadOnly => "只读",
+        deepseeknova_security::readonly::ReadOnlyKind::NotReadOnly => "非只读",
+        deepseeknova_security::readonly::ReadOnlyKind::Dangerous => "危险",
+    };
+    Some(format!("[风险:{label}]"))
+}
+
 async fn run_agent_loop(
     provider: Arc<dyn Provider>,
     tools: Vec<Arc<dyn Tool>>,
@@ -2481,7 +2497,17 @@ async fn stream_and_process_turn(
                             Decision::Ask => {
                                 let approved = if let Some(responder) = approval {
                                     let approval_id = format!("approval_{}", uuid::Uuid::new_v4());
-                                    let mut description = call.arguments.clone();
+                                    // 风险标签同时进 RunEvent 描述（serve/桌面）
+                                    // 与 responder 描述（TUI 审批浮层直接消费）。
+                                    let mut request_desc = call.arguments.clone();
+                                    if let Some(risk) = approval_risk_prefix(
+                                        permission.map(|g| g.as_ref()),
+                                        &call.name,
+                                        &call.arguments,
+                                    ) {
+                                        request_desc = format!("{risk}\n{request_desc}");
+                                    }
+                                    let mut description = request_desc.clone();
                                     let sug = render_suggestions(verdict.suggestions());
                                     if !sug.is_empty() {
                                         description.push_str(&format!("\n\n{sug}"));
@@ -2499,7 +2525,7 @@ async fn stream_and_process_turn(
                                         ans = responder.request(
                                             &approval_id,
                                             &call.name,
-                                            Some(&call.arguments),
+                                            Some(&request_desc),
                                         ) => ans,
                                         _ = cancel.cancelled() => false,
                                     }
@@ -4593,6 +4619,43 @@ mod tests {
                 Chunk::Done,
             ],
         ]
+    }
+
+    #[test]
+    fn approval_risk_prefix_maps_readonly_kinds() {
+        use deepseeknova_permission::{Decision, PermissionGate, Policy};
+
+        let gate = PermissionGate::new(Policy {
+            mode: Decision::Ask,
+            allow: vec![],
+            ask: vec![],
+            deny: vec![],
+        });
+        assert_eq!(
+            approval_risk_prefix(Some(&gate), "bash", r#"{"command": "git status"}"#).as_deref(),
+            Some("[风险:只读]")
+        );
+        assert_eq!(
+            approval_risk_prefix(Some(&gate), "Bash", r#"{"command": "rm -rf /tmp/x"}"#).as_deref(),
+            Some("[风险:非只读]")
+        );
+        assert_eq!(
+            approval_risk_prefix(
+                Some(&gate),
+                "shell",
+                r#"{"command": "git -c core.pager='sh -x' status"}"#
+            )
+            .as_deref(),
+            Some("[风险:危险]")
+        );
+        assert_eq!(
+            approval_risk_prefix(Some(&gate), "grep", r#"{"command": "x"}"#),
+            None
+        );
+        assert_eq!(
+            approval_risk_prefix(None, "bash", r#"{"command": "x"}"#),
+            None
+        );
     }
 
     #[tokio::test]

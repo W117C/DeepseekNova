@@ -85,7 +85,7 @@ pub async fn run_setup_wizard(local: bool) -> anyhow::Result<()> {
     std::io::stdout().flush().ok();
     let mut max_steps = String::new();
     reader.read_line(&mut max_steps)?;
-    let max_steps: usize = max_steps.trim().parse().unwrap_or(10);
+    let max_steps: usize = max_steps.trim().parse().unwrap_or(25);
 
     // Permission mode
     println!();

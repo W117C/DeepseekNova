@@ -587,7 +587,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
-        Some(Commands::Serve { addr, acp }) => {
+        Some(Commands::Serve { addr, acp, token }) => {
             info!("serve command: addr={addr}");
 
             use deepseeknova_provider::cost::ModelRole;
@@ -641,6 +641,12 @@ async fn main() -> anyhow::Result<()> {
             let responder: Arc<dyn deepseeknova_core::runner::ApprovalResponder> = Arc::new(
                 deepseeknova_serve::ServerApprovalResponder::new(pending.clone()),
             );
+            // 会话工厂在 build_agent 之后仍要复用 provider/tools，先各留一份。
+            let sess_mcp_tools = mcp_tools.clone();
+            let sess_provider = Arc::clone(&provider);
+            let sess_task_provider = task_provider.clone();
+            let sess_compact_provider = compact_provider.clone();
+            let sess_review_provider = review_provider.clone();
             let mut roles = deepseeknova_runtime::AgentRoleProviders::default();
             roles.task = Some(task_provider);
             roles.compact = Some(compact_provider);
@@ -664,10 +670,64 @@ async fn main() -> anyhow::Result<()> {
             let runner: Arc<dyn Runner> = Arc::new(agent);
 
             let workspace_root = std::env::current_dir().unwrap_or_default();
+
+            // 多轮会话端点（/v1/sessions*）：与 ACP 相同的 per-session runner
+            // 工厂，但工作区固定为进程启动目录。会话存到与 CLI/TUI 相同的
+            // JSONL 目录（[session] root 或 ~/.deepseeknova/sessions），
+            // 桌面端与终端看到同一批会话。
+            let sessions = sessions_root(&config).map(|dir| {
+                let cfg = config.clone();
+                let sess_router = model_router.clone();
+                let sess_workspace_root = workspace_root.clone();
+                let sess_pending = pending.clone();
+                let factory: deepseeknova_serve::SessionRunnerFactory = Arc::new(
+                    move |history: Arc<tokio::sync::Mutex<Vec<deepseeknova_core::Message>>>| {
+                        let mut roles = deepseeknova_runtime::AgentRoleProviders::default();
+                        roles.task = Some(Arc::clone(&sess_task_provider));
+                        roles.compact = Some(Arc::clone(&sess_compact_provider));
+                        roles.review = sess_review_provider.clone();
+                        let agent = build_agent_in(
+                            sess_workspace_root.clone(),
+                            Arc::clone(&sess_provider),
+                            roles,
+                            None,
+                            &cfg,
+                            0,
+                            sess_mcp_tools.clone(),
+                            &sess_router,
+                            None,
+                        )?;
+                        let agent = agent.with_conversation_history(history);
+                        let agent =
+                            if let Some(decider) = maybe_auto_router(&sess_router, &cfg, false) {
+                                agent.with_auto_router(decider)
+                            } else {
+                                agent
+                            };
+                        let agent = agent.with_approval_responder(Arc::new(
+                            deepseeknova_serve::ServerApprovalResponder::new(sess_pending.clone()),
+                        ));
+                        Ok(Arc::new(agent) as Arc<dyn Runner>)
+                    },
+                );
+                match deepseeknova_serve::SessionManager::open(dir, factory) {
+                    Ok(manager) => Some(Arc::new(manager)),
+                    Err(e) => {
+                        tracing::warn!("session endpoints disabled: {e}");
+                        None
+                    }
+                }
+            });
+            let sessions = sessions.flatten();
+
             let metrics_dir = workspace_root.join(".deepseeknova").join("metrics");
-            let server = deepseeknova_serve::Server::with_pending(runner, pending)
+            let mut server = deepseeknova_serve::Server::with_pending(runner, pending)
                 .with_metrics_dir(metrics_dir)
-                .with_runs_dir(workspace_root.join(".deepseeknova").join("runs"));
+                .with_runs_dir(workspace_root.join(".deepseeknova").join("runs"))
+                .with_auth_token(token.clone());
+            if let Some(sessions) = sessions {
+                server = server.with_sessions(sessions);
+            }
             server.serve(addr).await?;
         }
 

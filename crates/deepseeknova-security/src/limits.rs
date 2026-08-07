@@ -16,7 +16,7 @@ impl Default for ResourceLimits {
             max_files: 500,
             max_file_size: 1024 * 1024,             // 1 MB
             max_total_read_bytes: 50 * 1024 * 1024, // 50 MB
-            max_execution_time: Duration::from_secs(120),
+            max_execution_time: Duration::from_secs(600),
             max_output_bytes: 10 * 1024 * 1024, // 10 MB
             max_tool_calls: 100,
         }
@@ -41,8 +41,8 @@ mod tests {
         );
         assert_eq!(
             limits.max_execution_time,
-            Duration::from_secs(120),
-            "max_execution_time should be 120s"
+            Duration::from_secs(600),
+            "max_execution_time should be 600s"
         );
         assert_eq!(
             limits.max_output_bytes, 10_485_760,

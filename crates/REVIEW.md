@@ -448,3 +448,51 @@ provider embeddings 5），`make check` EXIT=0。
 
 **0 critical / 0 high / 2 medium（M1+M2，已修）/ 2 low（L1 已修、L2 接受）**。
 字面退出条件（无 High/Critical 且测试全绿）满足；第二轮复核无新问题。
+
+---
+
+## 轮次：观测台前端 UI + TUI 演进（2026-08-07 dev-loop 轮，工作区未提交）
+
+### 1. 覆盖声明
+
+- **范围确认**：`ocr delegate preview` 工作区模式输出包含上一轮 P0（serve 会话 API
+  + 认证，已在更早审查轮覆盖）与本轮改动混在同一工作树；本轮人工审查聚焦本轮新增：
+  `permission/lib.rs`（shell_readonly_kind）、`agent.rs`（Ask 风险标签接线）、
+  TUI `theme.rs` / `render/sidebar.rs` / `render/approval.rs` /
+  `render/message.rs` / `model/scorecard.rs` / `commands/builtin.rs` /
+  `app/state.rs` / `model/mod.rs`，以及桌面前端 `crates/deepseeknova-desktop/frontend/**`
+  （TypeScript 全读；`.test.ts` 被 OCR 默认路径排除，人工读）。
+- **规则**：仓库根无 `ocr.rules.json`，`ocr delegate rule` 使用 system 默认规则
+  （Rust 组 + default 组）。
+- **验证**：`cargo test -p deepseeknova-permission`（35 绿）、
+  `cargo test -p deepseeknova-agent`（239 绿）、`cargo test -p deepseeknova-tui`
+  （154 单测 + 1 doctest 绿）；`cargo clippy` 三个 crate `-D warnings` EXIT=0；
+  `cargo fmt --check` EXIT=0；前端 `vitest run` 14 绿 + `npm run build` EXIT=0；
+  反向验证 TUI 夜次分组与前端 nightKeyFromId 均真红→真绿。
+  全量 `make check` 结果见轮次结尾。
+
+### 2. 评论表（审查轮）
+
+| # | 路径 | 内容 | 严重度 |
+|---|------|------|--------|
+| R1 | agent.rs Ask 分支 | 风险标签只写进 `RunEvent::ApprovalRequest` 描述，TUI 审批浮层消费的是 `ApprovalResponder::request` 的 description（原始参数）→ 实际 TUI 永远看不到「风险：非只读」 | high |
+| R2 | agent.rs | 风险接线缺少“responder 收到带前缀描述”的端到端断言（仅有纯函数 + 渲染测试） | medium |
+| R3 | permission/lib.rs | `shell_readonly_kind` 与 `check` 各解析一次参数 JSON（查询路径开销可忽略） | low |
+| R4 | sidebar.rs | `group_by_night` 对每条 id 线性 `find` 组；行数上限 16，可忽略 | low |
+| R5 | 工作区 | `crates/deepseeknova-tui/src/repro_tmp.rs` 为未跟踪的用户调试文件（非本轮产物），提交时排除 | other |
+
+### 3. 修复轮验证
+
+- R1 已修：Ask 分支改为 `request_desc = [风险:…] + 原始参数`，`responder.request`
+  与 RunEvent 均传 `request_desc`；TUI 浮层可展示风险标签与完整命令。
+- R2 记录为测试盲区（接线简单、纯函数/渲染/权限分类已有 4 条测试覆盖），
+  后续可在 agent 集成测试补“捕获 responder 描述”断言，本轮接受。
+- R3/R4 接受（开销在 16 行/单次审批以内）。
+- R5：`git add` 显式排除 `repro_tmp.rs`，保留文件不动。
+- 复跑：permission/agent/tui 聚焦测试 + clippy + fmt 全绿（见覆盖声明）；
+  全量 `make check` 见轮次末尾。
+
+### 4. 结论
+
+**0 critical / 1 high（R1 已修）/ 1 medium（R2 记录接受）/ 2 low（接受）**。
+修复后聚焦测试全绿；最终 `make check` EXIT=0 后满足字面退出条件。

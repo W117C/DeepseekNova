@@ -150,33 +150,35 @@ fn dark_theme() -> Theme {
     }
 }
 
-/// 浅色终端版：前景改用深色系保证对比度，agent 用深品红。
+/// 浅色终端版（印刷星图）：纸白底 + 墨线 + 深化品牌蓝，
+/// token 与 `docs/superpowers/specs/2026-08-07-observatory-frontend-design.md`
+/// §1.1 浅色档逐项对齐。
 fn light_theme() -> Theme {
     Theme {
         user: Style::default()
-            .fg(Color::Rgb(0, 90, 150))
+            .fg(Color::Rgb(59, 85, 217))
             .add_modifier(Modifier::BOLD),
-        agent: Style::default().fg(Color::Rgb(150, 40, 120)),
+        agent: Style::default().fg(Color::Rgb(90, 79, 184)),
         reasoning: Style::default()
-            .fg(Color::Gray)
+            .fg(Color::Rgb(106, 115, 144))
             .add_modifier(Modifier::ITALIC),
-        tool: Style::default().fg(Color::Gray),
-        tool_result: Style::default().fg(Color::Gray),
-        verification_ok: Style::default().fg(Color::Rgb(0, 120, 60)),
-        verification_fail: Style::default().fg(Color::Rgb(190, 40, 40)),
-        system: Style::default().fg(Color::Gray),
+        tool: Style::default().fg(Color::Rgb(106, 115, 144)),
+        tool_result: Style::default().fg(Color::Rgb(106, 115, 144)),
+        verification_ok: Style::default().fg(Color::Rgb(14, 122, 66)),
+        verification_fail: Style::default().fg(Color::Rgb(192, 48, 58)),
+        system: Style::default().fg(Color::Rgb(106, 115, 144)),
         error: Style::default()
-            .fg(Color::Rgb(190, 40, 40))
+            .fg(Color::Rgb(192, 48, 58))
             .add_modifier(Modifier::BOLD),
-        paused: Style::default().fg(Color::Rgb(0, 90, 150)),
-        accent: Color::Rgb(0, 90, 150),
+        paused: Style::default().fg(Color::Rgb(59, 85, 217)),
+        accent: Color::Rgb(59, 85, 217),
         dim: Modifier::DIM,
-        border: Style::default().fg(Color::Gray),
+        border: Style::default().fg(Color::Rgb(216, 221, 236)),
         title: Style::default()
-            .fg(Color::Rgb(40, 40, 40))
+            .fg(Color::Rgb(26, 33, 56))
             .add_modifier(Modifier::BOLD),
         selection: Style::default()
-            .bg(Color::Gray)
+            .bg(Color::Rgb(221, 228, 251))
             .add_modifier(Modifier::REVERSED),
     }
 }
@@ -255,10 +257,35 @@ mod tests {
     #[test]
     fn light_theme_uses_dark_foregrounds() {
         let t = light_theme();
-        assert_eq!(t.user.fg, Some(Color::Rgb(0, 90, 150)));
-        assert_eq!(t.verification_ok.fg, Some(Color::Rgb(0, 120, 60)));
-        assert_eq!(t.verification_fail.fg, Some(Color::Rgb(190, 40, 40)));
-        assert_eq!(t.accent, Color::Rgb(0, 90, 150));
+        // 印刷星图浅色档：深化品牌蓝 + 墨色文字 + 纸白选中底。
+        assert_eq!(t.user.fg, Some(Color::Rgb(59, 85, 217)), "user=#3B55D9");
+        assert_eq!(t.agent.fg, Some(Color::Rgb(90, 79, 184)), "agent=#5A4FB8");
+        assert_eq!(
+            t.verification_ok.fg,
+            Some(Color::Rgb(14, 122, 66)),
+            "ok=#0E7A42"
+        );
+        assert_eq!(
+            t.verification_fail.fg,
+            Some(Color::Rgb(192, 48, 58)),
+            "fail=#C0303A"
+        );
+        assert_eq!(t.accent, Color::Rgb(59, 85, 217), "accent=#3B55D9");
+        assert_eq!(
+            t.border.fg,
+            Some(Color::Rgb(216, 221, 236)),
+            "hairline=#D8DDEC"
+        );
+        assert_eq!(
+            t.selection.bg,
+            Some(Color::Rgb(221, 228, 251)),
+            "selection=#DDE4FB"
+        );
+        assert_eq!(
+            t.tool.fg,
+            Some(Color::Rgb(106, 115, 144)),
+            "ink-dim=#6A7390"
+        );
     }
 
     #[test]
@@ -285,7 +312,7 @@ mod tests {
             if *val == "dark" {
                 assert_eq!(theme.accent, Color::Rgb(110, 140, 255));
             } else if *val == "light" {
-                assert_eq!(theme.accent, Color::Rgb(0, 90, 150));
+                assert_eq!(theme.accent, Color::Rgb(59, 85, 217));
             } else {
                 assert_eq!(theme, Theme::default());
             }

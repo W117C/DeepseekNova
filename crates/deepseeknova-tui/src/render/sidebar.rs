@@ -80,31 +80,48 @@ fn render_sessions(app: &AppState, theme: &Theme) -> Vec<Line<'static>> {
         }
         // 首次加载（一两帧内）保持安静：不显示“加载中”噪声。
     } else {
-        lines.push(Line::from(Span::styled(
-            format!(" 保存的会话 · {}", app.saved_sessions.len()),
-            theme.title,
-        )));
-        for (i, id) in app.saved_sessions.iter().take(MAX_SAVED_ROWS).enumerate() {
-            let selected = i == app.saved_session_selected;
-            let current = app.current_session.as_deref() == Some(id.as_str());
-            let marker = if selected { "▸" } else { " " };
-            let label = short_session_id(id, 18);
-            let suffix = if current { " (当前)" } else { "" };
-            let style = if selected {
-                theme.selection
-            } else {
-                theme.system
-            };
+        let groups = group_by_night(&app.saved_sessions);
+        let mut shown = 0usize;
+        'outer: for (gi, (night, ids)) in groups.iter().enumerate() {
+            if shown >= MAX_SAVED_ROWS {
+                break;
+            }
             lines.push(Line::from(Span::styled(
-                format!("{marker} {label}{suffix}"),
-                style,
+                format!(" ▾ {night} 夜 · {}", ids.len()),
+                theme.title,
             )));
+            for id in ids {
+                if shown >= MAX_SAVED_ROWS {
+                    break 'outer;
+                }
+                let i = app
+                    .saved_sessions
+                    .iter()
+                    .position(|x| x == id)
+                    .unwrap_or(usize::MAX);
+                let selected = i == app.saved_session_selected;
+                let current = app.current_session.as_deref() == Some(id.as_str());
+                let star = magnitude_char(current, gi);
+                let marker = if selected { "▸" } else { " " };
+                let label = short_session_id(id, 16);
+                let suffix = if current { " (当前)" } else { "" };
+                let style = if selected {
+                    theme.selection
+                } else {
+                    theme.system
+                };
+                lines.push(Line::from(Span::styled(
+                    format!("{marker}{star} {label}{suffix}"),
+                    style,
+                )));
+                shown += 1;
+            }
         }
-        if app.saved_sessions.len() > MAX_SAVED_ROWS {
+        if app.saved_sessions.len() > shown {
             lines.push(Line::from(Span::styled(
                 format!(
                     "  …还有 {} 个（/sessions 查看全部）",
-                    app.saved_sessions.len() - MAX_SAVED_ROWS
+                    app.saved_sessions.len() - shown
                 ),
                 theme.system,
             )));
@@ -133,6 +150,43 @@ fn render_sessions(app: &AppState, theme: &Theme) -> Vec<Line<'static>> {
         }
     }
     lines
+}
+
+/// `chat-20260807-164211` → `08-07`；无法解析时回退 `----`。
+fn night_key(id: &str) -> String {
+    let s = id.strip_prefix("chat-").unwrap_or(id);
+    let date = s.get(..8).unwrap_or("");
+    if date.len() == 8 && date.chars().all(|c| c.is_ascii_digit()) {
+        format!("{}-{}", &date[4..6], &date[6..8])
+    } else {
+        "----".to_string()
+    }
+}
+
+/// 按夜次分组（夜次倒序、组内保持原顺序），返回（夜次, 会话 id 列表）。
+fn group_by_night(ids: &[String]) -> Vec<(String, Vec<String>)> {
+    let mut groups: Vec<(String, Vec<String>)> = Vec::new();
+    for id in ids {
+        let key = night_key(id);
+        if let Some(g) = groups.iter_mut().find(|(k, _)| *k == key) {
+            g.1.push(id.clone());
+        } else {
+            groups.push((key, vec![id.clone()]));
+        }
+    }
+    groups.sort_by(|a, b| b.0.cmp(&a.0));
+    groups
+}
+
+/// 星等三档：当前 ◉ / 本夜 ● / 更早夜次 ·。
+fn magnitude_char(current: bool, group_index: usize) -> &'static str {
+    if current {
+        "◉"
+    } else if group_index == 0 {
+        "●"
+    } else {
+        "·"
+    }
 }
 
 /// 会话 id 的短标签：`chat-20260805-180304` → `20260805-180304`，超长截断。
@@ -222,6 +276,23 @@ fn render_cost(app: &AppState, theme: &Theme) -> Vec<Line<'static>> {
             theme.system,
         )));
     }
+    // 测光·评分卡：六维 █░ 横条 + 分值；无数据时给一句引导。
+    match &app.scorecard {
+        Some(sc) => {
+            lines.push(Line::from(Span::styled(" 测光·评分卡", theme.title)));
+            for row in &sc.rows {
+                let bar = crate::model::scorecard::photometry_bar(row.score);
+                lines.push(Line::from(Span::styled(
+                    format!(" {:<4} {bar} {:>5.1}", row.dim, row.score),
+                    theme.system,
+                )));
+            }
+        }
+        None => lines.push(Line::from(Span::styled(
+            " 测光待完成（运行 /scorecard）",
+            theme.system,
+        ))),
+    }
     lines
 }
 
@@ -310,12 +381,32 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
             .collect();
-        assert!(texts.contains("保存的会话 · 2"), "会话计数: {texts}");
+        assert!(texts.contains("▾ 08-06 夜 · 1"), "夜次分组头: {texts}");
+        assert!(texts.contains("▾ 08-05 夜 · 1"), "夜次分组头: {texts}");
         assert!(
-            texts.contains("▸ 20260806-112831 (当前)"),
+            texts.contains("▸◉ 20260806-112831 (当前)"),
             "选中 + 当前标记: {texts}"
         );
-        assert!(texts.contains("20260805-180304"), "列表含历史会话: {texts}");
+        assert!(texts.contains("· 20260805-180304"), "更早夜次星点: {texts}");
+    }
+
+    #[test]
+    fn night_grouping_orders_latest_night_first_and_marks_magnitude() {
+        let ids = vec![
+            "chat-20260807-160000".to_string(),
+            "chat-20260807-130000".to_string(),
+            "chat-20260806-220000".to_string(),
+            "plain".to_string(),
+        ];
+        let groups = group_by_night(&ids);
+        assert_eq!(
+            groups.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
+            vec!["08-07", "08-06", "----"]
+        );
+        assert_eq!(groups[0].1.len(), 2);
+        assert_eq!(magnitude_char(true, 0), "◉");
+        assert_eq!(magnitude_char(false, 0), "●");
+        assert_eq!(magnitude_char(false, 1), "·");
     }
 
     #[test]
@@ -326,5 +417,34 @@ mod tests {
         );
         assert_eq!(short_session_id("chat-20260805-180304", 10), "20260805-…");
         assert_eq!(short_session_id("plain-id", 18), "plain-id");
+    }
+
+    #[test]
+    fn cost_panel_shows_photometry_when_scorecard_loaded() {
+        let app = AppState {
+            scorecard: Some(crate::model::scorecard::Scorecard::parse_json(
+                r#"{"scores":{"治理":92.3,"验证":94.7,"反思":88.1,"审查":90.5,"协议":96.2,"综合":92.0}}"#,
+            )
+            .unwrap()),
+            ..Default::default()
+        };
+        let theme = Theme::default();
+        let lines = render_cost(&app, &theme);
+        let texts: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(texts.contains("测光·评分卡"), "{texts}");
+        assert!(texts.contains("治理"), "{texts}");
+        assert!(texts.contains("█"), "光度条: {texts}");
+        assert!(texts.contains("92.3"), "{texts}");
+
+        let empty = AppState::default();
+        let empty_lines = render_cost(&empty, &theme);
+        let empty_texts: String = empty_lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(empty_texts.contains("测光待完成"), "{empty_texts}");
     }
 }

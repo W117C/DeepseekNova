@@ -1,0 +1,9 @@
+{
+  "approved": true,
+  "approved_at": "2026-08-07",
+  "approval": "用户在观测台构图轮同轮选定 A（观测日志），用于观测日志视图（全部 runs 归档/日志页）：圆顶状态带 + 夜次分组会话栏 + 划线日志流 + 右缘竖向时间线标尺；桌面端主窗口北极星为 B（观测工作台）。",
+  "world": "Nova Observatory 新星观测台",
+  "surface": "desktop log/archive view (obs log page)",
+  "structure": "观测日志拓扑：顶部圆顶状态带（UTC 时刻 + token 刻度尺）+ 左侧按夜次分组的观测日志会话栏（星等点阵）+ 中央划线日志式对话流（推理折叠/工具表格行/diff）+ 右缘竖向时间线标尺（事件星点 + 底部预算刻度）",
+  "prompt": "High-fidelity dark-mode desktop UI mockup, landscape. AI coding agent app as astronomical OBSERVATORY LOG. World: night ground #0B1020, subtle fine graticule hairline grid, thin 1px rounded chart-frame borders, star-white ink #EDF1FB, single accent #4D6BFE star dots, amber #E8A33D tiny annotations, flat matte, no neon glow. Layout: (1) thin top status band: dome-shutter icon, session title, UTC timestamp, token budget scale. (2) left sidebar one-fifth: DeepseekNova, sessions as observation log grouped by night-date headers 08-07 夜, entries with magnitude-scaled indigo star dots, active entry thin rounded indigo frame. (3) center: chat as ruled logbook stream: 你 entry, deepseek-v4-pro entry with dim collapsed ▸ 推理过程, ruled tool table row ⚙ shell · cargo test ✓, monospace diff block, composer as thin rounded box with ❯ prompt. (4) right edge ~80px: vertical timeline ruler with ticks, indigo event star dots, bottom budget scale. Precise scientific tabular typography."
+}

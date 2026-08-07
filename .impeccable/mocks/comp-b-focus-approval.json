@@ -1,0 +1,6 @@
+{
+  "approved": false,
+  "surface": "desktop main window (first viewport)",
+  "structure": "专注两栏拓扑：左侧 52px 图标轨（无完整侧栏）+ 顶部状态带（token 预算/成本/turn 计数）+ 宽阅读列对话流 + composer 上方停靠的审批横幅卡（焦点时刻：红色左边框 + 风险标签 + 允许/拒绝/仅本次）",
+  "prompt": "High-fidelity dark-mode desktop application UI mockup, landscape. AI coding agent chat app, FOCUS layout with security approval moment as focal point. (1) NARROW ICON RAIL 52px far left: app glyph, chat/runs/metrics/settings icons, active indigo pill. NO full sidebar. (2) THIN TOP HEADER: session title 重构策略缓存层 with indigo status dot; right side token budget bar 52%, cost $0.0114, turn counter. (3) CENTER CHAT COLUMN wide reading measure: agent message with paragraph, collapsed ▸ 推理过程 row, expanded tool-call card ⚙ shell · cargo bench with gray monospace output. (4) APPROVAL BANNER CARD docked above composer, focal point: red left border, lock icon, title 权限请求, monospace command rm -rf target/tmp-cache/, red tag 非只读, gray tag shell, solid indigo button 允许 (Y), outline 拒绝 (N), dropdown 仅本次. (5) COMPOSER bottom. World: charcoal #16181D, hairline #2A2D34, accent #4D6BFE, red only for risk semantics, sans + mono, 8px corners, flat matte."
+}

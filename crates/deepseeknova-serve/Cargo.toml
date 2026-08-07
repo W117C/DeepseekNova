@@ -22,6 +22,7 @@ async-trait = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 deepseeknova-core = { workspace = true }
 deepseeknova-metrics = { workspace = true }
+deepseeknova-store = { workspace = true }
 futures-core = { workspace = true }
 futures = { workspace = true }
 

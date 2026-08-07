@@ -62,6 +62,8 @@ pub fn status_segments(app: &AppState, theme: &Theme, scroll_pct: usize) -> Vec<
     if let Some(cost) = app.total_cost_usd {
         segments.push(Span::styled(format!(" │ ${cost:.4}"), dim));
     }
+    // 折叠模式指示：/fold all|none|reset 后用户能一眼看到当前状态。
+    segments.push(Span::styled(format!(" │ 折叠 {}", app.fold_label()), dim));
     // ── 组 3：计数（静默） ───────────────────────────────
     segments.push(Span::styled(format!(" │ turn {}", app.turn), dim));
     if let Some(u) = &app.usage {
@@ -112,7 +114,8 @@ pub fn hint_for(focus: Focus) -> String {
             chord(Action::ConvScrollTop),
         ),
         Focus::Input => {
-            "/ 命令 · Ctrl+U 清行 · Ctrl+W 删词 · Shift+Enter 换行 · Esc 取消/再按退出".to_string()
+            "/ 命令 · Ctrl+T 鼠标 · Ctrl+U 清行 · Ctrl+W 删词 · Shift+Enter 换行 · Esc 取消/再按退出"
+                .to_string()
         }
         Focus::Sidebar => format!(
             "{} 选择会话 · Enter 恢复 · {} 切面板 · Esc 关闭",
@@ -176,11 +179,15 @@ mod tests {
             .find(|s| s.content.contains("turn"))
             .unwrap();
         assert!(turn.style.add_modifier.contains(Modifier::DIM));
+        // 折叠模式指示：默认态也要显示。
+        assert!(segments.iter().any(|s| s.content.contains("折叠 默认")));
     }
 
     #[test]
     fn hint_text_per_focus() {
-        assert!(hint_for(Focus::Input).contains("/ 命令"));
+        let input_hint = hint_for(Focus::Input);
+        assert!(input_hint.contains("/ 命令"));
+        assert!(input_hint.contains("Ctrl+T 鼠标"));
         assert!(hint_for(Focus::Conversation).contains("导航"));
         assert!(hint_for(Focus::Conversation).contains("导航"));
         assert!(hint_for(Focus::Sidebar).contains("切面板"));

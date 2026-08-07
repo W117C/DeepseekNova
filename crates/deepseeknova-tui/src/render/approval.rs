@@ -22,10 +22,36 @@ pub fn render_approval(req: &ApprovalRequest, theme: &Theme, f: &mut Frame, area
         req.title.clone(),
         Style::default().add_modifier(Modifier::BOLD),
     )));
+    // 风险标签（agent Ask 描述前缀 `[风险:只读|非只读|危险]`）。
+    let mut risk: Option<String> = None;
     if let Some(desc) = &req.description {
-        for line in desc.lines() {
-            lines.push(Line::from(Span::styled(line.to_string(), theme.system)));
+        let mut rest = desc.lines();
+        if let Some(first) = rest.next() {
+            if let Some(label) = first
+                .strip_prefix("[风险:")
+                .and_then(|s| s.strip_suffix(']'))
+            {
+                risk = Some(label.to_string());
+            } else {
+                lines.push(Line::from(Span::styled(first.to_string(), theme.system)));
+            }
         }
+        for line in rest {
+            // 命令/参数以等宽纪律展示（终端本就等宽，用缩进 + dim 区分）。
+            lines.push(Line::from(Span::styled(format!("  {line}"), theme.system)));
+        }
+    }
+    if let Some(label) = risk {
+        let style = match label.as_str() {
+            "只读" => Style::default().fg(theme.accent),
+            "非只读" => Style::default().fg(ratatui::style::Color::Yellow),
+            "危险" => border,
+            _ => theme.system,
+        };
+        lines.insert(
+            1,
+            Line::from(Span::styled(format!(" 风险：{label}"), style)),
+        );
     }
     lines.push(Line::from(Span::styled(
         "y 允许 · n 拒绝 · Esc 拒绝",
@@ -68,5 +94,37 @@ mod tests {
                 render_approval(&sample(), &theme, f, area);
             })
             .unwrap();
+    }
+
+    #[test]
+    fn renders_risk_label_and_mono_command() {
+        let (reply, _rx) = oneshot::channel();
+        let req = ApprovalRequest {
+            id: "a2".into(),
+            title: "Allow tool: bash".into(),
+            description: Some("[风险:非只读]\n{\"command\": \"rm -rf /tmp/x\"}".into()),
+            reply,
+        };
+        let theme = Theme::default();
+        let buf = ratatui::backend::TestBackend::new(50, 12);
+        let mut terminal = ratatui::Terminal::new(buf).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render_approval(&req, &theme, f, area);
+            })
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        // ratatui 宽字符在缓冲区占双格，去空格后做子串断言。
+        let flat = text.replace(' ', "");
+        assert!(flat.contains("风险：非只读"), "风险标签: {text}");
+        assert!(text.contains("rm"), "mono 命令完整展示: {text}");
+        assert!(text.contains("/tmp/x"), "mono 命令完整展示: {text}");
     }
 }

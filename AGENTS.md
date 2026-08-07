@@ -73,6 +73,10 @@ crates/
 ├── deepseeknova-tui/          # TUI
 ```
 
+> 桌面端前端工程 `crates/deepseeknova-desktop/frontend`（Vite + SolidJS +
+> Tailwind CSS 4）是**非 cargo 脚手架**，不在上述 22 crate 清单内；2026-08-07
+> 按「新星观测台」规范重建起步，Tauri 壳（src-tauri）待后续轮次。
+
 ---
 
 ## 3. 常用命令

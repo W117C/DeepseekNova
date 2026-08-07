@@ -1,0 +1,66 @@
+{
+  "title": "选择 DeepseekNova 两端共享的视觉世界",
+  "question": "掷签分配了「新星观测台」。保留它、换一张备选牌、重掷，或走品类标准。",
+  "options": [
+    {
+      "id": "assigned",
+      "label": "新星观测台 Nova Observatory",
+      "kicker": "THE ROLL",
+      "lineage": "天文台观测日志 · 星图集（celestial atlas）· 圆顶控制台",
+      "thesis": "Agent 会话即一夜观测：流式事件是观测记录，安全审批是圆顶联锁，评分卡是测光曲线。",
+      "palette": ["#0B1020", "#4D6BFE", "#EDF1FB", "#E8A33D"],
+      "materials": ["星图刻线 graticule 细线", "星等刻度点阵 magnitude dots", "观测日志表格纪律"],
+      "viewport": "左栏观测日志（会话按夜次分组），中央对话流如观测记录逐条落笔，右缘细刻度时间轴 + token 预算标尺，顶部状态带如圆顶开合指示；品牌蓝 #4D6BFE 是唯一星色。",
+      "risk": "夜空底色若执行松散会滑回品类默认的「暗色+霓虹」AI 皮肤，必须靠制图刻线与表格纪律撑住；亮色模式需给出「印刷星图（白底墨线）」的对应版本。",
+      "sketch": ".impeccable/sketches/assigned.png"
+    },
+    {
+      "id": "challenger-transit",
+      "label": "午夜调度图 Midnight Transit",
+      "lineage": "都市轨道交通图 · 午夜蓝珐琅壁画",
+      "thesis": "run 是线路，工具调用是站点，子代理分叉是换乘圈：整个会话成为一张可读的行车图。",
+      "case": "融合顺畅——事件序列天然映射线路与站点；但对话正文与 markdown 长文在珐琅壁画语法里没有位置，阅读区易退化为普通面板。",
+      "palette": ["#101C3A", "#F5F2EA", "#E8452C", "#2E9E5B"],
+      "materials": ["珐琅底 + 瓷白站点刻度", "45°/90° 折角线路"],
+      "viewport": "顶部整幅线路图呈现当前 run 的事件链，下方对话区按当前站点展开详情，审批是红色信号灯拦停。",
+      "risk": "线路图对短会话（3-5 个事件）显得空洞，对超长会话又挤成不可读的微缩图。",
+      "sketch": ".impeccable/sketches/challenger-transit.png",
+      "hero": "https://impeccable.style/worlds/cards/wayfinding-cartography-signage-midnight-transit-diagram-hero.webp"
+    },
+    {
+      "id": "challenger-teletext",
+      "label": "图文电视 Teletext Service",
+      "lineage": "广播图文电视杂志 · 40×24 字符栅格",
+      "thesis": "整个应用是一本可键入页码的广播杂志：会话是页，评分卡是数据页，REVEAL 藏着推理过程。",
+      "case": "字符栅格与 TUI 同宗、跨端统一最彻底；但固定广播 8 色没有品牌蓝 #4D6BFE 的立足之地，40 列栅格装不下代码 diff 长行。",
+      "palette": ["#000000", "#FFFF00", "#00FFFF", "#FF0000"],
+      "materials": ["位图字体单字面", "块状马赛克 sixel 图形"],
+      "viewport": "黑底 40×24 栅格，双倍行高黄字页头，键数字跳页；对话流是白字正文，工具结果是青色数据行。",
+      "risk": "复古语法喧宾夺主，长时间编码使用下新鲜感耗尽后只剩阅读性损失。",
+      "sketch": ".impeccable/sketches/challenger-teletext.png",
+      "hero": "https://impeccable.style/worlds/cards/broadcast-programming-teletext-service-hero.webp"
+    },
+    {
+      "id": "challenger-ikeda",
+      "label": "数据崇高 Datamatics",
+      "lineage": "池田亮司式纯黑白数据场 · 条码柱与正弦格",
+      "thesis": "会话是一段被采样的数据流：条码柱是事件密度，边缘等宽数字是原始遥测。",
+      "case": "monospace 数据密度深得开发者审美；但纯黑白抛弃品牌蓝承诺，频闪语法与长时编码会话相互敌对。",
+      "palette": ["#000000", "#FFFFFF"],
+      "materials": ["发丝级竖条码场", "等宽表格数字"],
+      "viewport": "白底黑字对话流居中，两侧发丝条码柱随事件流实时增密，选中消息时全场降为浅色底纹。",
+      "risk": "无彩色系统与「可信赖的品牌感」难以兼容，reduced-motion 之外的频闪对操作型界面是负资产。",
+      "sketch": ".impeccable/sketches/challenger-ikeda.png",
+      "hero": "https://impeccable.style/worlds/cards/ikeda-datamatics-hero.webp"
+    }
+  ],
+  "reroll": true,
+  "steer": true,
+  "canon": true,
+  "canonCard": {
+    "label": "品类标准",
+    "thesis": "开源 AI 编码 Agent 桌面端的通行布局，以满工艺执行，不带反讽。",
+    "viewport": "左侧会话栏 + 中央流式对话 + 底部输入框的三段式，暗色中性底 + 品牌蓝单 accent，对标 opencode / Claude Desktop 的工艺水准。",
+    "sketch": ".impeccable/sketches/canon.png"
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "approved": false,
+  "surface": "desktop main window (first viewport)",
+  "structure": "三栏拓扑：左侧会话栏（今天/昨天分组）+ 中央对话流（推理折叠行、工具卡、diff 块、composer + token 预算条）+ 右侧检查器（活动/成本/评分卡三 tab，工具活动时间轴，底部成本行）",
+  "prompt": "High-fidelity dark-mode desktop application UI mockup, landscape. An AI coding agent chat app at Claude Desktop level of craft. Exact layout structure: (1) LEFT SIDEBAR one-fifth width: app name DeepseekNova, indigo 新会话 button, session list grouped 今天/昨天, active item indigo left bar. (2) CENTER CHAT COLUMN: thin header with status dot and session title; user block 你; agent reply deepseek-v4-pro with collapsed ▸ 推理过程 row, tool-call card ⚙ shell · cargo test with green ✓, code diff block with red/green lines; bottom rounded composer with model chip and token budget bar 37%. (3) RIGHT INSPECTOR one-quarter width: tabs 活动·成本·评分卡, vertical tool activity timeline, cost row $0.0042. World: charcoal #16181D, hairline #2A2D34, single accent #4D6BFE, humanist sans + monospace, 8px corners, flat matte, no gradients, no glow."
+}

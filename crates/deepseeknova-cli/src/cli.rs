@@ -104,6 +104,10 @@ pub enum Commands {
         /// Run as an Agent Client Protocol (ACP) stdio server instead of HTTP.
         #[arg(long)]
         acp: bool,
+        /// Require this bearer token on every /v1/* route. When unset the
+        /// server is open — only safe on trusted loopback.
+        #[arg(long)]
+        token: Option<String>,
     },
     /// Run configuration wizard
     Setup {

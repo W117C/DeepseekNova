@@ -1,0 +1,7 @@
+{
+  "approved": false,
+  "world": "Nova Observatory 新星观测台",
+  "surface": "desktop main window (first viewport)",
+  "structure": "专注联锁拓扑：左侧 52px 图标轨（无完整侧栏）+ 顶部状态带（token 刻度尺 + 成本）+ 宽阅读列划线日志流 + composer 上方停靠的红光联锁审批卡（天文红光语法：暗红边框/红字/红实心允许键，与靛蓝夜空刻意对撞）",
+  "prompt": "High-fidelity dark-mode desktop UI mockup, landscape. AI coding agent app as observatory night session, FOCUS layout, focal point RED-LIGHT INTERLOCK approval card (astronomers' red light preserves night vision). World: night #0B1020, subtle graticule hairlines, thin 1px rounded chart frames, ink #EDF1FB, accent #4D6BFE, flat matte, no glow. Layout: (1) icon rail ~52px: dome glyph, chat/runs/metrics/settings thin-line icons, active indigo pill. (2) thin top band: dome icon, session title with indigo dot; right token scale bar with ticks 52%, cost $0.0114. (3) center wide reading column: ruled log entries, agent paragraph, dim ▸ 推理过程 row, expanded tool chart-frame ⚙ shell · cargo bench with gray monospace output. (4) INTERLOCK APPROVAL CARD above composer: deep red #D5484F thin border, dark red-tinted panel, red monospace text, shield glyph, title 圆顶联锁 · 权限请求, command rm -rf target/tmp-cache/, red tag 非只读, solid red 允许 (Y), outline 拒绝 (N), dropdown 仅本次. (5) composer: thin rounded box with ❯ prompt."
+}

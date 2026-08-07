@@ -900,30 +900,30 @@ Ctrl+U 清行 · Ctrl+W 删词 · Shift+Enter 换行 · /help · Esc 取消/再�
 
 ### 配色与主题
 
-配色沿用 Codex CLI 的语义色规则，不写死 RGB，深浅色终端都适配：
+配色走「新星观测台」语义表（`crates/deepseeknova-tui/src/theme.rs` 是唯一来源），
+与桌面端同一张 token 表：
 
-- 用户输入 / 状态指示（model、提示符 `>`、暂停提示）：cyan
-- agent 回复：magenta
-- 推理、工具调用与结果、系统信息：dim（暗色次要信息）
+- accent / 用户 / 主动作：品牌蓝 `#4D6BFE`（deepseek 默认档）
+- agent / 模型语声：柔蓝紫 `#7A8CFF`
+- 推理、工具调用与结果、系统信息：dim（次要信息）
 - 验证通过：green；验证失败 / 错误：red（错误加粗）
-- diff 输出行级高亮：`+` 新增=green、`-` 删除=red、`@@` 块头=cyan
-- 标题与输入框边框：默认色 + bold / dim，不用 emoji
+- 中断 / 标注：amber/yellow（预算条 >80%）
+- diff 输出行级高亮：`+` 新增=green、`-` 删除=red、`@@` 块头=accent
 
-主题经环境变量切换（默认 `codex`）：
+主题经环境变量切换（默认 `deepseek`；`codex` 为兼容别名，等价默认档）：
 
 ```bash
-DEEPSEEKNOVA_THEME=dark   deepseeknova-cli chat --tui   # 深色终端强调版
-DEEPSEEKNOVA_THEME=light  deepseeknova-cli chat --tui   # 浅色终端深前景版
+DEEPSEEKNOVA_THEME=dark   deepseeknova-cli chat --tui   # 深色强调版（accent 亮化）
+DEEPSEEKNOVA_THEME=light  deepseeknova-cli chat --tui   # 印刷星图浅色档（墨线 + 深化品牌蓝）
 ```
 
-未知值回退 `codex` 并在会话内提示。
+未知值回退 `deepseek` 并在会话内提示。
 
 ### 上下文占用
 
-状态行显示 `ctx N% (used / window)`：分子为会话累计 prompt+completion tokens
-（从 router ledger 每帧刷新），分母为主模型配置的 `context_window`。未配置
+状态行显示 `ctx N% (used / window)`：分子为**最近一次请求的实际 tokens**
+（从 provider usage 每帧刷新），分母为主模型配置的 `context_window`。未配置
 `context_window` 时该段不显示。占用率 >80% 黄色警示、>95% 红色警示。
-压缩（compaction）后 ledger 不减，占用率偏保守（显示偏高），属已知口径。
 
 ### 输入区增强
 
@@ -969,6 +969,7 @@ DEEPSEEKNOVA_THEME=light  deepseeknova-cli chat --tui   # 浅色终端深前景�
 | `/resume <id>` | 恢复指定会话并渲染进对话面板 |
 | `/model` | 显示模型与指针；`/model effort <level>`、`/model thinking`、`/model switch <name>`、`/model use <role> <name>` |
 | `/cost` | 按模型×角色输出 token 用量与美元估算 |
+| `/scorecard` | 读取 `.deepseeknova/metrics` 最新评分卡，输出六维测光表 |
 | `/skills` | 列出 `.deepseeknova/skills` 与 `.agents/skills` 中的技能 |
 | `/mcp` | 列出已启用 MCP server 并实时探测连接状态（✓ 已连接 / ✗ 未连接） |
 | `/raw` | 切换显示模式 normal / lite / raw（lite 隐藏推理，raw 带类型前缀） |

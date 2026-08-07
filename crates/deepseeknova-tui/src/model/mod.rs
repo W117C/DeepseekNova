@@ -5,3 +5,4 @@
 
 pub mod apply;
 pub mod conversation;
+pub mod scorecard;

@@ -318,9 +318,20 @@ impl AppState {
         }
     }
 
-    /// 全局模态热键：Ctrl+\ 侧边栏开合（任意焦点生效）。
+    /// 全局模态热键：Ctrl+T 鼠标捕获切换、Ctrl+\ 侧边栏开合（任意焦点生效）。
     /// 命令面板为纯 `/` 触发（就地候选，非模态），无 Ctrl+K。
     pub fn handle_modal_shortcuts(&mut self, key: &KeyEvent) -> bool {
+        // Ctrl+T：切换鼠标捕获（滚轮滚动对话 vs 鼠标选中复制）。
+        // Ctrl+M 在终端层面等价 Enter，不可用，故取未占用的 Ctrl+T。
+        if key.code == KeyCode::Char('t') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.mouse_capture = !self.mouse_capture;
+            if self.mouse_capture {
+                self.show_notice("鼠标捕获已开启：滚轮滚动对话历史（Ctrl+T 切换为选中文本）");
+            } else {
+                self.show_notice("鼠标捕获已关闭：可用鼠标选中/复制文本（Ctrl+T 恢复滚轮）");
+            }
+            return true;
+        }
         let Some(action) =
             crate::app::actions::resolve_action(&self.keymap, ActionContext::Input, key)
         else {
@@ -453,6 +464,23 @@ mod tests {
         assert!(!app.handle_modal_shortcuts(&key(KeyCode::Char('k'), KeyModifiers::CONTROL)));
         assert_eq!(app.focus, Focus::Input, "Ctrl+K 无模态可开");
         assert!(!app.sidebar_visible);
+        // Ctrl+T：鼠标捕获开关（默认 false 的测试构造 → 切到开启，并给临时提示）。
+        assert!(app.handle_modal_shortcuts(&key(KeyCode::Char('t'), KeyModifiers::CONTROL)));
+        assert!(app.mouse_capture, "Ctrl+T 应开启鼠标捕获");
+        assert!(
+            app.notice
+                .as_ref()
+                .is_some_and(|(t, _)| t.contains("鼠标捕获已开启")),
+            "开启时应给临时反馈"
+        );
+        assert!(app.handle_modal_shortcuts(&key(KeyCode::Char('t'), KeyModifiers::CONTROL)));
+        assert!(!app.mouse_capture, "再次 Ctrl+T 应关闭鼠标捕获");
+        assert!(
+            app.notice
+                .as_ref()
+                .is_some_and(|(t, _)| t.contains("鼠标捕获已关闭")),
+            "关闭时应给临时反馈"
+        );
         // Ctrl+\ 在 crossterm unix 下解析为 Char('4')+CONTROL。
         assert!(app.handle_modal_shortcuts(&key(KeyCode::Char('4'), KeyModifiers::CONTROL)));
         assert!(app.sidebar_visible);

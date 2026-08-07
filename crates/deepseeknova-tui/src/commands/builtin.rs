@@ -10,6 +10,7 @@ use deepseeknova_provider::factory::ReasoningEffort;
 use super::{ArgsSpec, Command, CommandCtx, CommandHandler, CommandOutcome};
 use crate::app::state::McpStatus;
 use crate::model::conversation::LineKind;
+use crate::model::scorecard::Scorecard;
 
 // ── help ────────────────────────────────────────────────────────
 
@@ -27,6 +28,7 @@ impl CommandHandler for HelpCmd {
             "  /resume <id>   恢复指定会话",
             "  /model         模型与 effort 热切换",
             "  /cost          会话成本报表",
+            "  /scorecard     读取最新测光评分卡",
             "  /skills        列出可用技能",
             "  /mcp           列出已配置 MCP 服务器",
             "  /raw           切换显示模式（normal/lite/raw）",
@@ -62,7 +64,7 @@ struct ClearCmd;
 impl CommandHandler for ClearCmd {
     async fn run(&self, ctx: &mut CommandCtx<'_>, _args: &str) -> CommandOutcome {
         ctx.app.clear_display();
-        ctx.app.echo_line(LineKind::System, "已清空对话面板");
+        ctx.app.show_notice("已清空对话面板");
         CommandOutcome::Handled
     }
 }
@@ -80,16 +82,13 @@ impl CommandHandler for NewCmd {
                     ctx.app.clear_display();
                     ctx.app.last_prompt = None;
                     ctx.app.sessions_loaded = false;
-                    ctx.app.echo_line(LineKind::System, "新会话已开始");
+                    ctx.app.show_notice("新会话已开始");
                 }
-                Err(e) => ctx
-                    .app
-                    .echo_line(LineKind::Error, &format!("新建会话失败: {e}")),
+                Err(e) => ctx.app.show_notice(format!("新建会话失败: {e}")),
             },
-            None => ctx.app.echo_line(
-                LineKind::System,
-                "会话管理不可用（未提供 SessionController）",
-            ),
+            None => ctx
+                .app
+                .show_notice("会话管理不可用（未提供 SessionController）"),
         }
         CommandOutcome::Handled
     }
@@ -118,17 +117,12 @@ impl CommandHandler for SessionsCmd {
                             .echo_line(LineKind::System, &format!("  {id}{marker}"));
                     }
                 }
-                Ok(_) => ctx
-                    .app
-                    .echo_line(LineKind::System, "（还没有已保存的会话）"),
-                Err(e) => ctx
-                    .app
-                    .echo_line(LineKind::Error, &format!("列出会话失败: {e}")),
+                Ok(_) => ctx.app.show_notice("（还没有已保存的会话）"),
+                Err(e) => ctx.app.show_notice(format!("列出会话失败: {e}")),
             },
-            None => ctx.app.echo_line(
-                LineKind::System,
-                "会话管理不可用（未提供 SessionController）",
-            ),
+            None => ctx
+                .app
+                .show_notice("会话管理不可用（未提供 SessionController）"),
         }
         CommandOutcome::Handled
     }
@@ -146,26 +140,19 @@ impl CommandHandler for ResumeCmd {
                     let count = lines.len();
                     ctx.app.restore_conversation(lines);
                     ctx.app.last_prompt = None;
-                    ctx.app.echo_line(
-                        LineKind::System,
-                        &format!(
-                            "已恢复 '{target}' — {} 条消息（进入对话面板，可滚动/折叠）",
-                            count
-                        ),
-                    );
+                    ctx.app.show_notice(format!(
+                        "已恢复 '{target}' — {} 条消息（进入对话面板，可滚动/折叠）",
+                        count
+                    ));
                 }
-                Err(e) => ctx
-                    .app
-                    .echo_line(LineKind::Error, &format!("恢复会话失败: {e}")),
+                Err(e) => ctx.app.show_notice(format!("恢复会话失败: {e}")),
             },
-            Some(_) => ctx.app.echo_line(
-                LineKind::Error,
-                "用法: /resume <session-id>（见 /sessions）",
-            ),
-            None => ctx.app.echo_line(
-                LineKind::System,
-                "会话管理不可用（未提供 SessionController）",
-            ),
+            Some(_) => ctx
+                .app
+                .show_notice("用法: /resume <session-id>（见 /sessions）"),
+            None => ctx
+                .app
+                .show_notice("会话管理不可用（未提供 SessionController）"),
         }
         CommandOutcome::Handled
     }
@@ -181,8 +168,7 @@ fn rebuild_runner(
 ) {
     let guard = ctx.caps.runtime.lock().unwrap();
     let Some(f) = guard.factory.clone() else {
-        ctx.app
-            .echo_line(LineKind::Error, "模型切换不可用（未提供 agent 工厂）");
+        ctx.app.show_notice("模型切换不可用（未提供 agent 工厂）");
         return;
     };
     let eff = effort.unwrap_or(guard.current_effort);
@@ -195,18 +181,13 @@ fn rebuild_runner(
             guard.current_effort = eff;
             guard.current_model = mdl.clone();
             guard.model_label = mdl.unwrap_or_else(|| "default".to_string());
-            ctx.app.echo_line(
-                LineKind::System,
-                &format!(
-                    "模型已切换: effort={} model={}",
-                    effort_label(eff),
-                    guard.model_label
-                ),
-            );
+            ctx.app.show_notice(format!(
+                "模型已切换: effort={} model={}",
+                effort_label(eff),
+                guard.model_label
+            ));
         }
-        Err(e) => ctx
-            .app
-            .echo_line(LineKind::Error, &format!("模型切换失败: {e}")),
+        Err(e) => ctx.app.show_notice(format!("模型切换失败: {e}")),
     }
 }
 
@@ -269,47 +250,39 @@ impl CommandHandler for ModelCmd {
             }
             "effort" => {
                 if sub_args.is_empty() {
-                    ctx.app.echo_line(
-                        LineKind::System,
-                        &format!(
-                            "当前 reasoning effort: {} (基线: {})",
-                            effort_label(current_effort),
-                            effort_label(baseline_effort)
-                        ),
-                    );
-                    ctx.app
-                        .echo_line(LineKind::System, "用法: /model effort disabled|high|max");
+                    ctx.app.show_notice(format!(
+                        "当前 reasoning effort: {} (基线: {}); 用法: /model effort disabled|high|max",
+                        effort_label(current_effort),
+                        effort_label(baseline_effort)
+                    ));
                 } else {
                     match parse_effort_command(sub_args) {
                         Ok(effort) => rebuild_runner(ctx, Some(effort), None),
-                        Err(msg) => ctx.app.echo_line(LineKind::Error, &msg),
+                        Err(msg) => ctx.app.show_notice(msg),
                     }
                 }
             }
             "thinking" => {
                 let new_effort = toggle_thinking(current_effort, baseline_effort);
                 if new_effort != current_effort {
-                    ctx.app.echo_line(
-                        LineKind::System,
-                        &format!(
-                            "thinking {} → {}",
-                            if current_effort.thinking() {
-                                "on"
-                            } else {
-                                "off"
-                            },
-                            if new_effort.thinking() { "on" } else { "off" }
-                        ),
-                    );
+                    ctx.app.show_notice(format!(
+                        "thinking {} → {}",
+                        if current_effort.thinking() {
+                            "on"
+                        } else {
+                            "off"
+                        },
+                        if new_effort.thinking() { "on" } else { "off" }
+                    ));
                     rebuild_runner(ctx, Some(new_effort), None);
                 } else {
-                    ctx.app.echo_line(LineKind::System, "thinking 状态未变");
+                    ctx.app.show_notice("thinking 状态未变");
                 }
             }
             "switch" => {
                 if sub_args.is_empty() {
                     ctx.app
-                        .echo_line(LineKind::Error, "用法: /model switch <provider-model-name>");
+                        .show_notice("用法: /model switch <provider-model-name>");
                 } else {
                     rebuild_runner(ctx, None, Some(sub_args.to_string()));
                 }
@@ -319,36 +292,31 @@ impl CommandHandler for ModelCmd {
                 let (role_s, model) = (parts.next(), parts.next());
                 if !has_router {
                     ctx.app
-                        .echo_line(LineKind::Error, "model pointers 不可用（未提供 router）");
+                        .show_notice("model pointers 不可用（未提供 router）");
                     return CommandOutcome::Handled;
                 }
                 let (Some(role_s), Some(model)) = (role_s, model) else {
-                    ctx.app.echo_line(
-                        LineKind::Error,
-                        "用法: /model use <main|task|compact|quick> <model-name>",
-                    );
+                    ctx.app
+                        .show_notice("用法: /model use <main|task|compact|quick> <model-name>");
                     return CommandOutcome::Handled;
                 };
                 let Some(role) = ModelRole::parse(role_s) else {
-                    ctx.app
-                        .echo_line(LineKind::Error, "未知角色（main|task|compact|quick）");
+                    ctx.app.show_notice("未知角色（main|task|compact|quick）");
                     return CommandOutcome::Handled;
                 };
                 {
                     let g = ctx.caps.runtime.lock().unwrap();
                     match g.router.as_ref().map(|r| r.set_pointer(role, model)) {
                         Some(Ok(())) => {
-                            ctx.app.echo_line(
-                                LineKind::System,
-                                &format!("pointer {} → {model}", role.label()),
-                            );
+                            ctx.app
+                                .show_notice(format!("pointer {} → {model}", role.label()));
                         }
                         Some(Err(e)) => {
-                            ctx.app.echo_line(LineKind::Error, &e.to_string());
+                            ctx.app.show_notice(e.to_string());
                             return CommandOutcome::Handled;
                         }
                         None => {
-                            ctx.app.echo_line(LineKind::Error, "router 不可用");
+                            ctx.app.show_notice("router 不可用");
                             return CommandOutcome::Handled;
                         }
                     }
@@ -356,10 +324,8 @@ impl CommandHandler for ModelCmd {
                 rebuild_runner(ctx, None, None);
             }
             other => {
-                ctx.app.echo_line(
-                    LineKind::Error,
-                    &format!("未知 /model 子命令: {other}（/model help 查看）"),
-                );
+                ctx.app
+                    .show_notice(format!("未知 /model 子命令: {other}（/model help 查看）"));
             }
         }
         // 保持 model 命令不需要 factory 也能展示帮助；需要 factory 的子命令由 rebuild_runner 降级。
@@ -375,12 +341,12 @@ impl CommandHandler for CostCmd {
     async fn run(&self, ctx: &mut CommandCtx<'_>, _args: &str) -> CommandOutcome {
         let Some(r) = ctx.caps.runtime.lock().unwrap().router.clone() else {
             ctx.app
-                .echo_line(LineKind::System, "router 不可用（/cost 需要 ModelRouter）");
+                .show_notice("router 不可用（/cost 需要 ModelRouter）");
             return CommandOutcome::Handled;
         };
         let report = r.ledger().report(&r.price_table());
         if report.rows.is_empty() {
-            ctx.app.echo_line(LineKind::System, "还没有用量记录");
+            ctx.app.show_notice("还没有用量记录");
             return CommandOutcome::Handled;
         }
         let window = ctx.caps.context_window.map(|w| w as u64);
@@ -432,6 +398,47 @@ impl CommandHandler for CostCmd {
     }
 }
 
+// ── scorecard ──────────────────────────────────────────────────
+
+struct ScorecardCmd;
+
+#[async_trait]
+impl CommandHandler for ScorecardCmd {
+    async fn run(&self, ctx: &mut CommandCtx<'_>, _args: &str) -> CommandOutcome {
+        // 优先工作区，其次用户目录；取最新 JSON 评分卡。
+        let mut candidates = Vec::new();
+        if let Ok(cwd) = std::env::current_dir() {
+            candidates.push(cwd.join(".deepseeknova").join("metrics"));
+        }
+        if let Some(home) = dirs::home_dir() {
+            candidates.push(home.join(".deepseeknova").join("metrics"));
+        }
+        let mut scorecard: Option<Scorecard> = None;
+        for dir in candidates {
+            if let Some(sc) = Scorecard::latest_from_dir(&dir) {
+                scorecard = Some(sc);
+                break;
+            }
+        }
+        let Some(sc) = scorecard else {
+            ctx.app
+                .show_notice("未找到测光数据（.deepseeknova/metrics 无评分卡 JSON）");
+            return CommandOutcome::Handled;
+        };
+        ctx.app.scorecard = Some(sc.clone());
+        ctx.app
+            .echo_line(LineKind::System, "测光·评分卡（最近一次 run）");
+        for row in &sc.rows {
+            let bar = crate::model::scorecard::photometry_bar(row.score);
+            ctx.app.echo_line(
+                LineKind::System,
+                &format!(" {:<4} {bar} {:>5.1}", row.dim, row.score),
+            );
+        }
+        CommandOutcome::Handled
+    }
+}
+
 // ── skills / mcp ────────────────────────────────────────────────
 
 struct SkillsCmd;
@@ -462,17 +469,14 @@ impl CommandHandler for SkillsCmd {
                     }
                 }
                 Ok(_) => {}
-                Err(e) => ctx.app.echo_line(
-                    LineKind::Error,
-                    &format!("加载技能失败 {}: {e}", path.display()),
-                ),
+                Err(e) => ctx
+                    .app
+                    .show_notice(format!("加载技能失败 {}: {e}", path.display())),
             }
         }
         if !found {
-            ctx.app.echo_line(
-                LineKind::System,
-                "（未找到技能，可创建 .md 文件放到 .deepseeknova/skills/）",
-            );
+            ctx.app
+                .show_notice("（未找到技能，可创建 .md 文件放到 .deepseeknova/skills/）");
         }
         CommandOutcome::Handled
     }
@@ -484,10 +488,8 @@ struct McpCmd;
 impl CommandHandler for McpCmd {
     async fn run(&self, ctx: &mut CommandCtx<'_>, _args: &str) -> CommandOutcome {
         if ctx.caps.mcp_servers.is_empty() {
-            ctx.app.echo_line(LineKind::System, "未配置 MCP 服务器");
-            ctx.app.echo_line(
-                LineKind::System,
-                "在 deepseeknova.toml 顶层 mcp_servers 数组配置后重启生效",
+            ctx.app.show_notice(
+                "未配置 MCP 服务器\n在 deepseeknova.toml 顶层 mcp_servers 数组配置后重启生效",
             );
             return CommandOutcome::Handled;
         }
@@ -519,25 +521,18 @@ struct UndoCmd;
 impl CommandHandler for UndoCmd {
     async fn run(&self, ctx: &mut CommandCtx<'_>, args: &str) -> CommandOutcome {
         let Some(ctrl) = &ctx.caps.undo else {
-            ctx.app
-                .echo_line(LineKind::System, "撤销不可用（未提供 UndoController）");
+            ctx.app.show_notice("撤销不可用（未提供 UndoController）");
             return CommandOutcome::Handled;
         };
         match args.trim() {
             "" => match ctrl.rollback_one().await {
-                Ok(Some(msg)) => ctx.app.echo_line(LineKind::System, &format!("✓ {msg}")),
-                Ok(None) => ctx.app.echo_line(LineKind::System, "没有可回滚的快照"),
-                Err(e) => ctx
-                    .app
-                    .echo_line(LineKind::Error, &format!("撤销失败: {e}")),
+                Ok(Some(msg)) => ctx.app.show_notice(format!("✓ {msg}")),
+                Ok(None) => ctx.app.show_notice("没有可回滚的快照"),
+                Err(e) => ctx.app.show_notice(format!("撤销失败: {e}")),
             },
             "all" => match ctrl.rollback_all().await {
-                Ok(n) => ctx
-                    .app
-                    .echo_line(LineKind::System, &format!("已全部回滚 {n} 个快照")),
-                Err(e) => ctx
-                    .app
-                    .echo_line(LineKind::Error, &format!("撤销失败: {e}")),
+                Ok(n) => ctx.app.show_notice(format!("已全部回滚 {n} 个快照")),
+                Err(e) => ctx.app.show_notice(format!("撤销失败: {e}")),
             },
             "list" => match ctrl.list().await {
                 Ok(lines) if !lines.is_empty() => {
@@ -546,15 +541,12 @@ impl CommandHandler for UndoCmd {
                         ctx.app.echo_line(LineKind::System, &format!("  {line}"));
                     }
                 }
-                Ok(_) => ctx.app.echo_line(LineKind::System, "（没有快照）"),
-                Err(e) => ctx
-                    .app
-                    .echo_line(LineKind::Error, &format!("列出快照失败: {e}")),
+                Ok(_) => ctx.app.show_notice("（没有快照）"),
+                Err(e) => ctx.app.show_notice(format!("列出快照失败: {e}")),
             },
-            other => ctx.app.echo_line(
-                LineKind::Error,
-                &format!("未知参数: {other}（用法: /undo | /undo all | /undo list）"),
-            ),
+            other => ctx.app.show_notice(format!(
+                "未知参数: {other}（用法: /undo | /undo all | /undo list）"
+            )),
         }
         CommandOutcome::Handled
     }
@@ -572,13 +564,10 @@ impl CommandHandler for RawCmd {
             crate::app::state::DisplayMode::Lite => crate::app::state::DisplayMode::Raw,
             crate::app::state::DisplayMode::Raw => crate::app::state::DisplayMode::Normal,
         };
-        ctx.app.echo_line(
-            LineKind::System,
-            &format!(
-                "显示模式: {}",
-                crate::app::state::display_mode_label(ctx.app.display_mode)
-            ),
-        );
+        ctx.app.show_notice(format!(
+            "显示模式: {}",
+            crate::app::state::display_mode_label(ctx.app.display_mode)
+        ));
         CommandOutcome::Handled
     }
 }
@@ -593,24 +582,22 @@ impl CommandHandler for FoldCmd {
         match args.trim() {
             "all" => {
                 ctx.app.fold_all(true);
-                ctx.app.echo_line(LineKind::System, "已折叠全部消息");
+                ctx.app
+                    .show_notice(format!("已折叠全部消息（当前: {}）", ctx.app.fold_label()));
             }
             "none" => {
                 ctx.app.fold_all(false);
-                ctx.app.echo_line(LineKind::System, "已展开全部消息");
+                ctx.app
+                    .show_notice(format!("已展开全部消息（当前: {}）", ctx.app.fold_label()));
             }
             "reset" => {
                 ctx.app.fold_reset();
-                ctx.app
-                    .echo_line(LineKind::System, "已重置折叠态（回智能默认）");
+                ctx.app.show_notice("已重置折叠态（回智能默认）");
             }
-            "" => ctx
+            "" => ctx.app.show_notice("用法: /fold all | none | reset"),
+            other => ctx
                 .app
-                .echo_line(LineKind::Error, "用法: /fold all | none | reset"),
-            other => ctx.app.echo_line(
-                LineKind::Error,
-                &format!("未知参数: {other}（all|none|reset）"),
-            ),
+                .show_notice(format!("未知参数: {other}（all|none|reset）")),
         }
         CommandOutcome::Handled
     }
@@ -646,6 +633,7 @@ static SESSIONS: SessionsCmd = SessionsCmd;
 static RESUME: ResumeCmd = ResumeCmd;
 static MODEL: ModelCmd = ModelCmd;
 static COST: CostCmd = CostCmd;
+static SCORECARD: ScorecardCmd = ScorecardCmd;
 static SKILLS: SkillsCmd = SkillsCmd;
 static MCP: McpCmd = McpCmd;
 static UNDO: UndoCmd = UndoCmd;
@@ -716,6 +704,14 @@ pub const BUILTIN: &[Command] = &[
         args_spec: ArgsSpec::None,
         args_hint: None,
         handler: &COST,
+    },
+    Command {
+        name: "scorecard",
+        desc: "读取最新测光评分卡（六维光度表）",
+        keywords: &["评分卡", "测光", "质量"],
+        args_spec: ArgsSpec::None,
+        args_hint: None,
+        handler: &SCORECARD,
     },
     Command {
         name: "skills",
@@ -835,8 +831,21 @@ mod tests {
     #[test]
     fn registry_contains_all_builtin() {
         for name in [
-            "help", "clear", "new", "sessions", "resume", "model", "cost", "skills", "mcp", "undo",
-            "raw", "fold", "copy", "quit",
+            "help",
+            "clear",
+            "new",
+            "sessions",
+            "resume",
+            "model",
+            "cost",
+            "skills",
+            "mcp",
+            "undo",
+            "raw",
+            "fold",
+            "copy",
+            "scorecard",
+            "quit",
         ] {
             assert!(CommandRegistry::find(name).is_some(), "missing {name}");
         }
@@ -853,7 +862,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clear_wipes_display_and_echoes() {
+    async fn clear_wipes_display_and_shows_notice() {
         let caps = empty_caps();
         let mut app = AppState::default();
         app.conversation.begin_turn("q".into());
@@ -861,7 +870,10 @@ mod tests {
         app.apply_run_event(RunEvent::Done(done_output("")));
         run_cmd("clear", "", &mut app, &caps).await;
         assert_eq!(app.conversation.segment_count(), 0);
-        assert!(app.echo.iter().any(|l| l.text.contains("已清空")));
+        assert!(app
+            .notice
+            .as_ref()
+            .is_some_and(|(t, _)| t.contains("已清空")));
     }
 
     #[tokio::test]
@@ -881,7 +893,10 @@ mod tests {
         let caps = empty_caps();
         let mut app = AppState::default();
         run_cmd("cost", "", &mut app, &caps).await;
-        assert!(app.echo.iter().any(|l| l.text.contains("router 不可用")));
+        assert!(app
+            .notice
+            .as_ref()
+            .is_some_and(|(t, _)| t.contains("router 不可用")));
     }
 
     #[tokio::test]
@@ -929,6 +944,9 @@ mod tests {
         let caps = empty_caps();
         let mut app = AppState::default();
         run_cmd("model", "switch deepseek-v4-pro", &mut app, &caps).await;
-        assert!(app.echo.iter().any(|l| l.text.contains("模型切换不可用")));
+        assert!(app
+            .notice
+            .as_ref()
+            .is_some_and(|(t, _)| t.contains("模型切换不可用")));
     }
 }

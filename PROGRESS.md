@@ -438,3 +438,28 @@ embed-backfill: attempted=0 ok=0
 - [x] B1 temp 目录 CLI 冒烟：`memory stats` 输出含 `embedded=`；`memory
       embed-backfill` 无 provider 不 panic 且 attempted=0（实测见下）
 - [x] B2 反向验证：改坏「语义独有命中」断言 → 真红（1 failed）→ 还原 → 真绿
+
+## 任务书：观测台前端 UI + TUI 演进（2026-08-07 dev-loop 轮）— 开工回执
+- 理解的目标：把已定稿观测台设计规范落地——桌面端重建纯前端工程（Vite+Solid+TS+Tailwind4）实现 A×B 首屏；TUI 按 §三 演进五项（浅色档 token、夜次分组+星点、审批风险标签+mono 命令、测光评分卡+/scorecard、欢迎卡圆顶字形），保留键位与命令；P0 未提交代码仅作基线提交。
+- 顺序：0 基线（提交 P0 + 记录 make check）→ 1 desktop scaffold + vitest + build + 截图 → 2 TUI 浅色档 → 3 夜次分组 → 4 审批风险 → 5 测光评分卡 → 6 欢迎卡 → 7 文档 → 8 全量验收 + 反向验证 → 9 OCR 审查修复 → 10 收尾。
+- 最大风险：desktop npm 安装/构建网络与版本（止损：3 次失败或 15 分钟 → 交付源码 + BLOCKED）；审批风险标签跨 permission/agent/tui（additive API，不改 core trait）；全量 make check 耗时长且当前树含 P0 未提交改动（先基线提交）。
+- 基线证据（本轮实测）：任务书 `docs/superpowers/plans/2026-08-07-frontend-tui-plan.md`；上一轮 CLOSEOUT 已记录 P0（会话级 HTTP API + serve 认证）未提交工作区 `make check` EXIT=0；本轮基线 `make check` 结果待本轮任务 0 回填。
+
+## 自验收清单（2026-08-07 前端+TUI 轮，执行者逐条打勾，命令亲跑）
+- [x] A1 基线说明：上一轮 P0 未提交改动与本轮改动同树（P0 已由前序审查轮覆盖），
+      交付时一次性提交（排除 `repro_tmp.rs` 用户调试文件）
+- [x] A2 最终 `make check` EXIT=0（fmt / clippy -D warnings / 全 workspace 测试 /
+      doctest / cargo doc 零警告）；TUI 154 单测 + 1 doctest（≥ 基线 + 新增）
+- [x] A3 desktop：`cd crates/deepseeknova-desktop/frontend && npm run build` EXIT=0；
+      `npx vitest run` 全绿（14 条，≥4）
+- [x] A4 截图存在：`.impeccable/mocks/obs-comp-d-desktop-p1.png`（1536×1024，
+      Agnes 视觉核对：深色首屏正常、双带/侧栏/对话流就位）
+- [x] A5 TUI 聚焦测试：`cargo test -p deepseeknova-tui` 全绿（154 单测 + 1 doctest）；
+      `cargo test -p deepseeknova-permission` 35 绿；`cargo test -p deepseeknova-agent` 全绿
+- [x] A6 反向验证：改坏夜次分组断言 → 真红（1 failed）→ 还原 → 真绿
+- [x] A7 反向验证：改坏 frontend nightKeyFromId → vitest 真红（1 failed）→ 还原 → 真绿
+- [x] A5b 聚焦 clippy：`cargo clippy -p permission -p agent -p tui --all-targets -- -D warnings` EXIT=0；
+      `cargo fmt --all -- --check` EXIT=0
+- [x] A8 OCR：`ocr delegate preview` + `ocr delegate rule` 输出与评论表已贴
+      crates/REVIEW.md；R1 high 已修；修复后全量 `make check` EXIT=0
+- [x] A9 收尾：CLOSEOUT 六事实面 + BLOCKED 更新；无未确认删除

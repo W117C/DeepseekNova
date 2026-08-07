@@ -809,7 +809,7 @@ pub struct AgentConfig {
 }
 
 fn default_max_steps() -> usize {
-    10
+    25
 }
 fn default_on_max_steps() -> String {
     "pause".to_string()
@@ -1896,7 +1896,7 @@ mod tests {
         let cfg = Config::default();
         assert!(cfg.default_model.is_none());
         assert!(cfg.providers.is_empty());
-        assert_eq!(cfg.agent.max_steps, 10);
+        assert_eq!(cfg.agent.max_steps, 25);
         assert_eq!(cfg.permissions.default_mode, PermissionMode::Ask);
         assert!(!cfg.sandbox.enabled);
         assert!(cfg.metrics.enabled);

@@ -60,7 +60,7 @@ Custom slash commands go in .deepseeknova/commands/ as .md files.
         let template = r#"# deepseeknova project configuration
 
 [agent]
-max_steps = 10
+max_steps = 25
 
 [permissions]
 default_mode = "ask"
