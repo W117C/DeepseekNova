@@ -93,6 +93,7 @@ impl Tool for LspDiagnosticsTool {
         }
         deepseeknova_security::context::enforce_capability(
             ctx,
+            &self.schema().name,
             deepseeknova_security::capability::Capability::FileRead,
         )?;
         if !self.cfg.enabled {

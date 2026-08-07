@@ -48,6 +48,7 @@ impl Tool for GrepTool {
     async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
         deepseeknova_security::context::enforce_capability(
             ctx,
+            &self.schema().name,
             deepseeknova_security::capability::Capability::FileRead,
         )?;
         let parsed: GrepArgs = serde_json::from_str(args)?;
@@ -75,66 +76,127 @@ impl Tool for GrepTool {
             .map(|s| s.limits.max_file_size)
             .unwrap_or(1024 * 1024);
 
-        let mut results: Vec<String> = Vec::new();
-        let mut files_searched = 0u32;
-        let mut total_bytes_searched = 0u64;
+        let limits = ScanLimits {
+            max_files,
+            max_total_bytes,
+            max_file_size,
+        };
+        let mut state = ScanState::new();
 
         if base.is_file() {
-            let bytes = search_file(&base, &re, &mut results, max_file_size)?;
-            total_bytes_searched += bytes;
-            files_searched = 1;
+            let bytes = search_file(&base, &re, &mut state.results, limits.max_file_size)?;
+            state.total_bytes_searched += bytes;
+            state.files_searched = 1;
         } else {
-            // Walk directory
-            let mut read_dir = tokio::fs::read_dir(&base).await?;
-            while let Some(entry) = read_dir.next_entry().await? {
-                if files_searched >= max_files {
-                    results.push(format!("... (stopped after {max_files} files)"));
-                    break;
-                }
-                if total_bytes_searched >= max_total_bytes {
-                    results.push(format!(
-                        "... (stopped after reading {max_total_bytes} bytes)"
-                    ));
-                    break;
-                }
-                if ctx.cancellation.is_cancelled() {
-                    anyhow::bail!("cancelled");
-                }
-                let path = entry.path();
-                // Ensure the path is safe (prevent symlink escape)
-                if deepseeknova_security::path::secure_resolve(&ctx.workspace_root, &path).is_err()
-                {
-                    continue;
-                }
-                if path.is_file() {
-                    // Check glob filter if specified
-                    if let Some(ref g) = parsed.glob {
-                        let fname = path.file_name().unwrap_or_default().to_string_lossy();
-                        if !simple_glob_match(g, &fname) {
-                            continue;
-                        }
-                    }
-                    let bytes = search_file(&path, &re, &mut results, max_file_size)?;
-                    total_bytes_searched += bytes;
-                    files_searched += 1;
-                }
-            }
+            walk_dir(
+                &base,
+                &ctx.workspace_root,
+                &re,
+                &parsed,
+                ctx,
+                &mut state,
+                limits,
+            )
+            .await?;
         }
 
-        if results.is_empty() {
+        if state.results.is_empty() {
             Ok(format!(
-                "no matches for '{}' in {} (searched {files_searched} files, {total_bytes_searched} bytes)",
+                "no matches for '{}' in {} (searched {} files, {} bytes)",
                 parsed.pattern,
-                base.display()
+                base.display(),
+                state.files_searched,
+                state.total_bytes_searched
             ))
         } else {
             Ok(format!(
-                "{} match(es) in {files_searched} files ({total_bytes_searched} bytes):\n{}",
-                results.len(),
-                results.join("\n")
+                "{} match(es) in {} files ({} bytes):\n{}",
+                state.results.len(),
+                state.files_searched,
+                state.total_bytes_searched,
+                state.results.join("\n")
             ))
         }
     }
+}
+
+/// grep 扫描的限额集合（来自 SecurityContext；缺省时回落内置默认值）。
+#[derive(Clone, Copy)]
+struct ScanLimits {
+    max_files: u32,
+    max_total_bytes: u64,
+    max_file_size: u64,
+}
+
+/// grep 扫描的累计状态（会话级聚合计数器）。
+struct ScanState {
+    results: Vec<String>,
+    files_searched: u32,
+    total_bytes_searched: u64,
+}
+
+impl ScanState {
+    fn new() -> Self {
+        Self {
+            results: Vec::new(),
+            files_searched: 0,
+            total_bytes_searched: 0,
+        }
+    }
+}
+
+/// 递归遍历目录，逐文件搜索；每层都检查取消/文件数上限/字节聚合上限。
+/// 覆盖嵌套子目录（修复原单层 read_dir 只扫顶层的问题）。
+async fn walk_dir(
+    dir: &std::path::Path,
+    root: &std::path::Path,
+    re: &regex::Regex,
+    parsed: &GrepArgs,
+    ctx: &ToolContext,
+    state: &mut ScanState,
+    limits: ScanLimits,
+) -> anyhow::Result<()> {
+    let mut read_dir = tokio::fs::read_dir(dir).await?;
+    while let Some(entry) = read_dir.next_entry().await? {
+        if state.files_searched >= limits.max_files {
+            state
+                .results
+                .push(format!("... (stopped after {} files)", limits.max_files));
+            return Ok(());
+        }
+        if state.total_bytes_searched >= limits.max_total_bytes {
+            state.results.push(format!(
+                "... (stopped after reading {} bytes)",
+                limits.max_total_bytes
+            ));
+            return Ok(());
+        }
+        if ctx.cancellation.is_cancelled() {
+            anyhow::bail!("cancelled");
+        }
+        let path = entry.path();
+        // Ensure the path is safe (prevent symlink escape)
+        if deepseeknova_security::path::secure_resolve(root, &path).is_err() {
+            continue;
+        }
+        if path.is_dir() {
+            // 递归 async fn 必须装箱（Box::pin），避免无限大小的 future 类型。
+            let recurse = walk_dir(&path, root, re, parsed, ctx, state, limits);
+            Box::pin(recurse).await?;
+        } else if path.is_file() {
+            // Check glob filter if specified
+            if let Some(ref g) = parsed.glob {
+                let fname = path.file_name().unwrap_or_default().to_string_lossy();
+                if !simple_glob_match(g, &fname) {
+                    continue;
+                }
+            }
+            let bytes = search_file(&path, re, &mut state.results, limits.max_file_size)?;
+            state.total_bytes_searched += bytes;
+            state.files_searched += 1;
+        }
+    }
+    Ok(())
 }
 
 /// Search a single file for regex matches. Returns size of read file.
@@ -180,4 +242,74 @@ fn simple_glob_match(pattern: &str, name: &str) -> bool {
         return name.contains(inner);
     }
     name == pattern
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use deepseeknova_security::context::SecurityContext;
+
+    fn temp_ctx(dir: &std::path::Path) -> ToolContext {
+        ToolContext::new("grep-test")
+            .with_workspace(dir.to_path_buf())
+            .with_extension(SecurityContext::with_safe_defaults())
+    }
+
+    #[tokio::test]
+    async fn grep_searches_nested_directories_recursively() {
+        // 回归：原单层 read_dir 只扫顶层，嵌套子目录不命中；递归后必须命中。
+        let dir = std::env::temp_dir().join(format!("dnv-grep-rec-{}", std::process::id()));
+        tokio::fs::create_dir_all(dir.join("src/sub"))
+            .await
+            .unwrap();
+        tokio::fs::write(dir.join("src/a.rs"), "fn alpha_top() {}\n")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.join("src/sub/b.rs"), "fn alpha_nested() {}\n")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.join("src/sub/c.md"), "nothing here\n")
+            .await
+            .unwrap();
+
+        let ctx = temp_ctx(&dir);
+        let out = GrepTool
+            .execute(&ctx, r#"{"pattern":"alpha","path":"src"}"#)
+            .await
+            .unwrap();
+        assert!(out.contains("src/a.rs"), "top-level match: {out}");
+        assert!(
+            out.contains("src/sub/b.rs"),
+            "nested match must be found: {out}"
+        );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn grep_aggregates_byte_budget_across_recursion() {
+        // 会话级聚合：max_total_read_bytes 跨子树累计，超限即停。
+        let dir = std::env::temp_dir().join(format!("dnv-grep-bytes-{}", std::process::id()));
+        tokio::fs::create_dir_all(dir.join("a/b")).await.unwrap();
+        tokio::fs::write(dir.join("a/x.rs"), "word here\n".repeat(200).as_bytes())
+            .await
+            .unwrap();
+        tokio::fs::write(dir.join("a/b/y.rs"), "word here\n".repeat(200).as_bytes())
+            .await
+            .unwrap();
+
+        let mut sec = SecurityContext::with_safe_defaults();
+        sec.limits.max_total_read_bytes = 10; // 极小预算，首个文件即超限
+        let ctx = ToolContext::new("grep-test")
+            .with_workspace(dir.clone())
+            .with_extension(sec);
+        let out = GrepTool
+            .execute(&ctx, r#"{"pattern":"word","path":"a"}"#)
+            .await
+            .unwrap();
+        assert!(
+            out.contains("stopped after reading 10 bytes"),
+            "byte aggregate must stop the scan: {out}"
+        );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
 }

@@ -93,6 +93,7 @@ impl Tool for SearchCodeTool {
     async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
         deepseeknova_security::context::enforce_capability(
             ctx,
+            &self.schema().name,
             deepseeknova_security::capability::Capability::FileRead,
         )?;
         let parsed: SearchCodeArgs = serde_json::from_str(args)?;
@@ -188,6 +189,7 @@ impl Tool for TraverseGraphTool {
     async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
         deepseeknova_security::context::enforce_capability(
             ctx,
+            &self.schema().name,
             deepseeknova_security::capability::Capability::FileRead,
         )?;
         let parsed: TraverseGraphArgs = serde_json::from_str(args)?;
@@ -297,6 +299,7 @@ impl Tool for RetrieveEntityTool {
     async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
         deepseeknova_security::context::enforce_capability(
             ctx,
+            &self.schema().name,
             deepseeknova_security::capability::Capability::FileRead,
         )?;
         let parsed: RetrieveEntityArgs = serde_json::from_str(args)?;
@@ -419,6 +422,7 @@ impl Tool for TraceCodeTool {
     async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
         deepseeknova_security::context::enforce_capability(
             ctx,
+            &self.schema().name,
             deepseeknova_security::capability::Capability::FileRead,
         )?;
         let parsed: TraceCodeArgs = serde_json::from_str(args)?;
@@ -508,6 +512,7 @@ impl Tool for ImpactCodeTool {
     async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
         deepseeknova_security::context::enforce_capability(
             ctx,
+            &self.schema().name,
             deepseeknova_security::capability::Capability::FileRead,
         )?;
         let parsed: ImpactCodeArgs = serde_json::from_str(args)?;
@@ -612,6 +617,7 @@ impl Tool for ExploreCodeTool {
     async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
         deepseeknova_security::context::enforce_capability(
             ctx,
+            &self.schema().name,
             deepseeknova_security::capability::Capability::FileRead,
         )?;
         let parsed: ExploreCodeArgs = serde_json::from_str(args)?;
@@ -764,6 +770,7 @@ impl Tool for DepsCodeTool {
     async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
         deepseeknova_security::context::enforce_capability(
             ctx,
+            &self.schema().name,
             deepseeknova_security::capability::Capability::FileRead,
         )?;
         let parsed: DepsCodeArgs = serde_json::from_str(args)?;

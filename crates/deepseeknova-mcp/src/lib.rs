@@ -11,6 +11,9 @@ pub mod discovery;
 pub mod http_client;
 pub mod types;
 
+#[cfg(test)]
+mod test_util;
+
 pub use adapter::*;
 pub use client::*;
 pub use connection::*;

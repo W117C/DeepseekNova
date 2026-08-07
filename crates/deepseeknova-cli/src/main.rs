@@ -30,10 +30,20 @@ async fn main() -> anyhow::Result<()> {
 
     // Config is loaded before any subscriber exists, so load-time diagnostics
     // go to stderr directly.
-    let config = deepseeknova_config::Config::load().unwrap_or_else(|e| {
+    let mut config = deepseeknova_config::Config::load().unwrap_or_else(|e| {
         eprintln!("warning: failed to load config, using defaults: {e}");
         deepseeknova_config::Config::default()
     });
+
+    // `--secure-defaults` 一键档：权限门控（已默认开启）保持开启 + 沙箱启用
+    // （若 OS 支持）。Windows 无 OS 沙箱后端时 platform_sandbox* 回落
+    // NoOpSandbox，由下方 main.rs 警告 + runtime 启动横幅明示；权限门控仍
+    // 独立生效，安全姿态不因此降级。
+    if cli.secure_defaults {
+        config.permissions.enabled = true;
+        config.sandbox.enabled = true;
+        eprintln!("secure-defaults: permission gate ON, sandbox ON");
+    }
 
     // Windows 上当前没有 OS 级沙箱后端（seatbelt/bubblewrap 均不可用），
     // `platform_sandbox*` 会回落 NoOpSandbox。即使 [sandbox] enabled=true，
@@ -566,7 +576,10 @@ async fn main() -> anyhow::Result<()> {
                             &router,
                             Some(cli_session_label()),
                         )?
-                        .with_conversation_history(Arc::clone(&history_clone));
+                        .with_conversation_history(Arc::clone(&history_clone))
+                        // REPL 交互审批：Ask 决策终端询问 y/n（权限门控默认开启，
+                        // 写工具需人工裁决，与 TUI 审批浮层同语义）。
+                        .with_approval_responder(chat::repl_approval_responder());
                         let agent = if let Some(decider) = maybe_auto_router(
                             &router,
                             cfg,
@@ -979,7 +992,9 @@ async fn main() -> anyhow::Result<()> {
                             &router,
                             Some(cli_session_label()),
                         )?
-                        .with_conversation_history(Arc::clone(&history_clone));
+                        .with_conversation_history(Arc::clone(&history_clone))
+                        // 无子命令 = 交互 REPL：同 chat 路径注入交互审批。
+                        .with_approval_responder(chat::repl_approval_responder());
                         let agent = if let Some(decider) = maybe_auto_router(
                             &router,
                             cfg,
@@ -1236,8 +1251,9 @@ fn build_agent_in(
     let session_skills: Arc<std::sync::Mutex<Vec<String>>> =
         Arc::new(std::sync::Mutex::new(Vec::new()));
     // Delegate to the shared runtime builder (security + sandbox + permission
-    // gate wiring lives in one place). CLI is non-interactive, so no approval
-    // responder is attached — the gate falls back to Allow on `Ask`.
+    // gate wiring lives in one place). CLI 非交互路径由各调用方显式注入
+    // DenyApprovalResponder；即便漏挂，agent 侧的 Ask 兜底也已默认
+    // fail-closed（permissions.ask_without_responder=deny），不会静默放行。
     let agent = deepseeknova_runtime::build_agent_with_role_providers(
         config,
         workspace_root.clone(),

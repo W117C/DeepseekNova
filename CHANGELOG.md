@@ -351,6 +351,75 @@ All notable changes to DeepseekNova will be documented in this file.
 - Parallel 子节点失败时不写回共享容器，兄弟 Observe 看不到失败产出；现失败也
   写回 Error，Observe 在无 ToolResult 时可见失败输出。
 
+---
+
+### ⚠ Breaking（并行优化轮，2026-08-07）
+
+- **权限门控默认开启**：`[permissions] enabled` 默认值从 `false` 改为 `true`
+  （`PermissionsConfig`）。默认配置下工具调用走 allow/ask/deny 门控，写工具
+  （bash/write_file 等）需审批或规则放行；依赖旧"无条件执行"的自动化需显式
+  `[permissions] enabled = false`。交互 CLI 有 REPL 审批 responder 兜底（见下），
+  serve/库级路径 Ask 默认拒绝。
+- **Ask 无 responder 默认 fail-closed**：`PermissionsConfig.ask_without_responder`
+  新配置项（默认 `"deny"`）。非交互/库级消费者（CLI 非交互、serve 直连）在无
+  人工审批通道时不再自动放行，改为拒绝并记录审计事件；显式配置 `"allow"` 可
+  恢复旧行为。消除与子代理侧 fail-closed 的行为不对称。
+
+### Added（并行优化轮，2026-08-07）
+
+- **serve 暴露面加固**：CORS 由 `allow_origin(Any)` 收窄为 **loopback-only**
+  （`localhost`/`127.0.0.1`/`::1`，任意端口），恶意网页无法跨源读取
+  SSE/会话/评分卡或自答 `/v1/approval`；`done` SSE 事件新增 `session_id`
+  （durable run id / 会话 id 由 serve 注入），run→评分卡/诊断建立关联键。
+- **默认安全姿态落地**：`--secure-defaults` 全局 flag 一键开启权限门控 + 沙箱；
+  runtime 构建 agent 时任一安全层关闭即打印启动横幅
+  （`⚠ security posture reduced`）；runtime 审计后端从 `TracingAuditLogger`
+  切换为 **JSONL 落盘**（`.deepseeknova/security/audit.jsonl`，含
+  tool_name/capability/path/allowed/reason，写盘失败仅 warn 不改变判定）；
+  交互 `chat`/无子命令路径接入 `ReplApprovalResponder`（y/yes 放行、回车默认
+  拒绝、Esc/Ctrl+C/EOF fail-closed）。
+- **checkpoint 容量与增量持久化**：内存快照容量上限（默认 200，FIFO 淘汰最旧，
+  `with_max_snapshots` 可配置）；`persist_all` 改增量追加，仅在淘汰/回滚/清空时
+  全量重写，消除大目录 O(n²) I/O 与无界内存。
+- **agent 热路径优化**：主循环每步会话历史全量克隆由 3–7 次降至 1~2 次——步起始
+  取一次快照复用（budget 判定 / 压缩判定 / classify / provider 请求共享），压缩
+  修改后重快照；`Memory` 新增零拷贝只读接口（`iter_all`/`last_message`/
+  `iter_recent`/`estimate_tokens(&self)`）；`MetricsGuard.start_len` 改
+  `Option<usize>`，锁忙时 emit 空 findings 不再误切片并发 run 数据。
+- **MCP 协议层测试补齐**：connection/client/http_client 三个外部输入面新增 28 个
+  伪造管道回放测试（请求/响应往返、半关闭、错误帧、超时、进程退出清理、HTTP
+  会话头）；写通道由 unbounded 改**有界 mpsc**（慢子进程防无界内存，不丢合法
+  消息）。
+- **core 死模块清理**：`identity`/`prefix`/`progress`/`plugin` 四模块（约 800 行，
+  workspace 零消费者经多路 grep 证实）整体删除，移除独占依赖 `serde_jcs`/
+  `ryu-js`；DESIGN.md 同步标注。`deepseeknova-context` 的
+  CacheAwarePromptBuilder/ContextEngine 仅产出决策意见（与 README 三层缓存承诺
+  联动，归 P2-6 统一裁决），本轮未改代码。
+- **serve 认证/契约文档同步**：README/README_EN 的 API key 环境变量统一为代码
+  默认 `DEEPSEEK_API_KEY`（Anthropic 默认 `ANTHROPIC_API_KEY`）；GUIDE.md HTTP
+  章节补齐 `/v1/sessions`、`--token`、SSE 事件清单、scorecard 示例字段修正
+  （移除不存在的 `overall`）；PRODUCT.md 缺口清单更新为已实现。
+
+### Security（并行优化轮，2026-08-07）
+
+- **`/dev/tcp`/`/dev/udp` 伪设备拦截**：命令参数含该形态归 `Dangerous` 硬拒
+  （此前 `cat /dev/tcp/169.254.169.254/80` 判只读放行，可读云元数据/本地服务）。
+- **web_fetch 重定向逐跳校验**：每跳经 `validate_redirect_target`（scheme + 域名
+  策略先行 + SSRF），与 web_search 对齐；DNS 重绑定接受说明保留。
+- **shell 工具工作目录**：`Command` 补 `current_dir(workspace_root)`，防 `cd`
+  逃逸导致后续文件操作落在工作区外。
+- **move_file 双路径守卫**：`extract_path` 泛化为递归收集路径字段，
+  source/destination 任一越界即硬拒。
+- **记忆/待办能力门**：`remember`/`forget`/`recall`/`todo_write` 补
+  `MemoryWrite`/`MemoryRead` 能力门控，与 fs/shell 一致。
+- **sanitize 清单扩展**：token 补 `--yes`/`--skip_permissions`/`<setConfig>` 等
+  形态；顺带修复 `--` 前缀插入到末尾无法打断 needle 的潜在死循环。
+- **资源限额统一**：`read_file` 限长改读 `sec.limits.max_file_size`（缺失回落
+  1MB）；`grep` 目录扫描改递归 + 字节预算/文件数预算会话级聚合，每层查
+  取消/symlink 逃逸。
+- **reqwest::Client 共享**：web_fetch/web_search/docs_tools 改为进程级一次构造
+  共享（此前每次调用重建）。
+
 ## [0.4.0] — 2026-07-19
 
 ### 桌面前端完善

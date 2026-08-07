@@ -1127,3 +1127,195 @@ async fn auth_token_guards_v1_but_not_health() {
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
 }
+
+// ---------------------------------------------------------------------------
+// CORS / done session_id 契约（B2 serve 暴露面加固）
+// ---------------------------------------------------------------------------
+
+/// 从 SSE body 提取 `event: done` 的 `data:` JSON 中 `session_id` 字段。
+fn sse_done_session_id(body: &str) -> Option<String> {
+    let mut in_done = false;
+    for line in body.lines() {
+        if let Some(ev) = line.strip_prefix("event: ") {
+            in_done = ev.trim() == "done";
+            continue;
+        }
+        if in_done {
+            if let Some(data) = line.strip_prefix("data: ") {
+                if let Ok(v) = serde_json::from_str::<Value>(data) {
+                    if let Some(id) = v.get("session_id").and_then(|s| s.as_str()) {
+                        return Some(id.to_string());
+                    }
+                }
+            }
+            if line.is_empty() {
+                in_done = false;
+            }
+        }
+    }
+    None
+}
+
+/// B2-P0：CORS 收窄 —— 恶意 Origin 的请求响应不得带 `Access-Control-Allow-Origin`
+/// （浏览器拒绝跨源读取，关闭经 `/v1/approval` 自答审批与 SSE/会话/评分卡数据
+/// 外带窗口）；loopback 来源与无 Origin 请求不受影响。
+#[tokio::test]
+async fn cors_blocks_malicious_origins() {
+    let dir = tempfile::tempdir().unwrap();
+    let port = start_sessions_server(Some(mock_sessions_manager(dir.path())), None).await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let client = helpers::http::localhost_client();
+
+    // 恶意 / 非 loopback 来源：GET 简单请求被处理但响应无 ACAO → 浏览器拒读。
+    for origin in [
+        "https://evil.example",
+        "http://192.168.1.10:8080",
+        "http://10.0.0.5:1234",
+        "null",
+    ] {
+        let resp = client
+            .get(format!("http://127.0.0.1:{port}/v1/sessions"))
+            .header(reqwest::header::ORIGIN, origin)
+            .send()
+            .await
+            .unwrap();
+        let acao = resp
+            .headers()
+            .get(reqwest::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .cloned();
+        assert!(
+            acao.is_none(),
+            "origin {origin} must NOT get ACAO, got {acao:?}"
+        );
+    }
+
+    // 跨源预检（POST /v1/chat 带 JSON body 属非 simple 请求）：恶意 origin 预检
+    // 也不得携带 ACAO → 实际请求不会被发出。
+    let resp = client
+        .request(
+            reqwest::Method::OPTIONS,
+            format!("http://127.0.0.1:{port}/v1/chat"),
+        )
+        .header(reqwest::header::ORIGIN, "https://evil.example")
+        .header("Access-Control-Request-Method", "POST")
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.headers()
+            .get(reqwest::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .is_none(),
+        "preflight from malicious origin must be rejected"
+    );
+
+    // 正向对照：loopback 来源放行（端口不限，webview/dev server 可用）。
+    for origin in ["http://127.0.0.1:8787", "http://localhost:3000"] {
+        let resp = client
+            .get(format!("http://127.0.0.1:{port}/v1/sessions"))
+            .header(reqwest::header::ORIGIN, origin)
+            .send()
+            .await
+            .unwrap();
+        let acao = resp
+            .headers()
+            .get(reqwest::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        assert_eq!(
+            acao.as_deref(),
+            Some(origin),
+            "loopback {origin} must be allowed"
+        );
+    }
+
+    // 无 Origin 头（curl / 同源 / 非浏览器客户端）→ 正常处理。
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/v1/sessions"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+}
+
+/// B2：`/v1/sessions/{id}/chat` 的 `done` 事件携带该会话 id（前端据 session_id
+/// 拉取该 run 的评分卡/诊断的关联键）。
+#[tokio::test]
+async fn sessions_chat_done_event_carries_session_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = mock_sessions_manager(dir.path());
+    let port = start_sessions_server(Some(manager.clone()), None).await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let client = helpers::http::localhost_client();
+
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/v1/sessions"))
+        .send()
+        .await
+        .unwrap();
+    let id: String = resp.json::<Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/v1/sessions/{id}/chat"))
+        .json(&ChatRequest {
+            prompt: "hello".to_string(),
+            images: None,
+            model: None,
+        })
+        .send()
+        .await
+        .unwrap();
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains(&format!("\"session_id\":\"{id}\"")),
+        "done event must carry session_id {id}: {body}"
+    );
+    assert_eq!(sse_done_session_id(&body).as_deref(), Some(id.as_str()));
+}
+
+/// B2：`/v1/chat` 配置 durable runs 时，`done` 事件携带与持久化 run 一致的 id
+/// （run/聊天/会话/metrics 三套 id 可关联）。
+#[tokio::test]
+async fn chat_done_event_carries_durable_run_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let runner: Arc<dyn Runner> = Arc::new(ServeMockRunner);
+    let server = Server::new(runner).with_runs_dir(dir.path().to_path_buf());
+    let app = server.into_router();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let client = helpers::http::localhost_client();
+
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/v1/chat"))
+        .json(&ChatRequest {
+            prompt: "hi".to_string(),
+            images: None,
+            model: None,
+        })
+        .send()
+        .await
+        .unwrap();
+    let body = resp.text().await.unwrap();
+    let run_id = sse_done_session_id(&body).expect("done must carry the run id");
+    assert!(!run_id.is_empty());
+
+    // 该 id 同时落为 durable run record（run/SSE 关联键一致）。
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/v1/runs"))
+        .send()
+        .await
+        .unwrap();
+    let runs: Vec<Value> = resp.json().await.unwrap();
+    assert!(
+        runs.iter()
+            .any(|r| r["id"].as_str() == Some(run_id.as_str())),
+        "durable run {run_id} must be listed: {runs:?}"
+    );
+}

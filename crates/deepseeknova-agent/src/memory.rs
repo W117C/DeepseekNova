@@ -55,6 +55,44 @@ impl Memory {
         out
     }
 
+    // -----------------------------------------------------------------------
+    // A1 热路径：零拷贝只读接口（避免为仅需统计/末条/近条的场景全量 clone）
+    // -----------------------------------------------------------------------
+
+    /// 会话历史全部消息的可借用视图（pinned + messages），**不克隆**。
+    /// 与 `get_all()` 顺序一致（先 pinned，后 messages）。
+    pub fn iter_all(&self) -> impl Iterator<Item = &Message> {
+        self.pinned.iter().chain(self.messages.iter())
+    }
+
+    /// 会话历史消息总数（零拷贝，等价 `get_all().len()`）。
+    pub fn len(&self) -> usize {
+        self.pinned.len() + self.messages.len()
+    }
+
+    /// 会话历史是否为空（零拷贝，等价 `get_all().is_empty()`）。
+    pub fn is_empty(&self) -> bool {
+        self.pinned.is_empty() && self.messages.is_empty()
+    }
+
+    /// 最后一条消息（只读借用，零拷贝；等价 `get_all().last()`）。
+    pub fn last_message(&self) -> Option<&Message> {
+        self.messages.back().or_else(|| self.pinned.last())
+    }
+
+    /// 迭代最近 `n` 条消息（保持从旧到新的顺序，零拷贝）；不足 `n` 条时
+    /// 返回全部。与 `get_all()` 的尾部 `n` 条一致。
+    pub fn iter_recent(&self, n: usize) -> impl Iterator<Item = &Message> {
+        let skip = self.len().saturating_sub(n);
+        self.iter_all().skip(skip)
+    }
+
+    /// 估算会话历史 token 数（含 reasoning_content），**零拷贝**。与
+    /// [`crate::tokens::estimate_tokens`] 同口径（同一换算函数）。
+    pub fn estimate_tokens(&self) -> u32 {
+        crate::tokens::estimate_messages_iter(self.iter_all())
+    }
+
     pub fn clear(&mut self) {
         self.messages.clear();
         self.full_results.clear();
@@ -317,4 +355,58 @@ fn floor_char_boundary_safe_from_end(s: &str, min: usize) -> usize {
         idx += 1;
     }
     idx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn msg(role: Role, content: &str) -> Message {
+        Message {
+            role,
+            content: content.into(),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        }
+    }
+
+    fn seed_memory() -> Memory {
+        let mut m = Memory::new();
+        m.pin_message(msg(Role::System, "system"));
+        m.add_message(msg(Role::User, "first"));
+        m.add_message(msg(Role::Assistant, "second"));
+        m
+    }
+
+    #[test]
+    fn zero_copy_views_match_get_all() {
+        let m = seed_memory();
+        let all = m.get_all();
+        // iter_all 顺序与 get_all 一致（按内容比较；Message 无 PartialEq）
+        let iter_contents: Vec<&str> = m.iter_all().map(|x| x.content.as_str()).collect();
+        let all_contents: Vec<&str> = all.iter().map(|x| x.content.as_str()).collect();
+        assert_eq!(iter_contents, all_contents);
+        // len / is_empty / last_message 与 get_all 派生一致
+        assert_eq!(m.len(), all.len());
+        assert_eq!(m.last_message().map(|x| x.content.as_str()), Some("second"));
+        assert!(!m.is_empty());
+        assert!(Memory::new().is_empty());
+        assert!(Memory::new().last_message().is_none());
+        // iter_recent：最近 n 条、旧→新顺序；不足 n 时返回全部
+        let recent: Vec<&str> = m.iter_recent(2).map(|x| x.content.as_str()).collect();
+        assert_eq!(recent, vec!["first", "second"]);
+        let recent_all: Vec<&str> = m.iter_recent(10).map(|x| x.content.as_str()).collect();
+        assert_eq!(recent_all, vec!["system", "first", "second"]);
+        assert_eq!(m.iter_recent(0).count(), 0);
+    }
+
+    #[test]
+    fn estimate_tokens_zero_copy_matches_get_all_slice() {
+        let m = seed_memory();
+        let all = m.get_all();
+        assert_eq!(m.estimate_tokens(), crate::tokens::estimate_tokens(&all));
+        assert_eq!(Memory::new().estimate_tokens(), 0);
+    }
 }

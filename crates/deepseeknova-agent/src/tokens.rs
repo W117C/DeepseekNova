@@ -9,7 +9,24 @@ use deepseeknova_core::Message;
 
 /// 估算消息序列的 token 数（含 reasoning_content）。
 pub fn estimate_tokens(messages: &[Message]) -> u32 {
-    deepseeknova_core::tokens::estimate_messages_tokens(messages)
+    estimate_messages_iter(messages.iter())
+}
+
+/// 估算消息**迭代器**的 token 数（含 reasoning_content）。与
+/// `estimate_tokens(&[Message])` 完全同口径，供零拷贝接口
+/// （如 [`crate::memory::Memory::estimate_tokens`]）在不构造 `Vec<Message>`
+/// 的前提下复用同一换算逻辑，避免口径漂移。
+pub fn estimate_messages_iter<'a>(messages: impl IntoIterator<Item = &'a Message>) -> u32 {
+    messages
+        .into_iter()
+        .map(|m| {
+            estimate_text_tokens(&m.content)
+                + m.reasoning_content
+                    .as_deref()
+                    .map(estimate_text_tokens)
+                    .unwrap_or(0)
+        })
+        .sum()
 }
 
 /// 单字符 CJK 判定（兼容旧名）。
@@ -83,6 +100,31 @@ mod tests {
         };
         // 2 + 2
         assert_eq!(estimate_tokens(&[m]), 4);
+    }
+
+    #[test]
+    fn estimate_messages_iter_matches_slice_estimate() {
+        let msgs = vec![
+            Message {
+                role: Role::User,
+                content: "hello".into(),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+            Message {
+                role: Role::Assistant,
+                content: "abcd".into(),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: Some("中文".into()),
+            },
+        ];
+        assert_eq!(estimate_messages_iter(msgs.iter()), estimate_tokens(&msgs));
+        assert_eq!(estimate_messages_iter(msgs.iter()), 6);
+        assert_eq!(estimate_messages_iter(std::iter::empty()), 0);
     }
 
     #[test]

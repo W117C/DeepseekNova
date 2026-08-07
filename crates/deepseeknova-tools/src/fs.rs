@@ -60,6 +60,7 @@ impl Tool for ReadFileTool {
     async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
         deepseeknova_security::context::enforce_capability(
             ctx,
+            &self.schema().name,
             deepseeknova_security::capability::Capability::FileRead,
         )?;
         let parsed: ReadFileArgs = serde_json::from_str(args)?;
@@ -69,9 +70,16 @@ impl Tool for ReadFileTool {
             anyhow::bail!("cancelled");
         }
 
+        // 资源限额统一：上限读 SecurityContext 的 `limits.max_file_size`
+        // （未装配时回落内置默认 1 MB），与 grep/ls 一致。
+        let max_size = ctx
+            .extensions
+            .get::<deepseeknova_security::context::SecurityContext>()
+            .map(|s| s.limits.max_file_size)
+            .unwrap_or(MAX_READ_SIZE);
         let meta = fs::metadata(&path).await?;
-        if meta.len() > MAX_READ_SIZE {
-            anyhow::bail!("file too large: {} bytes (max {MAX_READ_SIZE})", meta.len());
+        if meta.len() > max_size {
+            anyhow::bail!("file too large: {} bytes (max {max_size})", meta.len());
         }
 
         let content = fs::read_to_string(&path).await?;
@@ -172,6 +180,7 @@ impl Tool for WriteFileTool {
     async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
         deepseeknova_security::context::enforce_capability(
             ctx,
+            &self.schema().name,
             deepseeknova_security::capability::Capability::FileWrite,
         )?;
         let parsed: WriteFileArgs = serde_json::from_str(args)?;
@@ -311,6 +320,7 @@ impl Tool for EditFileTool {
     async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
         deepseeknova_security::context::enforce_capability(
             ctx,
+            &self.schema().name,
             deepseeknova_security::capability::Capability::FileWrite,
         )?;
         let parsed: EditFileArgs = serde_json::from_str(args)?;
@@ -446,6 +456,7 @@ impl Tool for MoveFileTool {
     async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
         deepseeknova_security::context::enforce_capability(
             ctx,
+            &self.schema().name,
             deepseeknova_security::capability::Capability::FileWrite,
         )?;
         let parsed: MoveFileArgs = serde_json::from_str(args)?;
@@ -637,6 +648,39 @@ mod tests {
             .await
             .unwrap();
         assert!(out.contains('a') && out.contains('b') && out.contains('c'));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn read_file_enforces_configured_size_limit() {
+        // 资源限额统一：read_file 上限必须读 `sec.limits.max_file_size`，
+        // 而非内置常量。
+        let dir = std::env::temp_dir().join(format!("dnv-lim-read-{}", std::process::id()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join("big.txt"), "x".repeat(100).as_bytes())
+            .await
+            .unwrap();
+
+        let mut sec = deepseeknova_security::context::SecurityContext::with_safe_defaults();
+        sec.limits.max_file_size = 50;
+        let ctx = ToolContext::new("t")
+            .with_workspace(dir.clone())
+            .with_extension(sec);
+
+        let err = ReadFileTool
+            .execute(&ctx, r#"{"path":"big.txt"}"#)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("file too large"), "got: {err}");
+
+        // 默认限额（1 MB）下正常读取
+        let ctx = test_ctx(&dir);
+        let out = ReadFileTool
+            .execute(&ctx, r#"{"path":"big.txt"}"#)
+            .await
+            .unwrap();
+        assert!(out.contains("xxx"), "got: {out}");
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 

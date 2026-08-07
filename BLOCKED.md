@@ -8,7 +8,7 @@
   sidecar 托管 + 随机 bearer token 注入留待下轮。
 - **桌面端后续页（P3/P4）**：星座图点星跳条目交互、审批卡、归档/诊断/聚合/
   设置/onboarding、印刷星图浅色档，均待前端工程进入下轮后按规范分期实现。
-- **界面文案语言**：未决（现状中文；i18n 双语 / 全英留待拍板）。
+- ~~**界面文案语言**~~（2026-08-07 已拍板：**双语 i18n 框架，英文默认 + 中文可选**，TUI 与桌面共享词表，见 PRODUCT.md 与 roadmap 记忆）。
 - **Logo/应用图标**：无现存资产，实现期先用文字标。
 - **风险标签接线端到端测试**：`responder.request` 收到带 `[风险:…]` 前缀描述
   的 agent 集成断言未补（本轮有纯函数 + 权限分类 + TUI 渲染测试覆盖）。
@@ -19,6 +19,51 @@
 
 ### 执行阻塞
 - 无（本轮无阻塞；全量验证以 `make check` EXIT=0 为准）。
+
+## 路线图调研轮（2026-08-07，领导裁决）
+
+七子代理并行调研（竞品对标 / 执行引擎 / 安全域 / 接口面 / 代码健康 / 发布就绪）
+后的裁决与待办：
+
+### 已拍板（2026-08-07 领导确认，落地为后续轮任务）
+- **默认安全姿态**：默认开启权限门控（`permissions.enabled=true`）；沙箱保持关闭但
+  启动横幅明示未启用；另提供 `--secure-defaults` 一键开沙箱。~~（P0-7）~~ **已做
+  （2026-08-07 第二批 B3**：config 默认 true + `--secure-defaults` + runtime 横幅 +
+  REPL 审批 responder）。
+- **Ask 无 responder 默认 fail-closed**：非交互/库级默认 deny，新增配置项允许显式
+  改回 allow。~~（P0-6）~~ **已做（2026-08-07 第二批 B3**：`ask_without_responder`
+  默认 deny + `with_ask_without_responder_deny` builder + 两条回归测试）。
+- **i18n**：双语框架，英文默认 + 中文可选，TUI 与桌面共享词表；词表结构须在 Tauri
+  壳之前敲定（已在 PRODUCT.md 落记）。**第三批受阻（2026-08-07**：i18n 子代理因 API
+  402 余额不足中断，迁移约 30% 完成（词表 keys.rs 914 行已建、业务文件仍约 500 处
+  中文）。半成品已回退（TUI 恢复 6eb8abf），词表成果备份在
+  `/tmp/deepseeknova-i18n-backup/` 供重启参考。**待余额恢复后重启该任务**。
+- **Tauri 桌面壳降为 P2**：CLI/TUI 先行开源；桌面待前端契约修复（scorecard 解析、
+  done 携带 session_id）后再接真数据（P1-12 → P2-12）。
+
+### 调研核实的 P0 发布阻塞（未裁决，按路线图待做）
+- 版本 bump 重发 crates.io（scanner/graph/metrics 三 crate 缺 description 不可发布）。
+- ~~API key 环境变量约定失效（代码读 `DEEPSEEK_API_KEY`，README 推荐
+  `DEEPSEEKNOVA_API_KEY`）~~ **已做（2026-08-07 第二批 B2 文档侧**：README/README_EN
+  统一到代码默认 `DEEPSEEK_API_KEY`；命名最终裁决仍在"待领导裁决"）。
+- README 截图空占位。
+- ~~`/dev/tcp` 只读分类器漏网（P0-4）~~ **已做（第一批 B1**：Dangerous 硬拒 + 回归测试）。
+- ~~serve CORS `allow_origin(Any)`（P0-5）~~ **已做（2026-08-07 第二批 B2**：收窄为
+  loopback-only + 恶意 Origin 回归测试）。
+- ~~done SSE 事件缺 session_id（P1-4）~~ **已做（2026-08-07 第二批 B2**：`WireEvent::Done`
+  增 `session_id`，serve 注入 durable run id / 会话 id）。
+- ~~审计日志持久化（P1-10）~~ **部分已做**：security 侧 `JsonlAuditLogger`（第一批 B1）
+  + runtime 侧切 JSONL 后端（第二批 B3）；`PermissionGate` 裁决统一进审计流仍未做。
+- SECURITY.md 支持版本表过期 + GitHub 元数据（description 仍写 Desktop）。
+
+### 待领导后续裁决（非本批阻塞）
+- Runtime/EventBus/ContextEngine 三选一（接线 / 标注库级 API / 删除）。
+- README"三层缓存"承诺（实现真实命中率 vs 撤稿）。
+- API key 命名统一到哪个变量名。
+- npm 安装器承诺（cargo-dist vs 删死配置）。
+- docs/superpowers 内部任务书（移出 / 标注 / 保留）。
+- Windows 沙箱排期。
+- temperature 配置接线 vs 删除。
 
 ## 本轮明确不做、留给领导裁决的顺手活
 - ~~状态栏常驻成本显示~~（2026-08-02 已做：router ledger 每帧刷新）

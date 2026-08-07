@@ -43,6 +43,7 @@ impl Tool for WebFetchTool {
     async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
         deepseeknova_security::context::enforce_capability(
             ctx,
+            &self.schema().name,
             deepseeknova_security::capability::Capability::NetworkAccess,
         )?;
         let parsed: WebFetchArgs = serde_json::from_str(args)?;
@@ -58,10 +59,10 @@ impl Tool for WebFetchTool {
         let host = url
             .host_str()
             .ok_or_else(|| anyhow::anyhow!("URL has no host: {}", parsed.url))?;
-        if let Some(sec) = ctx
+        let security = ctx
             .extensions
-            .get::<deepseeknova_security::context::SecurityContext>()
-        {
+            .get::<deepseeknova_security::context::SecurityContext>();
+        if let Some(sec) = security {
             if !sec.policy.is_domain_allowed(host) {
                 anyhow::bail!(
                     "Security violation: domain '{}' is blocked by security policy",
@@ -71,11 +72,13 @@ impl Tool for WebFetchTool {
         }
         validate_host_ssrf(host).await?;
 
-        // Step 3 — Build an HTTP client (no automatic redirects — we re-validate each hop)
-        let client = build_ssrf_safe_client()?;
+        // Step 3 — Shared HTTP client (no automatic redirects — we re-validate each hop)
+        let client = shared_http_client();
 
-        // Step 4 — Fetch with timeout, manually following redirects with re-validation
-        let body = fetch_with_redirects(&client, url.clone(), 0).await?;
+        // Step 4 — Fetch with timeout, manually following redirects with
+        // per-hop re-validation of BOTH the domain policy and SSRF safety
+        // (对齐 web_search.rs::search_get：每跳都过 is_domain_allowed）。
+        let body = fetch_with_redirects(client, url.clone(), 0, security).await?;
 
         Ok(body)
     }
@@ -238,22 +241,35 @@ fn is_ipv6_ipv4_mapped_unsafe(ip: &Ipv6Addr) -> bool {
 
 const MAX_REDIRECTS: u32 = 10;
 
-fn build_ssrf_safe_client() -> anyhow::Result<reqwest::Client> {
-    let client = reqwest::Client::builder()
-        .timeout(DEFAULT_FETCH_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::none())
-        .user_agent(format!("deepseeknova-tools/{}", env!("CARGO_PKG_VERSION")))
-        .build()?;
-
-    Ok(client)
+/// 共享 HTTP 客户端（进程级一次构造）。无自动重定向——每跳手动重校验
+/// 域名策略与 SSRF。
+fn shared_http_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(DEFAULT_FETCH_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
+            .user_agent(format!("deepseeknova-tools/{}", env!("CARGO_PKG_VERSION")))
+            .build()
+            .expect("failed to build shared HTTP client")
+    })
 }
 
-/// Follow redirects manually, re-validating the SSRF safety of every hop.
-fn fetch_with_redirects(
-    client: &reqwest::Client,
+/// Follow redirects manually, re-validating the domain policy + SSRF safety of
+/// every hop.
+///
+/// DNS 重绑定（TOCTOU）说明：SSRF 校验用 `lookup_host` 解析一次后，`reqwest`
+/// 在发送时自行再解析 DNS，恶意 DNS 可在校验后返回私网 IP。完整修复需按
+/// 校验出的 IP 直连并固定 Host/SNI（TLS 下需同时固定 SNI），改动面大；
+/// 此处保留"校验 + 发送"语义并对每个跳点重校验，作为当前层级的缓解，
+/// 与 web_search.rs 的 `search_get` 同款。域名策略检查先行，保证拒绝可
+/// 确定复现、不依赖 DNS。
+fn fetch_with_redirects<'a>(
+    client: &'a reqwest::Client,
     url: url::Url,
     depth: u32,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send + '_>> {
+    security: Option<&'a deepseeknova_security::context::SecurityContext>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send + 'a>> {
     Box::pin(async move {
         if depth > MAX_REDIRECTS {
             anyhow::bail!("too many redirects (max {MAX_REDIRECTS})");
@@ -274,27 +290,9 @@ fn fetch_with_redirects(
                     .to_str()
                     .map_err(|_| anyhow::anyhow!("redirect Location header is not valid UTF-8"))?;
 
-                let next_url = url.join(location_str).map_err(|e| {
-                    anyhow::anyhow!("failed to resolve redirect Location '{location_str}': {e}")
-                })?;
+                let next_url = validate_redirect_target(security, &url, location_str).await?;
 
-                // Validate scheme
-                match next_url.scheme() {
-                    "http" | "https" => {}
-                    other => {
-                        anyhow::bail!(
-                            "redirect to unsupported scheme '{other}' is blocked (from {url})"
-                        )
-                    }
-                }
-
-                // Re-validate the redirect target's host against SSRF
-                let next_host = next_url.host_str().ok_or_else(|| {
-                    anyhow::anyhow!("redirect Location has no host: {location_str}")
-                })?;
-                validate_host_ssrf(next_host).await?;
-
-                return fetch_with_redirects(client, next_url, depth + 1).await;
+                return fetch_with_redirects(client, next_url, depth + 1, security).await;
             }
         }
 
@@ -320,6 +318,44 @@ fn fetch_with_redirects(
 
         Ok(body)
     })
+}
+
+/// 校验重定向目标：scheme 必须 http/https、host 存在、域名过安全策略、
+/// 解析 IP 过 SSRF 检查。域名检查**先于** SSRF/DNS，保证拒绝可确定复现
+/// （无需真实网络）。
+async fn validate_redirect_target(
+    security: Option<&deepseeknova_security::context::SecurityContext>,
+    from: &url::Url,
+    location: &str,
+) -> anyhow::Result<url::Url> {
+    let next_url = from
+        .join(location)
+        .map_err(|e| anyhow::anyhow!("failed to resolve redirect Location '{location}': {e}"))?;
+
+    // Validate scheme
+    match next_url.scheme() {
+        "http" | "https" => {}
+        other => {
+            anyhow::bail!("redirect to unsupported scheme '{other}' is blocked (from {from})")
+        }
+    }
+
+    // Re-validate the redirect target's host against the security policy
+    let next_host = next_url
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("redirect Location has no host: {location}"))?;
+    if let Some(sec) = security {
+        if !sec.policy.is_domain_allowed(next_host) {
+            anyhow::bail!(
+                "Security violation: redirect to domain '{next_host}' is blocked by security policy"
+            );
+        }
+    }
+
+    // Re-validate the redirect target's host against SSRF
+    validate_host_ssrf(next_host).await?;
+
+    Ok(next_url)
 }
 
 // ---------------------------------------------------------------------------
@@ -436,5 +472,48 @@ mod tests {
     #[test]
     fn accepts_http() {
         assert!(validate_url("http://example.com").is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // redirect domain policy (item 2)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn redirect_to_denied_domain_is_rejected() {
+        // 域名策略允许 example.com；重定向到 evil.com 必须在域名检查处拒绝。
+        // 域名检查先于 SSRF/DNS，测试无需网络、可确定复现。
+        let mut sec = deepseeknova_security::context::SecurityContext::with_safe_defaults();
+        sec.policy.allowed_domains = vec!["example.com".to_string()];
+        let from = url::Url::parse("http://example.com/page").unwrap();
+
+        let err = validate_redirect_target(Some(&sec), &from, "http://evil.com/x")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("blocked by security policy"),
+            "redirect to denied domain must be rejected: {err}"
+        );
+
+        // 非 http/https scheme 也拒绝
+        let err = validate_redirect_target(Some(&sec), &from, "file:///etc/passwd")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unsupported scheme"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn redirect_to_allowed_ip_target_is_accepted() {
+        // 放行域内的重定向目标通过校验（IP 形态免 DNS，测试确定）。
+        // allowed_domains 匹配 `8.8.8.8` 字面量；SSRF 对公网 IP 放行。
+        let mut sec = deepseeknova_security::context::SecurityContext::with_safe_defaults();
+        sec.policy.allowed_domains = vec!["8.8.8.8".to_string()];
+        let from = url::Url::parse("http://8.8.8.8/page").unwrap();
+        assert!(
+            validate_redirect_target(Some(&sec), &from, "http://8.8.8.8/next")
+                .await
+                .is_ok()
+        );
     }
 }

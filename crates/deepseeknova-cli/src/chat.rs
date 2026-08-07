@@ -853,6 +853,42 @@ fn utf8_prefix_len(bytes: &[u8]) -> usize {
 }
 
 // ---------------------------------------------------------------------------
+// 交互审批：REPL 的 Ask 裁决（权限门控默认开启后，写工具决策 Ask 需人工批准）
+// ---------------------------------------------------------------------------
+
+/// REPL 交互审批应答器：`Ask` 决策在终端询问 y/n。
+///
+/// - `y`/`yes` → 放行；其余输入（含回车默认）→ 拒绝（fail-closed）。
+/// - Esc / Ctrl+C / EOF / 读取失败 → `None` → 拒绝（fail-closed）。
+/// - 复用 `read_line_tty`（字符级编辑 + raw 模式 RAII），与主提示符同款交互；
+///   审批发生在 agent 流式输出期间（主循环正 await 事件流），终端空闲，无
+///   输入竞争。
+struct ReplApprovalResponder;
+
+#[async_trait::async_trait]
+impl deepseeknova_core::runner::ApprovalResponder for ReplApprovalResponder {
+    async fn request(&self, _id: &str, title: &str, description: Option<&str>) -> bool {
+        // 审批信息走 stderr：stdout 保留给对话流（chat 正文/工具行）。
+        eprintln!("\n[审批] {title}");
+        if let Some(d) = description {
+            for line in d.lines() {
+                eprintln!("  {line}");
+            }
+        }
+        match read_line_tty("  允许执行? [y/N] > ") {
+            Ok(Some(line)) => matches!(line.trim(), "y" | "Y" | "yes"),
+            _ => false,
+        }
+    }
+}
+
+/// 构造 REPL 审批应答器，供 CLI 注入 agent（`with_approval_responder`）。
+pub(crate) fn repl_approval_responder(
+) -> std::sync::Arc<dyn deepseeknova_core::runner::ApprovalResponder> {
+    std::sync::Arc::new(ReplApprovalResponder)
+}
+
+// ---------------------------------------------------------------------------
 // TTY raw-mode 行编辑：字符级退格/删除，中文不产生残渣。
 // 复用 TUI 的 InputState（纯逻辑、UTF-8 安全），本实现只负责按键分派与
 // 整行重绘；非 TTY（管道/重定向）走上方 read_until 回退路径。

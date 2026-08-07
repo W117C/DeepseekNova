@@ -14,3 +14,5 @@ node_modules/
 # but the bundled default skills ship with the repo.
 .deepseeknova/*
 !.deepseeknova/skills/
+# 审计日志等运行时产物可能在各 crate 的 cwd 落盘（测试/子命令运行目录）。
+**/.deepseeknova/security/

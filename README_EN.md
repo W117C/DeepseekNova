@@ -105,7 +105,7 @@ cargo build --release -p deepseeknova-cli
 Use environment variables for API keys — never hardcode them:
 
 ```bash
-export DEEPSEEKNOVA_API_KEY="your-api-key"
+export DEEPSEEK_API_KEY="your-api-key"
 ```
 
 ```toml
@@ -116,9 +116,14 @@ default_model = "deepseek-chat"
 name = "deepseek"
 kind = "openai-compatible"
 base_url = "https://api.deepseek.com/v1"
-api_key_env = "DEEPSEEKNOVA_API_KEY"  # reads from env, not hardcoded
+api_key_env = "DEEPSEEK_API_KEY"  # reads from env, not hardcoded
 model = "deepseek-chat"
 ```
+
+> 💡 `DEEPSEEK_API_KEY` is the environment variable the code reads by default
+> (when `api_key_env` is unset). The `api_key` field also works, but is **not
+> recommended** — it risks being committed to version control. Prefer
+> `api_key_env`. (Anthropic defaults to `ANTHROPIC_API_KEY`.)
 
 > ⚠️ **Windows sandbox**: Shell tool sandboxing is only available on macOS (Seatbelt) and Linux (bubblewrap). Windows uses `NoOpSandbox` (no isolation). Configure `allowed_commands` and path policies carefully on Windows.
 > The CLI prints an explicit runtime warning on Windows because no OS-level

@@ -429,9 +429,11 @@ impl PermissionGate {
         let tool_name = &tool.schema().name;
 
         // Path-based guard: deny writes outside workspace (hard deny).
+        // 覆盖单路径工具（path/file/target/directory）与双路径工具
+        // （move_file 的 source+destination）——任一路径越界都必须硬拒。
         if !tool.read_only() {
             if let Some(ref root) = self.workspace_root {
-                if let Some(path) = extract_path(&args_value) {
+                for path in extract_paths(&args_value) {
                     if !is_within_workspace(root, &path) {
                         return CheckVerdict::hard_deny(format!("path outside workspace: {path}"));
                     }
@@ -566,18 +568,47 @@ fn is_shell_tool(tool_name: &str) -> bool {
     matches!(tool_name, "Bash" | "bash" | "shell")
 }
 
-/// Extract a file path from tool arguments.
-fn extract_path(args: &Value) -> Option<String> {
-    if let Value::Object(map) = args {
-        for key in &["path", "file", "file_path", "target", "directory"] {
-            if let Some(val) = map.get(*key) {
-                if let Some(s) = val.as_str() {
-                    return Some(s.to_string());
+/// 路径字段名（含 move_file 双路径 source/destination）。
+const PATH_KEYS: &[&str] = &[
+    "path",
+    "file",
+    "file_path",
+    "target",
+    "directory",
+    "source",
+    "destination",
+];
+
+/// 递归收集工具参数中的全部路径字段。
+///
+/// 覆盖单路径工具（`path`/`file`/`target`/`directory`）与双路径工具
+/// （`move_file` 的 `source`+`destination`）——任一路径越界都必须触发守卫。
+/// 递归进入嵌套对象与数组，防御未来新增的嵌套参数结构。
+fn extract_paths(args: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_path_fields(args, &mut out);
+    out
+}
+
+fn collect_path_fields(v: &Value, out: &mut Vec<String>) {
+    match v {
+        Value::Object(map) => {
+            for (key, val) in map {
+                if PATH_KEYS.contains(&key.as_str()) {
+                    if let Some(s) = val.as_str() {
+                        out.push(s.to_string());
+                    }
                 }
+                collect_path_fields(val, out);
             }
         }
+        Value::Array(items) => {
+            for item in items {
+                collect_path_fields(item, out);
+            }
+        }
+        _ => {}
     }
-    None
 }
 
 /// 提取可用作规则 subject 的参数字段（与 `subject_matches` 的字段集一致）。
@@ -1534,5 +1565,46 @@ mod tests {
         let v = gate.check(&tool, r#"{"path": "/tmp/x"}"#);
         assert_eq!(v.decision(), Decision::Deny);
         assert!(!v.is_hard_deny(), "cached 决策不是硬拒");
+    }
+
+    #[test]
+    fn check_guards_move_file_both_paths() {
+        // move_file 双路径：source 或 destination 任一出工作区都必须硬拒
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        let gate = allow_all_gate_with_root(root.clone());
+        let tool = NamedTool::writer("move_file");
+
+        // destination 越界
+        let v = gate.check(&tool, r#"{"source":"a.txt","destination":"/etc/passwd"}"#);
+        assert_eq!(v.decision(), Decision::Deny);
+        assert!(v.is_hard_deny());
+        assert!(v.reason().contains("/etc/passwd"), "reason: {}", v.reason());
+
+        // source 越界
+        let v = gate.check(&tool, r#"{"source":"/etc/passwd","destination":"b.txt"}"#);
+        assert_eq!(v.decision(), Decision::Deny);
+        assert!(v.is_hard_deny());
+
+        // 双路径都在工作区内 → 放行
+        let v = gate.check(&tool, r#"{"source":"a.txt","destination":"b.txt"}"#);
+        assert_eq!(v.decision(), Decision::Allow);
+
+        // 相对 `..` 逃逸任一方向都拒绝
+        let v = gate.check(&tool, r#"{"source":"ok.txt","destination":"../outside"}"#);
+        assert_eq!(v.decision(), Decision::Deny);
+        assert!(v.is_hard_deny());
+    }
+
+    #[test]
+    fn extract_paths_collects_multi_and_nested() {
+        let v = serde_json::json!({
+            "source": "s.txt",
+            "destination": "d.txt",
+            "edits": [{"path": "nested.rs"}],
+            "other": "not-a-path-key",
+        });
+        let paths = extract_paths(&v);
+        assert_eq!(paths, vec!["s.txt", "d.txt", "nested.rs"]);
     }
 }

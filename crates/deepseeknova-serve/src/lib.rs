@@ -26,7 +26,9 @@ pub use acp::{run_acp_io, serve_acp, AcpRunnerFactory};
 pub use sessions::{Busy, SessionManager, SessionRunnerFactory};
 
 use axum::extract::State;
+use axum::http::request::Parts;
 use axum::http::StatusCode;
+use axum::http::{HeaderValue, Method};
 use axum::response::sse::{Event, Sse};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -40,7 +42,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{oneshot, Mutex};
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 
 // ── Durable run store ─────────────────────────────────────────
 
@@ -269,8 +271,9 @@ impl Server {
     /// `GET /v1/sessions/{id}/scorecard` and `GET /v1/metrics/scorecards`.
     /// Defaults to `None` (endpoints return 404).
     ///
-    /// 注意：三个 metrics 端点均无认证，仅供本地/可信网络使用；装配到公网
-    /// 地址时需自行加认证层（本实现不做认证，属刻意范围裁剪）。
+    /// 注意：三个 metrics 端点默认无 token 时开放，仅供本地/可信网络使用；
+    /// 配置 [`Self::with_auth_token`]（CLI `--token`）后随 `/v1` 全部受
+    /// bearer token 保护，装配到公网地址时应启用 token。
     pub fn with_metrics_dir(mut self, dir: PathBuf) -> Self {
         self.metrics_dir = Some(dir);
         self
@@ -332,11 +335,6 @@ impl Server {
     /// Build the axum router for this server (no listener). Extracted from
     /// [`Self::serve`] so integration tests can bind an ephemeral port.
     pub fn into_router(self) -> axum::Router {
-        let cors = CorsLayer::new()
-            .allow_origin(Any)
-            .allow_methods(Any)
-            .allow_headers(Any);
-
         let auth = self.auth_token.clone();
         // /v1 子路由被 auth layer 包裹；/health 留在外侧，保持探活免认证。
         let v1 = Router::new()
@@ -353,7 +351,7 @@ impl Server {
                 get(sessions_history).delete(sessions_delete),
             )
             .route("/v1/sessions/{id}/chat", post(sessions_chat))
-            .layer(cors)
+            .layer(loopback_cors_layer())
             .with_state(Arc::new(self));
 
         let v1 = match auth {
@@ -366,6 +364,62 @@ impl Server {
 
         Router::new().route("/health", get(health)).merge(v1)
     }
+}
+
+/// CORS 策略：仅放行 loopback 来源（`localhost` / `127.0.0.1` / `::1`），
+/// 端口不限（本机任意 dev server 端口均视为可信 loopback）。
+///
+/// 背景（P0）：serve 默认无 token 开放于 127.0.0.1。此前 `allow_origin(Any)`
+/// 使任意网页可跨源读取 SSE/会话/评分卡，并可经 `/v1/approval` 自答审批。
+/// 收窄后：
+/// - 无 `Origin` 头的请求（同源页面加载、curl、非浏览器客户端）不受影响；
+/// - 跨源浏览器请求（`https://evil.example` 等）的响应不含
+///   `Access-Control-Allow-Origin`，浏览器拒绝读取 —— 关闭自审批与数据外带窗口；
+/// - loopback 来源放行（含 Tauri webview 从 `http://localhost:*` 调用，P2）。
+///
+/// 更严格的做法（精确 origin 白名单 + 配置化）留作后续收紧项；若未来 webview
+/// 启用自定义 origin（如 `tauri://localhost`），需在此加入白名单（P2 事项）。
+fn loopback_cors_layer() -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::predicate(
+            |origin: &HeaderValue, _parts: &Parts| is_loopback_origin(origin),
+        ))
+        .allow_methods(AllowMethods::list([
+            Method::GET,
+            Method::POST,
+            Method::DELETE,
+        ]))
+        .allow_headers(AllowHeaders::list([
+            axum::http::header::CONTENT_TYPE,
+            axum::http::header::AUTHORIZATION,
+        ]))
+}
+
+/// `Origin` 头是否为可信 loopback 来源。格式 `scheme://host[:port]`，仅接受
+/// http/https；host 白名单为 `localhost` / `127.0.0.1` / IPv6 `::1`（含 `[::1]`
+/// 括号形态）。`null` 与空 origin 一律拒绝（非浏览器/异常形态按不可信处理）。
+fn is_loopback_origin(origin: &HeaderValue) -> bool {
+    origin
+        .to_str()
+        .ok()
+        .and_then(origin_host)
+        .is_some_and(|host| matches!(host, "localhost" | "127.0.0.1" | "::1"))
+}
+
+/// 从 `Origin` 头值解析出裸 host（去掉 scheme、端口、路径）。非法 scheme、
+/// 无 `://` 分隔时返回 `None`。
+fn origin_host(origin: &str) -> Option<&str> {
+    let (scheme, rest) = origin.split_once("://")?;
+    if !matches!(scheme, "http" | "https") {
+        return None;
+    }
+    let authority = rest.split('/').next().unwrap_or("");
+    Some(if let Some(inner) = authority.strip_prefix('[') {
+        // IPv6：`[::1]:port` → `::1`
+        inner.split(']').next().unwrap_or("")
+    } else {
+        authority.split(':').next().unwrap_or("")
+    })
 }
 
 /// Middleware guarding every `/v1/*` route when `--token` is configured.
@@ -470,11 +524,16 @@ fn stream_input(state: Arc<Server>, input: RunInput, run_id: Option<String>) -> 
             Ok(mut stream) => {
                 use tokio_stream::StreamExt;
                 while let Some(event) = stream.next().await {
-                    let sse_event =
-                        match map_run_event(event, &mut done_text, &mut failed, &mut paused) {
-                            Some(e) => e,
-                            None => continue, // skipped (accumulated) events
-                        };
+                    let sse_event = match map_run_event(
+                        event,
+                        &mut done_text,
+                        &mut failed,
+                        &mut paused,
+                        run_id.as_deref(),
+                    ) {
+                        Some(e) => e,
+                        None => continue, // skipped (accumulated) events
+                    };
                     if !client_gone && tx.unbounded_send(sse_event).is_err() {
                         // 客户端断开：停止发送但继续消费 stream，让 run 跑完并
                         // 正确落盘，而不是取消任务、把半截结果标成 Done。
@@ -506,11 +565,16 @@ fn stream_input(state: Arc<Server>, input: RunInput, run_id: Option<String>) -> 
 /// accumulated into a later event (`TurnComplete`, `ToolCallDelta`) and
 /// should be skipped by the caller. State (`done_text` / `failed` / `paused`)
 /// is threaded through so stream enders can finalize durable records.
+///
+/// `session_id` 是当前 run 的关联键（`/v1/sessions/{id}/chat` 为会话 id，
+/// `/v1/chat` 与 `/v1/runs/{id}/resume` 为 durable run id），透传进 `done`
+/// 事件，供前端据此拉取该 run 的评分卡/诊断。
 fn map_run_event(
     event: Result<RunEvent, anyhow::Error>,
     done_text: &mut String,
     failed: &mut Option<String>,
     paused: &mut bool,
+    session_id: Option<&str>,
 ) -> Option<Result<Event, Infallible>> {
     match event {
         Ok(RunEvent::TextDelta(text)) => Some(Ok(Event::default().event("text").data(text))),
@@ -543,6 +607,7 @@ fn map_run_event(
                     "arguments": tc.function.arguments,
                 })).collect::<Vec<_>>(),
                 "usage": output.usage,
+                "session_id": session_id,
             });
             Some(Ok(Event::default().event("done").data(json.to_string())))
         }
@@ -743,7 +808,7 @@ fn read_metrics_json(
 /// `GET /v1/sessions/{id}/diagnose` — 读 `<dir>/diagnose/<id>.json`。
 /// 返回 200 JSON 或 404（未配置 metrics dir / 无该会话诊断报告）。
 ///
-/// 注意：无认证，仅供本地/可信网络使用；装配到公网地址需自行加认证层。
+/// 注意：配置 `--token` 后受保护；默认（无 token）仅供本地/可信网络使用。
 async fn session_diagnose(
     State(state): State<Arc<Server>>,
     axum::extract::Path(id): axum::extract::Path<String>,
@@ -761,7 +826,7 @@ async fn session_diagnose(
 /// `GET /v1/sessions/{id}/scorecard` — 读 `<dir>/<id>.scorecard.json`。
 /// 返回 200 JSON 或 404（未配置 metrics dir / 无该会话评分卡）。
 ///
-/// 注意：无认证，仅供本地/可信网络使用；装配到公网地址需自行加认证层。
+/// 注意：配置 `--token` 后受保护；默认（无 token）仅供本地/可信网络使用。
 async fn session_scorecard(
     State(state): State<Arc<Server>>,
     axum::extract::Path(id): axum::extract::Path<String>,
@@ -779,7 +844,7 @@ async fn session_scorecard(
 /// `GET /v1/metrics/scorecards` — 扫描 `<dir>/*.scorecard.json` 并返回聚合
 /// （count / 各维均值 / overall / 最差维度）。未配置 metrics dir → 404。
 ///
-/// 注意：无认证，仅供本地/可信网络使用；装配到公网地址需自行加认证层。
+/// 注意：配置 `--token` 后受保护；默认（无 token）仅供本地/可信网络使用。
 async fn metrics_scorecards(
     State(state): State<Arc<Server>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -920,11 +985,16 @@ fn stream_session_input(
             Ok(mut stream) => {
                 use tokio_stream::StreamExt;
                 while let Some(event) = stream.next().await {
-                    let sse_event =
-                        match map_run_event(event, &mut done_text, &mut failed, &mut paused) {
-                            Some(e) => e,
-                            None => continue,
-                        };
+                    let sse_event = match map_run_event(
+                        event,
+                        &mut done_text,
+                        &mut failed,
+                        &mut paused,
+                        Some(&id),
+                    ) {
+                        Some(e) => e,
+                        None => continue,
+                    };
                     if !client_gone && tx.unbounded_send(sse_event).is_err() {
                         client_gone = true;
                     }

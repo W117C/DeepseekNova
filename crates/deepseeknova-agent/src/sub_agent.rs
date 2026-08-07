@@ -437,25 +437,32 @@ async fn run_sub_agent_loop(
 
         info!("sub-agent step {}/{}", step + 1, max_steps);
 
+        // A1 热路径：每步只取一次会话快照；压缩（会修改历史）在修改点
+        // 重新快照，其余步内读取（token 估算 / provider 请求）复用同一
+        // 快照，消除步内重复全量克隆。
+        let mut messages = memory.get_all();
+
         // Compact if needed
         if let Some(threshold) = compaction_threshold {
-            let all_msgs = memory.get_all();
-            let tokens = estimate_tokens(&all_msgs);
+            let tokens = estimate_tokens(&messages);
             if tokens > threshold {
                 let before = tokens;
-                match compact_with_provider(compact_provider.as_ref(), &all_msgs).await {
+                match compact_with_provider(compact_provider.as_ref(), &messages).await {
                     Ok(digest) => {
                         memory.compact(digest, None);
-                        let after = estimate_tokens(&memory.get_all());
+                        // compact 重写了历史 → 重新快照，provider 必须看到压缩后。
+                        messages = memory.get_all();
+                        let after = estimate_tokens(&messages);
                         info!("compacted {before} → {after} tokens");
                     }
                     Err(e) => {
                         warn!("compaction failed: {e}, using simple fallback");
+                        let msg_count = messages.len();
                         let digest = format!(
-                            "Conversation summary ({} messages). Content truncated due to length.",
-                            all_msgs.len()
+                            "Conversation summary ({msg_count} messages). Content truncated due to length."
                         );
                         memory.compact(digest, None);
+                        messages = memory.get_all();
                     }
                 }
             }
@@ -463,7 +470,6 @@ async fn run_sub_agent_loop(
 
         // Build tool refs for provider
         let tool_refs: Vec<&dyn Tool> = tools.iter().map(|t| t.as_ref()).collect();
-        let messages = memory.get_all();
 
         // DeepSeek V4 protocol — ValidatedRequest::new fails early with
         // structured violations instead of corrupting provider state

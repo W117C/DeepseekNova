@@ -22,12 +22,25 @@ const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 
 pub struct Context7DocsTool {
     base_url: String,
+    /// 工具级一次构造的共享客户端（不自动跟随重定向）。
+    client: reqwest::Client,
+}
+
+/// 进程级共享 HTTP 客户端构造（客户端不随请求变化，一次构建复用）。
+fn build_shared_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(DEFAULT_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent(format!("deepseeknova-tools/{}", env!("CARGO_PKG_VERSION")))
+        .build()
+        .expect("failed to build shared HTTP client")
 }
 
 impl Context7DocsTool {
     pub fn new() -> Self {
         Self {
             base_url: DEFAULT_BASE_URL.to_string(),
+            client: build_shared_client(),
         }
     }
 
@@ -36,6 +49,7 @@ impl Context7DocsTool {
     fn with_base_url(base_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into(),
+            client: build_shared_client(),
         }
     }
 }
@@ -197,6 +211,7 @@ impl Tool for Context7DocsTool {
     async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
         deepseeknova_security::context::enforce_capability(
             ctx,
+            &self.schema().name,
             deepseeknova_security::capability::Capability::NetworkAccess,
         )?;
         let parsed: Context7DocsArgs = serde_json::from_str(args)?;
@@ -207,15 +222,7 @@ impl Tool for Context7DocsTool {
             return Ok(e.to_string());
         }
 
-        let client = match reqwest::Client::builder()
-            .timeout(DEFAULT_TIMEOUT)
-            .redirect(reqwest::redirect::Policy::none())
-            .user_agent(format!("deepseeknova-tools/{}", env!("CARGO_PKG_VERSION")))
-            .build()
-        {
-            Ok(c) => c,
-            Err(e) => return Ok(format!("failed to build HTTP client: {e}")),
-        };
+        let client = &self.client;
 
         // 1) 定库：显式 library_id 或先搜索取首个结果
         let (library_id, title) = match &parsed.library_id {
@@ -225,7 +232,7 @@ impl Tool for Context7DocsTool {
                     Ok(u) => u,
                     Err(e) => return Ok(format!("Context7 search URL error: {e}")),
                 };
-                let body = match fetch_text(&client, url, "search").await {
+                let body = match fetch_text(client, url, "search").await {
                     Ok(b) => b,
                     Err(msg) => return Ok(msg),
                 };
@@ -241,7 +248,7 @@ impl Tool for Context7DocsTool {
             Ok(u) => u,
             Err(e) => return Ok(format!("Context7 docs URL error: {e}")),
         };
-        let body = match fetch_text(&client, url, "docs").await {
+        let body = match fetch_text(client, url, "docs").await {
             Ok(b) => b,
             Err(msg) => return Ok(msg),
         };

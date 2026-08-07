@@ -705,7 +705,18 @@ Start the server:
 
 ```bash
 deepseeknova-cli serve --addr 127.0.0.1:3000
+# 可选：保护所有 /v1/* 路由（除 /health 探活外均需 Bearer token）
+deepseeknova-cli serve --addr 127.0.0.1:3000 --token <your-token>
 ```
+
+> **认证**：配置 `--token` 后，所有 `/v1/*` 请求须携带
+> `Authorization: Bearer <token>`，否则返回 401；`/health` 保持免认证以便
+> 探活。默认（无 token）服务开放于 127.0.0.1，仅限可信本机使用。
+>
+> **CORS**：跨源浏览器请求仅放行 loopback 来源（`localhost` / `127.0.0.1` /
+> `::1`，端口不限）；其他 Origin 的响应不带 `Access-Control-Allow-Origin`，
+> 浏览器会拒绝读取——恶意网页无法跨源读取 SSE/会话/评分卡或自答
+> `/v1/approval`。无 `Origin` 头的请求（curl、非浏览器客户端）不受影响。
 
 ### ACP stdio 模式
 
@@ -765,8 +776,33 @@ event: usage
 data: {"prompt_tokens":150,"completion_tokens":200,"total_tokens":350}
 
 event: done
-data: {"text":"...","tool_calls":[...],"usage":{...}}
+data: {"text":"...","tool_calls":[...],"usage":{...},"session_id":"<run 或 session id>"}
 ```
+
+`done` 事件携带 `session_id` 关联键：`/v1/sessions/{id}/chat` 为该会话 id，
+`/v1/chat` 与 `/v1/runs/{id}/resume` 为 durable run id——前端可据此拉取该 run
+的评分卡（`GET /v1/sessions/{id}/scorecard`）。未配置持久化时字段为 `null`。
+
+**SSE 事件清单**（`POST /v1/chat`、`POST /v1/runs/{id}/resume`、
+`POST /v1/sessions/{id}/chat` 共用同一事件集）：
+
+| event | data 内容 |
+|-------|-----------|
+| `text` | 增量正文（逐 token 追加渲染） |
+| `reasoning` | 推理增量文本 |
+| `tool_start` | `{"id","name"}` 工具调用开始 |
+| `tool_end` | `{"id","name","arguments"}` 工具调用结束（含累计 arguments） |
+| `tool_result` | `{"call_id","result"}` 工具执行结果 |
+| `usage` | token 用量（prompt/completion/total/cache/reasoning 等） |
+| `done` | `{"text","tool_calls","usage","session_id"}` run 结束 |
+| `approval_request` | `{"id","title","description"}` 权限 Ask（需 `POST /v1/approval` 应答） |
+| `paused` | `{"reason","session_id"}` run 暂停（可恢复） |
+| `verification` | `{"command","passed","summary"}` P4 验证命令结果 |
+| `quality_finding` | 任务质量闭环 finding |
+| `phase_transition` | 阶段迁移事件 |
+| `gate_violation` | 门控违规记录 |
+| `drift_finding` | drift 检测结果 |
+| `error` | 流错误 / 校验失败（prompt 为空、超长等） |
 
 #### `GET /v1/runs`
 
@@ -787,6 +823,47 @@ curl http://localhost:3000/v1/runs
 curl -X POST http://localhost:3000/v1/runs/<id>/resume
 ```
 
+#### `GET /v1/sessions` / `POST /v1/sessions`
+
+会话级 HTTP 接口（与 TUI/CLI 共用同一 JSONL store，默认 `~/.deepseeknova/sessions`，
+跨端看到同一批会话）。`GET` 列出会话摘要（新→旧），`POST` 创建一个空会话并返回
+其 id：
+
+```bash
+curl http://localhost:3000/v1/sessions
+# [{"id":"session-...","turns":0,"updated_at_ms":...}]
+# 有回合后 title 为首回合 prompt 截断：{"id":"...","turns":1,"updated_at_ms":...,"title":"hello session"}
+
+curl -X POST http://localhost:3000/v1/sessions
+# {"id":"session-1722830400-123"}
+```
+
+#### `GET /v1/sessions/{id}` / `DELETE /v1/sessions/{id}`
+
+`GET` 返回某会话已存回合（旧→新，`StoredTurn` 数组）；`DELETE` 删除会话，正在
+执行中的会话返回 409，不存在的返回 404：
+
+```bash
+curl http://localhost:3000/v1/sessions/session-1722830400-123
+# [{"turn":1,"timestamp":"2026-08-07T...","input":{"prompt":"..."},"output":{"text":"..."},"messages":[...]}]
+
+curl -X DELETE http://localhost:3000/v1/sessions/session-1722830400-123
+# {"deleted":true}
+```
+
+#### `POST /v1/sessions/{id}/chat`
+
+在会话内跑一回合 prompt，SSE 事件集与 `/v1/chat` 相同，但 runner 绑定该会话的
+共享多轮历史（连续 prompt 延续上下文）；`done` 事件的 `session_id` 即该会话 id。
+回合完成后落盘（仅用户 prompt + 助手最终正文，口径与 TUI 一致）。同一会话并发
+prompt 返回 409：
+
+```bash
+curl -X POST http://localhost:3000/v1/sessions/session-1722830400-123/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"继续刚才的话题"}'
+```
+
 #### `GET /v1/sessions/{id}/diagnose`
 
 读取失败会话的结构化诊断报告（`diagnose/<id>.json` 落盘文件）。
@@ -796,16 +873,16 @@ curl http://localhost:3000/v1/sessions/session-1722830400-0/diagnose
 # {"session_id":"...","outcome":"failed","phases":[...],"failures":[...],"sub_agents":[...],"quality":[...]}
 ```
 
-文件不存在 → 404。仅限本机访问（服务默认监听 127.0.0.1），session id 走白名单
-校验；无认证。
+文件不存在 → 404。配置 `--token` 后受保护；默认（无 token）仅限本机访问
+（服务默认监听 127.0.0.1），session id 走白名单校验。
 
 #### `GET /v1/sessions/{id}/scorecard`
 
-读取单会话六维评分卡（`<id>.scorecard.json` 落盘文件；protocol/composite 为协议增强能力包新增维）。
+读取单会话六维评分卡（`<id>.scorecard.json` 落盘文件；protocol/composite 为协议增强能力包新增维；`overall` 为派生计算值、不入库，以 `composite` 综合指数与各维均值参考）。
 
 ```bash
 curl http://localhost:3000/v1/sessions/session-1722830400-0/scorecard
-# {"session_id":"...","dimensions":{"governance":1.0,"verification":0.8,"reflection":0.5,"review":1.0,"protocol":1.0,"composite":0.86},"overall":0.86}
+# {"session_id":"session-1722830400-0","started_at_ms":...,"dimensions":{"governance":1.0,"verification":0.8,"reflection":0.5,"review":1.0,"protocol":1.0,"composite":0.86},"first_pass":true,"retry_rounds":0}
 ```
 
 文件不存在 → 404。

@@ -624,6 +624,13 @@ fn has_dangerous_path_form(cmd: &str) -> bool {
     if cmd.contains("@SSL@") || cmd.contains("DavWWWRoot") {
         return true;
     }
+    // `/dev/tcp/`、`/dev/udp/` 伪设备：bash 视为网络重定向（读任意端口/本地
+    // 服务、注入云元数据上下文）。即使 `cat` 等只读命令携带同样构成远程访问
+    // 面 → 硬拒；`echo hi > /dev/tcp/x/80` 的写形态也经此预检先于 injected
+    // 判定被拒绝。`/dev/tcp/*` 等变体同样含 `/dev/tcp/` 命中。
+    if cmd.contains("/dev/tcp/") || cmd.contains("/dev/udp/") {
+        return true;
+    }
     // `//` 前缀的 UNC 路径（`//evil/share`）
     let trimmed = cmd.trim_start();
     trimmed.starts_with("//")
@@ -1619,6 +1626,33 @@ mod tests {
         assert_eq!(classify_readonly("ls & echo x"), ReadOnlyKind::NotReadOnly);
         // 未引用换行 = 新命令边界
         assert_eq!(classify_readonly("ls\nrm -rf /"), ReadOnlyKind::NotReadOnly);
+    }
+
+    // ── C2：/dev/tcp /dev/udp 伪设备硬拒 ──
+
+    #[test]
+    fn dev_tcp_pseudo_device_is_dangerous() {
+        // `cat /dev/tcp/HOST/PORT` 是网络重定向（bash 伪设备），
+        // 可读云元数据/本地服务并注入上下文——即使 cat 只读也不得放行。
+        assert_eq!(
+            classify_readonly("cat /dev/tcp/169.254.169.254/80"),
+            ReadOnlyKind::Dangerous
+        );
+        assert_eq!(
+            classify_readonly("cat /dev/udp/127.0.0.1/53"),
+            ReadOnlyKind::Dangerous
+        );
+        // 变体：glob / 尾部斜杠形态
+        assert_eq!(classify_readonly("cat /dev/tcp/*"), ReadOnlyKind::Dangerous);
+        // 写形态（重定向）也必须硬拒——/dev/tcp 预检先于 injected 判定
+        assert_eq!(
+            classify_readonly("echo hi > /dev/tcp/x/80"),
+            ReadOnlyKind::Dangerous
+        );
+        // 正例：普通路径 / 常规只读命令不受影响
+        assert!(is_readonly_command("cat /etc/hostname"));
+        assert!(is_readonly_command("ls /dev"));
+        assert!(is_readonly_command("ls -la /etc/hosts"));
     }
 
     // ── C1：命令执行器不得进"任意参数安全"表 ──

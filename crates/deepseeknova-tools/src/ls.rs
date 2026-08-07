@@ -37,6 +37,7 @@ impl Tool for LsTool {
     async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
         deepseeknova_security::context::enforce_capability(
             ctx,
+            &self.schema().name,
             deepseeknova_security::capability::Capability::FileRead,
         )?;
         let parsed: LsArgs = if args.trim().is_empty() {

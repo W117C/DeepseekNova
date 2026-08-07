@@ -206,6 +206,14 @@ pub enum WireEvent {
     Done {
         text: String,
         usage: Option<WireUsageInfo>,
+        /// 关联 run/会话/metrics 的关联键：serve 透传当前 run 对应的
+        /// session_id（`/v1/sessions/{id}/chat` 为会话 id，`/v1/chat` 与
+        /// `/v1/runs/{id}/resume` 为 durable run id），供前端据此拉取
+        /// 该 run 的评分卡/诊断。`From<RunEvent>` 转换在无传输上下文时
+        /// 置 `None`；由传输层（serve SSE）注入。serde default 保证旧格式
+        /// 事件（无该字段）仍可反序列化。
+        #[serde(default)]
+        session_id: Option<String>,
     },
     Paused {
         reason: String,
@@ -305,6 +313,9 @@ impl From<RunEvent> for WireEvent {
             RunEvent::Done(output) => WireEvent::Done {
                 text: output.text,
                 usage: output.usage.map(|u| u.into()),
+                // RunEvent::Done 不携带传输上下文 id；由 serve 传输层在
+                // SSE done 事件中注入 session_id（见 serve::map_run_event）。
+                session_id: None,
             },
         }
     }
@@ -359,5 +370,53 @@ mod tests {
             json.contains("\"kind\":\"quality_finding\""),
             "json = {json}"
         );
+    }
+
+    /// B2：done 事件携带 `session_id` 关联键。`From<RunEvent>` 转换在无传输
+    /// 上下文时置 `None`（RunEvent::Done 不含 id，由 serve 传输层注入）；
+    /// 显式构造带 session_id 的 `WireEvent::Done` 须在 wire JSON 中序列化该
+    /// 字段，供前端据此拉取该 run 的评分卡/诊断。
+    #[test]
+    fn done_wire_event_carries_session_id() {
+        // 传输层注入路径：显式构造的 done 事件必须带 session_id。
+        let wire = WireEvent::Done {
+            text: "done".into(),
+            usage: None,
+            session_id: Some("session-1722830400-0".into()),
+        };
+        let json = serde_json::to_string(&wire).unwrap();
+        assert!(
+            json.contains("\"kind\":\"done\"")
+                && json.contains("\"session_id\":\"session-1722830400-0\""),
+            "done JSON must carry session_id, json = {json}"
+        );
+        // 往返：反序列化不丢字段。
+        let back: WireEvent = serde_json::from_str(&json).unwrap();
+        match back {
+            WireEvent::Done { session_id, .. } => {
+                assert_eq!(session_id.as_deref(), Some("session-1722830400-0"))
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+
+        // From<RunEvent> 无传输上下文 → session_id 为 None（serve 层负责注入）。
+        let output = RunOutput {
+            text: "done".into(),
+            tool_calls: Vec::new(),
+            usage: None,
+        };
+        let wire: WireEvent = RunEvent::Done(output).into();
+        match wire {
+            WireEvent::Done { session_id, .. } => assert_eq!(session_id, None),
+            other => panic!("expected Done, got {other:?}"),
+        }
+
+        // 旧格式 JSON（无 session_id 字段）仍可反序列化（serde default）。
+        let legacy = r#"{"kind":"done","text":"hi","usage":null}"#;
+        let back: WireEvent = serde_json::from_str(legacy).unwrap();
+        match back {
+            WireEvent::Done { session_id, .. } => assert_eq!(session_id, None),
+            other => panic!("expected Done, got {other:?}"),
+        }
     }
 }

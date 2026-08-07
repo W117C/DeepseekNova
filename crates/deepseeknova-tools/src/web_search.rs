@@ -26,11 +26,21 @@ pub fn web_search_tools(cfg: &deepseeknova_config::ToolsConfig) -> Vec<Arc<dyn T
 
 pub struct WebSearchTool {
     cfg: WebSearchConfig,
+    /// 进程级/工具级一次构造的共享客户端：不自动跟随重定向，每个跳点
+    /// 重新做域名/SSRF 校验（`search_get`）。
+    client: reqwest::Client,
 }
 
 impl WebSearchTool {
     pub fn new(cfg: WebSearchConfig) -> Self {
-        Self { cfg }
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(cfg.timeout_secs.max(1)))
+            .user_agent(format!("deepseeknova-tools/{}", env!("CARGO_PKG_VERSION")))
+            // 不自动跟随重定向：每个跳点都要重新做域名/SSRF 校验（同 web_fetch）。
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("failed to build shared HTTP client");
+        Self { cfg, client }
     }
 }
 
@@ -79,6 +89,7 @@ impl Tool for WebSearchTool {
     async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
         deepseeknova_security::context::enforce_capability(
             ctx,
+            &self.schema().name,
             deepseeknova_security::capability::Capability::NetworkAccess,
         )?;
         let parsed: WebSearchArgs = serde_json::from_str(args)?;
@@ -93,12 +104,7 @@ impl Tool for WebSearchTool {
             .max_results
             .unwrap_or(self.cfg.max_results)
             .min(MAX_RESULTS_CAP);
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(self.cfg.timeout_secs.max(1)))
-            .user_agent(format!("deepseeknova-tools/{}", env!("CARGO_PKG_VERSION")))
-            // 不自动跟随重定向：每个跳点都要重新做域名/SSRF 校验（同 web_fetch）。
-            .redirect(reqwest::redirect::Policy::none())
-            .build()?;
+        let client = &self.client;
 
         let hits = match self.cfg.provider.as_str() {
             "tavily" => {
@@ -141,7 +147,7 @@ impl Tool for WebSearchTool {
                 );
                 let (status, text) = search_get(
                     ctx,
-                    &client,
+                    client,
                     &url,
                     &[("Ocp-Apim-Subscription-Key", key.as_str())],
                 )
@@ -165,7 +171,7 @@ impl Tool for WebSearchTool {
                     base.trim_end_matches('/'),
                     urlencode(&parsed.query)
                 );
-                let (status, text) = search_get(ctx, &client, &url, &[]).await?;
+                let (status, text) = search_get(ctx, client, &url, &[]).await?;
                 if !status.is_success() {
                     anyhow::bail!(
                         "searxng search failed (HTTP {status}): {}",
@@ -179,7 +185,7 @@ impl Tool for WebSearchTool {
                     "https://api.duckduckgo.com/?q={}&format=json&no_html=1&skip_disambig=1",
                     urlencode(&parsed.query)
                 );
-                let (status, text) = search_get(ctx, &client, &url, &[]).await?;
+                let (status, text) = search_get(ctx, client, &url, &[]).await?;
                 if !status.is_success() {
                     anyhow::bail!(
                         "duckduckgo search failed (HTTP {status}): {}",

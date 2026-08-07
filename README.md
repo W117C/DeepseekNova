@@ -184,7 +184,7 @@ cargo build --release -p deepseeknova-cli
 
 ```bash
 # 推荐方式：通过环境变量
-export DEEPSEEKNOVA_API_KEY="your-api-key"
+export DEEPSEEK_API_KEY="your-api-key"
 ```
 
 ```toml
@@ -196,11 +196,13 @@ name = "deepseek"
 kind = "openai-compatible"
 base_url = "https://api.deepseek.com/v1"
 # 从环境变量读取，不硬编码到配置文件
-api_key_env = "DEEPSEEKNOVA_API_KEY"
+api_key_env = "DEEPSEEK_API_KEY"
 model = "deepseek-chat"
 ```
 
-> 💡 也支持 `api_key` 字段直接写入，但 **不推荐**——容易误提交到版本控制。优先使用 `api_key_env`。
+> 💡 `DEEPSEEK_API_KEY` 是代码默认读取的环境变量名（`api_key_env` 未配置时），
+> 也支持 `api_key` 字段直接写入，但 **不推荐**——容易误提交到版本控制。
+> 其他 provider（如 Anthropic）默认读 `ANTHROPIC_API_KEY`。
 
 ### 使用
 

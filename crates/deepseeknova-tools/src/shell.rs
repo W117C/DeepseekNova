@@ -60,6 +60,7 @@ impl Tool for ShellTool {
     async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
         deepseeknova_security::context::enforce_capability(
             ctx,
+            &self.schema().name,
             deepseeknova_security::capability::Capability::CommandExecute,
         )?;
         let parsed: ShellArgs = serde_json::from_str(args)?;
@@ -116,6 +117,9 @@ impl Tool for ShellTool {
 
         let mut cmd = Command::new(&sandbox_bin);
         cmd.args(&sandbox_args);
+        // 固定工作目录为工作区根：防止命令 `cd` 后（或继承进程 CWD 时）
+        // 后续文件操作落在工作区外。
+        cmd.current_dir(&ctx.workspace_root);
         cmd.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -342,5 +346,28 @@ mod tests {
                 .contains("SecurityContext extension not found"),
             "got: {err}"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shell_runs_in_workspace_root() {
+        // 回归：Command 未设 current_dir 时继承进程 CWD；现在必须固定在
+        // 工作区根（防 `cd` 逃逸后文件操作落在工作区外）。
+        let dir = std::env::temp_dir().join(format!("dnv-shell-cwd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let ctx = ToolContext::new("shell-cwd")
+            .with_workspace(dir.clone())
+            .with_extension(SecurityContext::with_safe_defaults());
+
+        let out = ShellTool::default()
+            .execute(&ctx, r#"{"command":"pwd"}"#)
+            .await
+            .expect("pwd 应成功");
+        assert!(
+            out.trim().ends_with(dir.to_string_lossy().as_ref()),
+            "shell 必须运行在工作区根，got: {out}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -7,6 +7,12 @@ use clap::{Args, Parser, Subcommand};
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
+
+    /// 一键开启安全默认：权限门控保持开启 + 沙箱启用（若 OS 支持；Windows
+    /// 无 OS 沙箱后端时回落 NoOpSandbox 并在启动时警告）。未启用项在启动
+    /// 日志横幅明示（runtime 构建 agent 时检查）。
+    #[arg(long, global = true)]
+    pub secure_defaults: bool,
 }
 
 /// Shared flags for commands that dispatch to a provider model.
@@ -219,5 +225,20 @@ mod tests {
     fn chat_tui_alone_parses() {
         let parsed = Cli::try_parse_from(["deepseeknova", "chat", "--tui"]);
         assert!(parsed.is_ok(), "--tui alone should parse");
+    }
+
+    #[test]
+    fn secure_defaults_flag_parses_before_and_after_subcommand() {
+        // global flag：子命令前、后均可解析，且所有子命令共享。
+        let before =
+            Cli::try_parse_from(["deepseeknova", "--secure-defaults", "run", "x"]).unwrap();
+        assert!(before.secure_defaults);
+        let after = Cli::try_parse_from(["deepseeknova", "chat", "--secure-defaults"]).unwrap();
+        assert!(
+            after.secure_defaults,
+            "global flag must parse after subcommand"
+        );
+        let off = Cli::try_parse_from(["deepseeknova", "chat"]).unwrap();
+        assert!(!off.secure_defaults, "absent flag must stay false");
     }
 }

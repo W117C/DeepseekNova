@@ -13,17 +13,27 @@
 //! 指令文本，父模型若照单执行即被越权。
 
 /// 需要中和的权限修改 token（大小写不敏感匹配）。
+///
+/// - `--yes`：Claude Code 自动批准全部权限提示的 flag，出现在子代理产出
+///   中即是一条"免确认执行"指令（配合 `claude --yes ...` 形态）
+/// - `SKIP_PERMISSIONS` / `skip_permissions`：权限旁路类 env/配置键形状
 const PERMISSION_OVERRIDE_TOKENS: &[&str] = &[
     "bypasspermissions",
     "--dangerously-skip-permissions",
+    "--yes",
     "permissions.allow",
     "permissions.deny",
     "permissions.enabled",
+    "skip_permissions",
 ];
 
 /// 需要中和的 XML/标签形状前缀（`<` 转义为 `<\`）。
+/// 全部小写存储：`has_permission_override` 对 needle 做大小写敏感包含
+/// 检查，小写可被 `to_ascii_lowercase` 的 haystack 命中；`sanitize_output`
+/// 的 `find_case_insensitive` 同样大小写不敏感。
 const XML_DIRECTIVE_PREFIXES: &[&str] = &[
     "<settings-json",
+    "<setconfig",
     "<permission",
     "<tool_permission",
     "<bypass",
@@ -96,10 +106,19 @@ pub fn sanitize_output(text: &str) -> String {
 }
 
 /// 计算 token 内"激活点"偏移：插入 `\` 的位置。
+///
+/// 关键不变量：插入位置必须**打断 needle**——插入后 token 不再整体命中
+/// 原 needle，否则 `while` 循环永不终止（如 `--yes` 若插到末尾给 `--yes\`
+/// 仍含 `--yes`，会无限插 `\`）。`--` 形态无第二个 `-` 时插到末尾前一
+/// 字符（`--yes` → `--ye\s`）。
 fn activation_point(token: &str) -> usize {
     // --flag 形式：在 `--` 后的第一个词边界插（`--dangerously` 末尾）
     if let Some(rest) = token.strip_prefix("--") {
-        return 2 + rest.find('-').unwrap_or(rest.len());
+        if let Some(idx) = rest.find('-') {
+            return 2 + idx;
+        }
+        // 无第二个 `-`：插到末尾前一个字符，保证打断 needle
+        return 2 + rest.len().saturating_sub(1).max(1);
     }
     // 点分形式（permissions.allow）：在第一个 `.` 处插
     if let Some(dot) = token.find('.') {
@@ -133,6 +152,38 @@ mod tests {
             sanitize_output("run with --dangerously-skip-permissions"),
             "run with --dangerously\\-skip-permissions"
         );
+    }
+
+    #[test]
+    fn neutralizes_yes_flag() {
+        // `--yes` 无第二个 `-`：激活点插到末尾前（`--ye\s`），打断 needle，
+        // 同时验证不进入无限循环。
+        assert_eq!(sanitize_output("claude --yes"), "claude --ye\\s");
+        assert!(has_permission_override("--yes"));
+    }
+
+    #[test]
+    fn neutralizes_skip_permissions_env_shape() {
+        // env/配置键形态：大写 SKIP_PERMISSIONS 与全小写都要中和
+        assert!(
+            sanitize_output("export SKIP_PERMISSIONS=1").contains("S\\KIP_PERMISSIONS"),
+            "uppercase must be neutralized"
+        );
+        assert!(
+            sanitize_output("set skip_permissions=1").contains("skip_per\\missions"),
+            "lowercase must be neutralized"
+        );
+        assert!(has_permission_override("SKIP_PERMISSIONS"));
+        assert!(has_permission_override("skip_permissions"));
+    }
+
+    #[test]
+    fn neutralizes_setconfig_tag() {
+        assert_eq!(
+            sanitize_output("<setConfig>permissions</setConfig>"),
+            "<\\setConfig>permissions</setConfig>"
+        );
+        assert!(has_permission_override("<setConfig>"));
     }
 
     #[test]

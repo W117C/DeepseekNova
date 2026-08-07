@@ -296,15 +296,7 @@ Swarm 成员通过 `SwarmMessage` 进行异步通信：
 
 ### 进度追踪
 
-`ProgressTracker` 是线程安全的（`Arc<RwLock<TrackerState>>`），前端（HTTP API / TUI）可实时查询：
-
-- `start(goal, config)` — 开始编排
-- `register_plan(plan)` — 注册动作列表
-- `mark_started(action_id, worker)` — 标记开始
-- `mark_completed(action_id, output)` — 标记完成
-- `mark_failed(action_id, reason)` — 标记失败
-- `record_retry(action_id)` — 记录重试
-- `report()` — 生成完整进度报告（可序列化为 JSON 给前端）
+> **已移除（2026-08-07 死代码清理）**：原 `deepseeknova-core::progress::ProgressTracker`（自已删除的 `deepseeknova-orch` crate 收编而来，见 CHANGELOG）在 workspace 内零消费者，已随死代码清理删除。本小节原描述的线程安全 `Arc<RwLock<TrackerState>>` 实时查询与 `start(goal, config)` / `register_plan(plan)` 等方法签名已不适用于现行代码；多智能体执行的实时状态改由 `deepseeknova-agent` 的 delegate/子代理路径承载。
 
 ---
 

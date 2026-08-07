@@ -51,7 +51,7 @@ DeepseekNova 是一个 Rust 编写的 AI Agent 框架，包含 22 个 crate。�
 crates/
 ├── deepseeknova-cli/          # CLI 入口
 ├── deepseeknova-agent/        # Agent 运行时（协调器、子代理、记忆、质量钩子、失败诊断）
-├── deepseeknova-core/         # 核心类型（事件、图谱、身份、规划器、前缀树、注册表、执行器、运行器、工具、插件）
+├── deepseeknova-core/         # 核心类型（事件、图谱、规划器、注册表、执行器、运行器、工具；身份/前缀/插件模块已于 2026-08-07 死代码清理移除）
 ├── deepseeknova-config/       # 配置管理（[protocol] 段：enabled/gates/adversarial_review）
 ├── deepseeknova-provider/     # LLM 提供商（Anthropic、OpenAI）
 ├── deepseeknova-tools/        # 工具集（fs、grep、shell、memory、web_fetch、todo）

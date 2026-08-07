@@ -122,3 +122,156 @@ impl McpClient {
             .context("prompts/get failed")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_util::connect_ready;
+    use serde_json::{json, Value};
+    use std::sync::{Arc, Mutex};
+
+    /// Small write-channel capacity is enough for the fake server to keep up.
+    const CHANNEL_CAPACITY: usize = 64;
+
+    async fn client_with<F>(handler: F) -> McpClient
+    where
+        F: FnMut(Value) -> Option<Value> + Send + 'static,
+    {
+        McpClient::new(connect_ready(handler, CHANNEL_CAPACITY).await)
+    }
+
+    // ── Tools ───────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn list_tools_parses_result() {
+        let client = client_with(|_req| {
+            Some(json!({"result": {"tools": [
+                {"name": "t1", "inputSchema": {"type": "object"}},
+                {"name": "t2", "description": "d", "inputSchema": {"type": "object"}}
+            ]}}))
+        })
+        .await;
+
+        let tools = client.list_tools().await.expect("tools/list");
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0].name, "t1");
+        assert_eq!(tools[1].description.as_deref(), Some("d"));
+    }
+
+    #[tokio::test]
+    async fn list_tools_rejects_malformed_response() {
+        let client = client_with(|_req| Some(json!({"result": {"unexpected": true}}))).await;
+
+        let err = client
+            .list_tools()
+            .await
+            .expect_err("missing tools field must fail");
+        assert!(
+            err.to_string().contains("invalid tools/list response"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn call_tool_serializes_params_and_parses_result() {
+        let seen: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_capture = Arc::clone(&seen);
+        let client = client_with(move |req| {
+            seen_capture.lock().unwrap().push(req);
+            Some(json!({"result": {"content": [{"type": "text", "text": "hi"}], "isError": false}}))
+        })
+        .await;
+
+        let result = client
+            .call_tool("my_tool", json!({"a": 1}))
+            .await
+            .expect("tools/call");
+        assert_eq!(result.content.len(), 1);
+        assert_eq!(result.content[0].text.as_deref(), Some("hi"));
+
+        let captured = seen.lock().unwrap();
+        let call = captured
+            .iter()
+            .find(|r| r["method"] == "tools/call")
+            .expect("server saw a tools/call request");
+        assert_eq!(call["params"]["name"], "my_tool");
+        assert_eq!(call["params"]["arguments"], json!({"a": 1}));
+    }
+
+    #[tokio::test]
+    async fn call_tool_surfaces_server_error() {
+        let client = client_with(|_req| {
+            Some(json!({"error": {"code": -32000, "message": "tool exploded"}}))
+        })
+        .await;
+
+        let err = client
+            .call_tool("x", json!({}))
+            .await
+            .expect_err("server error must fail the call");
+        assert!(
+            err.chain()
+                .any(|c| c.to_string().contains("MCP error: tool exploded")),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    // ── Resources ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn read_resource_parses_result() {
+        let client = client_with(|_req| {
+            Some(json!({"result": {"contents": [{"uri": "file:///tmp/a", "text": "data"}]}}))
+        })
+        .await;
+
+        let result = client
+            .read_resource("file:///tmp/a")
+            .await
+            .expect("resources/read");
+        assert_eq!(result.contents.len(), 1);
+        assert_eq!(result.contents[0].text.as_deref(), Some("data"));
+    }
+
+    // ── Prompts ─────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn list_prompts_parses_result() {
+        let client = client_with(|_req| {
+            Some(json!({"result": {"prompts": [
+                {"name": "review", "description": "Code review"}
+            ]}}))
+        })
+        .await;
+
+        let prompts = client.list_prompts().await.expect("prompts/list");
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0].name, "review");
+        assert_eq!(prompts[0].description.as_deref(), Some("Code review"));
+    }
+
+    #[tokio::test]
+    async fn get_prompt_forwards_arguments() {
+        let seen: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_capture = Arc::clone(&seen);
+        let client = client_with(move |req| {
+            seen_capture.lock().unwrap().push(req);
+            Some(json!({"result": {"messages": []}}))
+        })
+        .await;
+
+        let result = client
+            .get_prompt("review", Some(json!({"code": "x"})))
+            .await
+            .expect("prompts/get");
+        assert_eq!(result["messages"], json!([]));
+
+        let captured = seen.lock().unwrap();
+        let get = captured
+            .iter()
+            .find(|r| r["method"] == "prompts/get")
+            .expect("server saw a prompts/get request");
+        assert_eq!(get["params"]["name"], "review");
+        assert_eq!(get["params"]["arguments"], json!({"code": "x"}));
+    }
+}

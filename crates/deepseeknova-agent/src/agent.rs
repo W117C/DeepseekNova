@@ -69,6 +69,12 @@ pub struct Agent {
     /// Optional approval responder used to resolve `Ask` decisions.
     approval: Option<Arc<dyn ApprovalResponder>>,
 
+    /// 无审批 responder 时的 `Ask` 兜底：`true` = deny（fail-closed，默认），
+    /// `false` = allow（旧自动放行契约）。runtime 从
+    /// `permissions.ask_without_responder` 装配；裸 `Agent::new` 默认
+    /// fail-closed，与子代理侧（sub_agent.rs）的 Ask 语义对齐。
+    ask_without_responder_deny: bool,
+
     /// Build-time registered extensions injected into every ToolContext.
     /// Stored as closures to erase the concrete type while staying Clone-free.
     extensions: Vec<Arc<ExtensionApplier>>,
@@ -237,8 +243,10 @@ struct MetricsGuard {
     quality_findings: Option<Arc<tokio::sync::Mutex<Vec<QualityFinding>>>>,
     /// F4：本 run 起始时会话 findings 长度。emit 时只取 `[start_len..]` 差分
     /// 切片——并发 run 共享同一 Agent 级 `Arc\<Mutex\>` 时，各 run 的 QualitySummary
-    /// 只含本 run 新增，不互相污染。
-    start_len: usize,
+    /// 只含本 run 新增，不互相污染。`None` = 构造时锁被占用，起始基准未知
+    /// （此时 emit 一律报空 findings，绝不回退到 `0` 把并发 run 的 findings
+    /// 误切进本 run）。
+    start_len: Option<usize>,
     /// 本 run 失败回炉路径上实际产出 reflection 记录的次数。
     reflection_count: u32,
     /// 本 run 审查轮中判定 Approve / Issues 的轮数。
@@ -262,7 +270,9 @@ impl MetricsGuard {
             emitted: false,
             session_label,
             quality_findings: Some(quality_findings.clone()),
-            start_len: quality_findings.try_lock().map(|g| g.len()).unwrap_or(0),
+            // F4 起点：try_lock 成功 → 记录真实起始长度；锁忙 → None
+            // （"起始基准未知"，emit 时不再回退 0 误切片）。
+            start_len: quality_findings.try_lock().ok().map(|g| g.len()),
             reflection_count: 0,
             review_passes: 0,
             review_issues: 0,
@@ -296,21 +306,32 @@ impl MetricsGuard {
         }
         if let Some(ref hook) = self.hook {
             // F4：run 级差分切片——只取本 run 新增的 findings `[start_len..]`。
-            // try_lock 失败时切片为空 + warn，语义为「本次 run 无新增」而非
-            // 「空数据」（后者会让并发 run 的 governance 快照虚高）。注意
-            // F9 超限丢弃只发生在 start_len 之后，不会把历史 findings 挤进
-            // 本 run 切片。
-            let findings = match self
-                .quality_findings
-                .as_ref()
-                .and_then(|qf| qf.try_lock().ok())
-            {
-                Some(guard) => {
-                    let all = guard.clone();
-                    all.get(self.start_len..).unwrap_or(&[]).to_vec()
-                }
+            // 构造时锁忙（start_len=None）或 emit 时锁忙均报空 findings，
+            // 语义为「本次 run 无新增」而非「空数据」；**绝不回退到 `0`**
+            // 把并发 run 的 findings 误切进本 run。注意 F9 超限丢弃只发生在
+            // start_len 之后，不会把历史 findings 挤进本 run 切片。
+            let findings = match self.start_len {
+                Some(start) => match self
+                    .quality_findings
+                    .as_ref()
+                    .and_then(|qf| qf.try_lock().ok())
+                {
+                    Some(guard) => {
+                        let all = guard.clone();
+                        all.get(start..).unwrap_or(&[]).to_vec()
+                    }
+                    None => {
+                        warn!(
+                            "metrics emit: quality_findings lock busy; reporting empty run findings"
+                        );
+                        Vec::new()
+                    }
+                },
                 None => {
-                    warn!("metrics emit: quality_findings lock busy; reporting empty run findings");
+                    warn!(
+                        "metrics emit: quality_findings lock busy at run start; \
+                         run finding base unknown; reporting empty run findings"
+                    );
                     Vec::new()
                 }
             };
@@ -369,6 +390,7 @@ impl Agent {
             history: None,
             permission: None,
             approval: None,
+            ask_without_responder_deny: true,
             extensions: Vec::new(),
             repo_map_provider: None,
             recall_provider: None,
@@ -457,6 +479,15 @@ impl Agent {
     /// permission gate.
     pub fn with_approval_responder(mut self, responder: Arc<dyn ApprovalResponder>) -> Self {
         self.approval = Some(responder);
+        self
+    }
+
+    /// 设置「无审批 responder 时的 `Ask` 兜底」：`true` = deny（fail-closed，
+    /// 默认），`false` = allow（旧契约自动放行）。runtime 依据
+    /// `permissions.ask_without_responder` 装配；CLI 非交互路径已显式注入
+    /// DenyApprovalResponder，此兜底主要覆盖库级/裸 Agent 使用场景。
+    pub fn with_ask_without_responder_deny(mut self, deny: bool) -> Self {
+        self.ask_without_responder_deny = deny;
         self
     }
 
@@ -766,6 +797,7 @@ impl Runner for Agent {
         let history = self.history.clone();
         let permission = self.permission.clone();
         let approval = self.approval.clone();
+        let ask_without_responder_deny = self.ask_without_responder_deny;
         let extensions = self.extensions.clone();
         let repo_map_provider = self.repo_map_provider.clone();
         let recall_provider = self.recall_provider.clone();
@@ -928,6 +960,7 @@ impl Runner for Agent {
                 security,
                 permission,
                 approval,
+                ask_without_responder_deny,
                 extensions,
                 pause_on_max_steps,
                 l3_enabled,
@@ -1377,6 +1410,7 @@ async fn run_agent_loop(
     security: SecurityContext,
     permission: Option<Arc<PermissionGate>>,
     approval: Option<Arc<dyn ApprovalResponder>>,
+    ask_without_responder_deny: bool,
     extensions: Vec<Arc<ExtensionApplier>>,
     pause_on_max_steps: bool,
     l3_enabled: bool,
@@ -1517,12 +1551,19 @@ async fn run_agent_loop(
 
         info!("agent step {}/{}", step + 1, max_steps);
 
+        // A1 热路径：每步取一次会话历史快照，步内 budget 判定 / 压缩判定 /
+        // 机械续步分类 / provider 请求复用同一快照，消除步内 5-10 次全量
+        // 克隆。压缩等**修改会话**的路径在修改后重新快照（provider 必须
+        // 看到压缩后的历史）；其余步内对会话的写入在下一步反映，语义与
+        // 既有实现一致（原实现本就在 provider 请求处取同一时刻的快照）。
+        let mut snapshot = memory.read().await.get_all();
+
         // B2 预算守门：step 边界评估。CompressHistory 由下方压缩链处理；
         // Reject 时优雅暂停（保留历史写回路径），不再盲目上摊上下文。
         let mut budget_wants_compress = false;
         if let Some(ref b) = budget {
             const EXPECTED_TURN_TOKENS: usize = 2048; // 一轮回复的保守预估
-            let current = estimate_tokens(&memory.read().await.get_all()) as usize;
+            let current = estimate_tokens(&snapshot) as usize;
             use crate::budget::controller::BudgetDecision;
             match b.evaluate_budget(current, EXPECTED_TURN_TOKENS) {
                 BudgetDecision::Allow => {}
@@ -1565,8 +1606,8 @@ async fn run_agent_loop(
         // Atomic Turn-end compaction
         if compaction_threshold.is_some() || budget_wants_compress {
             let threshold = compaction_threshold.unwrap_or(0);
-            let all_msgs = memory.read().await.get_all();
-            let tokens = estimate_tokens(&all_msgs);
+            // A1：判定基于步内快照（与 budget 判定同源，零额外克隆）。
+            let tokens = estimate_tokens(&snapshot);
 
             if tokens > threshold || budget_wants_compress {
                 let before = tokens;
@@ -1574,7 +1615,9 @@ async fn run_agent_loop(
                 // P3.1：传入 token 阈值，shrink 内部按每条消息的 CJK/ASCII
                 // 构成换算字符预算，中文场景不再被 4 倍放大。
                 memory.write().await.shrink_large_results(threshold.max(1));
-                let after_shrink = estimate_tokens(&memory.read().await.get_all());
+                // A1：中间 token 估算用零拷贝接口（`&self` 只读借用），
+                // 不为此全量克隆历史。
+                let after_shrink = memory.read().await.estimate_tokens();
                 if after_shrink < before {
                     compacted = true;
                 }
@@ -1585,7 +1628,7 @@ async fn run_agent_loop(
                     warn!("context still over threshold after shrinking tool results. sliding window...");
                     memory.write().await.slide_window();
                     compacted = true;
-                    let after_slide = estimate_tokens(&memory.read().await.get_all());
+                    let after_slide = memory.read().await.estimate_tokens();
                     info!("slid window: {} -> {} tokens", after_shrink, after_slide);
 
                     // B2 L3：L1+L2 仍不够（或 budget 要求压缩）时，结构化摘要。
@@ -1598,7 +1641,7 @@ async fn run_agent_loop(
                             .as_deref()
                             .unwrap_or_else(|| provider.as_ref());
                         if l3.try_compact(p, &mut *memory.write().await).await {
-                            let after_l3 = estimate_tokens(&memory.read().await.get_all());
+                            let after_l3 = memory.read().await.estimate_tokens();
                             info!("L3 compacted: {} -> {} tokens", after_slide, after_l3);
                             compacted = true;
                         }
@@ -1608,15 +1651,19 @@ async fn run_agent_loop(
                 // P3.3 压缩后重建：无论 L1/L2/L3，只要历史发生了驱逐就按
                 // 最近用户意图召回注入，避免下一步决策上下文过薄。
                 if compacted {
+                    // A1：压缩已修改历史 → 在此统一重新快照（last_user 重建
+                    // 与后续 provider 请求都需要压缩后的最新历史）。
+                    snapshot = memory.read().await.get_all();
                     let rp = mid_run
                         .as_ref()
                         .map(|m| &m.provider)
                         .or(recall_provider.as_ref());
                     if let Some(rp) = rp {
-                        let last_user =
-                            crate::compaction::last_user_message(&memory.read().await.get_all());
+                        let last_user = crate::compaction::last_user_message(&snapshot);
                         if let Some(q) = last_user {
                             inject_recall(rp, &mut *memory.write().await, &q.content);
+                            // 召回注入修改了历史 → 再次快照。
+                            snapshot = memory.read().await.get_all();
                         }
                     }
                 }
@@ -1634,7 +1681,7 @@ async fn run_agent_loop(
         let step_provider: &Arc<dyn Provider> = if let Some(p) = auto_provider.as_ref() {
             p
         } else if let Some(r) = effort_routing.as_ref() {
-            if classify_quick_step(&*memory.read().await) {
+            if classify_quick_step(&snapshot) {
                 &r.quick
             } else {
                 &r.high
@@ -1710,6 +1757,7 @@ async fn run_agent_loop(
             &mut quality_blocked,
             permission.as_ref(),
             approval.as_ref(),
+            ask_without_responder_deny,
             &extensions,
             concurrent_tools,
             tool_cache,
@@ -1718,6 +1766,9 @@ async fn run_agent_loop(
             &mut metrics,
             &mut phase_runner,
             &protocol_gates,
+            // A1：复用步内快照作为本步 provider 请求的消息序列
+            // （压缩路径已在修改后重新快照）。
+            &snapshot,
         )
         .await?;
 
@@ -2272,6 +2323,7 @@ async fn stream_and_process_turn(
     quality_blocked: &mut bool,
     permission: Option<&Arc<PermissionGate>>,
     approval: Option<&Arc<dyn ApprovalResponder>>,
+    ask_without_responder_deny: bool,
     extensions: &[Arc<ExtensionApplier>],
     concurrent_tools: bool,
     tool_cache_enabled: bool,
@@ -2280,15 +2332,17 @@ async fn stream_and_process_turn(
     metrics: &mut MetricsGuard,
     phase_runner: &mut crate::phase_runner::PhaseRunner,
     protocol_gates: &[Arc<dyn PhaseGate>],
+    // A1：本步消息快照（由调用方在步开始时取，压缩后重新快照）。
+    // provider 请求复用此快照，不再在步内重复全量克隆。
+    messages: &[Message],
 ) -> anyhow::Result<StepOutcome> {
     // Build tool refs for provider
     let tool_refs: Vec<&dyn Tool> = tools.iter().map(|t| t.as_ref()).collect();
-    let messages = memory.read().await.get_all();
 
     // DeepSeek V4 protocol — ValidatedRequest::new fails early with
     // structured violation list, preventing corrupt messages from
     // ever reaching the provider
-    let validated = deepseeknova_provider::ValidatedRequest::new(&messages, &tool_refs).map_err(
+    let validated = deepseeknova_provider::ValidatedRequest::new(messages, &tool_refs).map_err(
         |violations| {
             for v in &violations {
                 tracing::error!(?v, "replay invariant violation before provider call");
@@ -2518,7 +2572,10 @@ async fn stream_and_process_turn(
                                 Some(msg)
                             }
                             Decision::Ask => {
-                                let approved = if let Some(responder) = approval {
+                                // 返回 (是否放行, 拒绝原因)：responder 存在时拒绝原因
+                                // 由调用方（用户取消/拒绝）决定，兜底 deny 时给出
+                                // 明确的 fail-closed 说明。
+                                let (approved, deny_reason) = if let Some(responder) = approval {
                                     let approval_id = format!("approval_{}", uuid::Uuid::new_v4());
                                     // 风险标签同时进 RunEvent 描述（serve/桌面）
                                     // 与 responder 描述（TUI 审批浮层直接消费）。
@@ -2544,28 +2601,45 @@ async fn stream_and_process_turn(
                                     .ok();
                                     // Block until the user answers, but never
                                     // deadlock: cancellation resolves to a denial.
-                                    tokio::select! {
+                                    let ans = tokio::select! {
                                         ans = responder.request(
                                             &approval_id,
                                             &call.name,
                                             Some(&request_desc),
                                         ) => ans,
                                         _ = cancel.cancelled() => false,
-                                    }
+                                    };
+                                    (ans, None)
+                                } else if ask_without_responder_deny {
+                                    // 无 responder（库级/裸 Agent/未接线交互面）且未显式
+                                    // 配置 allow：默认 fail-closed 拒绝——非交互/库级调用
+                                    // 没有人工审批通道，放行写操作属 fail-open。与子代理
+                                    // 侧（sub_agent.rs Ask 一律视作拒绝）语义对齐。
+                                    tracing::warn!(
+                                        security_event = "ask_denied_no_responder",
+                                        tool = %call.name,
+                                        "Ask denied: no approval responder wired (fail-closed); \
+                                         set permissions.ask_without_responder = \"allow\" to \
+                                         auto-allow"
+                                    );
+                                    (
+                                        false,
+                                        Some(
+                                            "denied: no approval responder available \
+                                             (fail-closed)"
+                                                .to_string(),
+                                        ),
+                                    )
                                 } else {
-                                    // 无 responder（CLI 非交互 / serve 直连）：无人工审批
-                                    // 通道。保持自动允许以支持非交互调用（既有契约，
-                                    // CLI 注释显式依赖），但必须记录安全事件供审计；
-                                    // 需要 fail-closed 的调用方应配置 mode=deny——
-                                    // 此时 policy 直接返回 Deny，根本不会到达此处。
+                                    // 显式配置 ask_without_responder = "allow"：恢复旧的
+                                    // 自动放行契约，仍需记录安全事件供审计。
                                     tracing::warn!(
                                         security_event = "ask_auto_allowed_no_responder",
                                         tool = %call.name,
-                                        "Ask auto-allowed: no approval responder wired \
-                                         (non-interactive); configure permission mode=deny \
-                                         to fail closed"
+                                        "Ask auto-allowed: no approval responder wired and \
+                                         permissions.ask_without_responder = \"allow\""
                                     );
-                                    true
+                                    (true, None)
                                 };
                                 if approved {
                                     gate.cache_decision(
@@ -2575,7 +2649,7 @@ async fn stream_and_process_turn(
                                     );
                                     None
                                 } else {
-                                    Some("denied by user".to_string())
+                                    deny_reason.or_else(|| Some("denied by user".to_string()))
                                 }
                             }
                         }
@@ -2640,7 +2714,7 @@ async fn stream_and_process_turn(
                 if let Some(reason) = hook_deny {
                     gate_block = Some(reason);
                 } else if let Some(reason) = hook_ask {
-                    let approved = if let Some(responder) = approval {
+                    let (approved, deny_reason) = if let Some(responder) = approval {
                         let approval_id = format!("approval_{}", uuid::Uuid::new_v4());
                         tx.send(Ok(RunEvent::ApprovalRequest {
                             id: approval_id.clone(),
@@ -2649,20 +2723,40 @@ async fn stream_and_process_turn(
                         }))
                         .await
                         .ok();
-                        tokio::select! {
+                        let ans = tokio::select! {
                             ans = responder.request(
                                 &approval_id,
                                 &call.name,
                                 Some(&call.arguments),
                             ) => ans,
                             _ = cancel.cancelled() => false,
-                        }
+                        };
+                        (ans, None)
+                    } else if ask_without_responder_deny {
+                        // 与 gate 路径同款 fail-closed 兜底：无 responder 默认拒绝。
+                        tracing::warn!(
+                            security_event = "ask_denied_no_responder",
+                            tool = %call.name,
+                            "Ask denied: no approval responder wired (fail-closed); set \
+                             permissions.ask_without_responder = \"allow\" to auto-allow"
+                        );
+                        (
+                            false,
+                            Some(
+                                "denied: no approval responder available (fail-closed)".to_string(),
+                            ),
+                        )
                     } else {
-                        // 无 responder（CLI/tests）→ allow，非交互调用方保持可用。
-                        true
+                        tracing::warn!(
+                            security_event = "ask_auto_allowed_no_responder",
+                            tool = %call.name,
+                            "Ask auto-allowed: no approval responder wired and \
+                             permissions.ask_without_responder = \"allow\""
+                        );
+                        (true, None)
                     };
                     if !approved {
-                        gate_block = Some("denied by user".to_string());
+                        gate_block = deny_reason.or_else(|| Some("denied by user".to_string()));
                     }
                 }
             }
@@ -3138,8 +3232,9 @@ fn contains_error_signal(text: &str) -> bool {
 /// 其余（首步、出错、回炉反馈）→ high。错误识别与 `is_tool_error_result`
 /// 语义一致（大小写不敏感 `error:` + 错误 JSON 形态），但保持 contains
 /// 语义（长输出中任何位置出现即算错误信号）。
-fn classify_quick_step(memory: &Memory) -> bool {
-    match memory.get_all().last() {
+/// A1：入参改为消息序列快照（步内复用同一快照，不再各自克隆内存）。
+fn classify_quick_step(messages: &[Message]) -> bool {
+    match messages.last() {
         Some(m) if m.role == Role::Tool => !contains_error_signal(&m.content),
         _ => false,
     }
@@ -3333,6 +3428,44 @@ mod tests {
     }
 
     #[test]
+    fn metrics_guard_lock_busy_at_start_emits_empty_findings() {
+        // A1 回归：构造时 quality_findings 锁被占用 → start_len=None，
+        // emit 报空 findings，绝不回退 0 把并发 run 的 findings 误切进来。
+        let qf: Arc<tokio::sync::Mutex<Vec<QualityFinding>>> =
+            Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        // 构造时锁被占用（blocking_lock 持有，try_lock 必失败）。
+        let held = qf.blocking_lock();
+        let emitted: Arc<std::sync::Mutex<Option<QualitySummary>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let hook: MetricsHook = {
+            let emitted = Arc::clone(&emitted);
+            Arc::new(move |_snap: SessionSnapshot, summary: QualitySummary| {
+                *emitted.lock().unwrap() = Some(summary);
+            })
+        };
+        let mut guard = MetricsGuard::new(Some(hook), &qf, None);
+        assert!(guard.start_len.is_none(), "锁忙时 start_len 应为 None");
+        drop(held);
+        // 之后（并发 run 视角）向共享容器追加 findings。
+        qf.blocking_lock().push(QualityFinding {
+            rule: "other-run".into(),
+            severity: FindingSeverity::Warning,
+            passed: false,
+            evidence: "concurrent".into(),
+        });
+        guard.emit(Some(RunOutcome::Completed));
+        let summary = emitted
+            .lock()
+            .unwrap()
+            .take()
+            .expect("hook 应被恰好调用一次");
+        assert!(
+            summary.findings.is_empty(),
+            "锁忙启动的 run 不得把并发 findings 误切进本 run"
+        );
+    }
+
+    #[test]
     fn tool_error_heuristic_flags_error_forms_only() {
         // 错误形态 → 判失败。
         for s in [
@@ -3388,7 +3521,7 @@ mod tests {
                 reasoning_content: None,
             });
             assert!(
-                !classify_quick_step(&mem),
+                !classify_quick_step(&mem.get_all()),
                 "含错误指示应判 high（非 quick）: {content}"
             );
         }
@@ -3413,7 +3546,10 @@ mod tests {
                 tool_call_id: None,
                 reasoning_content: None,
             });
-            assert!(classify_quick_step(&mem), "正常输出应判 quick: {content}");
+            assert!(
+                classify_quick_step(&mem.get_all()),
+                "正常输出应判 quick: {content}"
+            );
         }
     }
 
@@ -3428,8 +3564,11 @@ mod tests {
             tool_call_id: None,
             reasoning_content: None,
         });
-        assert!(!classify_quick_step(&mem), "非工具消息不判 quick");
-        assert!(!classify_quick_step(&Memory::new()), "空记忆不判 quick");
+        assert!(!classify_quick_step(&mem.get_all()), "非工具消息不判 quick");
+        assert!(
+            !classify_quick_step(&Memory::new().get_all()),
+            "空记忆不判 quick"
+        );
     }
 
     #[test]
@@ -4761,6 +4900,81 @@ mod tests {
         assert!(
             ran.load(Ordering::SeqCst),
             "without a gate the tool must execute (behavior unchanged)"
+        );
+    }
+
+    /// Ask-mode 门（无匹配规则 → 写工具一律 Ask）的构造助手。
+    fn ask_mode_gate() -> Arc<PermissionGate> {
+        use deepseeknova_permission::{Decision, PermissionGate, Policy};
+        Arc::new(PermissionGate::new(Policy {
+            mode: Decision::Ask,
+            allow: vec![],
+            ask: vec![],
+            deny: vec![],
+        }))
+    }
+
+    #[tokio::test]
+    async fn ask_without_responder_fail_closed_by_default() {
+        use std::sync::atomic::Ordering;
+
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let provider = Arc::new(MockProvider::sequential(call_danger_then_done()));
+        // 无审批 responder + 默认兜底（deny）：Ask 决策必须 fail-closed 拒绝，
+        // 与子代理侧（sub_agent.rs）语义一致，不再静默放行写工具。
+        let mut agent = Agent::new(provider, 5).with_permission_gate(ask_mode_gate());
+        agent.register_tool(Arc::new(RecordingTool { ran: ran.clone() }));
+
+        let mut stream = agent
+            .run_stream(RunInput {
+                prompt: "go".into(),
+                images: vec![],
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        let mut tool_result = String::new();
+        while let Some(ev) = stream.next().await {
+            if let Ok(RunEvent::ToolResult { result, .. }) = ev {
+                tool_result = result;
+            }
+        }
+
+        assert!(
+            !ran.load(Ordering::SeqCst),
+            "Ask without responder must be denied (fail-closed)"
+        );
+        assert!(
+            tool_result.contains("no approval responder"),
+            "denial must explain the fail-closed reason, got: {tool_result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ask_without_responder_allow_opt_in_restores_auto_allow() {
+        use std::sync::atomic::Ordering;
+
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let provider = Arc::new(MockProvider::sequential(call_danger_then_done()));
+        // 显式配置 ask_without_responder = "allow"：恢复旧的自动放行契约。
+        let mut agent = Agent::new(provider, 5)
+            .with_permission_gate(ask_mode_gate())
+            .with_ask_without_responder_deny(false);
+        agent.register_tool(Arc::new(RecordingTool { ran: ran.clone() }));
+
+        let mut stream = agent
+            .run_stream(RunInput {
+                prompt: "go".into(),
+                images: vec![],
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+
+        assert!(
+            ran.load(Ordering::SeqCst),
+            "ask_without_responder = allow must auto-allow the Ask tool"
         );
     }
 
@@ -6237,6 +6451,7 @@ mod tests {
             SecurityContext::with_safe_defaults(),
             None,
             None,
+            true, // ask_without_responder_deny：无 responder 默认 fail-closed
             Vec::new(),
             true,
             true,

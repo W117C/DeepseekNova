@@ -27,8 +27,8 @@ DeepseekNova 是 Rust 编写的 AI Agent 框架（22 个 crate），计划开源
 
 ## Operating Context
 
-- 后端能力经 `deepseeknova-serve` 暴露：`POST /v1/chat`（SSE 流式）、`GET /v1/runs` + resume、`POST /v1/approval`（流断开即拒绝，fail-closed）、评分卡/诊断查询端点；另有 ACP stdio 模式。
-- 已知接口缺口：会话级列表/恢复未 HTTP 化（TUI 走本地 `SessionController` 注入，serve 只有 run 粒度）；serve 仅限 127.0.0.1、无认证。桌面端全功能设计需将此列为配套后端工作。
+- 后端能力经 `deepseeknova-serve` 暴露：`POST /v1/chat`（SSE 流式）、`GET /v1/runs` + resume、`POST /v1/approval`（流断开即拒绝，fail-closed）、会话级 HTTP（`GET/POST /v1/sessions`、`GET/DELETE /v1/sessions/{id}`、`POST /v1/sessions/{id}/chat`）、评分卡/诊断查询端点；另有 ACP stdio 模式。会话级数据与 TUI/CLI 共用同一 JSONL store（默认 `~/.deepseeknova/sessions`），跨端一致。
+- 认证与暴露面（已实现）：`serve --token <token>` 经 bearer token 保护所有 `/v1/*` 路由（`/health` 免认证保探活）；CORS 仅放行 loopback 来源（`localhost`/`127.0.0.1`/`::1`），恶意网页无法跨源读取 SSE/会话/评分卡或自答 `/v1/approval`。默认无 token 时仍仅限 127.0.0.1、供可信本机使用。
 - 桌面端历史：两代实现（Tauri+React → Tauri+SolidJS 对标 opencode），于提交 `3ab55d7`（2026-08-04）整体移除，git 历史可作工程参考；旧规划文档（`docs/superpowers/specs/2026-08-03-tui-v2-design.md`）曾提出"TUI 与 desktop 主题打通（跨端统一）"。
 - 桌面端功能范围（本轮确认）：全功能——对话 + 会话管理 + run 恢复 + 评分卡/诊断可视化 + 设置，对标 opencode 桌面完成度。
 
@@ -36,7 +36,7 @@ DeepseekNova 是 Rust 编写的 AI Agent 框架（22 个 crate），计划开源
 
 - TUI 现状：对话流/状态行/输入区/提示行 + 五面板侧边栏、15 个斜杠命令、命令面板、语义化按键系统（keybindings.json 可改键 + 热重载）、审批浮层、消息折叠、diff 高亮、三档主题（`DEEPSEEKNOVA_THEME`）。
 - 未提交改动方向（信息层级演进）：瞬态反馈走 6 秒 TTL notice 浮层，永久内容进对话流；Ctrl+T 鼠标捕获切换；ctx 占用口径改为"最近一次请求实际 tokens"。
-- 明确未定的产品事实：**界面文案语言**——当前 TUI 文案为中文（"你"、"正在思考…"、"请求授权"），开源面向国际社区通常英文优先；是否引入 i18n 或切英文，留待用户决定，设计中不得擅自定死。
+- **界面文案语言（2026-08-07 已拍板）**：采用**双语 i18n 框架，英文默认 + 中文可选**，TUI 与桌面共享词表；词表结构须在 Tauri 壳（P2）之前敲定以免返工。当前 TUI 文案仍为中文，切换属后续轮落地项。
 
 ## Brand Commitments
 

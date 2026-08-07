@@ -859,16 +859,22 @@ impl Default for AgentConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PermissionsConfig {
-    /// Master switch. When false (the default), the permission gate is not
-    /// consulted during tool execution and tools run unconditionally (subject
-    /// only to the SecurityContext capability/path checks). Set true to enforce
-    /// allow/ask/deny gating.
-    #[serde(default)]
+    /// Master switch. When false, the permission gate is not consulted during
+    /// tool execution and tools run unconditionally (subject only to the
+    /// SecurityContext capability/path checks). **True by default** (默认安全
+    /// 姿态)：allow/ask/deny 门控在零配置下即生效。
+    #[serde(default = "default_true")]
     pub enabled: bool,
 
     /// Default mode for write tools when no rule matches.
     #[serde(default)]
     pub default_mode: PermissionMode,
+
+    /// 无审批 responder（非交互/库级调用）时 `Ask` 决策的兜底行为。
+    /// 默认 `deny`（fail-closed，与子代理侧 Ask 一律视作拒绝的语义一致）；
+    /// 显式 `allow` 恢复旧的自动放行契约。
+    #[serde(default)]
+    pub ask_without_responder: AskFallback,
 
     /// Optional rate limit: max gated tool calls per rolling minute.
     /// `None` disables rate limiting.
@@ -883,8 +889,9 @@ pub struct PermissionsConfig {
 impl Default for PermissionsConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             default_mode: PermissionMode::Ask,
+            ask_without_responder: AskFallback::Deny,
             rate_limit_per_minute: None,
             rules: Vec::new(),
         }
@@ -898,6 +905,23 @@ pub enum PermissionMode {
     Ask,
     Allow,
     Deny,
+}
+
+/// 无审批 responder 时 `Ask` 决策的兜底（`permissions.ask_without_responder`）。
+///
+/// 主 agent 的审批路径在「无 responder 且决策为 Ask」时不再无条件自动放行：
+/// - `deny`（默认）：记录安全事件并拒绝执行——非交互/库级调用没有人工审批
+///   通道，放行写操作属 fail-open，默认必须拒绝（与子代理侧 sub_agent.rs
+///   的 fail-closed 语义对齐）；
+/// - `allow`：恢复旧的自动放行契约（调用方显式 opt-in）。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AskFallback {
+    /// 无 responder 时拒绝（默认，fail-closed）。
+    #[default]
+    Deny,
+    /// 无 responder 时自动放行（显式 opt-in，旧契约）。
+    Allow,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1714,9 +1738,21 @@ impl AgentConfig {
 }
 
 impl PermissionsConfig {
+    /// 深度合并 `[permissions]`：开关字段仅在非默认值时才覆盖（`enabled`
+    /// 默认 true、`ask_without_responder` 默认 deny、`default_mode` 默认
+    /// ask），避免项目层缺省段清掉用户层显式配置；`rules` 显式列表整体替换
+    /// （与 providers/models 的“显式列表替换”语义一致）。
     fn merge(&mut self, other: PermissionsConfig) {
-        self.enabled = other.enabled;
-        self.default_mode = other.default_mode;
+        let d = PermissionsConfig::default();
+        if other.enabled != d.enabled {
+            self.enabled = other.enabled;
+        }
+        if other.default_mode != d.default_mode {
+            self.default_mode = other.default_mode;
+        }
+        if other.ask_without_responder != d.ask_without_responder {
+            self.ask_without_responder = other.ask_without_responder;
+        }
         if !other.rules.is_empty() {
             self.rules = other.rules;
         }
@@ -1898,12 +1934,97 @@ mod tests {
         assert!(cfg.providers.is_empty());
         assert_eq!(cfg.agent.max_steps, 25);
         assert_eq!(cfg.permissions.default_mode, PermissionMode::Ask);
+        // 默认安全姿态：权限门控默认开启；Ask 无 responder 默认 fail-closed。
+        assert!(cfg.permissions.enabled, "permissions must default ON");
+        assert_eq!(
+            cfg.permissions.ask_without_responder,
+            AskFallback::Deny,
+            "Ask-without-responder must default to deny (fail-closed)"
+        );
         assert!(!cfg.sandbox.enabled);
         assert!(cfg.metrics.enabled);
         // 协议增强：默认关闭（行为零变化回归防线）。
         assert!(!cfg.protocol.enabled);
         assert!(cfg.protocol.gates.is_empty());
         assert!(!cfg.protocol.adversarial_review);
+    }
+
+    #[test]
+    fn permissions_default_on_and_ask_fallback_defaults_when_absent() {
+        // 旧配置无 [permissions] 段 → serde default：enabled=true、ask 兜底 deny。
+        let cfg: Config = toml::from_str("[metrics]\nenabled = false\n").unwrap();
+        assert!(
+            cfg.permissions.enabled,
+            "absent [permissions] must default ON"
+        );
+        assert_eq!(cfg.permissions.ask_without_responder, AskFallback::Deny);
+        assert_eq!(cfg.permissions.default_mode, PermissionMode::Ask);
+
+        // 显式关闭仍是关闭；显式 allow 兜底仍被尊重。
+        let off: Config =
+            toml::from_str("[permissions]\nenabled = false\nask_without_responder = \"allow\"\n")
+                .unwrap();
+        assert!(!off.permissions.enabled);
+        assert_eq!(off.permissions.ask_without_responder, AskFallback::Allow);
+    }
+
+    #[test]
+    fn permissions_merge_preserves_user_layer_and_parses_ask_fallback() {
+        // 用户层显式关闭权限 → 项目层缺省 [permissions] 不得重新开启。
+        let mut base = Config::default();
+        base.merge(Config {
+            permissions: PermissionsConfig {
+                enabled: false,
+                ask_without_responder: AskFallback::Allow,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        assert!(!base.permissions.enabled);
+        assert_eq!(base.permissions.ask_without_responder, AskFallback::Allow);
+
+        // 项目层只改了 memory 等无关段 → 用户层的关闭/兜底保留。
+        base.merge(Config {
+            memory: MemoryConfig {
+                min_steps: 8,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        assert!(
+            !base.permissions.enabled,
+            "项目层缺省不得清掉用户层显式关闭"
+        );
+        assert_eq!(
+            base.permissions.ask_without_responder,
+            AskFallback::Allow,
+            "项目层缺省不得重置 ask 兜底"
+        );
+
+        // 项目层显式改 default_mode 为 deny（非默认值）→ 覆盖。
+        base.merge(Config {
+            permissions: PermissionsConfig {
+                default_mode: PermissionMode::Deny,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        assert_eq!(base.permissions.default_mode, PermissionMode::Deny);
+        // 项目层写回默认值（ask_without_responder = "deny" / enabled = true）
+        // 属「非默认值才覆盖」的已知限制：不能越过用户层显式 allow 覆盖回
+        // 默认 deny——用户层显式选择优先（与 MemoryConfig/MetricsConfig 同款）。
+        base.merge(Config {
+            permissions: PermissionsConfig {
+                ask_without_responder: AskFallback::Deny,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        assert_eq!(
+            base.permissions.ask_without_responder,
+            AskFallback::Allow,
+            "项目层缺省值不得覆盖用户层显式 allow（非默认值才覆盖语义）"
+        );
     }
 
     #[test]

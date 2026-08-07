@@ -1,5 +1,30 @@
 # PROGRESS — TUI 设计功能完善（任务书执行）
 
+## 并行优化三批（2026-08-07，调研驱动轮）
+
+- **前置**：七子代理并行调研（竞品对标 / 执行引擎 / 安全域 / 接口面 / 代码健康 /
+  发布就绪 + 综合）产出 P0×9 / P1×12 / P2×8 路线图；P0 级安全 claim 父级逐条
+  抽查实锤。四项决策用户拍板：默认安全姿态（权限门控默认开+横幅+`--secure-defaults`）、
+  Ask 无 responder 默认 deny、i18n 双语框架（英文默认+中文可选）、Tauri 壳降 P2。
+- **第一批**：B1 安全硬化（`/dev/tcp` 拦截、重定向逐跳校验、move_file 双路径守卫、
+  记忆/待办能力门、审计 JSONL 落盘、sanitize 扩展、资源限额统一、reqwest 共享）；
+  A3 MCP 协议层测试补齐（0→28 个回放测试 + 写通道有界化）；A6 checkpoint 快照
+  上限 + 增量持久化。
+- **第二批**：B2 serve 加固（CORS 收窄 loopback-only、done 事件带 session_id、
+  API key 文档统一、serve 契约文档同步）；B3 默认姿态（权限门控默认开、
+  `--secure-defaults`、启动横幅、Ask 无 responder 默认 deny、runtime 审计切 JSONL、
+  交互 REPL 审批 responder）。
+- **第三批**：A1 agent 热路径（快照复用 7→1~2 克隆/步 + Memory 零拷贝接口 +
+  MetricsGuard 误切片修复）；A2 core 死模块清理（identity/prefix/progress/plugin
+  20 文件删除 + 依赖清理 + DESIGN 同步）。
+- **i18n 受阻**：双语框架子代理因 API 402 余额不足中断（迁移约 30%，词表
+  keys.rs 914 行已建）；半成品回退，词表备份 `/tmp/deepseeknova-i18n-backup/`，
+  待余额恢复后重启（BLOCKED.md 已记录）。
+- **验证**：每批子代理域测试全绿；两轮 `make check` EXIT=0（复检前全 workspace，
+  含 TUI 提交后与三批合流）。审计测试产物 `audit.jsonl` 残留已修（.gitignore 补
+  `**/.deepseeknova/security/`）。
+- **状态**：未提交（三批成果 + CHANGELOG/PROGRESS/BLOCKED/文档待统一提交）。
+
 ## 日常体验包 + 审查修复（2026-08-07，非任务书轮）
 
 - 功能：web_search（ddg / tavily / bing / searxng）、lsp_diagnostics（写后

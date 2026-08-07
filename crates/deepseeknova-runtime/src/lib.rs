@@ -12,7 +12,7 @@ use deepseeknova_core::registry::RegistryHub;
 use deepseeknova_core::runner::{RunEventStream, RunInput, Runner};
 use deepseeknova_event::EventBus;
 use deepseeknova_permission::{Decision, PermissionGate, Policy};
-use deepseeknova_security::audit::TracingAuditLogger;
+use deepseeknova_security::audit::JsonlAuditLogger;
 use deepseeknova_security::capability::Capability;
 use deepseeknova_security::context::SecurityContext;
 use deepseeknova_security::limits::ResourceLimits;
@@ -274,7 +274,10 @@ pub fn build_security_context(
         capabilities,
         limits,
         policy,
-        audit: Arc::new(TracingAuditLogger),
+        // B1 遗留：审计后端从 TracingAuditLogger 切到 JSONL 落盘
+        // （`.deepseeknova/security/audit.jsonl`）。写盘失败仅 warn、
+        // 不影响安全判定（audit.rs 的 fail-closed 语义）。
+        audit: Arc::new(JsonlAuditLogger::at_workspace(workspace_root)),
     })
 }
 
@@ -332,6 +335,22 @@ pub fn build_agent_with_role_providers(
     let step_high = roles.step_high.clone();
     let observe_provider = roles.compact.clone().or_else(|| step_quick.clone());
     let security = build_security_context(config, &workspace_root)?;
+
+    // ── 默认安全姿态横幅：任一深度防御层未生效即在启动日志明示。仅提示、
+    // 不改变运行；与 Windows 无 OS 沙箱后端的 main.rs 警告语义一致。
+    if !config.permissions.enabled {
+        tracing::warn!(
+            "⚠ security posture reduced: permission gate DISABLED \
+             (default ON since B3; set [permissions] enabled=true to enforce)"
+        );
+    }
+    if !config.sandbox.enabled {
+        tracing::warn!(
+            "⚠ security posture reduced: sandbox DISABLED \
+             (set [sandbox] enabled=true or run with --secure-defaults)"
+        );
+    }
+
     let steps = if max_steps > 0 {
         max_steps
     } else {
@@ -354,6 +373,13 @@ pub fn build_agent_with_role_providers(
     if let Some(ref g) = gate {
         agent = agent.with_permission_gate(g.clone());
     }
+
+    // Ask 无 responder 兜底：默认 fail-closed（deny），与子代理侧
+    // （sub_agent.rs Ask 一律视作拒绝）语义对齐；显式
+    // `ask_without_responder = "allow"` 恢复旧的自动放行契约。
+    agent = agent.with_ask_without_responder_deny(
+        config.permissions.ask_without_responder == deepseeknova_config::AskFallback::Deny,
+    );
 
     // Tools — sandboxed shell only when explicitly enabled. Tools disabled via
     // `config.tools.overrides` (e.g. the desktop settings toggles) are skipped
@@ -2699,6 +2725,35 @@ mod tests {
         assert_eq!(runtime.events.receiver_count(), 0);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn security_context_persists_jsonl_audit_backend() {
+        // B1 遗留：build_security_context 的审计后端必须落盘 JSONL 而非仅
+        // tracing。写一条 SecurityEvent → 校验 `<ws>/.deepseeknova/security/
+        // audit.jsonl` 出现对应行（写盘失败仅 warn、不影响判定）。
+        let ws = std::env::temp_dir().join(format!("dnv-rt-audit-{}", std::process::id()));
+        std::fs::create_dir_all(&ws).unwrap();
+        let config = Config::default();
+        let ctx = build_security_context(&config, &ws).unwrap();
+        ctx.audit
+            .record(&deepseeknova_security::audit::SecurityEvent {
+                event_type: "capability_violation".to_string(),
+                call_id: "call-1".to_string(),
+                tool_name: "remember".to_string(),
+                capability: None,
+                path: Some("/etc/passwd".to_string()),
+                allowed: false,
+                reason: "capability disabled".to_string(),
+            });
+        let audit_file = ws.join(".deepseeknova/security/audit.jsonl");
+        let content = std::fs::read_to_string(&audit_file)
+            .unwrap_or_else(|e| panic!("audit.jsonl must be written: {e}"));
+        assert!(
+            content.contains("capability_violation") && content.contains("/etc/passwd"),
+            "audit event should persist to JSONL, got: {content}"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
     }
 
     fn mid_run_test_workspace(tag: &str) -> std::path::PathBuf {
