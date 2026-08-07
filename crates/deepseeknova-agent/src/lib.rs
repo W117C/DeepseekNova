@@ -30,6 +30,7 @@ mod compaction;
 pub mod coordinator;
 pub mod delegate;
 pub mod diagnose;
+mod fetch_tool;
 pub mod memory;
 pub mod memory_distill;
 pub mod phase_runner;

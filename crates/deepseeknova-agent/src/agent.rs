@@ -833,7 +833,8 @@ impl Runner for Agent {
         let adversarial_review_enabled = self.adversarial_review;
 
         tokio::spawn(async move {
-            let mut memory = Memory::new();
+            // 共享内存：fetch_full_result 工具按需取回被截断的完整结果。
+            let memory = Arc::new(tokio::sync::RwLock::new(Memory::new()));
 
             // Seed working memory from the persistent conversation store, if
             // one is attached. This is what makes the agent remember prior
@@ -842,7 +843,7 @@ impl Runner for Agent {
             let seeded = if let Some(ref hist) = history {
                 let prior = hist.lock().await;
                 for m in prior.iter() {
-                    memory.add_message(m.clone());
+                    memory.write().await.add_message(m.clone());
                 }
                 !prior.is_empty()
             } else {
@@ -870,7 +871,7 @@ impl Runner for Agent {
                         }
                     }
                 }
-                memory.add_message(Message {
+                memory.write().await.add_message(Message {
                     role: Role::System,
                     content,
                     name: None,
@@ -885,7 +886,7 @@ impl Runner for Agent {
             // reasoning，故通过 replay 不变量校验。
             if !seeded {
                 if let Some(ref rp) = recall_provider {
-                    inject_recall(rp, &mut memory, &input.prompt);
+                    inject_recall(rp, &mut *memory.write().await, &input.prompt);
                 }
             }
 
@@ -893,10 +894,10 @@ impl Runner for Agent {
             // 记忆 + 代码图命中（query = 当前用户消息）。
             if seeded {
                 if let Some(ref mid) = mid_run {
-                    let active =
-                        !mid.require_tool_turn || history_last_turn_used_tools(&memory.get_all());
+                    let active = !mid.require_tool_turn
+                        || history_last_turn_used_tools(&memory.read().await.get_all());
                     if active {
-                        inject_recall(&mid.provider, &mut memory, &input.prompt);
+                        inject_recall(&mid.provider, &mut *memory.write().await, &input.prompt);
                     }
                 }
             }
@@ -905,14 +906,21 @@ impl Runner for Agent {
             let task_text = input.prompt.clone();
             // F3：记录 run 起始消息数，蒸馏的文件关联只统计本 run 新增的工具调用，
             // 避免续聊会话把历史轮次的文件归到当前任务。
-            let run_start_len = memory.get_all().len();
+            let run_start_len = memory.read().await.get_all().len();
+
+            // 注册 fetch_full_result 工具：模型凭 call_id 按需取回被截断的
+            // 完整工具结果（与 memory.rs 截断提示配套，消除悬空指令）。
+            let mut tools = tools;
+            tools.push(Arc::new(crate::fetch_tool::FetchFullResultTool::new(
+                memory.clone(),
+            )));
 
             let result = run_agent_loop(
                 provider,
                 tools,
                 max_steps,
                 compaction_threshold,
-                &mut memory,
+                memory.clone(),
                 input,
                 &tx,
                 &cancel,
@@ -955,13 +963,13 @@ impl Runner for Agent {
             // not silently lost between turns.
             if let Some(ref hist) = history {
                 let mut store = hist.lock().await;
-                *store = memory.get_all();
+                *store = memory.read().await.get_all();
             }
 
             // Run-end 沉淀（非阻塞捕获）：取消时跳过。借用 &result，不影响后续错误日志。
             if let Some(ref hook) = distill_hook {
                 if !cancel.is_cancelled() {
-                    let msgs = memory.get_all();
+                    let msgs = memory.read().await.get_all();
                     let tool_calls: Vec<String> = msgs
                         .iter()
                         .filter(|m| m.role == Role::Tool)
@@ -1361,7 +1369,7 @@ async fn run_agent_loop(
     tools: Vec<Arc<dyn Tool>>,
     max_steps: usize,
     compaction_threshold: Option<u32>,
-    memory: &mut Memory,
+    memory: Arc<tokio::sync::RwLock<Memory>>,
     input: RunInput,
     tx: &mpsc::Sender<anyhow::Result<RunEvent>>,
     cancel: &CancellationToken,
@@ -1401,7 +1409,7 @@ async fn run_agent_loop(
     let session_label = session_label.or_else(|| Some(unique_run_label()));
 
     // Add user prompt
-    memory.add_message(Message {
+    memory.write().await.add_message(Message {
         role: Role::User,
         content: input.prompt.clone(),
         name: None,
@@ -1415,7 +1423,7 @@ async fn run_agent_loop(
     // 无匹配指针时回落默认 provider。
     let auto_provider = if let Some(ref decider) = auto_router {
         if input.model_override.is_none() {
-            decider.decide(&memory.get_all()).await
+            decider.decide(&memory.read().await.get_all()).await
         } else {
             None
         }
@@ -1514,7 +1522,7 @@ async fn run_agent_loop(
         let mut budget_wants_compress = false;
         if let Some(ref b) = budget {
             const EXPECTED_TURN_TOKENS: usize = 2048; // 一轮回复的保守预估
-            let current = estimate_tokens(&memory.get_all()) as usize;
+            let current = estimate_tokens(&memory.read().await.get_all()) as usize;
             use crate::budget::controller::BudgetDecision;
             match b.evaluate_budget(current, EXPECTED_TURN_TOKENS) {
                 BudgetDecision::Allow => {}
@@ -1535,12 +1543,14 @@ async fn run_agent_loop(
                         provider.clone(),
                         adversarial_review_enabled,
                         &input.prompt,
-                        memory,
+                        &*memory.read().await,
                         quality_findings,
                         quality_start_len,
                     )
                     .await;
-                    diagnose.emit("paused", &memory.get_all()).await;
+                    diagnose
+                        .emit("paused", &memory.read().await.get_all())
+                        .await;
                     tx.send(Ok(RunEvent::Paused {
                         reason: format!("budget: {why}"),
                         session_id: session_label.clone(),
@@ -1555,7 +1565,7 @@ async fn run_agent_loop(
         // Atomic Turn-end compaction
         if compaction_threshold.is_some() || budget_wants_compress {
             let threshold = compaction_threshold.unwrap_or(0);
-            let all_msgs = memory.get_all();
+            let all_msgs = memory.read().await.get_all();
             let tokens = estimate_tokens(&all_msgs);
 
             if tokens > threshold || budget_wants_compress {
@@ -1563,8 +1573,8 @@ async fn run_agent_loop(
                 let mut compacted = false;
                 // P3.1：传入 token 阈值，shrink 内部按每条消息的 CJK/ASCII
                 // 构成换算字符预算，中文场景不再被 4 倍放大。
-                memory.shrink_large_results(threshold.max(1));
-                let after_shrink = estimate_tokens(&memory.get_all());
+                memory.write().await.shrink_large_results(threshold.max(1));
+                let after_shrink = estimate_tokens(&memory.read().await.get_all());
                 if after_shrink < before {
                     compacted = true;
                 }
@@ -1573,9 +1583,9 @@ async fn run_agent_loop(
 
                 if after_shrink > threshold {
                     warn!("context still over threshold after shrinking tool results. sliding window...");
-                    memory.slide_window();
+                    memory.write().await.slide_window();
                     compacted = true;
-                    let after_slide = estimate_tokens(&memory.get_all());
+                    let after_slide = estimate_tokens(&memory.read().await.get_all());
                     info!("slid window: {} -> {} tokens", after_shrink, after_slide);
 
                     // B2 L3：L1+L2 仍不够（或 budget 要求压缩）时，结构化摘要。
@@ -1587,8 +1597,8 @@ async fn run_agent_loop(
                         let p: &dyn Provider = compact_provider
                             .as_deref()
                             .unwrap_or_else(|| provider.as_ref());
-                        if l3.try_compact(p, memory).await {
-                            let after_l3 = estimate_tokens(&memory.get_all());
+                        if l3.try_compact(p, &mut *memory.write().await).await {
+                            let after_l3 = estimate_tokens(&memory.read().await.get_all());
                             info!("L3 compacted: {} -> {} tokens", after_slide, after_l3);
                             compacted = true;
                         }
@@ -1603,9 +1613,10 @@ async fn run_agent_loop(
                         .map(|m| &m.provider)
                         .or(recall_provider.as_ref());
                     if let Some(rp) = rp {
-                        let last_user = crate::compaction::last_user_message(&memory.get_all());
+                        let last_user =
+                            crate::compaction::last_user_message(&memory.read().await.get_all());
                         if let Some(q) = last_user {
-                            inject_recall(rp, memory, &q.content);
+                            inject_recall(rp, &mut *memory.write().await, &q.content);
                         }
                     }
                 }
@@ -1623,7 +1634,7 @@ async fn run_agent_loop(
         let step_provider: &Arc<dyn Provider> = if let Some(p) = auto_provider.as_ref() {
             p
         } else if let Some(r) = effort_routing.as_ref() {
-            if classify_quick_step(memory) {
+            if classify_quick_step(&*memory.read().await) {
                 &r.quick
             } else {
                 &r.high
@@ -1687,7 +1698,7 @@ async fn run_agent_loop(
             step_provider,
             &tools,
             &tool_map,
-            memory,
+            memory.clone(),
             tx,
             cancel,
             &workspace_root,
@@ -1798,7 +1809,7 @@ async fn run_agent_loop(
                                 if content != original {
                                     metrics.observe_reflection();
                                 }
-                                memory.add_message(Message {
+                                memory.write().await.add_message(Message {
                                     role: Role::User,
                                     content,
                                     name: None,
@@ -1831,12 +1842,14 @@ async fn run_agent_loop(
                                     provider.clone(),
                                     adversarial_review_enabled,
                                     &input.prompt,
-                                    memory,
+                                    &*memory.read().await,
                                     quality_findings,
                                     quality_start_len,
                                 )
                                 .await;
-                                diagnose.emit("paused", &memory.get_all()).await;
+                                diagnose
+                                    .emit("paused", &memory.read().await.get_all())
+                                    .await;
                                 tx.send(Ok(RunEvent::Paused {
                                     reason,
                                     session_id: session_label.clone(),
@@ -1877,7 +1890,7 @@ async fn run_agent_loop(
                                         phase_runner.observe_verify(false);
                                     }
                                     metrics.observe_retry();
-                                    memory.add_message(Message {
+                                    memory.write().await.add_message(Message {
                                         role: Role::User,
                                         content: verify_failure_message(&reason),
                                         name: None,
@@ -1910,12 +1923,14 @@ async fn run_agent_loop(
                                         provider.clone(),
                                         adversarial_review_enabled,
                                         &input.prompt,
-                                        memory,
+                                        &*memory.read().await,
                                         quality_findings,
                                         quality_start_len,
                                     )
                                     .await;
-                                    diagnose.emit("paused", &memory.get_all()).await;
+                                    diagnose
+                                        .emit("paused", &memory.read().await.get_all())
+                                        .await;
                                     tx.send(Ok(RunEvent::Paused {
                                         reason,
                                         session_id: session_label.clone(),
@@ -1983,7 +1998,7 @@ async fn run_agent_loop(
                                 if content != original {
                                     metrics.observe_reflection();
                                 }
-                                memory.add_message(Message {
+                                memory.write().await.add_message(Message {
                                     role: Role::User,
                                     content,
                                     name: None,
@@ -2013,7 +2028,9 @@ async fn run_agent_loop(
                                 // 任务质量闭环 B：review 达上限的 Paused 显式产出
                                 // 报告（outcome=paused，失败详情带最终 pause reason）。
                                 diagnose.record_failure("review", None, None, reason.clone());
-                                diagnose.emit("paused", &memory.get_all()).await;
+                                diagnose
+                                    .emit("paused", &memory.read().await.get_all())
+                                    .await;
                                 tx.send(Ok(RunEvent::Paused {
                                     reason,
                                     session_id: session_label.clone(),
@@ -2080,13 +2097,15 @@ async fn run_agent_loop(
                     provider.clone(),
                     adversarial_review_enabled,
                     &input.prompt,
-                    memory,
+                    &*memory.read().await,
                     quality_findings,
                     quality_start_len,
                 )
                 .await;
                 if unverified {
-                    diagnose.emit("unverified", &memory.get_all()).await;
+                    diagnose
+                        .emit("unverified", &memory.read().await.get_all())
+                        .await;
                 } else {
                     diagnose.suppress();
                 }
@@ -2120,12 +2139,14 @@ async fn run_agent_loop(
                         provider.clone(),
                         adversarial_review_enabled,
                         &input.prompt,
-                        memory,
+                        &*memory.read().await,
                         quality_findings,
                         quality_start_len,
                     )
                     .await;
-                    diagnose.emit("paused", &memory.get_all()).await;
+                    diagnose
+                        .emit("paused", &memory.read().await.get_all())
+                        .await;
                     tx.send(Ok(RunEvent::Paused {
                         reason: format!("reached max steps ({max_steps})"),
                         session_id: session_label.clone(),
@@ -2157,12 +2178,14 @@ async fn run_agent_loop(
             provider.clone(),
             adversarial_review_enabled,
             &input.prompt,
-            memory,
+            &*memory.read().await,
             quality_findings,
             quality_start_len,
         )
         .await;
-        diagnose.emit("paused", &memory.get_all()).await;
+        diagnose
+            .emit("paused", &memory.read().await.get_all())
+            .await;
         tx.send(Ok(RunEvent::Paused {
             reason: format!("reached max steps ({max_steps})"),
             session_id: session_label.clone(),
@@ -2237,7 +2260,7 @@ async fn stream_and_process_turn(
     provider: &Arc<dyn Provider>,
     tools: &[Arc<dyn Tool>],
     tool_map: &HashMap<String, Arc<dyn Tool>>,
-    memory: &mut Memory,
+    memory: Arc<tokio::sync::RwLock<Memory>>,
     tx: &mpsc::Sender<anyhow::Result<RunEvent>>,
     cancel: &CancellationToken,
     workspace_root: &std::path::Path,
@@ -2260,7 +2283,7 @@ async fn stream_and_process_turn(
 ) -> anyhow::Result<StepOutcome> {
     // Build tool refs for provider
     let tool_refs: Vec<&dyn Tool> = tools.iter().map(|t| t.as_ref()).collect();
-    let messages = memory.get_all();
+    let messages = memory.read().await.get_all();
 
     // DeepSeek V4 protocol — ValidatedRequest::new fails early with
     // structured violation list, preventing corrupt messages from
@@ -2364,7 +2387,7 @@ async fn stream_and_process_turn(
     // Case 1: Only text → final answer
     if has_text && !has_tool_calls {
         // Add assistant message to memory
-        memory.add_message(Message {
+        memory.write().await.add_message(Message {
             role: Role::Assistant,
             content: text_buf.clone(),
             name: None,
@@ -2413,7 +2436,7 @@ async fn stream_and_process_turn(
             })
             .collect();
 
-        memory.add_message(Message {
+        memory.write().await.add_message(Message {
             role: Role::Assistant,
             content: text_buf.clone(),
             name: None,
@@ -2530,8 +2553,18 @@ async fn stream_and_process_turn(
                                         _ = cancel.cancelled() => false,
                                     }
                                 } else {
-                                    // No responder wired (CLI/tests) → allow, so
-                                    // non-interactive callers keep working.
+                                    // 无 responder（CLI 非交互 / serve 直连）：无人工审批
+                                    // 通道。保持自动允许以支持非交互调用（既有契约，
+                                    // CLI 注释显式依赖），但必须记录安全事件供审计；
+                                    // 需要 fail-closed 的调用方应配置 mode=deny——
+                                    // 此时 policy 直接返回 Deny，根本不会到达此处。
+                                    tracing::warn!(
+                                        security_event = "ask_auto_allowed_no_responder",
+                                        tool = %call.name,
+                                        "Ask auto-allowed: no approval responder wired \
+                                         (non-interactive); configure permission mode=deny \
+                                         to fail closed"
+                                    );
                                     true
                                 };
                                 if approved {
@@ -2914,7 +2947,7 @@ async fn stream_and_process_turn(
                     }
                 }
             }
-            memory.add_message(Message {
+            memory.write().await.add_message(Message {
                 role: Role::Tool,
                 content: stored,
                 name: None,
@@ -6182,7 +6215,7 @@ mod tests {
         let cap = captured.clone();
         let hook: DiagnoseHook = Arc::new(move |report| cap.lock().unwrap().push(report));
         let (tx, mut rx) = mpsc::channel(64);
-        let mut memory = Memory::new();
+        let memory = Arc::new(tokio::sync::RwLock::new(Memory::new()));
         let cancel = CancellationToken::new();
         cancel.cancel(); // 预置取消：步边界立即走取消路径
         let provider = Arc::new(MockProvider::text("never used"));
@@ -6192,7 +6225,7 @@ mod tests {
             Vec::new(),
             5,
             None,
-            &mut memory,
+            memory.clone(),
             RunInput {
                 prompt: "x".into(),
                 images: vec![],

@@ -38,7 +38,10 @@ impl SeatbeltSandbox {
         if !writable_paths.is_empty() || allow_network {
             profile.push_str("\n;; --- policy appended from config (last match wins) ---\n");
             for p in writable_paths {
-                profile.push_str(&format!("(allow file-write* (subpath \"{p}\"))\n"));
+                profile.push_str(&format!(
+                    "(allow file-write* (subpath \"{}\"))\n",
+                    escape_sbpl(p)
+                ));
             }
             if allow_network {
                 profile.push_str("(allow network*)\n");
@@ -65,7 +68,10 @@ impl SeatbeltSandbox {
                 if !writable_paths.is_empty() || allow_network {
                     profile.push_str("\n;; --- tier: workspace-write (last match wins) ---\n");
                     for p in writable_paths {
-                        profile.push_str(&format!("(allow file-write* (subpath \"{p}\"))\n"));
+                        profile.push_str(&format!(
+                            "(allow file-write* (subpath \"{}\"))\n",
+                            escape_sbpl(p)
+                        ));
                     }
                     if allow_network {
                         profile.push_str("(allow network*)\n");
@@ -200,9 +206,48 @@ fn default_profile() -> String {
     String::from(SeatbeltSandbox::default_profile())
 }
 
+/// 转义插入 SBPL 字符串字面量的特殊字符，防止来自项目配置（`deepseeknova.toml`，
+/// 优先级高于用户配置）的 `writable_paths` 注入额外 sandbox 规则
+/// （`"`/`\n`/`\r`/`\t`/`\`）。转义后路径成为纯字面量，注入失效。
+fn escape_sbpl(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn escape_sbpl_neutralizes_injection() {
+        // 恶意 writable_paths：注入 `")\n(allow file-write*)\n(allow network*)`
+        // 须被转义为字面量，不能产生额外规则
+        let evil = "x\") \n(allow file-write*)\n(allow network*)\n//";
+        let escaped = escape_sbpl(evil);
+        assert!(!escaped.contains('\n'), "newline must be escaped");
+        assert!(escaped.contains("\\\""), "quote rendered as literal");
+        assert!(
+            !escaped.contains(") \n(allow"),
+            "payload newline neutralized"
+        );
+
+        // 实际生成 profile 中不含未转义的裸注入 payload
+        let sb = SeatbeltSandbox::with_policy(&[evil.to_string()], true);
+        assert!(!sb.profile.contains("(allow file-write*)\n(allow network*)"));
+        assert!(sb
+            .profile
+            .contains(r#"subpath "x\") \n(allow file-write*)\n(allow network*)\n//""#));
+    }
 
     #[test]
     fn seatbelt_has_name() {

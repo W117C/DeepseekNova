@@ -197,7 +197,7 @@ impl Tool for WriteFileTool {
                 .unwrap_or_else(|| "tmp".to_string()),
         );
 
-        let mut tmp = fs::File::create(&tmp_path).await?;
+        let mut tmp = create_temp_exclusive(&tmp_path).await?;
         tmp.write_all(parsed.content.as_bytes()).await?;
         tmp.flush().await?;
 
@@ -379,7 +379,7 @@ impl Tool for EditFileTool {
                 .map(|e| format!("{}.tmp", e.to_string_lossy()))
                 .unwrap_or_else(|| "tmp".to_string()),
         );
-        let mut tmp = fs::File::create(&tmp_path).await?;
+        let mut tmp = create_temp_exclusive(&tmp_path).await?;
         tmp.write_all(working.as_bytes()).await?;
         tmp.flush().await?;
         fs::rename(&tmp_path, &path).await?;
@@ -483,6 +483,23 @@ fn sanitize_path(workspace: &Path, raw: &str) -> anyhow::Result<PathBuf> {
     deepseeknova_security::path::sanitize_path(workspace, raw)
 }
 
+/// 以 O_EXCL 语义打开临时文件：预埋的 symlink（指向工作区外）因"已存在"
+/// 直接失败，杜绝 `File::create` 跟随链接把内容写到工作区外文件。
+/// 残留的旧 tmp 也会触发 `AlreadyExists`，报错引导清理而非静默覆盖。
+async fn create_temp_exclusive(tmp_path: &std::path::Path) -> anyhow::Result<tokio::fs::File> {
+    tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(tmp_path)
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "cannot create temp file {} (already exists or is a symlink): {e}",
+                tmp_path.display()
+            )
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -510,6 +527,35 @@ mod tests {
             .unwrap()
             .to_string();
         (sid, ctx)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_file_rejects_preplanted_tmp_symlink() {
+        // F4 回归：tmp 路径被预埋 symlink 指向工作区外文件时，写入必须失败
+        //（O_EXCL），不得跟随链接把内容写到外部；外部文件保持原样。
+        let dir = std::env::temp_dir().join(format!("dnv-f4-write-{}", std::process::id()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let ctx = test_ctx(&dir);
+
+        let victim = std::env::temp_dir().join(format!("dnv-f4-victim-{}", std::process::id()));
+        tokio::fs::write(&victim, "original").await.unwrap();
+
+        // 预埋 symlink：write_file(path=foo.rs) 的 tmp=foo.rs.tmp → 外部 victim
+        let link = dir.join("foo.rs.tmp");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+
+        let args = r#"{"path":"foo.rs","content":"pwned"}"#;
+        let res = WriteFileTool::new().execute(&ctx, args).await;
+        assert!(
+            res.is_err(),
+            "write through preplanted tmp symlink must fail"
+        );
+
+        let after = tokio::fs::read_to_string(&victim).await.unwrap();
+        assert_eq!(after, "original", "external file must be untouched");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let _ = tokio::fs::remove_file(&victim).await;
     }
 
     #[tokio::test]

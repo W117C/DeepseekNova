@@ -130,7 +130,7 @@ pub async fn run_loop(
         // 实际发送的输入，含历史重发与 cache hit；completion 含推理输出）。
         // 与 Claude Code 等工具口径一致：显示当前窗口放了多少，而不是会话
         // 累计消耗——累计值只增不减，聊几句就"爆"，且 compaction 后不回落。
-        if let Some(r) = &caps.runtime.lock().unwrap().router {
+        if let Some(r) = &caps.runtime.lock().unwrap_or_else(|e| e.into_inner()).router {
             let report = r.ledger().report(&r.price_table());
             app.total_cost_usd = report.total_usd;
             app.context_usage = app.usage.as_ref().and_then(|u| {
@@ -263,7 +263,7 @@ pub async fn run_loop(
                                     // 也不影响新消息可见性。
                                     app.auto_scroll = true;
                                     let tx = tx.clone();
-                                    let runner = caps.runtime.lock().unwrap().runner.clone();
+                                    let runner = caps.runtime.lock().unwrap_or_else(|e| e.into_inner()).runner.clone();
                                     let gen = session.begin();
                                     current_run = Some(tokio::spawn(async move {
                                         if let Some(runner) = runner {

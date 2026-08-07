@@ -37,7 +37,6 @@ const READONLY_COMMANDS: &[&str] = &[
     "more",
     "wc",
     "grep",
-    "rg",
     "ag",
     "locate",
     "which",
@@ -69,7 +68,6 @@ const READONLY_COMMANDS: &[&str] = &[
     "fc -l",
     "tree",
     "jq",
-    "yq",
     "base64",
     "md5",
     "md5sum",
@@ -551,7 +549,7 @@ const DOCKER_READONLY_SUBCOMMANDS: &[&str] = &[
 ///
 /// 引号内（或转义后）的 `|`/`;` 等是字面量（`grep -E 'a|b'`、`sed 's/|//'`），
 /// 不构成链式，注入检测必须感知引用状态，不能对原始串做子串扫描。
-fn split_args(cmd: &str) -> (Vec<String>, bool, bool) {
+pub(crate) fn split_args(cmd: &str) -> (Vec<String>, bool, bool) {
     let mut args = Vec::new();
     let mut cur = String::new();
     let mut in_single = false;
@@ -949,6 +947,21 @@ fn tar_allowed(args: &[String]) -> bool {
     positional <= 1
 }
 
+/// rg 只读判定：ripgrep 本身是纯搜索、不写文件，但 `--pre`/`--pre-glob`
+/// 会在每个匹配文件上执行外部命令（命令执行器，归档的"执行器混入任意
+/// 参数安全表"漏洞类）→ 拒绝，归 NotReadOnly 走权限流程。
+fn rg_allowed(args: &[String]) -> bool {
+    !args.iter().any(|a| {
+        a == "--pre" || a.starts_with("--pre=") || a == "--pre-glob" || a.starts_with("--pre-glob=")
+    })
+}
+
+/// yq 只读判定：读模式安全；`-i`/`--inplace`（mikefarah/yq 与 kislyuk/yq
+/// 均支持）就地写文件 → 拒绝，归 NotReadOnly 走权限流程。
+fn yq_allowed(args: &[String]) -> bool {
+    !args.iter().any(|a| a == "-i" || a == "--inplace")
+}
+
 /// openssl x509 只读判定：仅证书查看 flag；`-req`（签名请求）/`-out`
 /// （写文件）/`-signkey` 等写操作拒绝。
 fn openssl_x509_allowed(args: &[String]) -> bool {
@@ -1262,6 +1275,8 @@ pub fn classify_readonly(cmd: &str) -> ReadOnlyKind {
         "gpg" => gpg_allowed(&args[1..]),
         "journalctl" => journalctl_allowed(&args[1..]),
         "plutil" => plutil_allowed(&args),
+        "rg" => rg_allowed(&args),
+        "yq" => yq_allowed(&args),
         _ => false,
     };
     if allowed {
@@ -1359,6 +1374,39 @@ mod tests {
         assert!(is_readonly_command("date +%s"));
         assert!(is_readonly_command("hostname -f"));
         assert!(is_readonly_command("hostname -s"));
+    }
+
+    // ── 执行器/写形态 flag 不得免询问放行（rg --pre / yq -i）──
+
+    #[test]
+    fn rg_pre_is_executor_not_readonly() {
+        // rg --pre 在每个匹配文件上执行外部命令（命令执行器）→ NotReadOnly
+        assert_eq!(
+            classify_readonly("rg --pre 'sh -c \"touch /tmp/pwn\"' pattern ."),
+            ReadOnlyKind::NotReadOnly
+        );
+        assert_eq!(
+            classify_readonly("rg --pre=cat pattern ."),
+            ReadOnlyKind::NotReadOnly
+        );
+        // 常规搜索仍只读
+        assert!(is_readonly_command("rg -l foo src/"));
+        assert!(is_readonly_command("rg --type rust 'struct X' ."));
+    }
+
+    #[test]
+    fn yq_inplace_is_write_not_readonly() {
+        // yq -i/--inplace 就地写文件 → NotReadOnly（走权限流程）
+        assert_eq!(
+            classify_readonly("yq -i '.enabled = true' config.yml"),
+            ReadOnlyKind::NotReadOnly
+        );
+        assert_eq!(
+            classify_readonly("yq --inplace '.a.b' file.yaml"),
+            ReadOnlyKind::NotReadOnly
+        );
+        // 读模式仍只读
+        assert!(is_readonly_command("yq '.enabled' config.yml"));
     }
 
     // ── 链式/重定向/命令替换走权限流程 ──

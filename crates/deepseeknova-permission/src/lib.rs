@@ -414,7 +414,18 @@ impl PermissionGate {
             return CheckVerdict::hard_deny("rate limit exceeded");
         }
 
-        let args_value: Value = serde_json::from_str(args).unwrap_or(Value::Null);
+        let args_value: Value = match serde_json::from_str(args) {
+            Ok(v) => v,
+            Err(_) => {
+                // 参数无法解析（畸形 JSON）：写工具 + 有工作区根时无法验证
+                // 路径，fail-closed 硬拒，避免畸形输入静默跳过工作区守卫。
+                // （Windows 下未转义反斜杠路径即会命中此分支。）
+                if !tool.read_only() && self.workspace_root.is_some() {
+                    return CheckVerdict::hard_deny("malformed tool arguments: cannot verify path");
+                }
+                Value::Null
+            }
+        };
         let tool_name = &tool.schema().name;
 
         // Path-based guard: deny writes outside workspace (hard deny).
@@ -590,20 +601,29 @@ fn extract_subject(args: &Value) -> Option<String> {
 /// （新建文件）时对最近存在的父目录 canonicalize；全部失败则词法兜底。
 fn is_within_workspace(root: &std::path::Path, path: &str) -> bool {
     let target = std::path::Path::new(path);
-    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    // root 词法规范化（不解析 symlink），与 target 用同一坐标系比较：
+    // 若 root 预先 canonicalize，而 target 是原始形式（如 macOS 的
+    // `/var` → `/private/var`），分量会错位导致合法路径误拒。
+    let root_norm = lexical_normalize(root);
     let target = if target.is_absolute() {
         target.to_path_buf()
     } else {
-        canonical_root.join(target)
+        root_norm.join(target)
     };
 
-    if let Ok(c) = target.canonicalize() {
-        return c.starts_with(&canonical_root);
+    // 词法主判定（跨平台一致）：折叠 `.`/`..` 后 target 必须是 root 的延伸。
+    // 任何 `..` 弹出 root 之外即拒绝；纯分量运算、不访问文件系统，不依赖
+    // OS 的 canonicalize 返回形式（Windows 的 `\\?\` 前缀/盘符差异不影响）。
+    if !lexical_normalize(&target).starts_with(&root_norm) {
+        return false;
     }
 
-    // 目标不存在：对最近存在的父目录 canonicalize，再拼接剩余段。
-    // 剩余段必须原样保留 `..` 分量（`file_name()` 对 `..` 返回 None），
-    // 拼接后统一词法折叠，避免把 `missing/../../outside` 误判为工作区内。
+    // symlink 补充检查：canonicalize（解析链接）后仍须落在 canonical root 内。
+    // 目标不存在（新建文件）时对最近存在的父目录 canonicalize，再拼接剩余段。
+    let canonical_root = root.canonicalize().unwrap_or_else(|_| root_norm.clone());
+    if let Ok(c) = target.canonicalize() {
+        return lexical_normalize(&c).starts_with(&canonical_root);
+    }
     let mut ancestor = target.as_path();
     let mut rest: Vec<std::ffi::OsString> = Vec::new();
     loop {
@@ -634,8 +654,8 @@ fn is_within_workspace(root: &std::path::Path, path: &str) -> bool {
         }
     }
 
-    // 完全无法解析（如根目录都不存在）：词法规范化兜底，折叠 `..`
-    lexical_normalize(&target).starts_with(&canonical_root)
+    // 完全无法解析（如根目录都不存在）：词法判定在上方已通过，此处恒真。
+    true
 }
 
 /// 词法路径规范化：折叠 `.` / `..`，不访问文件系统。
@@ -1320,6 +1340,26 @@ mod tests {
     }
 
     #[test]
+    fn check_hard_denies_malformed_json_for_writer_with_root() {
+        // 回归：畸形 JSON（如 Windows 路径含未转义反斜杠，`\a`/`\.` 非法
+        // 转义）曾静默降级为 Null、跳过工作区路径守卫导致逃逸放行。
+        // 现在对"写工具 + 有工作区根"fail-closed 硬拒。
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        let gate = allow_all_gate_with_root(root.clone());
+        let tool = NamedTool::writer("write");
+
+        let v = gate.check(&tool, r#"{"path": "D:\a\_temp\.tmpX\..\etc\shadow"}"#);
+        assert_eq!(v.decision(), Decision::Deny);
+        assert!(v.is_hard_deny());
+
+        // 无工作区根约束时：畸形 JSON 不硬拒、不 panic（行为与旧逻辑一致）。
+        let gate2 = allow_all_gate();
+        let v = gate2.check(&tool, r#"{"path": "D:\a\_temp\.tmpX\..\etc\shadow"}"#);
+        assert_eq!(v.decision(), Decision::Allow);
+    }
+
+    #[test]
     fn check_hard_denies_path_outside_workspace() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().to_path_buf();
@@ -1331,12 +1371,11 @@ mod tests {
         assert_eq!(v.decision(), Decision::Deny);
         assert!(v.is_hard_deny());
 
-        // `..` 逃逸（词法上仍在根内，解析后越界）
-        let escape = format!(
-            r#"{{"path": "{}"}}"#,
-            root.join("..").join("etc").join("shadow").display()
-        );
-        let v = gate.check(&tool, &escape);
+        // `..` 逃逸（词法上仍在根内，解析后越界）。用 serde_json 序列化以
+        // 正确转义路径（Windows 反斜杠经手写 format! 会变成畸形 JSON）。
+        let escape = root.join("..").join("etc").join("shadow");
+        let args = serde_json::json!({ "path": escape.display().to_string() }).to_string();
+        let v = gate.check(&tool, &args);
         assert_eq!(v.decision(), Decision::Deny, "dotdot escape must be denied");
     }
 
@@ -1368,11 +1407,9 @@ mod tests {
         let tool = NamedTool::writer("write");
 
         // 尚不存在的目标文件（父目录链最深层可解析）应放行
-        let target = format!(
-            r#"{{"path": "{}"}}"#,
-            root.join("a").join("b").join("new.rs").display()
-        );
-        let v = gate.check(&tool, &target);
+        let target = root.join("a").join("b").join("new.rs");
+        let args = serde_json::json!({ "path": target.display().to_string() }).to_string();
+        let v = gate.check(&tool, &args);
         assert_eq!(v.decision(), Decision::Allow);
         // 相对路径按工作区根解释
         let v = gate.check(&tool, r#"{"path": "relative/new.rs"}"#);
@@ -1402,7 +1439,8 @@ mod tests {
             .join("..")
             .join(outside.path().file_name().unwrap())
             .join("pwn.txt");
-        let v = gate.check(&tool, &format!(r#"{{"path": "{}"}}"#, escape.display()));
+        let args = serde_json::json!({ "path": escape.display().to_string() }).to_string();
+        let v = gate.check(&tool, &args);
         assert_eq!(
             v.decision(),
             Decision::Deny,
