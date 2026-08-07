@@ -1,18 +1,42 @@
 //! 状态行与提示行：model 标签用 accent，次要信息 dim，随焦点显示键位。
 
 use ratatui::style::{Modifier, Style};
-use ratatui::text::Span;
+use ratatui::text::{Line, Span};
+use unicode_width::UnicodeWidthStr;
 
 use crate::app::actions::ActionContext;
 use crate::app::focus::Focus;
 use crate::app::state::AppState;
 use crate::theme::Theme;
 
+/// 状态行分段优先级（数字越大越先保留）。宽度不足时按此顺序丢弃：
+/// 先丢 usage 明细 → lines → turn → 折叠 → 成本 → ctx → 模型/运行态 → 退出警示。
+const PRIO_QUIT: u8 = 10;
+const PRIO_MODEL: u8 = 9;
+const PRIO_CTX: u8 = 8;
+const PRIO_COST: u8 = 7;
+const PRIO_FOLD: u8 = 6;
+const PRIO_TURN: u8 = 5;
+const PRIO_USAGE: u8 = 4;
+const PRIO_LINES: u8 = 3;
+
 /// 状态行分段（仪表盘式，3 组信息，语义色分层）：
 /// 1) 运行态 + 模型（主信息，accent/bold）
 /// 2) token 预算条 + 成本（资源，阈值变色）
 /// 3) 计数（turn/usage/lines，dim 静默）
+///
+/// 仅测试使用：生产渲染走 [`fit_status_line`]（宽度感知）。保留裸段构造
+/// 供测试直接断言各段内容与样式。
+#[cfg(test)]
 pub fn status_segments(app: &AppState, theme: &Theme, scroll_pct: usize) -> Vec<Span<'static>> {
+    tagged_segments(app, theme, scroll_pct)
+        .into_iter()
+        .map(|(_, s)| s)
+        .collect()
+}
+
+/// 带优先级的 segment 构建（fit 与直接展示共用，避免两份逻辑漂移）。
+fn tagged_segments(app: &AppState, theme: &Theme, scroll_pct: usize) -> Vec<(u8, Span<'static>)> {
     let dim = Style::default().add_modifier(Modifier::DIM);
     let mut segments = Vec::new();
     // ── 组 1：运行态 + 模型 ──────────────────────────────
@@ -27,13 +51,16 @@ pub fn status_segments(app: &AppState, theme: &Theme, scroll_pct: usize) -> Vec<
     } else {
         Span::styled("○", dim)
     };
-    segments.push(state);
-    segments.push(Span::styled(" ", dim));
-    segments.push(Span::styled(
-        app.model_label.clone(),
-        Style::default()
-            .fg(theme.accent)
-            .add_modifier(Modifier::BOLD),
+    segments.push((PRIO_MODEL, state));
+    segments.push((PRIO_MODEL, Span::styled(" ", dim)));
+    segments.push((
+        PRIO_MODEL,
+        Span::styled(
+            app.model_label.clone(),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
     ));
     // ── 组 2：token 预算条 + 成本 ────────────────────────
     if let Some((used, window)) = app.context_usage {
@@ -49,53 +76,137 @@ pub fn status_segments(app: &AppState, theme: &Theme, scroll_pct: usize) -> Vec<
             dim
         };
         let bar = token_bar(pct);
-        segments.push(Span::styled(" │ ctx ".to_string(), dim));
-        segments.push(Span::styled(
-            format!(
-                "[{bar}] {pct}% ({} / {})",
-                fmt_tokens(used),
-                fmt_tokens(window)
+        // ctx 标签 + 进度条合并为单个段：宽度不足时整体保留或整体丢弃，
+        // 避免出现"进度条在、标签被丢"的残缺形态。
+        segments.push((
+            PRIO_CTX,
+            Span::styled(
+                format!(
+                    " │ ctx [{bar}] {pct}% ({} / {})",
+                    fmt_tokens(used),
+                    fmt_tokens(window)
+                ),
+                style,
             ),
-            style,
         ));
     }
     if let Some(cost) = app.total_cost_usd {
-        segments.push(Span::styled(format!(" │ ${cost:.4}"), dim));
+        segments.push((PRIO_COST, Span::styled(format!(" │ ${cost:.4}"), dim)));
     }
     // 折叠模式指示：/fold all|none|reset 后用户能一眼看到当前状态。
-    segments.push(Span::styled(format!(" │ 折叠 {}", app.fold_label()), dim));
+    segments.push((
+        PRIO_FOLD,
+        Span::styled(format!(" │ 折叠 {}", app.fold_label()), dim),
+    ));
     // ── 组 3：计数（静默） ───────────────────────────────
-    segments.push(Span::styled(format!(" │ turn {}", app.turn), dim));
+    segments.push((
+        PRIO_TURN,
+        Span::styled(format!(" │ turn {}", app.turn), dim),
+    ));
     if let Some(u) = &app.usage {
-        segments.push(Span::styled(
-            format!(
-                " │ ↑{} ↓{} Σ{} 推理{} 缓存hit{}",
-                u.prompt_tokens,
-                u.completion_tokens,
-                u.total_tokens,
-                u.reasoning_tokens,
-                u.cache_hit_tokens
+        segments.push((
+            PRIO_USAGE,
+            Span::styled(
+                format!(
+                    " │ ↑{} ↓{} Σ{} 推理{} 缓存hit{}",
+                    u.prompt_tokens,
+                    u.completion_tokens,
+                    u.total_tokens,
+                    u.reasoning_tokens,
+                    u.cache_hit_tokens
+                ),
+                dim,
             ),
-            dim,
         ));
     }
-    segments.push(Span::styled(
-        format!(" │ lines {} 滚动{}%", app.render_line_count(), scroll_pct),
-        dim,
+    segments.push((
+        PRIO_LINES,
+        Span::styled(
+            format!(" │ lines {} 滚动{}%", app.render_line_count(), scroll_pct),
+            dim,
+        ),
     ));
-    // 退出确认警示（高优先级，红色加粗）。
+    // 退出确认警示（最高优先级，红色加粗）。
     if app.quit_armed {
-        segments.push(Span::styled(
-            " │ ⚠ 再按 Esc 退出",
-            Style::default()
-                .fg(theme
-                    .verification_fail
-                    .fg
-                    .unwrap_or(ratatui::style::Color::Red))
-                .add_modifier(Modifier::BOLD),
+        segments.push((
+            PRIO_QUIT,
+            Span::styled(
+                " │ ⚠ 再按 Esc 退出",
+                Style::default()
+                    .fg(theme
+                        .verification_fail
+                        .fg
+                        .unwrap_or(ratatui::style::Color::Red))
+                    .add_modifier(Modifier::BOLD),
+            ),
         ));
     }
     segments
+}
+
+/// 宽度感知的状态行：总宽超过 `width` 时按优先级丢弃最次要的 segment，
+/// 仍放不下则对最右侧剩余内容截断。返回可直接渲染的 [Line]。
+///
+/// 参考 Codex footer 的"回退链"：教学性/次要信息最先牺牲，最后只留
+/// 运行态 + 模型（+ 退出警示），避免窄终端上静默截断丢失关键信息。
+pub fn fit_status_line(
+    app: &AppState,
+    theme: &Theme,
+    scroll_pct: usize,
+    width: usize,
+) -> Line<'static> {
+    let mut segs = tagged_segments(app, theme, scroll_pct);
+    let total: usize = segs.iter().map(|(_, s)| s.content.width()).sum();
+    if total <= width.max(1) {
+        return Line::from(segs.into_iter().map(|(_, s)| s).collect::<Vec<_>>());
+    }
+    // 丢弃非核心 segment（优先级低于 PRIO_MODEL 的都可丢），按优先级升序丢最次要的，
+    // 直到放得下或只剩核心（运行态 + 模型 + 退出警示）。
+    loop {
+        let total: usize = segs.iter().map(|(_, s)| s.content.width()).sum();
+        if total <= width.max(1) {
+            break;
+        }
+        let candidate = (0..segs.len())
+            .filter(|&i| segs[i].0 < PRIO_MODEL)
+            .min_by_key(|&i| (segs[i].0, i));
+        let Some(idx) = candidate else {
+            break;
+        };
+        segs.remove(idx);
+    }
+    // 丢弃后放得下：直接返回，不再截断/加省略号。
+    let remaining: usize = segs.iter().map(|(_, s)| s.content.width()).sum();
+    if remaining <= width.max(1) {
+        return Line::from(segs.into_iter().map(|(_, s)| s).collect::<Vec<_>>());
+    }
+    // 核心仍超宽：对整行做显示宽度截断并加省略号。
+    let mut line = String::new();
+    let mut used = 0usize;
+    let budget = width.saturating_sub(1);
+    for (_, s) in &segs {
+        let w = s.content.width();
+        if used + w > budget && !line.is_empty() {
+            break;
+        }
+        line.push_str(s.content.as_ref());
+        used += w;
+    }
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    if used > 0 {
+        spans.push(Span::styled(
+            line,
+            Style::default().add_modifier(Modifier::DIM),
+        ));
+        spans.push(Span::styled("…", Style::default()));
+    } else {
+        // 极端窄终端：至少保留运行态标记。
+        spans.push(Span::styled(
+            "○…",
+            Style::default().add_modifier(Modifier::DIM),
+        ));
+    }
+    Line::from(spans)
 }
 
 /// 上下文感知提示行：随焦点显示当前键位。键位文本从 action 注册表
@@ -114,7 +225,7 @@ pub fn hint_for(focus: Focus) -> String {
             chord(Action::ConvScrollTop),
         ),
         Focus::Input => {
-            "/ 命令 · Ctrl+T 鼠标 · Ctrl+U 清行 · Ctrl+W 删词 · Shift+Enter 换行 · Esc 取消/再按退出"
+            "/ 命令 · Ctrl+T 鼠标 · Ctrl+U 清行 · Ctrl+W 删词 · Shift+Enter 换行 · Esc 取消/再按 Esc 退出"
                 .to_string()
         }
         Focus::Sidebar => format!(
@@ -123,6 +234,7 @@ pub fn hint_for(focus: Focus) -> String {
             chord(Action::SidebarNextTab)
         ),
         Focus::Completion => "↑↓ 选择 · Enter 插入 · Esc 关闭补全".to_string(),
+        Focus::Help => "j/k 或 ↑/↓ 滚动 · PageUp/Down 翻页 · Esc/q 关闭".to_string(),
         Focus::Confirm => "y 确认 · n/Esc 取消".to_string(),
     }
 }
@@ -134,6 +246,7 @@ fn ctx_for(focus: Focus) -> crate::app::actions::ActionContext {
         Focus::Conversation => ActionContext::Conversation,
         Focus::Sidebar => ActionContext::Sidebar,
         Focus::Completion => ActionContext::Completion,
+        Focus::Help => ActionContext::Conversation,
         Focus::Confirm => ActionContext::Input,
     }
 }
@@ -270,5 +383,61 @@ mod tests {
         let ctx = segments.iter().find(|s| s.content.contains("46%")).unwrap();
         assert!(ctx.content.contains('█'), "预算条渲染: {}", ctx.content);
         assert!(ctx.content.contains("46%"));
+    }
+
+    #[test]
+    fn fit_status_line_drops_least_important_first() {
+        let theme = Theme::default();
+        let app = AppState {
+            model_label: "deepseek-v4-flash-0731".into(),
+            context_usage: Some((4_000, 128_000)),
+            total_cost_usd: Some(0.0012),
+            turn: 3,
+            usage: Some(deepseeknova_core::chunk::Usage {
+                prompt_tokens: 4000,
+                completion_tokens: 100,
+                total_tokens: 4100,
+                reasoning_tokens: 20,
+                cache_hit_tokens: 0,
+                cache_miss_tokens: 0,
+            }),
+            rendered_lines: 30,
+            ..Default::default()
+        };
+
+        // 宽裕：全量可见。
+        let wide = fit_status_line(&app, &theme, 0, 400);
+        let wide_text = wide.to_string();
+        assert!(wide_text.contains("lines 30"), "宽行含 lines: {wide_text}");
+        assert!(wide_text.contains("缓存hit"));
+
+        // 收窄到 ~70 列：丢 usage 明细、lines、cost、turn，保留 model/ctx。
+        let narrow = fit_status_line(&app, &theme, 0, 70);
+        let narrow_text = narrow.to_string();
+        assert!(
+            !narrow_text.contains("缓存hit"),
+            "窄行应已丢 usage 明细: {narrow_text}"
+        );
+        assert!(
+            !narrow_text.contains("lines 30"),
+            "窄行应已丢 lines: {narrow_text}"
+        );
+        assert!(
+            narrow_text.contains("deepseek-v4-flash-0731"),
+            "模型必须保留: {narrow_text}"
+        );
+        assert!(
+            narrow_text.contains("ctx"),
+            "ctx 预算段优先保留: {narrow_text}"
+        );
+
+        // 极窄：只留运行态 + 模型（+ 省略号），不出现截断空白。
+        let tiny = fit_status_line(&app, &theme, 0, 12);
+        let tiny_text = tiny.to_string();
+        assert!(
+            tiny_text.contains("deepseek-v4-flash-0731") || tiny_text.contains("…"),
+            "极窄退化为模型+省略号: {tiny_text}"
+        );
+        assert!(tiny_text.width() <= 13, "宽度受约束: {tiny_text}");
     }
 }

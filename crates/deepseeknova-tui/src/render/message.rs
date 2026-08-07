@@ -5,8 +5,10 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
+
+use crate::app::focus::HelpOverlay;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::state::{AppState, DisplayMode};
@@ -183,8 +185,25 @@ pub fn kind_tag(kind: LineKind) -> &'static str {
 /// 折叠摘要文本。
 fn folded_summary(seg: &Segment) -> String {
     match seg {
-        Segment::Reasoning { .. } => {
-            format!("[推理 ▸ 折叠 {} 字符 · Enter 展开]", seg.char_len())
+        Segment::Reasoning { text } => {
+            // 折叠摘要带首句预览（去换行、截断 40 字符），让用户不展开也知道
+            // 推理在讲什么——只显示字符数对长推理几乎无信息量。
+            let first = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            let preview: String = first.chars().take(40).collect();
+            let preview = if first.chars().count() > 40 {
+                format!("{preview}…")
+            } else {
+                preview
+            };
+            if preview.is_empty() {
+                format!("[推理 ▸ 折叠 {} 字符 · Enter 展开]", seg.char_len())
+            } else {
+                format!(
+                    "[推理 ▸ 折叠 {} 字符 · 「{}」· Enter 展开]",
+                    seg.char_len(),
+                    preview
+                )
+            }
         }
         Segment::ToolCall { name, .. } => format!("[工具 ▸ {name} 已折叠 · Enter 展开]"),
         _ => "[已折叠 · Enter 展开]".to_string(),
@@ -207,7 +226,9 @@ pub struct MessageBlock {
 pub fn build_conversation_blocks(app: &AppState, theme: &Theme) -> Vec<MessageBlock> {
     let mut blocks: Vec<MessageBlock> = Vec::new();
     // 首次启动（还没有任何回合）显示欢迎卡，替代“空面板 + 加载中噪声”。
-    if app.conversation.turn_count() == 0 && !app.running {
+    // /help 浮层打开时不显示欢迎卡：浮层锚定在输入框上方，但欢迎卡仍占
+    // 对话区顶部，两者同屏显得拥挤（C1）。
+    if app.conversation.turn_count() == 0 && !app.running && app.help_overlay.is_none() {
         blocks.push(welcome_block(app, theme));
     }
     let mut last_turn: Option<u64> = None;
@@ -521,6 +542,76 @@ fn overlay(area: Rect) -> Rect {
     }
 }
 
+/// 输入相关浮层（@ 补全、/help）锚定到**状态行上方**（输入区正上方），
+/// 与斜杠命令浮层同一位置——避免居中在对话区中部造成与正文/欢迎卡叠层。
+/// `height` 是期望高度，实际钳制在 `[1, status_area.y]` 内，永不溢出到状态行。
+fn input_overlay(status_area: Rect, height: u16) -> Rect {
+    let h = height.clamp(1, status_area.y.max(1));
+    Rect {
+        x: status_area.x,
+        y: status_area.y.saturating_sub(h),
+        width: status_area.width,
+        height: h,
+    }
+}
+
+/// /help 帮助浮层：可滚动面板（Esc/q 关闭，j/k、↑/↓、PageUp/Down 滚动）。
+/// 先用 `Clear` 擦除底下内容，避免与对话文本交叉（@ 补全浮层曾出现
+/// 边框与正文混叠的伪影）。
+fn render_help_overlay(help: &HelpOverlay, theme: &Theme, f: &mut Frame, area: Rect) {
+    if area.width < 20 || area.height < 4 {
+        return;
+    }
+    f.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.border)
+        .title(Line::from(Span::styled(" 帮助 · 快捷键", theme.title)));
+    let inner = block.inner(area);
+    let inner_h = inner.height as usize;
+    let start = help.scroll.min(help.lines.len().saturating_sub(inner_h));
+    let end = (start + inner_h).min(help.lines.len());
+    let lines: Vec<Line> = help.lines[start..end]
+        .iter()
+        .map(|l| {
+            Line::from(Span::styled(
+                if l.is_empty() {
+                    " ".to_string()
+                } else {
+                    l.clone()
+                },
+                theme.system,
+            ))
+        })
+        .collect();
+    f.render_widget(block, area);
+    let pager = if help.lines.len() > inner_h {
+        format!(
+            " · {}-{}/{} 行 · j/k 滚动 · Esc 关闭",
+            start + 1,
+            end,
+            help.lines.len()
+        )
+    } else {
+        " · Esc 关闭".to_string()
+    };
+    let body = Paragraph::new(lines);
+    f.render_widget(body, inner);
+    let hint = Paragraph::new(Span::styled(
+        pager,
+        Style::default().add_modifier(Modifier::DIM),
+    ));
+    f.render_widget(
+        hint,
+        Rect {
+            x: inner.x,
+            y: inner.y + inner.height.saturating_sub(1),
+            width: inner.width,
+            height: 1,
+        },
+    );
+}
+
 impl AppState {
     /// 全量渲染入口（每帧由事件循环调用）。
     pub fn draw(&mut self, f: &mut Frame) {
@@ -567,9 +658,12 @@ impl AppState {
         } else {
             self.scroll_offset * 100 / self.render_line_count()
         };
-        let status = Paragraph::new(Line::from(crate::render::status::status_segments(
-            self, &theme, scroll_pct,
-        )));
+        let status = Paragraph::new(crate::render::status::fit_status_line(
+            self,
+            &theme,
+            scroll_pct,
+            status_area.width as usize,
+        ));
         f.render_widget(status, status_area);
 
         // 临时命令反馈（状态变更类命令）：画在状态行上方，超时自动消失，
@@ -618,11 +712,24 @@ impl AppState {
         ));
         f.render_widget(hint, hint_area);
 
-        // ── 浮层（审批 / @ 补全）──────────────────────────
+        // ── 浮层（审批居中 / @ 补全与 /help 锚定输入框上方）────
         if let Some(approval) = &self.pending_approval {
             crate::render::approval::render_approval(approval, &theme, f, overlay(conv_area));
         } else if self.completion.is_some() {
-            crate::render::input::render_completion(self, &theme, f, overlay(conv_area));
+            // 高度随候选数收缩（最多 10 候选 + 2 边框），候选少不占整屏。
+            let n = self
+                .completion
+                .as_ref()
+                .map(|c| c.candidates.len().min(10))
+                .unwrap_or(3);
+            crate::render::input::render_completion(
+                self,
+                &theme,
+                f,
+                input_overlay(status_area, (n + 2) as u16),
+            );
+        } else if let Some(help) = &self.help_overlay {
+            render_help_overlay(help, &theme, f, input_overlay(status_area, 20));
         }
 
         // ── 侧边栏 ────────────────────────────────────────
@@ -712,8 +819,9 @@ mod tests {
     fn folded_reasoning_renders_summary() {
         let mut app = AppState::default();
         app.conversation.begin_turn("q".into());
+        let long = format!("推理内容 {}", "x".repeat(80));
         app.apply_run_event(RunEvent::ReasoningDelta {
-            text: "推理内容".into(),
+            text: long.clone(),
             signature: None,
         });
         app.apply_run_event(RunEvent::TextDelta("ans".into()));
@@ -722,7 +830,12 @@ mod tests {
         let blocks = build_conversation_blocks(&app, &theme);
         let texts: String = blocks.iter().flat_map(block_texts).collect();
         assert!(texts.contains("推理 ▸ 折叠"), "推理默认折叠摘要");
-        assert!(!texts.contains("推理内容"), "折叠态不显示正文");
+        assert!(
+            texts.contains("「推理内容 xxxx"),
+            "折叠摘要带首句预览: {texts}"
+        );
+        // 预览截断在 40 字符内，不显示长正文的尾部。
+        assert!(!texts.contains(&"x".repeat(80)), "折叠态不显示完整正文");
     }
 
     fn block_texts(block: &MessageBlock) -> Vec<String> {

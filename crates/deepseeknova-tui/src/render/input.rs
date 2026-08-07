@@ -39,13 +39,8 @@ pub fn render_input(app: &AppState, theme: &Theme, f: &mut Frame, area: Rect) {
     );
     // 首行前缀 `❯ `（accent），其余行（多行输入）无前缀。
     let input_lines: Vec<Line> = if app.running {
-        // 帧由本轮运行起始时刻推导：事件循环 100ms tick 重绘，
-        // spinner 随时间转动（此前用 `Instant::now().elapsed()` 恒为 0，
-        // 动画永远停在首帧，等待效果不可见）。
-        let frame = app
-            .run_started_at
-            .map(|t| spinner_frame(t.elapsed()))
-            .unwrap_or(SPINNER_FRAMES[0]);
+        // 运行中：对话面板 agent 位置已有转圈动画，输入区不再重复 spinner，
+        // 改为静态提示（避免"双转圈"冗余）。spinner_frame 仍供消息面板使用。
         vec![Line::from(vec![
             Span::styled(
                 "❯ ",
@@ -53,7 +48,7 @@ pub fn render_input(app: &AppState, theme: &Theme, f: &mut Frame, area: Rect) {
                     .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(format!("{frame} 等待响应… Ctrl+C 取消"), theme.system),
+            Span::styled("运行中 · Esc/Ctrl+C 取消", theme.system),
         ])]
     } else {
         view.rows
@@ -170,6 +165,8 @@ pub fn render_completion(app: &AppState, theme: &Theme, f: &mut Frame, area: Rec
     if candidates.is_empty() {
         return;
     }
+    // 先 Clear：浮层锚定在输入框上方，不擦除会与对话正文/欢迎卡叠层。
+    f.render_widget(ratatui::widgets::Clear, area);
     let block = ratatui::widgets::Block::default()
         .borders(ratatui::widgets::Borders::ALL)
         .border_style(theme.border)
@@ -214,10 +211,9 @@ mod tests {
     }
 
     #[test]
-    fn running_input_animates_from_run_start() {
-        // 回归：spinner 帧必须由 run_started_at 推导——此前
-        // `Instant::now().elapsed()` 恒为 0，动画永远停在首帧 ⠋，
-        // 等待效果不可见。
+    fn running_input_shows_static_hint() {
+        // 运行中输入区显示静态"运行中"提示（转圈动画只在对话面板 agent 位置，
+        // 输入区不重复 spinner，避免双转圈）。
         let theme = Theme::default();
         let started = std::time::Instant::now() - Duration::from_millis(350);
         let app = AppState {
@@ -242,8 +238,9 @@ mod tests {
             .collect();
         // TestBackend 中宽字符按 cell 拆开（"等 待 响 应"），去空格后断言。
         let flat: String = content.chars().filter(|c| !c.is_whitespace()).collect();
-        assert!(flat.contains('⠸'), "350ms → 第 3 帧 ⠸: {content}");
-        assert!(flat.contains("等待响应"), "等待文案渲染: {content}");
+        // 运行中输入区改为静态提示（对话面板有转圈动画，不重复 spinner）。
+        assert!(!flat.contains('⠸'), "输入区不再显示转圈帧: {content}");
+        assert!(flat.contains("运行中"), "运行中提示渲染: {content}");
         // 无 run_started_at（异常态）回退首帧，不 panic。
         let app = AppState {
             running: true,

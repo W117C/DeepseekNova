@@ -21,6 +21,16 @@ use crate::commands::{CommandCtx, CommandOutcome, CommandRegistry};
 use crate::model::conversation::LineKind;
 use state::{AppState, KeyAction};
 
+/// ctx 计量的有效窗口：`min(context_window, budget_window)`——预算才是真实
+/// 压力点，窗口配置过大（如 1M）时进度条不至于永远接近 0%。预算缺省或为 0
+/// 时回退窗口本身。
+fn effective_ctx_window(context_window: Option<u32>, budget_window: Option<u32>) -> Option<u32> {
+    context_window.map(|w| match budget_window {
+        Some(b) if b > 0 => w.min(b),
+        _ => w,
+    })
+}
+
 /// 运行代际：每轮提交/取消递增，旧回合残留事件按 gen 丢弃。
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct RunSession {
@@ -63,7 +73,7 @@ enum AppEvent {
     },
     /// 侧边栏会话列表刷新结果（SessionController 异步拉取）。
     Sessions {
-        ids: Vec<String>,
+        metas: Vec<state::SessionMeta>,
         current: Option<String>,
     },
     /// 会话列表拉取失败/完成：只复位刷新中标记，不清空旧列表。
@@ -130,6 +140,8 @@ pub async fn run_loop(
         // 实际发送的输入，含历史重发与 cache hit；completion 含推理输出）。
         // 与 Claude Code 等工具口径一致：显示当前窗口放了多少，而不是会话
         // 累计消耗——累计值只增不减，聊几句就"爆"，且 compaction 后不回落。
+        // 分母取 min(context_window, budget_window)：预算才是真实压力点，
+        // 避免窗口配置过大（如 1M）时进度条永远接近 0% 失去参考价值。
         if let Some(r) = &caps
             .runtime
             .lock()
@@ -139,10 +151,10 @@ pub async fn run_loop(
             let report = r.ledger().report(&r.price_table());
             app.total_cost_usd = report.total_usd;
             app.context_usage = app.usage.as_ref().and_then(|u| {
-                caps.context_window.map(|w| {
+                effective_ctx_window(caps.context_window, caps.budget_window).map(|window| {
                     (
                         u64::from(u.prompt_tokens) + u64::from(u.completion_tokens),
-                        w as u64,
+                        u64::from(window),
                     )
                 })
             });
@@ -201,11 +213,11 @@ pub async fn run_loop(
                     return;
                 };
                 match ctrl.list_sessions().await {
-                    Ok(mut ids) => {
-                        ids.sort();
-                        ids.reverse();
+                    Ok(mut metas) => {
+                        metas.sort_by_key(|m| m.id.clone());
+                        metas.reverse(); // id 按时间字典序，最新优先
                         let current = ctrl.current_session().await;
-                        let _ = tx.send(AppEvent::Sessions { ids, current }).await;
+                        let _ = tx.send(AppEvent::Sessions { metas, current }).await;
                     }
                     Err(_) => {
                         let _ = tx.send(AppEvent::SessionsRefreshDone).await;
@@ -353,8 +365,8 @@ pub async fn run_loop(
                             }
                         }
                         AppEvent::Input(_) => {}
-                        AppEvent::Sessions { ids, current } => {
-                            app.saved_sessions = ids;
+                        AppEvent::Sessions { metas, current } => {
+                            app.saved_sessions = metas;
                             app.current_session = current;
                             app.sessions_loaded = true;
                             app.saved_session_selected = app
@@ -478,6 +490,26 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
+    fn effective_ctx_window_takes_min_with_budget() {
+        // 窗口 > 预算 → 预算生效（压力点）。
+        assert_eq!(
+            effective_ctx_window(Some(1_000_000), Some(128_000)),
+            Some(128_000)
+        );
+        // 窗口 < 预算 → 窗口生效。
+        assert_eq!(
+            effective_ctx_window(Some(64_000), Some(128_000)),
+            Some(64_000)
+        );
+        // 无预算 → 窗口本身。
+        assert_eq!(effective_ctx_window(Some(128_000), None), Some(128_000));
+        // 预算为 0（禁用语义）→ 窗口本身。
+        assert_eq!(effective_ctx_window(Some(128_000), Some(0)), Some(128_000));
+        // 无窗口 → None（不显示占用率）。
+        assert_eq!(effective_ctx_window(None, Some(128_000)), None);
+    }
+
+    #[test]
     fn run_session_generation_isolates_events() {
         let mut session = RunSession::default();
         let g1 = session.begin();
@@ -510,6 +542,7 @@ mod tests {
             mcp_probe: None,
             undo: None,
             context_window: None,
+            budget_window: None,
             approval_rx: None,
         };
         let mut app = AppState::default();

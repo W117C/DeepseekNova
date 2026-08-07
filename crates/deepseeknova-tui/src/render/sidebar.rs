@@ -97,13 +97,29 @@ fn render_sessions(app: &AppState, theme: &Theme) -> Vec<Line<'static>> {
                 let i = app
                     .saved_sessions
                     .iter()
-                    .position(|x| x == id)
+                    .position(|m| &m.id == id)
                     .unwrap_or(usize::MAX);
                 let selected = i == app.saved_session_selected;
                 let current = app.current_session.as_deref() == Some(id.as_str());
                 let star = magnitude_char(current, gi);
                 let marker = if selected { "▸" } else { " " };
-                let label = short_session_id(id, 16);
+                // 有首句预览就显示预览（会话标题），否则回退不透明 id。
+                let preview = app
+                    .saved_sessions
+                    .get(i)
+                    .map(|m| m.preview.trim().to_string())
+                    .filter(|p| !p.is_empty());
+                let label = match preview {
+                    Some(p) => {
+                        let cut: String = p.chars().take(16).collect();
+                        if p.chars().count() > 16 {
+                            format!("{cut}…")
+                        } else {
+                            cut
+                        }
+                    }
+                    None => short_session_id(id, 16),
+                };
                 let suffix = if current { " (当前)" } else { "" };
                 let style = if selected {
                     theme.selection
@@ -164,14 +180,14 @@ fn night_key(id: &str) -> String {
 }
 
 /// 按夜次分组（夜次倒序、组内保持原顺序），返回（夜次, 会话 id 列表）。
-fn group_by_night(ids: &[String]) -> Vec<(String, Vec<String>)> {
+fn group_by_night(metas: &[crate::app::state::SessionMeta]) -> Vec<(String, Vec<String>)> {
     let mut groups: Vec<(String, Vec<String>)> = Vec::new();
-    for id in ids {
-        let key = night_key(id);
+    for m in metas {
+        let key = night_key(&m.id);
         if let Some(g) = groups.iter_mut().find(|(k, _)| *k == key) {
-            g.1.push(id.clone());
+            g.1.push(m.id.clone());
         } else {
-            groups.push((key, vec![id.clone()]));
+            groups.push((key, vec![m.id.clone()]));
         }
     }
     groups.sort_by(|a, b| b.0.cmp(&a.0));
@@ -368,8 +384,14 @@ mod tests {
         let app = AppState {
             sessions_loaded: true,
             saved_sessions: vec![
-                "chat-20260806-112831".to_string(),
-                "chat-20260805-180304".to_string(),
+                crate::app::state::SessionMeta {
+                    id: "chat-20260806-112831".to_string(),
+                    preview: "查看一下这个仓库".to_string(),
+                },
+                crate::app::state::SessionMeta {
+                    id: "chat-20260805-180304".to_string(),
+                    preview: String::new(),
+                },
             ],
             current_session: Some("chat-20260806-112831".to_string()),
             saved_session_selected: 0,
@@ -384,21 +406,36 @@ mod tests {
         assert!(texts.contains("▾ 08-06 夜 · 1"), "夜次分组头: {texts}");
         assert!(texts.contains("▾ 08-05 夜 · 1"), "夜次分组头: {texts}");
         assert!(
-            texts.contains("▸◉ 20260806-112831 (当前)"),
-            "选中 + 当前标记: {texts}"
+            texts.contains("▸◉ 查看一下这个仓库 (当前)"),
+            "有预览显示首句标题: {texts}"
         );
-        assert!(texts.contains("· 20260805-180304"), "更早夜次星点: {texts}");
+        assert!(
+            texts.contains("· 20260805-180304"),
+            "无预览回退不透明 id: {texts}"
+        );
     }
 
     #[test]
     fn night_grouping_orders_latest_night_first_and_marks_magnitude() {
-        let ids = vec![
-            "chat-20260807-160000".to_string(),
-            "chat-20260807-130000".to_string(),
-            "chat-20260806-220000".to_string(),
-            "plain".to_string(),
+        let metas = vec![
+            crate::app::state::SessionMeta {
+                id: "chat-20260807-160000".to_string(),
+                preview: String::new(),
+            },
+            crate::app::state::SessionMeta {
+                id: "chat-20260807-130000".to_string(),
+                preview: String::new(),
+            },
+            crate::app::state::SessionMeta {
+                id: "chat-20260806-220000".to_string(),
+                preview: String::new(),
+            },
+            crate::app::state::SessionMeta {
+                id: "plain".to_string(),
+                preview: String::new(),
+            },
         ];
-        let groups = group_by_night(&ids);
+        let groups = group_by_night(&metas);
         assert_eq!(
             groups.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
             vec!["08-07", "08-06", "----"]

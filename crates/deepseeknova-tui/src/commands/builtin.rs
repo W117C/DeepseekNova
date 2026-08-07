@@ -19,39 +19,46 @@ struct HelpCmd;
 #[async_trait]
 impl CommandHandler for HelpCmd {
     async fn run(&self, ctx: &mut CommandCtx<'_>, _args: &str) -> CommandOutcome {
-        ctx.app.echo_line(LineKind::System, "可用命令:");
-        for line in [
-            "  /help          显示帮助",
-            "  /clear         清空对话面板",
-            "  /new           开始新会话",
-            "  /sessions      列出已保存会话",
-            "  /resume <id>   恢复指定会话",
-            "  /model         模型与 effort 热切换",
-            "  /cost          会话成本报表",
-            "  /scorecard     读取最新测光评分卡",
-            "  /skills        列出可用技能",
-            "  /mcp           列出已配置 MCP 服务器",
-            "  /raw           切换显示模式（normal/lite/raw）",
-            "  /fold          折叠控制（all/none/reset）",
-            "  /copy          复制当前选中消息",
-            "  /undo          回滚最近一个快照",
-            "  /undo all      回滚全部快照",
-            "  /undo list     列出快照与状态",
-            "  /quit          退出 TUI（Esc）",
-            "  Ctrl+K         命令面板",
-            "  j/k            Conversation 焦点下消息导航",
-            "  Enter          折叠/展开选中消息",
-            "  y              复制选中消息",
-            "  PageUp/Down    滚动回看",
-            "  ↑/↓            输入历史（多行时移动光标）",
-            "  Shift+Enter    换行（Ctrl+J 同）",
-            "  ←/→/Home/End  输入内移动光标（空闲时）",
-            "  Delete/Backspace 编辑输入",
-            "  Ctrl+U/W       清空输入 / 删前一词",
-            "  Ctrl+C         取消当前运行",
-        ] {
-            ctx.app.echo_line(LineKind::System, line);
-        }
+        // /help 改为可滚动浮层：不再往对话面板灌 30+ 行（用户反馈"一直堆在
+        // 对话页面里很碍事"）。Esc/q 关闭，j/k、↑/↓、PageUp/Down 滚动。
+        ctx.app.help_overlay = Some(crate::app::focus::HelpOverlay {
+            lines: vec![
+                "  /help          显示帮助",
+                "  /clear         清空对话面板",
+                "  /new           开始新会话",
+                "  /sessions      列出已保存会话",
+                "  /resume <id>   恢复指定会话",
+                "  /model         模型与 effort 热切换",
+                "  /cost          会话成本报表",
+                "  /scorecard     读取最新测光评分卡",
+                "  /skills        列出可用技能",
+                "  /mcp           列出已配置 MCP 服务器",
+                "  /raw           切换显示模式（normal/lite/raw）",
+                "  /fold          折叠控制（all/none/reset）",
+                "  /copy          复制当前选中消息",
+                "  /undo          回滚最近一个快照",
+                "  /undo all      回滚全部快照",
+                "  /undo list     列出快照与状态",
+                "  /quit          退出 TUI（Esc）",
+                "  Ctrl+K         命令面板",
+                "  j/k            Conversation 焦点下消息导航",
+                "  Enter          折叠/展开选中消息",
+                "  y              复制选中消息",
+                "  PageUp/Down    滚动回看",
+                "  ↑/↓            输入历史（多行时移动光标）",
+                "  Shift+Enter    换行（Ctrl+J 同）",
+                "  ←/→/Home/End  输入内移动光标（空闲时）",
+                "  Delete/Backspace 编辑输入",
+                "  Ctrl+U/W       清空输入 / 删前一词",
+                "  Ctrl+C         取消当前运行",
+                "",
+                "  j/k 或 ↑/↓ 滚动 · Esc 或 q 关闭",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect(),
+            scroll: 0,
+        });
         CommandOutcome::Handled
     }
 }
@@ -101,20 +108,25 @@ impl CommandHandler for SessionsCmd {
     async fn run(&self, ctx: &mut CommandCtx<'_>, _args: &str) -> CommandOutcome {
         match &ctx.caps.session {
             Some(ctrl) => match ctrl.list_sessions().await {
-                Ok(mut ids) if !ids.is_empty() => {
-                    ids.sort();
-                    ids.reverse(); // id 按时间字典序，最新优先
+                Ok(mut metas) if !metas.is_empty() => {
+                    metas.sort_by_key(|m| m.id.clone());
+                    metas.reverse(); // id 按时间字典序，最新优先
                     let current = ctrl.current_session().await;
                     ctx.app
                         .echo_line(LineKind::System, "已保存会话（最新优先）:");
-                    for id in &ids {
-                        let marker = if current.as_deref() == Some(id.as_str()) {
+                    for m in &metas {
+                        let marker = if current.as_deref() == Some(m.id.as_str()) {
                             "  (当前)"
                         } else {
                             ""
                         };
+                        let label = if m.preview.is_empty() {
+                            m.id.clone()
+                        } else {
+                            format!("{} — {}", m.id, m.preview)
+                        };
                         ctx.app
-                            .echo_line(LineKind::System, &format!("  {id}{marker}"));
+                            .echo_line(LineKind::System, &format!("  {label}{marker}"));
                     }
                 }
                 Ok(_) => ctx.app.show_notice("（还没有已保存的会话）"),
@@ -825,6 +837,7 @@ mod tests {
             mcp_probe: None,
             undo: None,
             context_window: None,
+            budget_window: None,
             approval_rx: None,
         }
     }
@@ -934,10 +947,13 @@ mod tests {
         let caps = empty_caps();
         let mut app = AppState::default();
         run_cmd("help", "", &mut app, &caps).await;
-        let texts: Vec<&str> = app.echo.iter().map(|l| l.text.as_str()).collect();
-        assert!(texts.iter().any(|t| t.contains("/fold")));
-        assert!(texts.iter().any(|t| t.contains("/copy")));
-        assert!(texts.iter().any(|t| t.contains("Ctrl+K")));
+        // /help 打开可滚动浮层，不再往对话面板 echo 30+ 行（用户反馈污染）。
+        assert!(app.help_overlay.is_some(), "帮助走浮层");
+        assert!(app.echo.is_empty(), "帮助不进 echo 通道");
+        let overlay = app.help_overlay.as_ref().unwrap();
+        assert!(overlay.lines.iter().any(|l| l.contains("/fold")));
+        assert!(overlay.lines.iter().any(|l| l.contains("/copy")));
+        assert!(overlay.lines.iter().any(|l| l.contains("Ctrl+K")));
     }
 
     #[tokio::test]

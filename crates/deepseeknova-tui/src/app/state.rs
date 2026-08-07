@@ -11,7 +11,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use deepseeknova_core::chunk::Usage;
 use deepseeknova_core::runner::RunEvent;
 
-use super::focus::{CompletionState, Focus, SidebarTab};
+use super::focus::{CompletionState, Focus, HelpOverlay, SidebarTab};
 use crate::input::editor::InputState;
 use crate::model::apply::ConversationApply;
 use crate::model::conversation::{Conversation, SegId};
@@ -61,7 +61,8 @@ pub enum KeyAction {
 #[async_trait]
 pub trait SessionController: Send + Sync {
     async fn new_session(&self) -> anyhow::Result<()>;
-    async fn list_sessions(&self) -> anyhow::Result<Vec<String>>;
+    /// 已保存会话（含首句预览，供侧边栏区分会话），最新优先。
+    async fn list_sessions(&self) -> anyhow::Result<Vec<SessionMeta>>;
     async fn current_session(&self) -> Option<String>;
     async fn resume(&self, id: &str) -> anyhow::Result<Vec<ResumedLine>>;
     async fn record_turn(
@@ -70,6 +71,13 @@ pub trait SessionController: Send + Sync {
         output_text: &str,
         model: Option<String>,
     ) -> anyhow::Result<()>;
+}
+
+/// 侧边栏会话列表的一条：id + 首句预览（预览空时渲染回退 id）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionMeta {
+    pub id: String,
+    pub preview: String,
 }
 
 /// 恢复会话中的一条消息。
@@ -167,8 +175,10 @@ pub struct AppState {
     pub completion: Option<CompletionState>,
     /// 斜杠命令行内候选（输入 `/` 开头时触发，Claude Code 风格）。
     pub command_hint: Option<crate::commands::CommandHintState>,
-    /// 磁盘保存的会话 id 列表（最新优先；事件循环经 SessionController 刷新）。
-    pub saved_sessions: Vec<String>,
+    /// /help 帮助浮层：全量帮助文本 + 滚动位置。Esc/q 关闭，j/k 滚动。
+    pub help_overlay: Option<HelpOverlay>,
+    /// 磁盘保存的会话（最新优先；事件循环经 SessionController 刷新）。
+    pub saved_sessions: Vec<SessionMeta>,
     /// 当前会话 id（SessionController 上报；侧边栏“当前”标记用）。
     pub current_session: Option<String>,
     /// 是否已从磁盘加载过会话列表（首次加载前渲染“加载中”占位）。
@@ -286,7 +296,7 @@ impl AppState {
             self.quit_armed_at = Some(std::time::Instant::now());
             self.echo_line(
                 crate::model::conversation::LineKind::System,
-                "再按 Esc 退出（3 秒内）",
+                "再按 Esc 退出",
             );
             KeyAction::None
         }
@@ -535,6 +545,43 @@ impl AppState {
 
     /// 把恢复的会话行灌入消息树（`/resume` 共用）：用户行开新回合，
     /// 助手行落 Text 段，系统行落 System 段；全部标记 Done。
+    /// /help 浮层按键：Esc/q 关闭；j/k、↑/↓ 滚动。
+    pub fn handle_help_key(&mut self, key: &KeyEvent) -> KeyAction {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.help_overlay = None;
+                KeyAction::None
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(overlay) = &mut self.help_overlay {
+                    let max_scroll = overlay.lines.len().saturating_sub(1);
+                    overlay.scroll = (overlay.scroll + 1).min(max_scroll);
+                }
+                KeyAction::None
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(overlay) = &mut self.help_overlay {
+                    overlay.scroll = overlay.scroll.saturating_sub(1);
+                }
+                KeyAction::None
+            }
+            KeyCode::PageDown => {
+                if let Some(overlay) = &mut self.help_overlay {
+                    let max_scroll = overlay.lines.len().saturating_sub(1);
+                    overlay.scroll = (overlay.scroll + 10).min(max_scroll);
+                }
+                KeyAction::None
+            }
+            KeyCode::PageUp => {
+                if let Some(overlay) = &mut self.help_overlay {
+                    overlay.scroll = overlay.scroll.saturating_sub(10);
+                }
+                KeyAction::None
+            }
+            _ => KeyAction::None,
+        }
+    }
+
     pub fn restore_conversation(&mut self, lines: Vec<ResumedLine>) {
         self.clear_display();
         for line in lines {
@@ -813,6 +860,26 @@ mod tests {
             std::time::Instant::now() - NOTICE_TTL - Duration::from_secs(1),
         ));
         assert!(app.notice_expired(), "超过 TTL 后应判定过期");
+    }
+
+    #[test]
+    fn help_overlay_scrolls_and_closes() {
+        let mut app = AppState::default();
+        app.help_overlay = Some(crate::app::focus::HelpOverlay {
+            lines: (0..30).map(|i| format!("行 {i}")).collect(),
+            scroll: 0,
+        });
+        // j 滚动下移。
+        app.handle_help_key(&KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(app.help_overlay.as_ref().unwrap().scroll, 1);
+        // k 上移。
+        app.handle_help_key(&KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        assert_eq!(app.help_overlay.as_ref().unwrap().scroll, 0);
+        // Esc 关闭。
+        app.handle_help_key(&KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.help_overlay.is_none(), "Esc 关闭帮助浮层");
+        // 关闭后再按不 panic。
+        app.handle_help_key(&KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     }
 
     #[test]

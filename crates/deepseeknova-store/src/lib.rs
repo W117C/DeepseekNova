@@ -209,6 +209,41 @@ impl SessionStore {
         Ok(summaries)
     }
 
+    /// 首条用户输入的可读预览：读会话文件**首行**解析出 `input.prompt`，
+    /// 去换行、截断到 `max_chars`。空/损坏/不存在文件返回空串。
+    ///
+    /// 相对 [`SessionStore::list_summaries`] 的轻量替代：TUI 侧边栏每 2s 刷新
+    /// 会话列表，全量读每个文件只为拿首句不划算。
+    pub fn preview_first_prompt(&self, session_id: &str, max_chars: usize) -> String {
+        let path = self.session_path(session_id);
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            return String::new();
+        };
+        let Some(first) = content.lines().find(|l| !l.trim().is_empty()) else {
+            return String::new();
+        };
+        let Ok(turn) = serde_json::from_str::<StoredTurn>(first) else {
+            return String::new();
+        };
+        let prompt = turn.input.prompt.replace(['\n', '\r'], "");
+        prompt.chars().take(max_chars).collect()
+    }
+
+    /// 会话 id + 首句预览（TUI 侧边栏用），最新优先。
+    /// 预览截断 24 字符；空/无首句的会话预览为空串（渲染回退 id）。
+    pub fn list_sessions_with_preview(&self) -> anyhow::Result<Vec<(String, String)>> {
+        let mut ids = self.list_sessions()?;
+        ids.sort();
+        ids.reverse(); // id 按时间字典序，最新优先
+        Ok(ids
+            .into_iter()
+            .map(|id| {
+                let preview = self.preview_first_prompt(&id, 24);
+                (id, preview)
+            })
+            .collect())
+    }
+
     /// Get the last N turns from a session.
     pub fn last_n(&self, session_id: &str, n: usize) -> anyhow::Result<Vec<StoredTurn>> {
         let mut turns = self.load(session_id)?;
@@ -463,6 +498,41 @@ mod tests {
 
         let _ = store.delete("session-a");
         let _ = store.delete("session-b");
+    }
+
+    #[test]
+    fn preview_first_prompt_reads_only_first_line() {
+        let root = test_root();
+        let store = SessionStore::new(root.clone()).unwrap();
+
+        // 多行 prompt：预览去换行。
+        let input = RunInput {
+            prompt: "第一行\n第二行，这是一个很长的提示用来测试截断".to_string(),
+            images: vec![],
+            model_override: None,
+        };
+        let turn = SessionStore::build_turn(&input, 1, vec![], None);
+        store.append("pv", &turn).unwrap();
+
+        assert_eq!(store.preview_first_prompt("pv", 10), "第一行第二行，这是一");
+        assert_eq!(
+            store.preview_first_prompt("pv", 100),
+            "第一行第二行，这是一个很长的提示用来测试截断"
+        );
+        // 不存在/空文件 → 空串。
+        assert_eq!(store.preview_first_prompt("nope", 10), "");
+        // 最新优先排序 + 预览。
+        store.append("pv-old", &turn).unwrap();
+        let with_preview = store.list_sessions_with_preview().unwrap();
+        assert!(
+            with_preview
+                .iter()
+                .any(|(id, p)| id == "pv" && !p.is_empty()),
+            "预览非空: {with_preview:?}"
+        );
+
+        let _ = store.delete("pv");
+        let _ = store.delete("pv-old");
     }
 
     #[test]

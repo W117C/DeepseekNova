@@ -869,7 +869,7 @@ deepseeknova-cli chat --tui
 │ 第二行输入（Shift+Enter 换行）                      │ │                        │
 │                                                    │ │                        │
 └────────────────────────────────────────────────────┘ └────────────────────────┘
-Ctrl+U 清行 · Ctrl+W 删词 · Shift+Enter 换行 · /help · Esc 取消/再按退出
+Ctrl+U 清行 · Ctrl+W 删词 · Shift+Enter 换行 · /help · Esc 取消/再按 Esc 退出
 ```
 
 ### 消息树与折叠

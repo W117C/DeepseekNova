@@ -22,6 +22,8 @@ pub enum Focus {
     Sidebar,
     /// @ 文件补全浮层。
     Completion,
+    /// /help 帮助浮层（Esc/q 关闭，j/k 或 ↑/↓ 滚动）。
+    Help,
     /// 破坏性操作确认（spec 预留位；当前无挂起操作，保持可达性以避
     /// 免后续接线时破坏焦点分发表）。
     #[allow(dead_code)]
@@ -81,6 +83,15 @@ pub struct CompletionState {
     pub selected: usize,
 }
 
+/// /help 帮助浮层：全量帮助文本 + 滚动位置。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HelpOverlay {
+    /// 帮助行（构建时一次性生成，Esc 关闭后清空）。
+    pub lines: Vec<String>,
+    /// 当前滚动偏移（可见区首行）。
+    pub scroll: usize,
+}
+
 impl AppState {
     /// 按键分派：按焦点路由。返回是否退出/提交/取消。
     pub fn handle_key(&mut self, key: &KeyEvent) -> KeyAction {
@@ -130,6 +141,10 @@ impl AppState {
         if let Some(action) = self.handle_command_hint_key(key) {
             return action;
         }
+        // /help 浮层优先：Esc/q 关闭，j/k、↑/↓ 滚动。
+        if self.help_overlay.is_some() {
+            return self.handle_help_key(key);
+        }
         match self.focus {
             Focus::Conversation => self.handle_conversation_key(key),
             Focus::Input => {
@@ -143,6 +158,7 @@ impl AppState {
             }
             Focus::Sidebar => self.handle_sidebar_key(key),
             Focus::Completion => crate::input::at_complete::handle_key(self, key),
+            Focus::Help => KeyAction::None, // handle_help_key 已在浮层分支消费
             Focus::Confirm => self.handle_confirm_key(key),
         }
     }
@@ -285,13 +301,9 @@ impl AppState {
             }
             Action::SidebarResumeSelected => {
                 if self.sidebar_tab == SidebarTab::Sessions {
-                    if let Some(id) = self
-                        .saved_sessions
-                        .get(self.saved_session_selected)
-                        .cloned()
-                    {
+                    if let Some(meta) = self.saved_sessions.get(self.saved_session_selected) {
                         // 事件循环用真实 caps 消费 pending_command，与 Ctrl+K 同路。
-                        self.pending_command = Some(("resume".to_string(), id));
+                        self.pending_command = Some(("resume".to_string(), meta.id.clone()));
                         self.focus = Focus::Input;
                     }
                 }
@@ -417,7 +429,16 @@ mod tests {
         let mut app = AppState {
             focus: Focus::Sidebar,
             sidebar_tab: SidebarTab::Sessions,
-            saved_sessions: vec!["chat-a".to_string(), "chat-b".to_string()],
+            saved_sessions: vec![
+                crate::app::state::SessionMeta {
+                    id: "chat-a".into(),
+                    preview: "第一个".into(),
+                },
+                crate::app::state::SessionMeta {
+                    id: "chat-b".into(),
+                    preview: "第二个".into(),
+                },
+            ],
             ..Default::default()
         };
         app.handle_key(&key(KeyCode::Down, KeyModifiers::NONE));

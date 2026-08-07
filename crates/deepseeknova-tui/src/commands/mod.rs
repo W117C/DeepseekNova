@@ -118,6 +118,9 @@ pub struct TuiCaps {
     /// 主模型上下文窗口上限（tokens），由 CLI 从 config 注入；
     /// `None` 时状态行与 `/cost` 不显示占用率百分比。
     pub context_window: Option<u32>,
+    /// 会话总预算上限（tokens），CLI 从 `[budget] max_total_tokens` 注入；
+    /// 与 `context_window` 取较小值作为 ctx 计量分母。
+    pub budget_window: Option<u32>,
     /// 权限审批请求接收端（CLI 注入 agent 的 responder 通道）。
     pub approval_rx: Option<tokio::sync::mpsc::Receiver<crate::approval::ApprovalRequest>>,
 }

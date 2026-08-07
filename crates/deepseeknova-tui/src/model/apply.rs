@@ -15,6 +15,32 @@ const ARGS_PREVIEW: usize = 200;
 /// 工具结果单行预览上限（字符）。
 const RESULT_PREVIEW: usize = 400;
 
+/// 把 agent 的 Paused reason 转成对用户可读的中文说明（保留原始原因信息）。
+///
+/// 已知两种 reason 形态来自 `deepseeknova-agent`：
+/// - `reached max steps (N)`：步数上限，属"任务做了一半被保护性暂停"
+/// - `budget: <why>`：预算上限
+///
+/// 其余形态原样保留，不猜测。文案必须包含"任务未完成"的因果提示，让用户知道
+/// 这不是 bug，而是保护机制，且是可继续的（/resume）。
+pub fn friendly_pause_reason(reason: &str) -> String {
+    let trimmed = reason.trim();
+    if let Some(n) = trimmed.strip_prefix("reached max steps (") {
+        if let Some(digits) = n.strip_suffix(')') {
+            if digits.chars().all(|c| c.is_ascii_digit()) {
+                return format!("已达步骤上限（{digits}），任务未完成");
+            }
+        }
+    }
+    if let Some(why) = trimmed.strip_prefix("budget:") {
+        return format!("已达预算上限：{}", why.trim());
+    }
+    if trimmed == "max steps" {
+        return "已达步骤上限，任务未完成".to_string();
+    }
+    format!("任务暂停：{trimmed}")
+}
+
 /// 消息树的单一变更入口。`ConversationApply` 是 [Conversation] 的行为扩展。
 pub trait ConversationApply {
     /// 增量消费一个 RunEvent，更新当前回合的消息树。
@@ -218,12 +244,12 @@ impl ConversationApply for Conversation {
                 turn.assistant.mark_unfinished_tools_failed();
                 turn.assistant.segments.push(Segment::System {
                     kind: SystemKind::Paused,
-                    text: format!("⏸ {reason}"),
+                    text: format!("⏸ {}", friendly_pause_reason(&reason)),
                 });
                 if let Some(id) = session_id {
                     turn.assistant.segments.push(Segment::System {
                         kind: SystemKind::Info,
-                        text: format!("可 /resume {id}"),
+                        text: format!("输入 /resume {id} 继续任务，或直接输入新指令"),
                     });
                 }
                 turn.status = TurnStatus::Paused;
@@ -480,7 +506,7 @@ mod tests {
             signature: None,
         });
         c.apply(RunEvent::Paused {
-            reason: "max steps".into(),
+            reason: "reached max steps (10)".into(),
             session_id: Some("abc".into()),
         });
         let turn = c.current().unwrap();
@@ -492,12 +518,30 @@ mod tests {
         ));
         assert!(matches!(
             &turn.assistant.segments[1],
-            Segment::System { kind: SystemKind::Paused, text } if text == "⏸ max steps"
+            Segment::System { kind: SystemKind::Paused, text } if text == "⏸ 已达步骤上限（10），任务未完成"
         ));
         assert!(matches!(
             &turn.assistant.segments[2],
-            Segment::System { kind: SystemKind::Info, text } if text == "可 /resume abc"
+            Segment::System { kind: SystemKind::Info, text } if text == "输入 /resume abc 继续任务，或直接输入新指令"
         ));
+    }
+
+    #[test]
+    fn friendly_pause_reason_maps_known_and_passes_through() {
+        assert_eq!(
+            friendly_pause_reason("reached max steps (40)"),
+            "已达步骤上限（40），任务未完成"
+        );
+        assert_eq!(
+            friendly_pause_reason("budget: 预算超限"),
+            "已达预算上限：预算超限"
+        );
+        assert_eq!(friendly_pause_reason("unexpected"), "任务暂停：unexpected");
+        // 非数字的 max steps 形态不猜测，原样保留。
+        assert_eq!(
+            friendly_pause_reason("reached max steps (x)"),
+            "任务暂停：reached max steps (x)"
+        );
     }
 
     #[test]

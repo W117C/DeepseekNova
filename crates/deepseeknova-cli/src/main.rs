@@ -451,6 +451,12 @@ async fn main() -> anyhow::Result<()> {
                             .and_then(|m| cfg.find_model(m))
                             .and_then(|mc| mc.context_window)
                     });
+                // 预算上限作为 ctx 计量的第二分母：取 min(context_window, budget)，
+                // 预算才是真实压力点（窗口配置过大时进度条不至于永远 0%）。
+                let budget_window = cfg
+                    .budget
+                    .enabled
+                    .then_some(cfg.budget.max_total_tokens as u32);
                 let hist = history.clone();
                 let mcp = mcp_tools;
                 // 权限审批：responder 注入每次重建的 agent（/model 热切换
@@ -501,6 +507,9 @@ async fn main() -> anyhow::Result<()> {
                     tui = tui.with_session_controller(ctrl);
                 }
                 tui = tui.with_context_window(context_window);
+                tui = tui.with_budget_window(budget_window);
+                // @ 文件补全候选：工作区文件清单（GUIDE 声称"由 CLI 注入"）。
+                tui = tui.with_at_files(collect_at_files());
                 tui.run().await?;
                 return Ok(());
             }
@@ -1006,6 +1015,55 @@ async fn main() -> anyhow::Result<()> {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// 收集工作区文件路径，供 TUI 的 `@` 文件补全注入候选。
+///
+/// 递归扫 cwd，跳过常见噪声目录（.git/target/node_modules/.deepseeknova 等）
+/// 与隐藏条目；上限 `MAX_AT_FILES` 条防止大仓库拖慢启动。返回相对路径。
+fn collect_at_files() -> Vec<String> {
+    const MAX_AT_FILES: usize = 500;
+    const SKIP_DIRS: &[&str] = &[
+        ".git",
+        ".svn",
+        "target",
+        "node_modules",
+        ".deepseeknova",
+        ".cargo",
+        ".cache",
+        "dist",
+        "build",
+    ];
+    let mut out = Vec::new();
+    let mut stack = vec![std::path::PathBuf::from(".")];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            // 目录 symlink 一律跳过：`is_dir()` 会跟随符号链接，指向祖先或
+            // 自身的链接会形成环导致无限递归，指向大目录（如 node_modules）
+            // 则把无关文件扫进来。文件 symlink 同理不跟随（引用价值低）。
+            if entry.file_type().is_ok_and(|ft| ft.is_symlink()) {
+                continue;
+            }
+            if name.starts_with('.') && path.is_dir() {
+                continue;
+            }
+            if path.is_dir() {
+                if SKIP_DIRS.contains(&name.as_ref()) {
+                    continue;
+                }
+                stack.push(path);
+            } else if out.len() < MAX_AT_FILES {
+                out.push(path.to_string_lossy().replace("./", ""));
+            }
+        }
+    }
+    out
+}
+
 /// Resolve a ProviderConfig for a given model name (or the default).
 fn resolve_provider_cfg<'a>(
     config: &'a deepseeknova_config::Config,
@@ -1333,9 +1391,13 @@ impl deepseeknova_tui::SessionController for TuiSessionController {
         Ok(())
     }
 
-    async fn list_sessions(&self) -> anyhow::Result<Vec<String>> {
+    async fn list_sessions(&self) -> anyhow::Result<Vec<deepseeknova_tui::SessionMeta>> {
         let p = self.persist.lock().await;
-        p.store.list_sessions()
+        let metas = p.store.list_sessions_with_preview()?;
+        Ok(metas
+            .into_iter()
+            .map(|(id, preview)| deepseeknova_tui::SessionMeta { id, preview })
+            .collect())
     }
 
     async fn current_session(&self) -> Option<String> {
@@ -1661,6 +1723,58 @@ fn truncate_str(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn collect_at_files_skips_noise_dirs_and_caps() {
+        let ws = tempfile::tempdir().unwrap();
+        let root = ws.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("target")).unwrap();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::create_dir_all(root.join(".deepseeknova")).unwrap();
+        std::fs::write(root.join("src/main.rs"), "fn main(){}").unwrap();
+        std::fs::write(root.join("src/lib.rs"), "fn f(){}").unwrap();
+        std::fs::write(root.join("target/x.txt"), "noise").unwrap();
+        std::fs::write(root.join(".git/config"), "noise").unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[package]").unwrap();
+
+        let old = std::env::current_dir().unwrap();
+        std::env::set_current_dir(root).unwrap();
+        let files = collect_at_files();
+        std::env::set_current_dir(&old).unwrap();
+
+        assert!(files.contains(&"Cargo.toml".to_string()));
+        assert!(files.contains(&"src/main.rs".to_string()));
+        assert!(files.contains(&"src/lib.rs".to_string()));
+        assert!(
+            !files.iter().any(|f| f.contains("target/")
+                || f.contains(".git/")
+                || f.contains(".deepseeknova/")),
+            "噪声目录必须被跳过: {files:?}"
+        );
+    }
+
+    #[test]
+    fn collect_at_files_skips_symlink_cycles() {
+        // 回归：目录 symlink 指向自身/祖先会形成环，跟随则无限递归挂起
+        // 启动。`file_type().is_symlink()` 不跟随链接，必须直接跳过。
+        let ws = tempfile::tempdir().unwrap();
+        let root = ws.path();
+        std::fs::write(root.join("real.txt"), "x").unwrap();
+        std::os::unix::fs::symlink(root, root.join("loop")).unwrap();
+        std::os::unix::fs::symlink("real.txt", root.join("ln.txt")).unwrap();
+
+        let old = std::env::current_dir().unwrap();
+        std::env::set_current_dir(root).unwrap();
+        let files = collect_at_files();
+        std::env::set_current_dir(&old).unwrap();
+
+        assert!(files.contains(&"real.txt".to_string()));
+        assert!(
+            !files.iter().any(|f| f.starts_with("loop") || f == "ln.txt"),
+            "symlink 一律跳过，不成环也不收录: {files:?}"
+        );
+    }
 
     #[test]
     fn sessions_root_honors_session_config() {

@@ -50,7 +50,8 @@ use deepseeknova_provider::factory::ReasoningEffort;
 use deepseeknova_provider::router::ModelRouter;
 
 pub use app::state::{
-    McpProbe, McpServerInfo, McpStatus, ResumedLine, ResumedRole, SessionController, UndoController,
+    McpProbe, McpServerInfo, McpStatus, ResumedLine, ResumedRole, SessionController, SessionMeta,
+    UndoController,
 };
 pub use theme::Theme;
 
@@ -91,6 +92,9 @@ pub struct TuiRunner {
     at_files: Vec<String>,
     /// 主模型上下文窗口上限（tokens），CLI 从 config 注入；None 不显示占用率。
     context_window: Option<u32>,
+    /// 会话总预算上限（tokens），CLI 从 `[budget] max_total_tokens` 注入；
+    /// 与 `context_window` 取较小值作为 ctx 计量的分母（预算才是真实压力点）。
+    budget_window: Option<u32>,
     /// 权限审批请求接收端（CLI 注入 agent 的 responder 通道）。
     approval_rx: Option<tokio::sync::mpsc::Receiver<crate::approval::ApprovalRequest>>,
 }
@@ -117,6 +121,7 @@ impl TuiRunner {
             theme: None,
             at_files: Vec::new(),
             context_window: None,
+            budget_window: None,
             approval_rx: None,
         }
     }
@@ -217,6 +222,13 @@ impl TuiRunner {
         self
     }
 
+    /// 注入会话总预算上限（tokens），CLI 从 `[budget] max_total_tokens` 读取；
+    /// 与 `context_window` 取较小值作为 ctx 计量分母（预算才是真实压力点）。
+    pub fn with_budget_window(mut self, budget: Option<u32>) -> Self {
+        self.budget_window = budget;
+        self
+    }
+
     /// Enter the TUI and block until the user quits.
     pub async fn run(&mut self) -> anyhow::Result<()> {
         let mut terminal = ratatui::init();
@@ -253,6 +265,7 @@ impl TuiRunner {
             mcp_probe: self.mcp_probe.clone(),
             undo: self.undo.clone(),
             context_window: self.context_window,
+            budget_window: self.budget_window,
             approval_rx: self.approval_rx.take(),
         };
 
