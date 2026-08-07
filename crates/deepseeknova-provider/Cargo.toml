@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 description = "Unified LLM provider abstraction for OpenAI-compatible and Anthropic backends with streaming and tool calling."
 readme = "README.md"
-documentation = "https://docs.rs/deepseeknova-provider/0.4.0"
+documentation = "https://docs.rs/deepseeknova-provider/0.5.0"
 
 [dependencies]
 anyhow = { workspace = true }

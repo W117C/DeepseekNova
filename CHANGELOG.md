@@ -446,10 +446,11 @@ All notable changes to DeepseekNova will be documented in this file.
   `cargo package` 不再报错）；README/README_EN 截图空占位改为运行说明；
   SECURITY.md 版本表更新为 latest-minor 支持策略（0.4.x Current / 0.3.x
   Backports）。
-- **实证：版本须 bump 至 0.5.0**（未执行，待用户确认）——crates.io 的 0.4.0 已被
+- **实证：版本须 bump 至 0.5.0**（已执行）——crates.io 的 0.4.0 已被
   2026-07-20 旧快照占用 19/22 crate，`cargo publish --dry-run` 实测 metrics 因
   代码引用当前未发布模块（`core::tool_hook`/`provider::cost`）编译失败，0.4.0
-  重发当前代码不可行。
+  重发当前代码不可行。已全 workspace bump 至 0.5.0（workspace.package +
+  23 处内部依赖 + 20 个 crate docs URL）。
 
 ## [0.4.0] — 2026-07-19
 

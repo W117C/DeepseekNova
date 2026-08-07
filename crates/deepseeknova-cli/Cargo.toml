@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 description = "CLI frontend for the deepseeknova agent framework with chat, plan, serve, and setup subcommands."
 readme = "README.md"
-documentation = "https://docs.rs/deepseeknova-cli/0.4.0"
+documentation = "https://docs.rs/deepseeknova-cli/0.5.0"
 
 [dependencies]
 anyhow = { workspace = true }

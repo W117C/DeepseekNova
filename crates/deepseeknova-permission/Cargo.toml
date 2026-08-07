@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 description = "Policy-based allow/ask/deny permission gates for tool execution with per-tool rules and session caching."
 readme = "README.md"
-documentation = "https://docs.rs/deepseeknova-permission/0.4.0"
+documentation = "https://docs.rs/deepseeknova-permission/0.5.0"
 
 [dependencies]
 anyhow = { workspace = true }
