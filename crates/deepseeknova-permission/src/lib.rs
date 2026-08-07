@@ -197,6 +197,58 @@ impl CheckVerdict {
 }
 
 // ---------------------------------------------------------------------------
+// GatePreview — 决策链预览（exec 审计模式）
+// ---------------------------------------------------------------------------
+
+/// 命中的规则（预览/审计用）：来源表 + 规则本体。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuleHit {
+    /// 规则来源表：`deny` / `ask` / `allow`（按优先级排列）。
+    pub source: String,
+    /// 规则模式（tool + 可选 subject）。
+    pub rule: Rule,
+}
+
+/// 能力检查结果（预览用，只计算不执行）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CapabilityCheck {
+    /// 生效的工作区根（`None` = 未配置，路径守卫不启用）。
+    pub workspace_root: Option<String>,
+    /// 越界路径（写工具 + 有工作区根时触发硬拒）。
+    pub path_outside_workspace: Option<String>,
+    /// 参数为畸形 JSON（写工具 + 有工作区根时 fail-closed 硬拒）。
+    pub malformed_args: bool,
+}
+
+/// 一次权限检查的完整决策链预览（exec 审计模式）。
+///
+/// 与真实执行路径 [`PermissionGate::check`] 同源（共用 preflight + finalize
+/// 决策链），保证"预览到的决策"与"实际执行时的决策"一致（一致性测试见
+/// `preview_matches_check_decision`）。**只计算不执行、不改变状态**——
+/// 不写会话缓存、不触发限流计数、不记审计。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GatePreview {
+    /// 被审计的工具名。
+    pub tool_name: String,
+    /// 被审计的工具参数（原始 JSON 字符串）。
+    pub args: String,
+    /// 最终决策：allow / ask / deny。
+    pub decision: Decision,
+    /// 安全硬拒标志（不可通过规则覆盖）。
+    pub hard: bool,
+    /// 决策原因。
+    pub reason: String,
+    /// 命中的规则链（deny > ask > allow，每表取首个命中；无规则命中为空）。
+    pub matched_rules: Vec<RuleHit>,
+    /// shell 工具的只读分类（非 shell 工具为 `None`）。
+    pub readonly_kind: Option<deepseeknova_security::readonly::ReadOnlyKind>,
+    /// 能力检查（工作区路径守卫等）。
+    pub capability: CapabilityCheck,
+    /// 拒绝即教育建议（Ask 时附带"添加 allow 规则即可自动放行"）。
+    pub suggestions: Vec<RuleSuggestion>,
+}
+
+// ---------------------------------------------------------------------------
 // Policy
 // ---------------------------------------------------------------------------
 
@@ -567,56 +619,18 @@ impl PermissionGate {
     /// 不可通过规则覆盖。旧调用方可经 [`CheckVerdict::decision`] 取三态。
     pub fn check(&self, tool: &dyn Tool, args: &str) -> CheckVerdict {
         // Rate limit first: a hard cap independent of per-tool decisions.
+        // （预览 API 不触发限流计数——见 [`PermissionGate::preview`]。）
         if self.rate_limited() {
             return CheckVerdict::hard_deny("rate limit exceeded");
         }
 
-        let args_value: Value = match serde_json::from_str(args) {
-            Ok(v) => v,
-            Err(_) => {
-                // 参数无法解析（畸形 JSON）：写工具 + 有工作区根时无法验证
-                // 路径，fail-closed 硬拒，避免畸形输入静默跳过工作区守卫。
-                // （Windows 下未转义反斜杠路径即会命中此分支。）
-                if !tool.read_only() && self.workspace_root.is_some() {
-                    return CheckVerdict::hard_deny("malformed tool arguments: cannot verify path");
-                }
-                Value::Null
-            }
-        };
         let tool_name = &tool.schema().name;
+        let read_only = tool.read_only();
 
-        // Path-based guard: deny writes outside workspace (hard deny).
-        // 覆盖单路径工具（path/file/target/directory）与双路径工具
-        // （move_file 的 source+destination）——任一路径越界都必须硬拒。
-        if !tool.read_only() {
-            if let Some(ref root) = self.workspace_root {
-                for path in extract_paths(&args_value) {
-                    if !is_within_workspace(root, &path) {
-                        return CheckVerdict::hard_deny(format!("path outside workspace: {path}"));
-                    }
-                }
-            }
-        }
-
-        // Shell 命令只读分类：
-        // - Dangerous（工具级注入面：git -c/--config-env、%G/%x 格式串、
-        //   UNC/URL/SMB 路径形态）→ 安全硬拒，不可通过规则覆盖
-        // - ReadOnly → 仅当无 deny 规则/缓存拒绝命中时才免询问放行
-        //   （H1 修复：deny 优先于只读免询问——"Deny always wins"契约）
-        // - NotReadOnly（含链式/重定向/命令替换等普通 shell 组合）
-        //   → 走规则/审批流程，可由用户 allow 规则覆盖
-        let mut readonly_cmd = false;
-        if is_shell_tool(tool_name) {
-            if let Some(cmd) = extract_command(&args_value) {
-                use deepseeknova_security::readonly::{classify_readonly, ReadOnlyKind};
-                match classify_readonly(&cmd) {
-                    ReadOnlyKind::Dangerous => {
-                        return CheckVerdict::hard_deny("dangerous command detected");
-                    }
-                    ReadOnlyKind::ReadOnly => readonly_cmd = true,
-                    ReadOnlyKind::NotReadOnly => {}
-                }
-            }
+        // 预检：参数解析 + 路径守卫 + 只读分类（与 preview 同源）。
+        let preflight = self.preflight(tool_name, read_only, args);
+        if let Some(v) = preflight.hard_deny {
+            return v;
         }
 
         // Check session cache (user decisions take precedence over readonly auto-allow)
@@ -631,6 +645,165 @@ impl PermissionGate {
             }
         }
 
+        // 策略裁决（与 preview 同源）。
+        let outcome = self.finalize(tool_name, read_only, &preflight);
+        CheckVerdict {
+            decision: outcome.decision,
+            hard: outcome.hard,
+            reason: outcome.reason,
+            suggestions: outcome.suggestions,
+        }
+    }
+
+    /// 预执行决策预览（exec 审计模式）。
+    ///
+    /// 给定工具名 + 参数（+ 可选工作区根），返回完整决策链：命中规则
+    /// （id/模式/来源）、最终 Allow/Ask/Deny、只读分类、能力检查结果、
+    /// 建议。**只计算不执行、不改变状态**——不写会话缓存、不触发限流
+    /// 计数、不记审计。
+    ///
+    /// 与 [`PermissionGate::check`] 共用 `preflight` + `finalize` 决策链，
+    /// 保证预览与真实执行决策一致（一致性测试见 `preview_matches_check_decision`）。
+    /// 无 `&dyn Tool` 依赖：由调用方提供工具名与只读标志，便于 CLI/库在
+    /// 不实例化工具的情况下审计任意工具调用。
+    pub fn preview(&self, tool_name: &str, read_only: bool, args: &str) -> GatePreview {
+        let preflight = self.preflight(tool_name, read_only, args);
+        let (decision, hard, reason, suggestions, matched_rules) = match &preflight.hard_deny {
+            Some(v) => (
+                v.decision(),
+                v.is_hard_deny(),
+                v.reason().to_string(),
+                v.suggestions().to_vec(),
+                Vec::new(),
+            ),
+            None => {
+                let o = self.finalize(tool_name, read_only, &preflight);
+                (o.decision, o.hard, o.reason, o.suggestions, o.matched_rules)
+            }
+        };
+        GatePreview {
+            tool_name: tool_name.to_string(),
+            args: args.to_string(),
+            decision,
+            hard,
+            reason,
+            matched_rules,
+            readonly_kind: preflight.readonly_kind,
+            capability: preflight.capability,
+            suggestions,
+        }
+    }
+
+    /// 预检：参数解析 + 工作区路径守卫 + shell 只读分类。
+    ///
+    /// 真实执行路径 [`PermissionGate::check`] 与预览 [`PermissionGate::preview`]
+    /// 共用，保证两端决策同源。预检阶段硬拒（畸形参数/越界路径/危险命令）
+    /// 记录在 `hard_deny`，由调用方决定处理。**不写缓存、不触发限流**。
+    fn preflight(&self, tool_name: &str, read_only: bool, args: &str) -> Preflight {
+        let args_value: Value = match serde_json::from_str(args) {
+            Ok(v) => v,
+            Err(_) => {
+                // 参数无法解析（畸形 JSON）：写工具 + 有工作区根时无法验证
+                // 路径，fail-closed 硬拒，避免畸形输入静默跳过工作区守卫。
+                // （Windows 下未转义反斜杠路径即会命中此分支。）
+                if !read_only && self.workspace_root.is_some() {
+                    return Preflight {
+                        args_value: Value::Null,
+                        readonly_kind: None,
+                        readonly_cmd: false,
+                        capability: CapabilityCheck {
+                            workspace_root: self
+                                .workspace_root
+                                .as_ref()
+                                .map(|p| p.display().to_string()),
+                            malformed_args: true,
+                            ..Default::default()
+                        },
+                        hard_deny: Some(CheckVerdict::hard_deny(
+                            "malformed tool arguments: cannot verify path",
+                        )),
+                    };
+                }
+                Value::Null
+            }
+        };
+
+        let mut capability = CapabilityCheck {
+            workspace_root: self
+                .workspace_root
+                .as_ref()
+                .map(|p| p.display().to_string()),
+            ..Default::default()
+        };
+
+        // Path-based guard: deny writes outside workspace (hard deny).
+        // 覆盖单路径工具（path/file/target/directory）与双路径工具
+        // （move_file 的 source+destination）——任一路径越界都必须硬拒。
+        if !read_only {
+            if let Some(ref root) = self.workspace_root {
+                for path in extract_paths(&args_value) {
+                    if !is_within_workspace(root, &path) {
+                        capability.path_outside_workspace = Some(path.clone());
+                        return Preflight {
+                            args_value,
+                            readonly_kind: None,
+                            readonly_cmd: false,
+                            capability,
+                            hard_deny: Some(CheckVerdict::hard_deny(format!(
+                                "path outside workspace: {path}"
+                            ))),
+                        };
+                    }
+                }
+            }
+        }
+
+        // Shell 命令只读分类：
+        // - Dangerous（工具级注入面：git -c/--config-env、%G/%x 格式串、
+        //   UNC/URL/SMB 路径形态）→ 安全硬拒，不可通过规则覆盖
+        // - ReadOnly → 仅当无 deny 规则/缓存拒绝命中时才免询问放行
+        //   （H1 修复：deny 优先于只读免询问——"Deny always wins"契约）
+        // - NotReadOnly（含链式/重定向/命令替换等普通 shell 组合）
+        //   → 走规则/审批流程，可由用户 allow 规则覆盖
+        let mut readonly_kind = None;
+        let mut readonly_cmd = false;
+        if is_shell_tool(tool_name) {
+            if let Some(cmd) = extract_command(&args_value) {
+                use deepseeknova_security::readonly::{classify_readonly, ReadOnlyKind};
+                match classify_readonly(&cmd) {
+                    ReadOnlyKind::Dangerous => {
+                        readonly_kind = Some(ReadOnlyKind::Dangerous);
+                        return Preflight {
+                            args_value,
+                            readonly_kind,
+                            readonly_cmd: false,
+                            capability,
+                            hard_deny: Some(CheckVerdict::hard_deny("dangerous command detected")),
+                        };
+                    }
+                    ReadOnlyKind::ReadOnly => {
+                        readonly_cmd = true;
+                        readonly_kind = Some(ReadOnlyKind::ReadOnly);
+                    }
+                    ReadOnlyKind::NotReadOnly => {
+                        readonly_kind = Some(ReadOnlyKind::NotReadOnly);
+                    }
+                }
+            }
+        }
+
+        Preflight {
+            args_value,
+            readonly_kind,
+            readonly_cmd,
+            capability,
+            hard_deny: None,
+        }
+    }
+
+    /// 策略裁决（preflight 之后）。与 [`PermissionGate::check`] 的 Ask/Deny
+    /// 分支同源；额外返回命中规则链供预览展示。
+    fn finalize(&self, tool_name: &str, read_only: bool, preflight: &Preflight) -> CoreOutcome {
         // Evaluate policy; attach "拒绝即教育" suggestions on ask/deny.
         // - 模式预设（self.mode）覆盖写工具默认回退；
         // - untrusted + 项目层 allow 规则 → 降级为 Ask（不能静默放行陌生
@@ -640,16 +813,23 @@ impl PermissionGate {
         let allow_hit = degrade_allow
             && self
                 .policy
-                .matching_rule(tool_name, &args_value, &self.policy.allow)
+                .matching_rule(tool_name, &preflight.args_value, &self.policy.allow)
                 .is_some();
+        let matched_rules = self.matching_rules_chain(tool_name, &preflight.args_value);
         match self.policy.decide_effective(
             tool_name,
-            tool.read_only(),
-            &args_value,
+            read_only,
+            &preflight.args_value,
             self.mode(),
             degrade_allow,
         ) {
-            Decision::Allow => CheckVerdict::allow(),
+            Decision::Allow => CoreOutcome {
+                decision: Decision::Allow,
+                hard: false,
+                reason: String::new(),
+                suggestions: Vec::new(),
+                matched_rules,
+            },
             Decision::Ask => {
                 // 区分"显式 ask 规则命中"与"mode 回退 Ask"：
                 // - 显式规则命中 → 只读命令也不得短路（用户明确要求确认，
@@ -657,37 +837,79 @@ impl PermissionGate {
                 // - mode 回退（无规则命中）→ 只读命令免询问放行
                 let explicit_ask = self
                     .policy
-                    .matching_rule(tool_name, &args_value, &self.policy.ask)
+                    .matching_rule(tool_name, &preflight.args_value, &self.policy.ask)
                     .is_some();
-                if readonly_cmd && !explicit_ask {
-                    CheckVerdict::allow()
+                if preflight.readonly_cmd && !explicit_ask {
+                    CoreOutcome {
+                        decision: Decision::Allow,
+                        hard: false,
+                        reason: String::new(),
+                        suggestions: Vec::new(),
+                        matched_rules,
+                    }
                 } else {
                     let mut v = CheckVerdict::ask("requires user approval");
                     // 仅当 Ask 来自被降级的 allow 规则时抑制建议。
                     if !(allow_hit && !explicit_ask) {
-                        for s in suggest_allow(tool_name, &args_value) {
+                        for s in suggest_allow(tool_name, &preflight.args_value) {
                             v = v.with_suggestion(s);
                         }
                     }
-                    v
+                    CoreOutcome {
+                        decision: v.decision(),
+                        hard: v.is_hard_deny(),
+                        reason: v.reason().to_string(),
+                        suggestions: v.suggestions().to_vec(),
+                        matched_rules,
+                    }
                 }
             }
             Decision::Deny => {
                 // 若 deny 由规则命中，reason 指名规则。deny 优先于 allow，
                 // 此时不附加"添加 allow 规则即可放行"建议（该建议无效，
                 // 只会误导用户）。
-                match self
-                    .policy
-                    .matching_rule(tool_name, &args_value, &self.policy.deny)
-                {
-                    Some(r) => CheckVerdict::deny(format!(
-                        "blocked by deny rule: tool={} subject={:?}",
-                        r.tool, r.subject
-                    )),
-                    None => CheckVerdict::deny("blocked by deny rule"),
+                let (hard, reason) = match self.policy.matching_rule(
+                    tool_name,
+                    &preflight.args_value,
+                    &self.policy.deny,
+                ) {
+                    Some(r) => (
+                        false,
+                        format!(
+                            "blocked by deny rule: tool={} subject={:?}",
+                            r.tool, r.subject
+                        ),
+                    ),
+                    None => (false, "blocked by deny rule".to_string()),
+                };
+                CoreOutcome {
+                    decision: Decision::Deny,
+                    hard,
+                    reason,
+                    suggestions: Vec::new(),
+                    matched_rules,
                 }
             }
         }
+    }
+
+    /// 全部命中的规则（deny > ask > allow 优先级顺序，每表取首个命中）。
+    /// 供 exec 审计预览展示完整决策链。
+    fn matching_rules_chain(&self, tool_name: &str, args: &Value) -> Vec<RuleHit> {
+        let mut out = Vec::new();
+        for (rules, source) in [
+            (self.policy.deny.as_slice(), "deny"),
+            (self.policy.ask.as_slice(), "ask"),
+            (self.policy.allow.as_slice(), "allow"),
+        ] {
+            if let Some(r) = self.policy.matching_rule(tool_name, args, rules) {
+                out.push(RuleHit {
+                    source: source.to_string(),
+                    rule: r.clone(),
+                });
+            }
+        }
+        out
     }
 
     /// Cache a user's decision for this session (called after user responds to Ask).
@@ -732,6 +954,32 @@ impl PermissionGate {
     pub fn deny_rules(&self) -> &[Rule] {
         &self.policy.deny
     }
+}
+
+// ---------------------------------------------------------------------------
+// 决策链中间结构（check 与 preview 共用）
+// ---------------------------------------------------------------------------
+
+/// 预检结果：参数解析 + 路径守卫 + 只读分类（不含限流/缓存/策略）。
+///
+/// `hard_deny` 为 `Some` 时表示预检阶段即硬拒（畸形参数/越界路径/危险
+/// 命令），调用方应直接返回该裁决，不再进入策略。
+struct Preflight {
+    args_value: Value,
+    readonly_kind: Option<deepseeknova_security::readonly::ReadOnlyKind>,
+    /// shell 命令被分类为只读（ReadOnly，且无 deny/ask 规则/缓存拒绝时免询问）。
+    readonly_cmd: bool,
+    capability: CapabilityCheck,
+    hard_deny: Option<CheckVerdict>,
+}
+
+/// 策略裁决结果（含命中规则链，供预览展示）。
+struct CoreOutcome {
+    decision: Decision,
+    hard: bool,
+    reason: String,
+    suggestions: Vec<RuleSuggestion>,
+    matched_rules: Vec<RuleHit>,
 }
 
 // ---------------------------------------------------------------------------
@@ -2004,6 +2252,217 @@ mod tests {
         assert_eq!(
             policy.decide_effective("write_file", false, &secret, None, true),
             Decision::Ask
+        );
+    }
+
+    // ── exec 审计：preview 与真实执行决策一致性 + 无副作用 ──
+
+    #[test]
+    fn preview_matches_check_decision() {
+        // exec 审计一致性：预览决策 == 真实执行路径 check 决策（同源）。
+        let gate = PermissionGate::new(Policy {
+            mode: Decision::Ask,
+            allow: vec![],
+            ask: vec![],
+            deny: vec![],
+        });
+        let cases: &[(&str, bool, &str)] = &[
+            // 只读命令免询问放行
+            ("bash", false, r#"{"command": "git status"}"#),
+            ("bash", false, r#"{"command": "ls -la"}"#),
+            // 非只读 → Ask
+            ("bash", false, r#"{"command": "rm -rf /tmp/x"}"#),
+            // 写工具无规则 → Ask
+            ("write", false, r#"{"path": "/tmp/x"}"#),
+            // 读工具 → 放行
+            ("read_file", true, r#"{"path": "src/main.rs"}"#),
+            // 危险注入 → 硬拒
+            (
+                "bash",
+                false,
+                r#"{"command": "git -c core.pager='cat /etc/passwd' log"}"#,
+            ),
+            ("bash", false, r#"{"command": "//evil/share"}"#),
+            // 畸形 JSON（无工作区根 → Null → Ask）
+            ("write", false, r#"{"path": "D:\a\_temp\x"}"#),
+        ];
+        for &(tool, ro, args) in cases {
+            let v = gate.check(
+                &NamedTool {
+                    name: tool,
+                    read_only: ro,
+                },
+                args,
+            );
+            let p = gate.preview(tool, ro, args);
+            assert_eq!(p.decision, v.decision(), "decision mismatch: {tool} {args}");
+            assert_eq!(p.hard, v.is_hard_deny(), "hard mismatch: {tool} {args}");
+            assert_eq!(p.reason, v.reason(), "reason mismatch: {tool} {args}");
+            assert_eq!(
+                p.suggestions.len(),
+                v.suggestions().len(),
+                "suggestion count mismatch: {tool} {args}"
+            );
+        }
+    }
+
+    #[test]
+    fn preview_matches_check_decision_with_rules() {
+        // 规则命中路径下预览与 check 仍一致（deny/ask 覆盖只读免询问）。
+        let policy = Policy {
+            mode: Decision::Ask,
+            allow: vec![Rule::with_subject("bash", "ls *")],
+            ask: vec![Rule::with_subject("bash", "git *")],
+            deny: vec![Rule::with_subject("bash", "rm *")],
+        };
+        let gate = PermissionGate::new(policy);
+        let cases: &[(&str, bool, &str)] = &[
+            ("bash", false, r#"{"command": "rm -rf /tmp/x"}"#), // deny 优先
+            ("bash", false, r#"{"command": "git status"}"#),    // 显式 ask 覆盖只读
+            ("bash", false, r#"{"command": "ls -la"}"#),        // allow 命中
+            ("bash", false, r#"{"command": "pwd"}"#),           // 无规则 + 只读 → 放行
+            ("bash", false, r#"{"command": "find . -delete"}"#), // 无规则 + 非只读 → Ask
+        ];
+        for &(tool, ro, args) in cases {
+            let v = gate.check(
+                &NamedTool {
+                    name: tool,
+                    read_only: ro,
+                },
+                args,
+            );
+            let p = gate.preview(tool, ro, args);
+            assert_eq!(p.decision, v.decision(), "decision mismatch: {tool} {args}");
+            assert_eq!(p.hard, v.is_hard_deny(), "hard mismatch: {tool} {args}");
+            assert_eq!(p.reason, v.reason(), "reason mismatch: {tool} {args}");
+        }
+    }
+
+    #[test]
+    fn preview_reports_matched_rules_chain() {
+        let policy = Policy {
+            mode: Decision::Ask,
+            allow: vec![Rule::with_subject("bash", "ls *")],
+            ask: vec![Rule::with_subject("bash", "git *")],
+            deny: vec![Rule::with_subject("bash", "rm *")],
+        };
+        let gate = PermissionGate::new(policy);
+        // 命中 deny → 规则链以 deny 打头，指名 subject
+        let p = gate.preview("bash", false, r#"{"command": "rm -rf /tmp/x"}"#);
+        assert_eq!(p.decision, Decision::Deny);
+        assert_eq!(p.matched_rules.len(), 1);
+        assert_eq!(p.matched_rules[0].source, "deny");
+        assert_eq!(p.matched_rules[0].rule.subject.as_deref(), Some("rm *"));
+        assert!(p.suggestions.is_empty(), "deny 不附 allow 建议");
+        // 显式 ask 覆盖只读
+        let p = gate.preview("bash", false, r#"{"command": "git status"}"#);
+        assert_eq!(p.decision, Decision::Ask);
+        assert_eq!(p.matched_rules[0].source, "ask");
+        // allow 命中
+        let p = gate.preview("bash", false, r#"{"command": "ls -la"}"#);
+        assert_eq!(p.decision, Decision::Allow);
+        assert_eq!(p.matched_rules[0].source, "allow");
+        // 无规则命中 → 空链
+        let p = gate.preview("bash", false, r#"{"command": "pwd"}"#);
+        assert_eq!(p.decision, Decision::Allow);
+        assert!(p.matched_rules.is_empty());
+    }
+
+    #[test]
+    fn preview_readonly_kind_reported_for_shell() {
+        use deepseeknova_security::readonly::ReadOnlyKind;
+        let gate = allow_all_gate();
+        let p = gate.preview("bash", false, r#"{"command": "git status"}"#);
+        assert_eq!(p.readonly_kind, Some(ReadOnlyKind::ReadOnly));
+        let p = gate.preview("Bash", false, r#"{"command": "rm -rf /tmp/x"}"#);
+        assert_eq!(p.readonly_kind, Some(ReadOnlyKind::NotReadOnly));
+        let p = gate.preview("shell", false, r#"{"command": "//evil/share"}"#);
+        assert_eq!(p.readonly_kind, Some(ReadOnlyKind::Dangerous));
+        // 非 shell 工具 → None
+        let p = gate.preview("read_file", true, r#"{"path": "x"}"#);
+        assert_eq!(p.readonly_kind, None);
+    }
+
+    #[test]
+    fn preview_does_not_write_session_cache() {
+        // 无副作用：preview 只计算，不得写会话缓存。
+        let gate = PermissionGate::new(Policy {
+            mode: Decision::Ask,
+            allow: vec![],
+            ask: vec![],
+            deny: vec![],
+        });
+        let _ = gate.preview("bash", false, r#"{"command": "rm -rf /tmp/x"}"#);
+        let _ = gate.preview("write", false, r#"{"path": "/tmp/x"}"#);
+        let _ = gate.preview("bash", false, r#"{"command": "git -c core.pager='x' log"}"#);
+        assert!(
+            gate.session_cache.lock().unwrap().is_empty(),
+            "preview 不得写会话缓存"
+        );
+    }
+
+    #[test]
+    fn preview_does_not_consume_rate_limit() {
+        // 无副作用：preview 不触发限流计数（限流是执行期状态）。
+        let gate = allow_all_gate().with_rate_limit(1);
+        for _ in 0..5 {
+            let _ = gate.preview("stub", false, "{}");
+        }
+        let tool = StubTool;
+        assert_eq!(
+            gate.check(&tool, "{}").decision(),
+            Decision::Allow,
+            "preview 不得消耗限流窗口"
+        );
+    }
+
+    #[test]
+    fn preview_captures_capability_checks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let gate = allow_all_gate_with_root(root.clone());
+        // 路径越界 → 硬拒 + 能力检查记录越界路径
+        let p = gate.preview("write", false, r#"{"path": "/etc/passwd"}"#);
+        assert_eq!(p.decision, Decision::Deny);
+        assert!(p.hard);
+        assert_eq!(
+            p.capability.path_outside_workspace.as_deref(),
+            Some("/etc/passwd")
+        );
+        let root_str = root.display().to_string();
+        assert_eq!(
+            p.capability.workspace_root.as_deref(),
+            Some(root_str.as_str())
+        );
+        // 畸形 JSON（写工具 + root）→ 硬拒 + malformed_args
+        let p = gate.preview("write", false, r#"{"path": "D:\a\_temp\x"}"#);
+        assert_eq!(p.decision, Decision::Deny);
+        assert!(p.hard);
+        assert!(p.capability.malformed_args);
+        // 工作区内路径 → 放行，能力检查无越界
+        let args =
+            serde_json::json!({ "path": root.join("new.rs").display().to_string() }).to_string();
+        let p = gate.preview("write", false, &args);
+        assert_eq!(p.decision, Decision::Allow);
+        assert!(p.capability.path_outside_workspace.is_none());
+    }
+
+    #[test]
+    fn preview_gate_preview_serializes() {
+        // JSON 输出契约：GatePreview 可序列化（audit --format json 依赖）。
+        let gate = PermissionGate::new(Policy {
+            mode: Decision::Ask,
+            allow: vec![],
+            ask: vec![],
+            deny: vec![],
+        });
+        let p = gate.preview("bash", false, r#"{"command": "rm -rf /tmp/x"}"#);
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(json.contains("\"decision\":\"ask\""), "{json}");
+        assert!(json.contains("\"tool_name\":\"bash\""), "{json}");
+        assert!(
+            json.contains("\"readonly_kind\":\"not_read_only\""),
+            "{json}"
         );
     }
 }

@@ -17,6 +17,7 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 tracing = { workspace = true }
 rusqlite = { version = "0.40", features = ["bundled"] }
+deepseeknova-core = { workspace = true }
 tree-sitter = "0.25"
 tree-sitter-rust = "0.24"
 tree-sitter-python = "0.25"

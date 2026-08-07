@@ -2,10 +2,12 @@
 
 use crate::model::{node_id, EdgeKind, EdgeRec, GraphError, Node, NodeKind};
 use crate::parser::{parse_source, Lang};
+use deepseeknova_core::memory::embedding::{cosine, EmbeddingProvider};
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 /// 邻居遍历方向。
@@ -157,6 +159,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_external_deps_unique ON raw_external_d
 CREATE INDEX IF NOT EXISTS idx_raw_trait_methods_path ON raw_trait_methods(path);
 CREATE INDEX IF NOT EXISTS idx_raw_impl_methods_path ON raw_impl_methods(path);
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS node_embeddings(
+  id TEXT PRIMARY KEY,
+  dim INTEGER NOT NULL,
+  model TEXT NOT NULL,
+  embedding BLOB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_node_embeddings_model ON node_embeddings(model);
 ";
 
 /// 当前 schema 版本：v2 引入 raw_calls/raw_imports 事实表与全局边重建；
@@ -170,6 +179,21 @@ const HARD_EXCLUDES: [&str; 4] = ["target", "node_modules", ".git", "dist"];
 /// SQLite 持久化的代码图存储（单线程串行；上层门面负责加锁）。
 pub struct Store {
     conn: Connection,
+    /// 可选语义嵌入后端；None 或查询嵌入失败时检索回落纯词法（fail-open）。
+    embedder: Option<Arc<dyn EmbeddingProvider>>,
+    /// 写入/查询共用的嵌入模型名；仅同模型向量参与余弦融合。
+    embed_model: String,
+}
+
+/// 混合检索的分数分解（测试/诊断用）。各分量为**对总分的加性贡献**：
+/// `bm25 = weight * 归一化词法分`，`cosine = (1-weight) * max(cos, 0)`，
+/// `score == bm25 + cosine`。
+#[derive(Debug, Clone)]
+pub struct HybridHit {
+    pub node: Node,
+    pub bm25: f64,
+    pub cosine: f64,
+    pub score: f64,
 }
 
 fn node_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Node> {
@@ -195,8 +219,18 @@ fn node_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Node> {
 }
 
 impl Store {
-    /// 打开（或创建）数据库并建表；父目录不存在则创建。
+    /// 打开（或创建）数据库并建表；父目录不存在则创建。纯词法模式（无嵌入后端）。
     pub fn open(db_path: &Path) -> Result<Store, GraphError> {
+        Self::open_with_embedder(db_path, None, "")
+    }
+
+    /// 打开（或创建）数据库并建表，装配可选的语义嵌入后端（写入即嵌入 + hybrid 检索）。
+    /// 嵌入不可用（None / 缺 key / 网络错）时检索回落纯词法，不阻断既有功能。
+    pub fn open_with_embedder(
+        db_path: &Path,
+        embedder: Option<Arc<dyn EmbeddingProvider>>,
+        model: &str,
+    ) -> Result<Store, GraphError> {
         if let Some(parent) = db_path.parent() {
             if !parent.as_os_str().is_empty() && std::fs::create_dir_all(parent).is_err() {
                 tracing::warn!(path = %parent.display(), "failed to create db parent dir");
@@ -233,7 +267,11 @@ impl Store {
                 [SCHEMA_VERSION],
             )?;
         }
-        Ok(Store { conn })
+        Ok(Store {
+            conn,
+            embedder,
+            embed_model: model.to_string(),
+        })
     }
 
     /// 增量刷新：mtime/sha256 双级判定，仅重解析变更文件。
@@ -339,6 +377,10 @@ impl Store {
             tx.execute("DELETE FROM nodes WHERE path = ?1", [rel_path])?;
             tx.execute("DELETE FROM symbol_fts WHERE path = ?1", [rel_path])?;
             tx.execute("DELETE FROM symbol_fts_cjk WHERE path = ?1", [rel_path])?;
+            tx.execute(
+                "DELETE FROM node_embeddings WHERE id LIKE ?1 || '#%'",
+                [rel_path],
+            )?;
             tx.execute("DELETE FROM raw_calls WHERE path = ?1", [rel_path])?;
             tx.execute("DELETE FROM raw_imports WHERE path = ?1", [rel_path])?;
             tx.execute("DELETE FROM raw_import_links WHERE path = ?1", [rel_path])?;
@@ -359,9 +401,9 @@ impl Store {
                 doc: String::new(),
                 score: 0.0,
             };
-            insert_node(&tx, &file_node)?;
+            insert_node(&tx, &file_node, self.embedder.as_deref(), &self.embed_model)?;
             for def in &parsed.nodes {
-                insert_node(&tx, def)?;
+                insert_node(&tx, def, self.embedder.as_deref(), &self.embed_model)?;
                 tx.execute(
                     "INSERT INTO edges(src, dst, kind) VALUES(?1, ?2, ?3)",
                     (&file_node.id, &def.id, EdgeKind::Contains.as_str()),
@@ -432,6 +474,10 @@ impl Store {
             tx.execute("DELETE FROM nodes WHERE path = ?1", [path])?;
             tx.execute("DELETE FROM symbol_fts WHERE path = ?1", [path])?;
             tx.execute("DELETE FROM symbol_fts_cjk WHERE path = ?1", [path])?;
+            tx.execute(
+                "DELETE FROM node_embeddings WHERE id LIKE ?1 || '#%'",
+                [path],
+            )?;
             tx.execute("DELETE FROM raw_calls WHERE path = ?1", [path])?;
             tx.execute("DELETE FROM raw_imports WHERE path = ?1", [path])?;
             tx.execute("DELETE FROM raw_import_links WHERE path = ?1", [path])?;
@@ -665,6 +711,189 @@ impl Store {
         kind: Option<NodeKind>,
         limit: usize,
     ) -> Result<Vec<Node>, GraphError> {
+        let scored = self.search_scored(query, kind, limit)?;
+        let hits: Vec<Node> = scored.into_iter().map(|(n, _)| n).collect();
+        let (mut exact, rest): (Vec<Node>, Vec<Node>) = hits
+            .into_iter()
+            .partition(|n| n.name.eq_ignore_ascii_case(query.trim()));
+        exact.extend(rest);
+        Ok(exact)
+    }
+
+    /// 混合检索（词法 ∪ 语义）：`0.5*归一化词法分 + 0.5*max(余弦, 0)` 融合排序。
+    /// 无嵌入后端、查询嵌入失败或库中无同模型嵌入时回落纯词法（fail-open），
+    /// 行为与 [`Self::search`] 一致。
+    pub fn search_hybrid(
+        &self,
+        query: &str,
+        kind: Option<NodeKind>,
+        limit: usize,
+    ) -> Result<Vec<Node>, GraphError> {
+        self.search_hybrid_with_weight(query, kind, limit, 0.5)
+    }
+
+    /// 混合检索，可调词法权重 `weight`（余弦权重为 `1 - weight`）。
+    pub fn search_hybrid_with_weight(
+        &self,
+        query: &str,
+        kind: Option<NodeKind>,
+        limit: usize,
+        weight: f64,
+    ) -> Result<Vec<Node>, GraphError> {
+        Ok(self
+            .search_hybrid_breakdown(query, kind, limit, weight)?
+            .into_iter()
+            .map(|h| h.node)
+            .collect())
+    }
+
+    /// 混合检索的分数分解（测试/诊断用）。结果集/排序/总分与
+    /// [`Self::search_hybrid_with_weight`] 完全一致，仅额外暴露
+    /// bm25 / 余弦两个加性分量（见 [`HybridHit`]）。
+    ///
+    /// 查询向量在 SQL 前计算——嵌入是潜在慢 HTTP 调用，不持有连接。
+    /// 失败/缺 provider → 纯词法（与 [`Self::search`] 一致）。
+    pub fn search_hybrid_breakdown(
+        &self,
+        query: &str,
+        kind: Option<NodeKind>,
+        limit: usize,
+        weight: f64,
+    ) -> Result<Vec<HybridHit>, GraphError> {
+        // 嵌入失败/缺 provider → 纯词法（fail-open）。
+        let Some(qv) = self.embedder.as_deref().and_then(|p| p.embed(query).ok()) else {
+            return self.hybrid_fts_fallback(query, kind, limit, weight);
+        };
+        let fts = self.search_scored(query, kind, limit.saturating_mul(2))?;
+
+        // 1. 同模型嵌入全扫，算余弦（JOIN nodes 过滤已删除的孤儿向量）。
+        let mut cos_map: HashMap<String, f64> = HashMap::new();
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT e.id, e.embedding, e.dim, n.kind\n                 FROM node_embeddings e JOIN nodes n ON n.id = e.id\n                 WHERE e.model = ?1",
+            )?;
+            let rows = stmt.query_map([&self.embed_model], |r| {
+                let id: String = r.get(0)?;
+                let blob: Vec<u8> = r.get(1)?;
+                let dim: i64 = r.get(2)?;
+                let kind: String = r.get(3)?;
+                let mut vec = Vec::with_capacity(dim as usize);
+                for chunk in blob.chunks_exact(4) {
+                    vec.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+                }
+                Ok((id, kind, vec))
+            })?;
+            for row in rows {
+                let (id, kind_s, vec) = row?;
+                if let Some(k) = kind {
+                    if kind_s != k.as_str() {
+                        continue;
+                    }
+                }
+                let c = cosine(&qv, &vec);
+                if c > 0.0 {
+                    cos_map.insert(id, c as f64);
+                }
+            }
+        }
+
+        // 2. 合并 id 集：FTS 顺序在前，语义独有命中补尾。
+        let mut ids: Vec<String> = fts.iter().map(|(n, _)| n.id.clone()).collect();
+        let mut seen: HashSet<String> = ids.iter().cloned().collect();
+        let mut emb_only: Vec<String> = Vec::new();
+        for id in cos_map.keys() {
+            if seen.insert(id.clone()) {
+                ids.push(id.clone());
+                emb_only.push(id.clone());
+            }
+        }
+
+        // 3. 节点表：FTS 命中直接复用，语义独有 id 批量补拉。
+        let mut node_map: HashMap<String, Node> =
+            fts.iter().map(|(n, _)| (n.id.clone(), n.clone())).collect();
+        for chunk in emb_only.chunks(200) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "SELECT id, kind, name, path, start_line, end_line, signature, doc, score\n                 FROM nodes WHERE id IN ({placeholders})"
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+            let refs: Vec<&str> = chunk.iter().map(|s| s.as_str()).collect();
+            for r in stmt.query_map(rusqlite::params_from_iter(refs), node_from_row)? {
+                let n = r?;
+                node_map.insert(n.id.clone(), n);
+            }
+        }
+
+        // 4. 融合打分：bm25 分已归一化到 [0,1]（越高越相关）。
+        let fts_map: HashMap<String, f64> = fts.iter().map(|(n, s)| (n.id.clone(), *s)).collect();
+        let mut out: Vec<HybridHit> = Vec::new();
+        for id in &ids {
+            let Some(node) = node_map.get(id) else {
+                continue;
+            };
+            let bm = fts_map.get(id).copied().unwrap_or(0.0);
+            let c = cos_map.get(id).copied().unwrap_or(0.0);
+            let bm25 = weight * bm;
+            let cosine = (1.0 - weight) * c.max(0.0);
+            out.push(HybridHit {
+                node: node.clone(),
+                bm25,
+                cosine,
+                score: bm25 + cosine,
+            });
+        }
+        Ok(Self::finalize_hybrid(out, query, limit))
+    }
+
+    /// 嵌入不可用路径：纯词法结果包装成统一分解（余弦恒 0）。
+    fn hybrid_fts_fallback(
+        &self,
+        query: &str,
+        kind: Option<NodeKind>,
+        limit: usize,
+        weight: f64,
+    ) -> Result<Vec<HybridHit>, GraphError> {
+        let hits = self.search_scored(query, kind, limit)?;
+        let out = hits
+            .into_iter()
+            .map(|(node, bm)| {
+                let bm25 = weight * bm;
+                HybridHit {
+                    node,
+                    bm25,
+                    cosine: 0.0,
+                    score: bm25,
+                }
+            })
+            .collect();
+        Ok(Self::finalize_hybrid(out, query, limit))
+    }
+
+    /// 统一收尾：排序 → 剔除零分（纯语义权重下无语义来源）→ 截断 → 名称精确置前。
+    fn finalize_hybrid(mut hits: Vec<HybridHit>, query: &str, limit: usize) -> Vec<HybridHit> {
+        hits.sort_by(|a, b| {
+            b.score
+                .total_cmp(&a.score)
+                .then_with(|| a.node.id.cmp(&b.node.id))
+        });
+        hits.retain(|h| h.score > 0.0);
+        hits.truncate(limit);
+        let needle = query.trim();
+        let (mut exact, rest): (Vec<HybridHit>, Vec<HybridHit>) = hits
+            .into_iter()
+            .partition(|h| h.node.name.eq_ignore_ascii_case(needle));
+        exact.extend(rest);
+        exact
+    }
+
+    /// 词法检索，返回 (Node, 归一化相关分)（`[0,1]`，越高越相关）：
+    /// FTS5 BM25（负分取绝对值按最大值归一），短词走 LIKE 用 PageRank score 归一。
+    fn search_scored(
+        &self,
+        query: &str,
+        kind: Option<NodeKind>,
+        limit: usize,
+    ) -> Result<Vec<(Node, f64)>, GraphError> {
         let tokens: Vec<String> = query
             .split_whitespace()
             .filter(|t| !t.is_empty())
@@ -676,7 +905,7 @@ impl Store {
 
         // 短查询（≤2 字符，含中文短词）无法走 FTS/trigram → LIKE 回退。
         if !tokens.iter().any(|t| t.chars().count() >= 3) {
-            return self.search_like(&tokens, kind, limit);
+            return self.search_like_scored(&tokens, kind, limit);
         }
 
         // 含 CJK 且存在 ≥3 字符 token → trigram 表（中文子串检索）。
@@ -693,31 +922,45 @@ impl Store {
             .collect::<Vec<_>>()
             .join(" OR ");
 
-        let mut hits: Vec<Node> = Vec::new();
+        let mut raw: Vec<(Node, f64)> = Vec::new();
         let base = format!(
-            "SELECT n.id, n.kind, n.name, n.path, n.start_line, n.end_line,\n                    n.signature, n.doc, n.score\n             FROM nodes n JOIN {table} f ON n.id = f.id\n             WHERE {table} MATCH ?1"
+            "SELECT n.id, n.kind, n.name, n.path, n.start_line, n.end_line,\n                    n.signature, n.doc, n.score, bm25({table}) AS fts_bm25\n             FROM nodes n JOIN {table} f ON n.id = f.id\n             WHERE {table} MATCH ?1"
         );
         if let Some(k) = kind {
             let sql = format!("{base} AND n.kind = ?2 ORDER BY bm25({table}) LIMIT ?3");
             let mut stmt = self.conn.prepare(&sql)?;
-            let rows = stmt.query_map((&match_expr, k.as_str(), limit as i64), node_from_row)?;
+            let rows = stmt.query_map((&match_expr, k.as_str(), limit as i64), |row| {
+                let node = node_from_row(row)?;
+                let s: f64 = row.get("fts_bm25")?;
+                Ok((node, s))
+            })?;
             for row in rows {
-                hits.push(row?);
+                raw.push(row?);
             }
         } else {
             let sql = format!("{base} ORDER BY bm25({table}) LIMIT ?2");
             let mut stmt = self.conn.prepare(&sql)?;
-            let rows = stmt.query_map((&match_expr, limit as i64), node_from_row)?;
+            let rows = stmt.query_map((&match_expr, limit as i64), |row| {
+                let node = node_from_row(row)?;
+                let s: f64 = row.get("fts_bm25")?;
+                Ok((node, s))
+            })?;
             for row in rows {
-                hits.push(row?);
+                raw.push(row?);
             }
         }
-        // 名称精确命中稳定置前（partition 保持相对顺序）
-        let (mut exact, rest): (Vec<Node>, Vec<Node>) = hits
+        // bm25 负分：绝对值越大越相关 → 归一化到 [0,1]。
+        let best = raw.iter().map(|(_, s)| *s).fold(f64::INFINITY, f64::min);
+        let denom = if best.is_finite() {
+            (-best).max(0.0)
+        } else {
+            0.0
+        };
+        let denom = if denom > 0.0 { denom } else { 1.0 };
+        Ok(raw
             .into_iter()
-            .partition(|n| n.name.eq_ignore_ascii_case(query.trim()));
-        exact.extend(rest);
-        Ok(exact)
+            .map(|(n, s)| (n, ((-s).max(0.0)) / denom))
+            .collect())
     }
 
     /// 是否含 CJK 字符（决定走 trigram 表）。
@@ -729,14 +972,13 @@ impl Store {
         })
     }
 
-    /// LIKE 回退：短词（1-2 字符）做子串匹配（NOCASE），按 PageRank score 排序，
-    /// 名称精确命中稳定置前。
-    fn search_like(
+    /// LIKE 回退：短词（1-2 字符）做子串匹配（NOCASE），按 PageRank score 归一化排序。
+    fn search_like_scored(
         &self,
         tokens: &[String],
         kind: Option<NodeKind>,
         limit: usize,
-    ) -> Result<Vec<Node>, GraphError> {
+    ) -> Result<Vec<(Node, f64)>, GraphError> {
         let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
         let mut clauses: Vec<String> = Vec::new();
         for (i, t) in tokens.iter().enumerate() {
@@ -761,18 +1003,18 @@ impl Store {
 
         let mut stmt = self.conn.prepare(&sql)?;
         let raw_params = rusqlite::params_from_iter(params.iter().map(|p| p.as_ref()));
-        let mut hits: Vec<Node> = Vec::new();
-        let rows = stmt.query_map(raw_params, node_from_row)?;
+        let mut hits: Vec<(Node, f64)> = Vec::new();
+        let rows = stmt.query_map(raw_params, |row| {
+            let node = node_from_row(row)?;
+            let s: f64 = row.get("score")?;
+            Ok((node, s))
+        })?;
         for row in rows {
             hits.push(row?);
         }
-        // 名称精确命中稳定置前（partition 保持相对顺序）
-        let needle = tokens.join(" ");
-        let (mut exact, rest): (Vec<Node>, Vec<Node>) = hits
-            .into_iter()
-            .partition(|n| n.name.eq_ignore_ascii_case(&needle));
-        exact.extend(rest);
-        Ok(exact)
+        let max_s = hits.iter().map(|(_, s)| *s).fold(0.0, f64::max);
+        let denom = if max_s > 0.0 { max_s } else { 1.0 };
+        Ok(hits.into_iter().map(|(n, s)| (n, s / denom)).collect())
     }
 
     /// BFS 邻居：最多 hops 层，去重、排除起点，按 score 降序。
@@ -1050,9 +1292,24 @@ impl Store {
         }
         Ok(())
     }
+
+    /// 当前嵌入模型下已写入嵌入的节点数（诊断/回填核对用）。
+    pub fn embedding_count(&self) -> Result<usize, GraphError> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM node_embeddings WHERE model = ?1",
+            [&self.embed_model],
+            |r| r.get(0),
+        )?;
+        Ok(n as usize)
+    }
 }
 
-fn insert_node(conn: &Connection, node: &Node) -> Result<(), GraphError> {
+fn insert_node(
+    conn: &Connection,
+    node: &Node,
+    embedder: Option<&dyn EmbeddingProvider>,
+    model: &str,
+) -> Result<(), GraphError> {
     conn.execute(
         "INSERT OR REPLACE INTO nodes(id, kind, name, path, start_line, end_line, signature, doc, score)\n         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         (
@@ -1075,6 +1332,22 @@ fn insert_node(conn: &Connection, node: &Node) -> Result<(), GraphError> {
         "INSERT INTO symbol_fts_cjk(name, signature, doc, id, path) VALUES(?1, ?2, ?3, ?4, ?5)",
         (&node.name, &node.signature, &node.doc, &node.id, &node.path),
     )?;
+    // 写入即嵌入（仅符号节点；File/Directory 只有路径名，无语义价值）。
+    // 嵌入失败跳过——fail-open，下次刷新该文件时自愈重试。
+    if let Some(emb) = embedder {
+        if !matches!(node.kind, NodeKind::File | NodeKind::Directory) {
+            let text = format!("{}\n{}\n{}", node.name, node.signature, node.doc);
+            if let Ok(vec) = emb.embed(&text) {
+                let blob: Vec<u8> = vec.iter().flat_map(|f| f.to_le_bytes()).collect();
+                conn.execute(
+                    "INSERT INTO node_embeddings(id, dim, model, embedding) VALUES(?1, ?2, ?3, ?4)\n                     ON CONFLICT(id) DO UPDATE SET dim = excluded.dim, model = excluded.model, embedding = excluded.embedding",
+                    (&node.id, vec.len() as i64, model, blob.as_slice()),
+                )?;
+            } else {
+                tracing::debug!(id = %node.id, "graph node embedding failed; node stays lexical-only");
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1586,5 +1859,218 @@ require github.com/single/dep v1.0.0\n";
         // main.go 的实体应被索引
         let hits = store.find_by_name("main").unwrap();
         assert!(!hits.is_empty());
+    }
+
+    /// 确定性嵌入替身：子串 → 向量，命中靠语义（查询 token 不与目标共词也能召回）。
+    struct FakeEmbed;
+
+    impl EmbeddingProvider for FakeEmbed {
+        fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+            if text.contains("alpha") {
+                Ok(vec![1.0, 0.0])
+            } else if text.contains("beta") {
+                Ok(vec![0.6, 0.8])
+            } else if text.contains("gamma") {
+                Ok(vec![0.0, 1.0])
+            } else if text.contains("ferris") {
+                Ok(vec![0.9, 0.1])
+            } else if text.contains("needle") {
+                Ok(vec![1.0, 0.0])
+            } else {
+                Ok(vec![0.0, 1.0])
+            }
+        }
+    }
+
+    /// 恒定失败的嵌入替身（模拟缺 key / 网络错误）。
+    struct FailingEmbed;
+
+    impl EmbeddingProvider for FailingEmbed {
+        fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+            anyhow::bail!("embedding endpoint unavailable")
+        }
+    }
+
+    #[test]
+    fn hybrid_search_finds_semantic_only_hit_without_lexical_overlap() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "src/a.rs",
+            "/// needle alpha formatter\npub fn alpha_needle() {}\n\
+             /// ferris crab language\npub fn ferris_crab() {}\n",
+        );
+        let mut store = Store::open_with_embedder(
+            &root.join(".deepseeknova/graph.db"),
+            Some(Arc::new(FakeEmbed)),
+            "test-model",
+        )
+        .unwrap();
+        store.refresh(root, 1_048_576).unwrap();
+
+        // 只嵌入符号节点（文件节点跳过）。
+        assert_eq!(
+            store.embedding_count().unwrap(),
+            2,
+            "alpha_needle + ferris_crab 应已嵌入"
+        );
+
+        // 纯词法：无共词，找不到 ferris_crab（语义命中）。
+        let fts = store.search("needle", None, 10).unwrap();
+        assert!(
+            fts.iter().all(|n| n.name != "ferris_crab"),
+            "FTS 不得召回语义独有命中: {:?}",
+            fts.iter().map(|n| &n.name).collect::<Vec<_>>()
+        );
+
+        // hybrid：语义独有命中被召回，且词法+语义双命中居首。
+        let hy = store.search_hybrid("needle", None, 10).unwrap();
+        assert!(
+            hy.iter().any(|n| n.name == "ferris_crab"),
+            "hybrid 必须召回语义命中: {:?}",
+            hy.iter().map(|n| &n.name).collect::<Vec<_>>()
+        );
+        assert_eq!(hy[0].name, "alpha_needle", "双命中（词法+语义）应居首");
+    }
+
+    #[test]
+    fn hybrid_falls_back_to_fts_when_no_embedder() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "src/a.rs",
+            "/// needle alpha formatter\npub fn alpha_needle() {}\n",
+        );
+        let mut store = Store::open(&root.join(".deepseeknova/graph.db")).unwrap();
+        store.refresh(root, 1_048_576).unwrap();
+
+        let hy = store.search_hybrid("needle", None, 10).unwrap();
+        let plain = store.search("needle", None, 10).unwrap();
+        assert!(!hy.is_empty(), "无嵌入后端必须回落 FTS");
+        assert_eq!(hy.len(), plain.len());
+        for (a, b) in hy.iter().zip(plain.iter()) {
+            assert_eq!(a.id, b.id, "回落路径结果须与纯 FTS 一致");
+        }
+    }
+
+    #[test]
+    fn hybrid_falls_back_to_fts_when_embedding_fails() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "src/a.rs",
+            "/// needle alpha formatter\npub fn alpha_needle() {}\n",
+        );
+        let mut store = Store::open_with_embedder(
+            &root.join(".deepseeknova/graph.db"),
+            Some(Arc::new(FailingEmbed)),
+            "test-model",
+        )
+        .unwrap();
+        // 刷新不得因嵌入失败中断（fail-open，节点仅词法可检索）。
+        store.refresh(root, 1_048_576).unwrap();
+        assert_eq!(store.embedding_count().unwrap(), 0, "嵌入失败则无向量落库");
+
+        let hy = store.search_hybrid("needle", None, 10).unwrap();
+        let plain = store.search("needle", None, 10).unwrap();
+        assert!(!hy.is_empty(), "嵌入失败必须回落纯 FTS");
+        assert_eq!(hy[0].id, plain[0].id, "回落路径结果须与纯 FTS 一致");
+    }
+
+    #[test]
+    fn hybrid_fuses_bm25_and_cosine_with_weight() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "src/a.rs",
+            "/// needle alpha formatter\npub fn alpha_needle() {}\n\
+             /// needle beta utils\npub fn beta_needle() {}\n\
+             /// needle gamma router\npub fn gamma_needle() {}\n\
+             /// ferris crab language\npub fn ferris_crab() {}\n",
+        );
+        let mut store = Store::open_with_embedder(
+            &root.join(".deepseeknova/graph.db"),
+            Some(Arc::new(FakeEmbed)),
+            "test-model",
+        )
+        .unwrap();
+        store.refresh(root, 1_048_576).unwrap();
+
+        // w=1.0：纯词法，顺序与 FTS 完全一致；语义独有命中（零分）被剔除。
+        let pure_lex = store
+            .search_hybrid_with_weight("needle", None, 10, 1.0)
+            .unwrap();
+        let plain = store.search("needle", None, 10).unwrap();
+        let lex_names: Vec<&str> = pure_lex.iter().map(|n| n.name.as_str()).collect();
+        let plain_names: Vec<&str> = plain.iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(lex_names, plain_names, "w=1.0 必须与纯 FTS 同序");
+        assert!(
+            lex_names.iter().all(|n| *n != "ferris_crab"),
+            "w=1.0 时语义独有命中不得出现在结果中"
+        );
+
+        // w=0.0：纯余弦排序（alpha=1.0 > ferris≈0.994 > beta=0.6；gamma 余弦 0 剔除）。
+        let pure_sem = store
+            .search_hybrid_with_weight("needle", None, 10, 0.0)
+            .unwrap();
+        let sem_names: Vec<&str> = pure_sem.iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(
+            sem_names,
+            vec!["alpha_needle", "ferris_crab", "beta_needle"],
+            "{sem_names:?}"
+        );
+
+        // 分数分解：各分量严格加性，融合重排一致。
+        let bd = store
+            .search_hybrid_breakdown("needle", None, 10, 0.5)
+            .unwrap();
+        for h in &bd {
+            assert!(
+                (h.bm25 + h.cosine - h.score).abs() < 1e-9,
+                "分数分解必须严格加性: {h:?}"
+            );
+        }
+        assert_eq!(bd[0].node.name, "alpha_needle", "0.5 融合双命中应居首");
+    }
+
+    #[test]
+    fn hybrid_backward_compatible_with_old_index_without_embeddings() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "src/a.rs",
+            "/// needle alpha formatter\npub fn alpha_needle() {}\n",
+        );
+        let db = root.join(".deepseeknova/graph.db");
+        {
+            let mut store = Store::open(&db).unwrap();
+            store.refresh(root, 1_048_576).unwrap();
+        }
+        // 模拟升级前旧索引：文件无 node_embeddings 表。
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch("DROP TABLE node_embeddings;").unwrap();
+        }
+        // 重开：SCHEMA 增量重建表，不触发 schema_version 变更/全量重解析。
+        let store = Store::open(&db).unwrap();
+        assert_eq!(
+            store.find_by_name("alpha_needle").unwrap().len(),
+            1,
+            "旧索引既有节点必须保留（不得因 schema 增量而全量清空）"
+        );
+        let hits = store.search("needle", None, 10).unwrap();
+        assert!(!hits.is_empty(), "旧索引 FTS 检索必须正常");
+
+        // 带嵌入后端重开也兼容：无向量 → 余弦全零 → 回落纯 FTS。
+        let store2 =
+            Store::open_with_embedder(&db, Some(Arc::new(FakeEmbed)), "test-model").unwrap();
+        let hy = store2.search_hybrid("needle", None, 10).unwrap();
+        assert!(!hy.is_empty(), "旧索引 hybrid 必须 fail-open 到 FTS");
+        assert!(hy.iter().all(|n| n.name == "alpha_needle"));
     }
 }

@@ -1,3 +1,4 @@
+mod audit;
 mod chat;
 mod cli;
 mod eval;
@@ -1090,6 +1091,33 @@ async fn main() -> anyhow::Result<()> {
         Some(Commands::Init { legacy }) => {
             info!("init command (legacy={legacy})");
             init::run_init(*legacy).await?;
+        }
+
+        // ── Audit（exec 审计：预执行安全决策预览，P1-7）──────────────────
+        Some(Commands::Audit {
+            args,
+            format,
+            rules,
+            workspace,
+        }) => {
+            // 工作区根：--workspace 指定（相对路径按 cwd 解析），缺省当前目录。
+            // 缺省（"."）直接用 cwd，避免 `cwd/.` 这类带 `.` 分量的路径。
+            let raw = workspace.as_deref().unwrap_or(".");
+            let workspace_root = if raw == "." {
+                std::env::current_dir().unwrap_or_default()
+            } else if std::path::Path::new(raw).is_absolute() {
+                std::path::PathBuf::from(raw)
+            } else {
+                std::env::current_dir().unwrap_or_default().join(raw)
+            };
+
+            if *rules {
+                audit::render_rules(&config, format)?;
+            } else {
+                let target = audit::parse_audit_target(args)?;
+                let report = audit::build_report(&config, &workspace_root, target);
+                audit::render_report(&report, format)?;
+            }
         }
 
         None => {

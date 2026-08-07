@@ -639,6 +639,7 @@ dependencies = [
  "deepseeknova-core",
  "deepseeknova-graph",
  "deepseeknova-metrics",
+ "deepseeknova-permission",
  "deepseeknova-provider",
  "deepseeknova-runtime",
  "deepseeknova-scanner",
@@ -732,6 +733,7 @@ name = "deepseeknova-graph"
 version = "0.5.0"
 dependencies = [
  "anyhow",
+ "deepseeknova-core",
  "hex",
  "rusqlite",
  "serde",

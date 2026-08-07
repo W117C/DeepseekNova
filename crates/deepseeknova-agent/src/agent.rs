@@ -6,7 +6,8 @@ use deepseeknova_core::memory::skill::{TaskObservation, TaskOutcome};
 use deepseeknova_core::protocol::{Phase, PhaseGate, PhaseOutcome, PhaseTransition};
 use deepseeknova_core::tool::ToolContext;
 use deepseeknova_core::tool_hook::{
-    FindingSeverity, HookVerdict, QualityFinding, ToolHook, ToolHookCtx,
+    run_user_hook, FindingSeverity, HookEvent, HookPayload, HookVerdict, QualityFinding, ToolHook,
+    ToolHookCtx, UserHookCommand, UserHooks,
 };
 use deepseeknova_core::types::{FunctionCall, ToolCall};
 use deepseeknova_core::{
@@ -148,6 +149,12 @@ pub struct Agent {
     /// 评估，按注册顺序串行执行。
     tool_hooks: Vec<Arc<dyn ToolHook>>,
 
+    /// 用户级外部 hooks（`[hooks]` 配置装配而来）：tool_before 在内部
+    /// tool_hook 链之外**额外一层**（内部链 + 用户 hooks 都过才执行），
+    /// tool_after / session_start / session_end / failure 为通知型。空 =
+    /// 零进程开销。
+    user_hooks: UserHooks,
+
     /// 会话级质量 findings 累计（跨 run 累积；供阶段 B/C 消费，本次只累积）。
     quality_findings: Arc<tokio::sync::Mutex<Vec<QualityFinding>>>,
 
@@ -256,6 +263,10 @@ struct MetricsGuard {
     /// QualitySummary；由 run_agent_loop 每次 transition 后同步）。
     protocol_violations: u32,
     phase_transitions: u32,
+    /// 用户级外部 hooks 的 failure 命令列表（run 非成功终点触发；空 = 跳过）。
+    failure_hooks: Vec<UserHookCommand>,
+    /// 工作区根目录（failure hook 载荷的 `workspace` 字段）。
+    workspace_root: PathBuf,
 }
 
 impl MetricsGuard {
@@ -263,6 +274,8 @@ impl MetricsGuard {
         hook: Option<MetricsHook>,
         quality_findings: &Arc<tokio::sync::Mutex<Vec<QualityFinding>>>,
         session_label: Option<String>,
+        failure_hooks: &[UserHookCommand],
+        workspace_root: PathBuf,
     ) -> Self {
         Self {
             tracker: SessionTracker::new(),
@@ -278,7 +291,35 @@ impl MetricsGuard {
             review_issues: 0,
             protocol_violations: 0,
             phase_transitions: 0,
+            failure_hooks: failure_hooks.to_vec(),
+            workspace_root,
         }
+    }
+
+    /// 触发用户级外部 hooks 的 failure 事件（失败诊断时）。判定：PausedMaxSteps
+    /// （优雅暂停但未完成）或异常返回（outcome=None，Drop 兜底）→ 触发；成功
+    /// Completed / 取消 Cancelled（正常终止，不产诊断报告）→ 不触发。失败仅
+    /// warn，不阻断。`emit` 是 run 终点的唯一 chokepoint，保证恰好触发一次。
+    fn fire_user_failure_hooks(&self, outcome: Option<RunOutcome>) {
+        if self.failure_hooks.is_empty() {
+            return;
+        }
+        let is_failure = match outcome {
+            Some(RunOutcome::Completed) | Some(RunOutcome::Cancelled) => false,
+            Some(RunOutcome::PausedMaxSteps) | None => true,
+        };
+        if !is_failure {
+            return;
+        }
+        let session_id: &str = self.session_label.as_deref().unwrap_or("unknown");
+        let payload = HookPayload {
+            event: HookEvent::Failure.as_str(),
+            tool: None,
+            arguments: None,
+            workspace: &self.workspace_root,
+            session_id,
+        };
+        fire_user_notify_hooks(&self.failure_hooks, &payload);
     }
 
     fn observe_step(&mut self) {
@@ -301,6 +342,8 @@ impl MetricsGuard {
         if self.emitted {
             return;
         }
+        // 用户级外部 hooks：failure 事件在 run 终点触发（失败诊断时）。
+        self.fire_user_failure_hooks(outcome);
         if let Some(o) = outcome {
             self.tracker.mark_outcome(o);
         }
@@ -415,6 +458,7 @@ impl Agent {
             observe: None,
             tool_cache: false,
             tool_hooks: Vec::new(),
+            user_hooks: UserHooks::default(),
             quality_findings: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             diagnose_hook: None,
             protocol_gates: Vec::new(),
@@ -649,6 +693,17 @@ impl Agent {
         self
     }
 
+    /// 挂载用户级外部 hooks（`[hooks]` 配置，runtime 装配）。`tool_before`
+    /// 在内部 tool_hook 链之外额外一层（AND 链：内部链 + 用户 hooks 都过
+    /// 才执行；任一命令非 0 退出 / 超时 / 崩溃 / 裁决 `allowed=false` →
+    /// 阻止执行，fail-closed）；`tool_after` 失败仅 warn；`session_start` /
+    /// `session_end` / `failure` 为通知型（失败仅 warn）。空 `UserHooks` =
+    /// 零进程开销。
+    pub fn with_user_hooks(mut self, hooks: UserHooks) -> Self {
+        self.user_hooks = hooks;
+        self
+    }
+
     /// 注入协议门控集合（阶段3）：阶段边界对门求值并产出
     /// PhaseTransition/GateViolation/DriftFinding 事件；空集合 = 协议关闭
     /// （零成本路径）。可多次调用追加。门 panic 由调用方按 fail-closed
@@ -857,6 +912,9 @@ impl Runner for Agent {
         // 任务质量闭环 A：钩子链与会话级 findings 在 spawn 前 clone，
         // 供 spawned task 内引用（避免 self 借用逃逸出方法体）。
         let tool_hooks = self.tool_hooks.clone();
+        // 用户级外部 hooks：同法 clone 带进 spawned task（会话边界事件
+        // 在 spawned task 内触发；空集合零开销）。
+        let user_hooks = self.user_hooks.clone();
         let quality_findings = self.quality_findings.clone();
         // 任务质量闭环 B：诊断回调同法 clone 带进 spawned task。
         let diagnose_hook = self.diagnose_hook.clone();
@@ -947,6 +1005,23 @@ impl Runner for Agent {
                 memory.clone(),
             )));
 
+            // ── 用户级外部 hooks：session_start（run 启动，一次）──
+            // 会话 id 与 run_agent_loop 内部解析一致（显式标注优先，否则
+            // 唯一 id）。workspace 克隆供 session_end（workspace_root 随后
+            // 移入 run_agent_loop）。
+            let session_hook_id = session_label.clone().unwrap_or_else(unique_run_label);
+            let session_hook_workspace = workspace_root.clone();
+            if !user_hooks.session_start.is_empty() {
+                let payload = HookPayload {
+                    event: HookEvent::SessionStart.as_str(),
+                    tool: None,
+                    arguments: None,
+                    workspace: &session_hook_workspace,
+                    session_id: &session_hook_id,
+                };
+                fire_user_notify_hooks(&user_hooks.session_start, &payload);
+            }
+
             let result = run_agent_loop(
                 provider,
                 tools,
@@ -983,12 +1058,26 @@ impl Runner for Agent {
                 metrics_hook,
                 mid_run,
                 &tool_hooks,
+                &user_hooks,
                 &quality_findings,
                 diagnose_hook,
                 protocol_gates,
                 adversarial_review_enabled,
             )
             .await;
+
+            // ── 用户级外部 hooks：session_end（run 结束，总是触发）──
+            // 通知型：失败仅 warn，不阻断。
+            if !user_hooks.session_end.is_empty() {
+                let payload = HookPayload {
+                    event: HookEvent::SessionEnd.as_str(),
+                    tool: None,
+                    arguments: None,
+                    workspace: &session_hook_workspace,
+                    session_id: &session_hook_id,
+                };
+                fire_user_notify_hooks(&user_hooks.session_end, &payload);
+            }
 
             // Persist the full conversation back to the store so the next
             // run_stream call resumes with this context. We write back even
@@ -1360,6 +1449,21 @@ fn unique_run_label() -> String {
     )
 }
 
+/// 触发一组通知型用户 hooks（session_start / session_end / failure）：
+/// 任一命令失败（非 0 退出 / 超时 / 崩溃）仅 warn，不阻断主流程。空列表
+/// 零开销（不 spawn 进程）。
+fn fire_user_notify_hooks(commands: &[UserHookCommand], payload: &HookPayload) {
+    for cmd in commands {
+        let run = run_user_hook(cmd, payload);
+        if !run.exec.is_allowed() {
+            warn!(
+                "user hook '{}' ({}) failed: {:?}",
+                cmd.command, payload.event, run.exec
+            );
+        }
+    }
+}
+
 /// 将权限裁决的"拒绝即教育"建议渲染为人类可读文本；无建议时返回空串。
 fn render_suggestions(suggestions: &[RuleSuggestion]) -> String {
     if suggestions.is_empty() {
@@ -1433,6 +1537,7 @@ async fn run_agent_loop(
     metrics_hook: Option<MetricsHook>,
     mid_run: Option<MidRunRetrieval>,
     tool_hooks: &[Arc<dyn ToolHook>],
+    user_hooks: &UserHooks,
     quality_findings: &Arc<tokio::sync::Mutex<Vec<QualityFinding>>>,
     diagnose_hook: Option<DiagnoseHook>,
     protocol_gates: Vec<Arc<dyn PhaseGate>>,
@@ -1441,6 +1546,8 @@ async fn run_agent_loop(
     // serve 等共享 Agent 场景未配置会话标注：每次 run 生成唯一 id，避免
     // 多会话共用同一 Paused session_id / 诊断报告文件名互相覆盖。
     let session_label = session_label.or_else(|| Some(unique_run_label()));
+    // 会话 id（用户 hooks JSON 载荷的 `session_id` 字段）。
+    let session_id: &str = session_label.as_deref().unwrap_or("unknown");
 
     // Add user prompt
     memory.write().await.add_message(Message {
@@ -1484,7 +1591,15 @@ async fn run_agent_loop(
     // P2.3 会话内只读工具结果缓存（写执行后整体失效）。
     let mut tool_cache_map: HashMap<u64, String> = HashMap::new();
     // 会话效能采集（局部 tracker，run 隔离）。
-    let mut metrics = MetricsGuard::new(metrics_hook, quality_findings, session_label.clone());
+    // 用户 hooks 的 failure 事件在 MetricsGuard::emit 触发（run 终点的唯一
+    // chokepoint，可精确区分 PausedMaxSteps/异常返回与成功/取消）。
+    let mut metrics = MetricsGuard::new(
+        metrics_hook,
+        quality_findings,
+        session_label.clone(),
+        &user_hooks.failure,
+        workspace_root.clone(),
+    );
     // F4：本 run 起始时会话 findings 长度。DiagnoseGuard 与对抗审查同样
     // 按此起点切片，保证诊断报告/审查只含本 run 新增，不被并发 run 或
     // 历史 run 的 findings 污染（MetricsGuard 内部也按同一时刻切片）。
@@ -1753,6 +1868,8 @@ async fn run_agent_loop(
             &mut tool_calls_made,
             &mut wrote_files,
             tool_hooks,
+            user_hooks,
+            session_id,
             quality_findings,
             &mut quality_blocked,
             permission.as_ref(),
@@ -2319,6 +2436,8 @@ async fn stream_and_process_turn(
     tool_calls_made: &mut usize,
     wrote_files: &mut bool,
     tool_hooks: &[Arc<dyn ToolHook>],
+    user_hooks: &UserHooks,
+    session_id: &str,
     quality_findings: &Arc<tokio::sync::Mutex<Vec<QualityFinding>>>,
     quality_blocked: &mut bool,
     permission: Option<&Arc<PermissionGate>>,
@@ -2760,6 +2879,40 @@ async fn stream_and_process_turn(
                     }
                 }
             }
+            // ── 用户级外部 hooks：tool_before（额外一层，fail-closed）──
+            // 内部 tool_hook 链 + 用户 hooks 都过才执行（AND 链）。任一命令
+            // 非 0 退出 / 超时 / 崩溃，或 stdout 裁决 `allowed=false` → 阻止
+            // 执行（原因透传给调用方）。放行语义与内部链独立叠加。
+            if gate_block.is_none() && !user_hooks.tool_before.is_empty() {
+                let payload = HookPayload {
+                    event: HookEvent::ToolBefore.as_str(),
+                    tool: Some(&call.name),
+                    arguments: Some(&call.arguments),
+                    workspace: workspace_root,
+                    session_id,
+                };
+                for cmd in &user_hooks.tool_before {
+                    let run = run_user_hook(cmd, &payload);
+                    if !run.exec.is_allowed() {
+                        gate_block = Some(format!(
+                            "blocked by user hook '{}' (fail-closed: {:?})",
+                            cmd.command, run.exec
+                        ));
+                        break;
+                    }
+                    if let Some(v) = run.verdict {
+                        if !v.allowed {
+                            let reason = if v.reason.is_empty() {
+                                format!("denied by user hook '{}'", cmd.command)
+                            } else {
+                                v.reason.clone()
+                            };
+                            gate_block = Some(reason);
+                            break;
+                        }
+                    }
+                }
+            }
             decisions.push(gate_block);
         }
 
@@ -3040,6 +3193,20 @@ async fn stream_and_process_turn(
                         tx.send(Ok(RunEvent::QualityFinding(finding))).await.ok();
                     }
                 }
+            }
+            // ── 用户级外部 hooks：tool_after（已执行；失败仅 warn，不阻断）──
+            // 工具已执行，通知命令失败不影响主流程（与内部 after fail-open
+            // 语义一致）。executed 判定不含工具自身错误结果——工具即使返回
+            // 错误也视为「已执行」，通知命令照常触发。
+            if executed[i] && !user_hooks.tool_after.is_empty() {
+                let payload = HookPayload {
+                    event: HookEvent::ToolAfter.as_str(),
+                    tool: Some(&call.name),
+                    arguments: Some(&call.arguments),
+                    workspace: workspace_root,
+                    session_id,
+                };
+                fire_user_notify_hooks(&user_hooks.tool_after, &payload);
             }
             memory.write().await.add_message(Message {
                 role: Role::Tool,
@@ -3443,7 +3610,7 @@ mod tests {
                 *emitted.lock().unwrap() = Some(summary);
             })
         };
-        let mut guard = MetricsGuard::new(Some(hook), &qf, None);
+        let mut guard = MetricsGuard::new(Some(hook), &qf, None, &[], PathBuf::new());
         assert!(guard.start_len.is_none(), "锁忙时 start_len 应为 None");
         drop(held);
         // 之后（并发 run 视角）向共享容器追加 findings。
@@ -6474,6 +6641,7 @@ mod tests {
             None,
             None,
             &[],
+            &UserHooks::default(),
             &quality_findings,
             Some(hook),
             Vec::new(), // 协议门控（阶段3）：空 = 关闭
@@ -6528,5 +6696,238 @@ mod tests {
             "no empty verify phase expected without file writes, got {names:?}"
         );
         assert!(names.contains(&"plan"), "plan phase must be present");
+    }
+
+    // -----------------------------------------------------------------------
+    // 用户级外部 hooks（`[hooks]` 段装配而来）
+    // -----------------------------------------------------------------------
+
+    /// 构造一条「追加固定文本到文件」的外部命令（`sh -c "echo .. >> file"`），
+    /// 用作外部命令 mock：通过文件内容断言钩子是否触发。
+    fn marker_hook(marker: &str, path: &std::path::Path) -> UserHookCommand {
+        UserHookCommand {
+            command: "sh".into(),
+            args: vec![
+                "-c".into(),
+                format!("echo '{}' >> '{}'", marker, path.display()),
+            ],
+            timeout: Some(std::time::Duration::from_secs(10)),
+        }
+    }
+
+    /// 读取 marker 文件全部文本（不存在返回空串）。
+    fn marker_text(path: &std::path::Path) -> String {
+        std::fs::read_to_string(path).unwrap_or_default()
+    }
+
+    /// 收集事件流中的工具结果文本。
+    fn tool_results(events: &[RunEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                RunEvent::ToolResult { result, .. } => Some(result.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn session_start_and_end_hooks_fire() {
+        let tmp = tempfile::tempdir().unwrap();
+        let markers = tmp.path().join("session.log");
+        let hooks = UserHooks {
+            session_start: vec![marker_hook("start", &markers)],
+            session_end: vec![marker_hook("end", &markers)],
+            ..Default::default()
+        };
+        let agent = Agent::new(Arc::new(MockProvider::text("done")), 3).with_user_hooks(hooks);
+        let events = drain(agent, "hello").await;
+        assert!(events.iter().any(|e| matches!(e, RunEvent::Done(_))));
+        let text = marker_text(&markers);
+        assert!(text.contains("start"), "session_start 必须触发: {text:?}");
+        assert!(text.contains("end"), "session_end 必须触发: {text:?}");
+        assert!(
+            text.find("start") < text.find("end"),
+            "session_start 应先于 session_end: {text:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_hooks_empty_means_no_process() {
+        // 空 hooks：跑一轮成功 run 不触发任何外部命令（零开销路径不崩）。
+        let agent = Agent::new(Arc::new(MockProvider::text("done")), 3)
+            .with_user_hooks(UserHooks::default());
+        let events = drain(agent, "hello").await;
+        assert!(events.iter().any(|e| matches!(e, RunEvent::Done(_))));
+    }
+
+    #[tokio::test]
+    async fn tool_before_allows_on_exit_zero() {
+        let mut agent = Agent::new(
+            Arc::new(MockProvider::tool_call("write_file", "{}", "ok", "done")),
+            5,
+        )
+        .with_user_hooks(UserHooks {
+            tool_before: vec![UserHookCommand {
+                command: "true".into(),
+                args: vec![],
+                timeout: None,
+            }],
+            ..Default::default()
+        });
+        agent.register_tool(Arc::new(SpyTool {
+            name: "write_file",
+            result: "written".into(),
+        }));
+        let results = tool_results(&drain(agent, "write").await);
+        assert!(
+            results.iter().any(|r| r.contains("written")),
+            "exit 0 的 tool_before 应放行，工具结果: {results:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_before_blocks_on_nonzero_exit() {
+        let mut agent = Agent::new(
+            Arc::new(MockProvider::tool_call("write_file", "{}", "ok", "done")),
+            5,
+        )
+        .with_user_hooks(UserHooks {
+            tool_before: vec![UserHookCommand {
+                command: "false".into(),
+                args: vec![],
+                timeout: None,
+            }],
+            ..Default::default()
+        });
+        agent.register_tool(Arc::new(SpyTool {
+            name: "write_file",
+            result: "written".into(),
+        }));
+        let results = tool_results(&drain(agent, "write").await);
+        assert!(
+            results.iter().any(|r| r.contains("blocked by user hook")),
+            "非 0 退出的 tool_before 必须阻止执行（fail-closed），工具结果: {results:?}"
+        );
+        assert!(
+            results.iter().all(|r| !r.contains("written")),
+            "被阻止后工具不得执行"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_before_blocks_on_verdict_deny() {
+        let mut agent = Agent::new(
+            Arc::new(MockProvider::tool_call("write_file", "{}", "ok", "done")),
+            5,
+        )
+        .with_user_hooks(UserHooks {
+            tool_before: vec![UserHookCommand {
+                command: "sh".into(),
+                args: vec![
+                    "-c".into(),
+                    "echo '{\"allowed\":false,\"reason\":\"no writes\"}'".into(),
+                ],
+                timeout: None,
+            }],
+            ..Default::default()
+        });
+        agent.register_tool(Arc::new(SpyTool {
+            name: "write_file",
+            result: "written".into(),
+        }));
+        let results = tool_results(&drain(agent, "write").await);
+        assert!(
+            results.iter().any(|r| r.contains("no writes")),
+            "裁决 allowed=false 必须阻止执行，工具结果: {results:?}"
+        );
+        assert!(
+            results.iter().all(|r| !r.contains("written")),
+            "裁决拒绝后工具不得执行"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_before_timeout_is_deny() {
+        let mut agent = Agent::new(
+            Arc::new(MockProvider::tool_call("write_file", "{}", "ok", "done")),
+            5,
+        )
+        .with_user_hooks(UserHooks {
+            tool_before: vec![UserHookCommand {
+                command: "sleep".into(),
+                args: vec!["5".into()],
+                timeout: Some(std::time::Duration::from_millis(100)),
+            }],
+            ..Default::default()
+        });
+        agent.register_tool(Arc::new(SpyTool {
+            name: "write_file",
+            result: "written".into(),
+        }));
+        let results = tool_results(&drain(agent, "write").await);
+        assert!(
+            results.iter().any(|r| r.contains("blocked by user hook")),
+            "超时的 tool_before 必须 fail-closed 拒绝，工具结果: {results:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_after_failure_does_not_block() {
+        let mut agent = Agent::new(
+            Arc::new(MockProvider::tool_call("write_file", "{}", "ok", "done")),
+            5,
+        )
+        .with_user_hooks(UserHooks {
+            tool_after: vec![UserHookCommand {
+                command: "false".into(),
+                args: vec![],
+                timeout: None,
+            }],
+            ..Default::default()
+        });
+        agent.register_tool(Arc::new(SpyTool {
+            name: "write_file",
+            result: "written".into(),
+        }));
+        let results = tool_results(&drain(agent, "write").await);
+        assert!(
+            results.iter().any(|r| r.contains("written")),
+            "tool_after 失败仅 warn，不得阻止已执行工具: {results:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn failure_hook_fires_on_max_steps_paused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let markers = tmp.path().join("failure.log");
+        let hooks = UserHooks {
+            failure: vec![marker_hook("failed", &markers)],
+            ..Default::default()
+        };
+        let agent = looping_agent(2).with_user_hooks(hooks);
+        let events = drain(agent, "loop").await;
+        assert!(events.iter().any(|e| matches!(e, RunEvent::Paused { .. })));
+        assert!(
+            marker_text(&markers).contains("failed"),
+            "max-steps Paused 必须触发 failure 事件（失败诊断时）"
+        );
+    }
+
+    #[tokio::test]
+    async fn failure_hook_not_fired_on_completed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let markers = tmp.path().join("failure.log");
+        let hooks = UserHooks {
+            failure: vec![marker_hook("failed", &markers)],
+            ..Default::default()
+        };
+        let agent = Agent::new(Arc::new(MockProvider::text("done")), 3).with_user_hooks(hooks);
+        let events = drain(agent, "hello").await;
+        assert!(events.iter().any(|e| matches!(e, RunEvent::Done(_))));
+        assert!(
+            marker_text(&markers).is_empty(),
+            "成功完成不得触发 failure 事件"
+        );
     }
 }

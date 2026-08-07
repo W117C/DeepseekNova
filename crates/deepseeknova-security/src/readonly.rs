@@ -12,9 +12,15 @@
 //! 配置注入、git 格式串注入）归为 [`ReadOnlyKind::Dangerous`] 直接拒绝；
 //! 普通链式/重定向/命令替换按 [`ReadOnlyKind::NotReadOnly`] 走权限流程，
 //! 由权限门/用户审批决定是否执行。
+//!
+//! [`CommandAudit`] 是只读分类的可预览结构（exec 审计模式），与
+//! [`classify_readonly`] 同源——一次判定同时给出分类与命中形态。
+
+use serde::{Deserialize, Serialize};
 
 /// 命令分类结果。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ReadOnlyKind {
     /// 只读命令（可安全免询问执行）。
     ReadOnly,
@@ -22,6 +28,82 @@ pub enum ReadOnlyKind {
     NotReadOnly,
     /// 注入/危险命令（应直接拒绝，不得执行）。
     Dangerous,
+}
+
+/// 只读分类命中的形态（四层分类 + 危险预检 + 规则回退）。
+///
+/// 供 exec 审计预览展示"这条命令为什么被这样分类"；与 [`classify_readonly`]
+/// 同源（分类器一次判定即同时给出分类与形态）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadonlyForm {
+    /// 危险注入形态预检（UNC/URL/SMB 路径、`/dev/tcp` 伪设备、git 全局
+    /// `-c`/`--config-env` 或 `%G`/`%x` 格式串注入）→ 直接拒绝。
+    Dangerous,
+    /// 第一层：任意参数安全（`ls`/`cat`/`grep`/`du`/...）。
+    Allowlist,
+    /// 第四层：子命令 + flag 白名单（git/gh/docker/find/tar/openssl/...）。
+    SubcommandAllowlist,
+    /// 第三层：精确形式安全（`node -v`/`date -u`/`hostname -f`/...）。
+    Exact,
+    /// 第二层：零参数安全（`pwd`/`whoami`/...）。
+    NoArgs,
+    /// 无白名单命中，走权限审批/规则流程。
+    Fallback,
+}
+
+/// 只读分类的可预览结构（exec 审计模式）。
+///
+/// 由 CLI `audit` 子命令与 permission crate 的 `PermissionGate` 预览消费：
+/// 命令 + 分类 + 是否免询问 + 命中形态说明。`from_command` 与
+/// [`classify_readonly`] 同源（同一实现），保证预览分类与真实执行路径
+/// 决策零漂移。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandAudit {
+    /// 被分类的原始命令。
+    pub command: String,
+    /// 分类结果（只读 / 非只读 / 危险）。
+    pub kind: ReadOnlyKind,
+    /// 是否可免询问。分类层语义：`ReadOnly` 为 `true`；权限门仍可能因
+    /// 显式 deny/ask 规则而询问或拒绝——最终裁决见 gate 预览。
+    pub allow_without_prompt: bool,
+    /// 命中的分类形态（四层 + 危险 + 回退）。
+    pub form: ReadonlyForm,
+    /// 人类可读的命中说明。
+    pub explanation: String,
+}
+
+impl CommandAudit {
+    /// 对一条 shell 命令做只读分类预览。
+    ///
+    /// 与真实执行路径 `classify_readonly` 同一实现，语义零漂移
+    /// （一致性由测试 `command_audit_matches_classify_readonly` 保证）。
+    pub fn from_command(cmd: impl Into<String>) -> Self {
+        let command = cmd.into();
+        let (kind, form) = classify_with_form(&command);
+        let explanation = match form {
+            ReadonlyForm::Dangerous => {
+                "命中危险注入形态（UNC/URL/SMB 路径、/dev/tcp 伪设备、git 全局 \
+                 -c/--config-env 或 %G/%x 格式串注入），直接拒绝"
+            }
+            ReadonlyForm::Allowlist => {
+                "命中「任意参数安全」白名单（ls/cat/grep/du/...），免询问放行"
+            }
+            ReadonlyForm::SubcommandAllowlist => {
+                "命中子命令 + flag 白名单（git/gh/docker/find/tar/openssl/... 只读形态），免询问放行"
+            }
+            ReadonlyForm::Exact => "精确形式安全（如 node -v / date -u），免询问放行",
+            ReadonlyForm::NoArgs => "零参数安全（如 pwd/whoami），免询问放行",
+            ReadonlyForm::Fallback => "无白名单命中，走权限审批/规则流程",
+        };
+        Self {
+            allow_without_prompt: kind == ReadOnlyKind::ReadOnly,
+            kind,
+            form,
+            command,
+            explanation: explanation.to_string(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1217,39 +1299,39 @@ fn docker_allowed(args: &[String]) -> bool {
 // 入口
 // ---------------------------------------------------------------------------
 
-/// 四层分类命令是否只读。
+/// 四层分类命令是否只读（带命中形态追踪）。
 ///
-/// 返回 [`ReadOnlyKind::ReadOnly`] 表示命令被判定为只读（可免询问执行）；
-/// [`ReadOnlyKind::NotReadOnly`] 表示存在写入可能，应走正常权限流程；
-/// [`ReadOnlyKind::Dangerous`] 表示命中注入模式，应直接拒绝执行。
-pub fn classify_readonly(cmd: &str) -> ReadOnlyKind {
+/// 与 [`classify_readonly`] 同源：后者只取分类；本函数额外报告命中的
+/// 分类形态，供 [`CommandAudit`]（exec 审计预览）展示"为什么这样分类"。
+/// 语义与 `classify_readonly` 完全一致（同一判定过程，仅附带形态信息）。
+fn classify_with_form(cmd: &str) -> (ReadOnlyKind, ReadonlyForm) {
     if cmd.trim().is_empty() {
-        return ReadOnlyKind::NotReadOnly;
+        return (ReadOnlyKind::NotReadOnly, ReadonlyForm::Fallback);
     }
     // 危险路径形式（UNC/URL/SMB）与 token 引用状态无关，全局预检
     if has_dangerous_path_form(cmd) {
-        return ReadOnlyKind::Dangerous;
+        return (ReadOnlyKind::Dangerous, ReadonlyForm::Dangerous);
     }
 
     let (args, closed, injected) = split_args(cmd);
     if !closed {
         // 引号未闭合：命令无法正常解析执行，保守拒绝
-        return ReadOnlyKind::NotReadOnly;
+        return (ReadOnlyKind::NotReadOnly, ReadonlyForm::Fallback);
     }
     // 链式/重定向/命令替换不是危险注入，但会执行额外命令或写文件：
     // 归 NotReadOnly 走权限流程，且优先于只读表，防止
     // `ls $(rm -rf /)` 借任意参数安全表免询问放行。
     if injected {
-        return ReadOnlyKind::NotReadOnly;
+        return (ReadOnlyKind::NotReadOnly, ReadonlyForm::Fallback);
     }
     let Some(first) = args.first() else {
-        return ReadOnlyKind::NotReadOnly;
+        return (ReadOnlyKind::NotReadOnly, ReadonlyForm::Fallback);
     };
 
     // 第三层：精确形式
     for (bin, flag) in READONLY_EXACT {
         if args.len() == 2 && first == bin && args[1] == *flag {
-            return ReadOnlyKind::ReadOnly;
+            return (ReadOnlyKind::ReadOnly, ReadonlyForm::Exact);
         }
     }
 
@@ -1259,7 +1341,7 @@ pub fn classify_readonly(cmd: &str) -> ReadOnlyKind {
             // argv 级注入面：格式串注入与全局 `-c`/`--config-env` 配置注入
             // （core.pager 等可执行任意命令）→ 直接 Dangerous
             if git_format_injection(&args) || git_global_config_injection(&args) {
-                return ReadOnlyKind::Dangerous;
+                return (ReadOnlyKind::Dangerous, ReadonlyForm::Dangerous);
             }
             git_allowed(&args)
         }
@@ -1287,7 +1369,7 @@ pub fn classify_readonly(cmd: &str) -> ReadOnlyKind {
         _ => false,
     };
     if allowed {
-        return ReadOnlyKind::ReadOnly;
+        return (ReadOnlyKind::ReadOnly, ReadonlyForm::SubcommandAllowlist);
     }
 
     // 第一层：任意参数安全（含 "uname -a" 这类带固定参数的条目）。
@@ -1301,15 +1383,24 @@ pub fn classify_readonly(cmd: &str) -> ReadOnlyKind {
             first == *c
         }
     }) {
-        return ReadOnlyKind::ReadOnly;
+        return (ReadOnlyKind::ReadOnly, ReadonlyForm::Allowlist);
     }
 
     // 第二层：零参数安全
     if args.len() == 1 && READONLY_NOARGS.iter().any(|c| first == *c) {
-        return ReadOnlyKind::ReadOnly;
+        return (ReadOnlyKind::ReadOnly, ReadonlyForm::NoArgs);
     }
 
-    ReadOnlyKind::NotReadOnly
+    (ReadOnlyKind::NotReadOnly, ReadonlyForm::Fallback)
+}
+
+/// 四层分类命令是否只读。
+///
+/// 返回 [`ReadOnlyKind::ReadOnly`] 表示命令被判定为只读（可免询问执行）；
+/// [`ReadOnlyKind::NotReadOnly`] 表示存在写入可能，应走正常权限流程；
+/// [`ReadOnlyKind::Dangerous`] 表示命中注入模式，应直接拒绝执行。
+pub fn classify_readonly(cmd: &str) -> ReadOnlyKind {
+    classify_with_form(cmd).0
 }
 
 /// git 全局区配置注入检测：子命令之前出现 `-c`/`--config-env`
@@ -1844,5 +1935,122 @@ mod tests {
         // 纯 list 仍放行
         assert!(is_readonly_command("tar -tf x.tar"));
         assert!(is_readonly_command("tar -tvf x.tar"));
+    }
+
+    // ── exec 审计：CommandAudit / classify_with_form 命中形态 ──
+
+    #[test]
+    fn command_audit_tracks_matched_form_per_layer() {
+        // 第一层：任意参数安全
+        let a = CommandAudit::from_command("ls -la");
+        assert_eq!(a.kind, ReadOnlyKind::ReadOnly);
+        assert_eq!(a.form, ReadonlyForm::Allowlist);
+        assert!(a.allow_without_prompt);
+        // 第二层：零参数
+        let a = CommandAudit::from_command("pwd");
+        assert_eq!(a.kind, ReadOnlyKind::ReadOnly);
+        assert_eq!(a.form, ReadonlyForm::NoArgs);
+        // 第三层：精确形式
+        let a = CommandAudit::from_command("node -v");
+        assert_eq!(a.kind, ReadOnlyKind::ReadOnly);
+        assert_eq!(a.form, ReadonlyForm::Exact);
+        // 第四层：子命令 + flag 白名单
+        let a = CommandAudit::from_command("git status --porcelain");
+        assert_eq!(a.kind, ReadOnlyKind::ReadOnly);
+        assert_eq!(a.form, ReadonlyForm::SubcommandAllowlist);
+        let a = CommandAudit::from_command("tar -tf x.tar");
+        assert_eq!(a.form, ReadonlyForm::SubcommandAllowlist);
+        // 危险注入
+        let a = CommandAudit::from_command("//evil/share");
+        assert_eq!(a.kind, ReadOnlyKind::Dangerous);
+        assert_eq!(a.form, ReadonlyForm::Dangerous);
+        assert!(!a.allow_without_prompt);
+        let a = CommandAudit::from_command("git -c core.pager='cat /etc/passwd' log");
+        assert_eq!(a.kind, ReadOnlyKind::Dangerous);
+        assert_eq!(a.form, ReadonlyForm::Dangerous);
+        // 回退：非只读，走权限流程
+        let a = CommandAudit::from_command("rm -rf /tmp/x");
+        assert_eq!(a.kind, ReadOnlyKind::NotReadOnly);
+        assert_eq!(a.form, ReadonlyForm::Fallback);
+        assert!(!a.allow_without_prompt);
+        // 链式组合归 NotReadOnly（Fallback），不误入只读表
+        let a = CommandAudit::from_command("ls $(rm -rf /)");
+        assert_eq!(a.kind, ReadOnlyKind::NotReadOnly);
+        assert_eq!(a.form, ReadonlyForm::Fallback);
+    }
+
+    #[test]
+    fn command_audit_explanation_is_non_empty_and_human_readable() {
+        for cmd in [
+            "ls -la",
+            "pwd",
+            "node -v",
+            "git status",
+            "rm -rf /",
+            "//evil/share",
+        ] {
+            let a = CommandAudit::from_command(cmd);
+            assert!(!a.explanation.is_empty(), "cmd={cmd}");
+            assert!(
+                !a.explanation.chars().any(char::is_control),
+                "explanation 不得含控制字符: {:?}",
+                a.explanation
+            );
+            assert!(
+                a.explanation.len() >= 8,
+                "explanation 过短: {:?}",
+                a.explanation
+            );
+        }
+    }
+
+    #[test]
+    fn command_audit_matches_classify_readonly() {
+        // 一致性：预览分类与真实执行路径 `classify_readonly` 同源零漂移
+        let samples = [
+            "ls -la",
+            "cat /etc/hostname",
+            "pwd",
+            "node -v",
+            "date -u",
+            "git status",
+            "git log --oneline -5",
+            "gh pr view 123",
+            "docker ps",
+            "tar -tf x.tar",
+            "rm -rf /tmp/x",
+            "git add .",
+            "git -c core.pager='cat /etc/passwd' log",
+            "git log --format='%G?'",
+            "//evil/share",
+            "cat /dev/tcp/169.254.169.254/80",
+            "ls $(rm -rf /)",
+            "echo ${HOME}",
+            "",
+            "grep -E 'a|b' src/",
+        ];
+        for cmd in samples {
+            assert_eq!(
+                CommandAudit::from_command(cmd).kind,
+                classify_readonly(cmd),
+                "CommandAudit 与 classify_readonly 分类必须一致: {cmd:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn readonly_kind_serde_roundtrip() {
+        for kind in [
+            ReadOnlyKind::ReadOnly,
+            ReadOnlyKind::NotReadOnly,
+            ReadOnlyKind::Dangerous,
+        ] {
+            let s = serde_json::to_string(&kind).unwrap();
+            assert_eq!(serde_json::from_str::<ReadOnlyKind>(&s).unwrap(), kind);
+        }
+        assert_eq!(
+            serde_json::from_str::<ReadOnlyKind>("\"read_only\"").unwrap(),
+            ReadOnlyKind::ReadOnly
+        );
     }
 }

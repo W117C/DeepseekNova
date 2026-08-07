@@ -9,10 +9,12 @@ pub mod rank;
 pub mod repomap;
 pub mod store;
 
+pub use deepseeknova_core::memory::embedding::EmbeddingProvider;
 pub use model::{EdgeKind, GraphError, Node, NodeKind};
 pub use store::{Direction, TraceResult};
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// 代码图索引门面。内部 Store 连接串行；多处共享时外层包 `Arc<Mutex<GraphIndex>>`。
 pub struct GraphIndex {
@@ -24,9 +26,21 @@ pub struct GraphIndex {
 impl GraphIndex {
     /// 打开（或创建）workspace 的图索引。不触发解析——refresh 才解析。
     pub fn open(root: impl AsRef<Path>, max_file_size: u64) -> Result<Self, GraphError> {
+        Self::open_with_embedder(root, max_file_size, None, "")
+    }
+
+    /// 打开图索引并装配语义嵌入后端（写入即嵌入 + hybrid 检索）。
+    /// 嵌入由调用方装配（如 provider 的 RemoteEmbedder 包成
+    /// `Arc<dyn EmbeddingProvider>`）；不可用时检索回落纯词法，不阻断既有功能。
+    pub fn open_with_embedder(
+        root: impl AsRef<Path>,
+        max_file_size: u64,
+        embedder: Option<Arc<dyn EmbeddingProvider>>,
+        model: &str,
+    ) -> Result<Self, GraphError> {
         let root = root.as_ref().to_path_buf();
         let db = root.join(".deepseeknova").join("graph.db");
-        let store = store::Store::open(&db)?;
+        let store = store::Store::open_with_embedder(&db, embedder, model)?;
         Ok(Self {
             store,
             root,
@@ -57,6 +71,28 @@ impl GraphIndex {
         limit: usize,
     ) -> Result<Vec<Node>, GraphError> {
         self.store.search(query, kind, limit)
+    }
+
+    /// 混合检索（词法 ∪ 语义），默认 `0.5*bm25 + 0.5*余弦`；嵌入不可用回落纯词法。
+    pub fn search_hybrid(
+        &self,
+        query: &str,
+        kind: Option<NodeKind>,
+        limit: usize,
+    ) -> Result<Vec<Node>, GraphError> {
+        self.store.search_hybrid(query, kind, limit)
+    }
+
+    /// 混合检索，可调词法权重 `weight`（余弦权重 `1 - weight`）。
+    pub fn search_hybrid_with_weight(
+        &self,
+        query: &str,
+        kind: Option<NodeKind>,
+        limit: usize,
+        weight: f64,
+    ) -> Result<Vec<Node>, GraphError> {
+        self.store
+            .search_hybrid_with_weight(query, kind, limit, weight)
     }
 
     pub fn neighbors(
@@ -564,5 +600,53 @@ mod tests {
                 .map(|n| (&n.path, &n.name))
                 .collect::<Vec<_>>()
         );
+    }
+
+    /// 确定性嵌入替身：查询 token "needle" 与目标 doc "ferris" 语义对应但无共词。
+    struct FakeEmbed;
+
+    impl EmbeddingProvider for FakeEmbed {
+        fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+            if text.contains("ferris") {
+                Ok(vec![0.9, 0.1])
+            } else if text.contains("needle") {
+                Ok(vec![1.0, 0.0])
+            } else {
+                Ok(vec![0.0, 1.0])
+            }
+        }
+    }
+
+    #[test]
+    fn open_with_embedder_enables_hybrid_search() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/lib.rs"),
+            "/// needle alpha formatter\npub fn alpha_needle() {}\n\
+             /// ferris crab language\npub fn ferris_crab() {}\n",
+        )
+        .unwrap();
+        let mut idx = GraphIndex::open_with_embedder(
+            root,
+            1_048_576,
+            Some(Arc::new(FakeEmbed)),
+            "test-model",
+        )
+        .unwrap();
+        idx.refresh().unwrap();
+
+        let plain = idx.search("needle", None, 10).unwrap();
+        assert!(
+            plain.iter().all(|n| n.name != "ferris_crab"),
+            "纯词法不得召回语义命中"
+        );
+        let hy = idx.search_hybrid("needle", None, 10).unwrap();
+        assert!(
+            hy.iter().any(|n| n.name == "ferris_crab"),
+            "GraphIndex hybrid 必须召回语义独有命中"
+        );
+        assert_eq!(hy[0].name, "alpha_needle", "双命中应居首");
     }
 }

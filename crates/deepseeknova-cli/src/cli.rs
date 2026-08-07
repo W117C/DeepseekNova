@@ -172,6 +172,29 @@ pub enum Commands {
         #[arg(long)]
         legacy: bool,
     },
+    /// 预执行安全审计：预览一条命令/工具调用会被如何分类与裁决。
+    /// 用法：`audit <shell-command>` 或 `audit <tool> <json-args>`；
+    /// `--rules` 显示当前全部权限规则。
+    ///
+    /// 审计参数（--format/--rules/--workspace）须置于命令之前；命令内以
+    /// `-` 开头的 flag 一律并入被审计命令（`audit ls -la` 审计的就是
+    /// `ls -la` 整条命令）。
+    Audit {
+        /// shell 命令（如 `rm -rf /tmp/x`），或 shell 工具名 + JSON 参数
+        /// （如 `bash '{"command":"git status"}'`）。与 `--rules` 连用时可为空。
+        /// 允许 `-` 开头的值（shell 命令常带 flag，如 `ls -la`）。
+        #[arg(allow_hyphen_values = true)]
+        args: Vec<String>,
+        /// 输出格式：md | json。
+        #[arg(long, default_value = "md")]
+        format: String,
+        /// 显示当前全部权限规则（deny/ask/allow）后退出。
+        #[arg(long)]
+        rules: bool,
+        /// 工作区根路径（默认当前目录）。
+        #[arg(long)]
+        workspace: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -507,6 +530,76 @@ mod tests {
                 assert!(top_k.is_none(), "缺 --top-k 时由调用方取默认 10");
             }
             _ => panic!("expected Replay"),
+        }
+    }
+
+    // ── audit 子命令（exec 审计，P1-7）解析 ───────────────────────────
+
+    #[test]
+    fn audit_parses_shell_args_and_format() {
+        // 审计参数须置于命令之前；`--format` 先解析，之后全部为命令。
+        let parsed =
+            Cli::try_parse_from(["deepseeknova", "audit", "--format", "json", "git", "status"])
+                .unwrap();
+        match parsed.command {
+            Some(Commands::Audit {
+                args,
+                format,
+                rules,
+                workspace,
+            }) => {
+                assert_eq!(args, vec!["git", "status"]);
+                assert_eq!(format, "json");
+                assert!(!rules);
+                assert!(workspace.is_none());
+            }
+            _ => panic!("expected Audit command"),
+        }
+    }
+
+    #[test]
+    fn audit_hyphen_command_args_stay_in_command() {
+        // 命令内以 `-` 开头的 flag 并入被审计命令（`ls -la` 整条审计）。
+        let parsed = Cli::try_parse_from(["deepseeknova", "audit", "ls", "-la"]).unwrap();
+        match parsed.command {
+            Some(Commands::Audit { args, .. }) => {
+                assert_eq!(args, vec!["ls", "-la"]);
+            }
+            _ => panic!("expected Audit command"),
+        }
+    }
+
+    #[test]
+    fn audit_rules_flag_parses_without_args() {
+        let parsed = Cli::try_parse_from(["deepseeknova", "audit", "--rules"]).unwrap();
+        match parsed.command {
+            Some(Commands::Audit { args, rules, .. }) => {
+                assert!(args.is_empty());
+                assert!(rules, "--rules 必须置位");
+            }
+            _ => panic!("expected Audit command"),
+        }
+    }
+
+    #[test]
+    fn audit_workspace_flag_parses() {
+        let parsed = Cli::try_parse_from([
+            "deepseeknova",
+            "audit",
+            "--workspace",
+            "/tmp/ws",
+            "ls",
+            "-la",
+        ])
+        .unwrap();
+        match parsed.command {
+            Some(Commands::Audit {
+                workspace, args, ..
+            }) => {
+                assert_eq!(workspace.as_deref(), Some("/tmp/ws"));
+                assert_eq!(args, vec!["ls", "-la"]);
+            }
+            _ => panic!("expected Audit command"),
         }
     }
 }

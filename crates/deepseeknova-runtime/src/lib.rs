@@ -1140,6 +1140,9 @@ pub fn build_agent_with_role_providers(
         );
     }
 
+    // ── 用户级外部 hooks（`[hooks]` 段）：enabled 且非空时挂载；否则原样返回 ──
+    agent = attach_user_hooks(agent, config);
+
     Ok(agent)
 }
 
@@ -1431,6 +1434,56 @@ pub fn attach_quality_hook(
         deepseeknova_security::quality::QualityPolicy::builtin(),
     );
     agent.with_tool_hook(Arc::new(hook))
+}
+
+/// 按配置挂载用户级外部 hooks（`[hooks]` 段）：`enabled=true` 且任一事件挂载
+/// 了有效命令（未 `disabled`）时，把 config 命令映射为
+/// [`deepseeknova_core::tool_hook::UserHooks`] 并挂到 agent（`with_user_hooks`）。
+/// `enabled=false` / 全空 / 全部 `disabled` 时原样返回——Agent 零进程开销
+/// （不 spawn 任何进程）。
+///
+/// 事件语义（对齐配置注释）：tool_before 为 AND 链预检（任一失败 →
+/// fail-closed 阻止执行），tool_after / session_start / session_end / failure
+/// 为通知型（失败仅 warn，不阻断）。内部 tool_hook 治理链不受影响，用户
+/// hooks 是额外一层。
+pub fn attach_user_hooks(
+    agent: deepseeknova_agent::Agent,
+    config: &Config,
+) -> deepseeknova_agent::Agent {
+    let hooks = &config.hooks;
+    if !hooks.enabled || hooks.is_empty() {
+        return agent;
+    }
+    let user_hooks = user_hooks_from_config(hooks);
+    if user_hooks.is_empty() {
+        return agent;
+    }
+    agent.with_user_hooks(user_hooks)
+}
+
+/// 把配置命令映射为运行时规格（过滤 `disabled`、转换超时）。
+fn user_hooks_from_config(
+    cfg: &deepseeknova_config::HooksConfig,
+) -> deepseeknova_core::tool_hook::UserHooks {
+    fn map(
+        list: &[deepseeknova_config::HookCommandConfig],
+    ) -> Vec<deepseeknova_core::tool_hook::UserHookCommand> {
+        list.iter()
+            .filter(|c| !c.disabled)
+            .map(|c| deepseeknova_core::tool_hook::UserHookCommand {
+                command: c.command.clone(),
+                args: c.args.clone(),
+                timeout: c.timeout_secs.map(std::time::Duration::from_secs),
+            })
+            .collect()
+    }
+    deepseeknova_core::tool_hook::UserHooks {
+        tool_before: map(&cfg.tool_before),
+        tool_after: map(&cfg.tool_after),
+        session_start: map(&cfg.session_start),
+        session_end: map(&cfg.session_end),
+        failure: map(&cfg.failure),
+    }
 }
 
 /// 诊断报告留存上限：对齐 `[metrics] max_reports` 配置默认值（100）。诊断
@@ -4384,5 +4437,142 @@ mod tests {
         assert_eq!(back.retry_rounds, 1);
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // -----------------------------------------------------------------------
+    // 用户级外部 hooks（`[hooks]` 段装配）
+    // -----------------------------------------------------------------------
+
+    /// 构造「追加固定文本到文件」的配置命令（外部命令 mock）。
+    fn marker_cmd(marker: &str, path: &std::path::Path) -> deepseeknova_config::HookCommandConfig {
+        deepseeknova_config::HookCommandConfig {
+            command: "sh".into(),
+            args: vec![
+                "-c".into(),
+                format!("echo '{}' >> '{}'", marker, path.display()),
+            ],
+            timeout_secs: Some(10),
+            disabled: false,
+        }
+    }
+
+    #[test]
+    fn user_hooks_from_config_maps_events_and_filters_disabled() {
+        let cfg = deepseeknova_config::HooksConfig {
+            enabled: true,
+            tool_before: vec![
+                marker_cmd("a", std::path::Path::new("/tmp/a")),
+                deepseeknova_config::HookCommandConfig {
+                    command: "disabled-cmd".into(),
+                    args: vec![],
+                    timeout_secs: None,
+                    disabled: true,
+                },
+            ],
+            tool_after: vec![marker_cmd("b", std::path::Path::new("/tmp/b"))],
+            session_start: vec![],
+            session_end: vec![],
+            failure: vec![],
+        };
+        let hooks = user_hooks_from_config(&cfg);
+        assert_eq!(hooks.tool_before.len(), 1, "disabled 命令必须被过滤");
+        assert_eq!(hooks.tool_before[0].command, "sh");
+        assert_eq!(
+            hooks.tool_before[0].timeout,
+            Some(std::time::Duration::from_secs(10)),
+            "timeout_secs 必须转换为 Duration"
+        );
+        assert_eq!(hooks.tool_after.len(), 1);
+        assert!(hooks.session_start.is_empty());
+        assert!(hooks.session_end.is_empty());
+        assert!(hooks.failure.is_empty());
+        assert!(!hooks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn attach_user_hooks_fires_session_start_end_to_end() {
+        use futures::StreamExt;
+        let mut config = Config::default();
+        config.graph.enabled = false;
+        config.memory.enabled = false;
+        config.verify.enabled = false;
+        config.review.enabled = false;
+        let root = std::env::temp_dir().join(format!("dnv-hooks-session-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let markers = root.join("session.log");
+        config.hooks = deepseeknova_config::HooksConfig {
+            enabled: true,
+            session_start: vec![marker_cmd("start", &markers)],
+            ..Default::default()
+        };
+        let provider = std::sync::Arc::new(stub_provider());
+        let agent = build_agent(&config, std::env::temp_dir(), provider, 5, None, vec![]).unwrap();
+        let mut stream = agent
+            .run_stream(RunInput {
+                prompt: "hi".into(),
+                images: vec![],
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        let text = std::fs::read_to_string(&markers).unwrap_or_default();
+        assert!(
+            text.contains("start"),
+            "build_agent 装配的 session_start hook 必须触发: {text:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn attach_user_hooks_noop_when_disabled() {
+        use futures::StreamExt;
+        // enabled=false：即便配置了命令也不挂载（零开销，不 spawn 进程）。
+        let mut config = Config::default();
+        config.graph.enabled = false;
+        config.memory.enabled = false;
+        config.verify.enabled = false;
+        config.review.enabled = false;
+        let root = std::env::temp_dir().join(format!("dnv-hooks-disabled-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let markers = root.join("session.log");
+        config.hooks = deepseeknova_config::HooksConfig {
+            enabled: false,
+            session_start: vec![marker_cmd("start", &markers)],
+            ..Default::default()
+        };
+        let provider = std::sync::Arc::new(stub_provider());
+        let agent = build_agent(&config, std::env::temp_dir(), provider, 5, None, vec![]).unwrap();
+        let mut stream = agent
+            .run_stream(RunInput {
+                prompt: "hi".into(),
+                images: vec![],
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        assert!(
+            !markers.exists(),
+            "hooks 关闭时不得触发任何外部命令（零开销）"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn attach_user_hooks_noop_when_all_commands_disabled() {
+        // enabled=true 但命令全部 disabled → 映射后 UserHooks 为空 → 不挂载。
+        let cfg = deepseeknova_config::HooksConfig {
+            enabled: true,
+            tool_before: vec![deepseeknova_config::HookCommandConfig {
+                command: "audit".into(),
+                args: vec![],
+                timeout_secs: None,
+                disabled: true,
+            }],
+            ..Default::default()
+        };
+        let hooks = user_hooks_from_config(&cfg);
+        assert!(hooks.is_empty(), "全部 disabled 时必须映射为空");
     }
 }

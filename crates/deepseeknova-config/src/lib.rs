@@ -118,6 +118,11 @@ pub struct Config {
     /// Agent 行为与现状完全一致（回归防线，见协议增强设计 §3.4/§10）。
     #[serde(default)]
     pub protocol: ProtocolConfig,
+
+    /// 用户级外部 hooks（`[hooks]` 段）：事件到外部命令的映射。
+    /// 默认关闭——关闭时装配层不挂载，Agent 零进程开销。
+    #[serde(default)]
+    pub hooks: HooksConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -1537,6 +1542,96 @@ pub struct ProtocolConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Hooks（用户级外部 hooks，`[hooks]` 段）
+// ---------------------------------------------------------------------------
+
+/// `[hooks]` 段：把事件映射到外部命令（JSON 协议，stdin 传结构化上下文）。
+///
+/// 事件之间是 AND 链：tool_before 全部命令通过（exit 0 且裁决放行）才执行
+/// 工具；任一失败（非 0 退出 / 超时 / 崩溃 / `allowed=false`）即阻止
+/// （fail-closed，对齐项目默认安全姿态）。tool_after 失败仅 warn（工具已
+/// 执行）；session_start / session_end / failure 失败仅 warn（不阻断）。
+/// `enabled=false`（默认）时装配层不挂载，Agent 零进程开销。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct HooksConfig {
+    /// 总开关（默认 false → 不装配，零开销）。
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// 工具调用前预检命令（AND 链，全过才执行）。
+    #[serde(default)]
+    pub tool_before: Vec<HookCommandConfig>,
+
+    /// 工具调用后通知命令（失败仅 warn）。
+    #[serde(default)]
+    pub tool_after: Vec<HookCommandConfig>,
+
+    /// 会话启动通知命令。
+    #[serde(default)]
+    pub session_start: Vec<HookCommandConfig>,
+
+    /// 会话结束通知命令。
+    #[serde(default)]
+    pub session_end: Vec<HookCommandConfig>,
+
+    /// 失败诊断通知命令。
+    #[serde(default)]
+    pub failure: Vec<HookCommandConfig>,
+}
+
+impl HooksConfig {
+    /// 是否未配置任何命令（含全部 disabled 时视为空，装配层可整体跳过）。
+    pub fn is_empty(&self) -> bool {
+        self.tool_before.is_empty()
+            && self.tool_after.is_empty()
+            && self.session_start.is_empty()
+            && self.session_end.is_empty()
+            && self.failure.is_empty()
+    }
+
+    /// 深度合并 `[hooks]`：`enabled` 仅非默认值覆盖（避免项目层缺省段清掉
+    /// 用户层显式开启）；事件命令列表显式非空时整体替换（与 providers/
+    /// models 的“显式列表替换”语义一致）。
+    fn merge(&mut self, other: HooksConfig) {
+        let d = HooksConfig::default();
+        if other.enabled != d.enabled {
+            self.enabled = other.enabled;
+        }
+        if !other.tool_before.is_empty() {
+            self.tool_before = other.tool_before;
+        }
+        if !other.tool_after.is_empty() {
+            self.tool_after = other.tool_after;
+        }
+        if !other.session_start.is_empty() {
+            self.session_start = other.session_start;
+        }
+        if !other.session_end.is_empty() {
+            self.session_end = other.session_end;
+        }
+        if !other.failure.is_empty() {
+            self.failure = other.failure;
+        }
+    }
+}
+
+/// 单条用户 hook 命令配置。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HookCommandConfig {
+    /// 外部命令（可执行文件路径或 PATH 查找名）。
+    pub command: String,
+    /// 命令参数。
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// 超时秒数；缺省由执行器默认（30s）。
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+    /// 停用开关（保留配置但装配时跳过执行）。
+    #[serde(default)]
+    pub disabled: bool,
+}
+
+// ---------------------------------------------------------------------------
 // Loading & merging
 // ---------------------------------------------------------------------------
 
@@ -1636,6 +1731,7 @@ impl Config {
         self.attribution.merge(other.attribution);
         self.quality.merge(other.quality);
         self.protocol.merge(other.protocol);
+        self.hooks.merge(other.hooks);
     }
 
     /// Apply DEEPSEEKNOVA_* environment variable overrides.
@@ -2101,6 +2197,9 @@ mod tests {
         assert!(!cfg.protocol.enabled);
         assert!(cfg.protocol.gates.is_empty());
         assert!(!cfg.protocol.adversarial_review);
+        // 用户级外部 hooks：默认关闭（不挂载 → 零进程开销）。
+        assert!(!cfg.hooks.enabled);
+        assert!(cfg.hooks.is_empty());
     }
 
     #[test]
@@ -3051,5 +3150,137 @@ mod tests {
         let variant = tmp.path().join("a").join("..").join("a").join("b");
         assert!(store.is_trusted(&variant), "词法折叠后应命中");
         assert!(!store.is_trusted(tmp.path()), "无关路径仍 untrusted");
+    }
+
+    #[test]
+    fn hooks_config_defaults_when_absent() {
+        // 旧配置无 [hooks] 段 → 默认关闭、全空（零开销，行为零变化）。
+        let cfg: Config = toml::from_str("[metrics]\nenabled = false\n").unwrap();
+        assert!(!cfg.hooks.enabled, "hooks 必须默认关闭");
+        assert!(cfg.hooks.is_empty());
+        let d = Config::default();
+        assert!(!d.hooks.enabled);
+        assert!(d.hooks.is_empty());
+    }
+
+    #[test]
+    fn hooks_config_parses_events_and_commands() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [hooks]
+            enabled = true
+
+            [[hooks.tool_before]]
+            command = "node"
+            args = ["check-tool.mjs", "--strict"]
+            timeout_secs = 10
+
+            [[hooks.tool_before]]
+            command = "/usr/bin/auditctl"
+            disabled = true
+
+            [[hooks.tool_after]]
+            command = "curl"
+            args = ["-s", "-X", "POST", "http://localhost:9000/tool"]
+            timeout_secs = 5
+
+            [[hooks.session_start]]
+            command = "/usr/bin/logger"
+            args = ["nova-session-start"]
+
+            [[hooks.session_end]]
+            command = "/usr/bin/logger"
+            args = ["nova-session-end"]
+
+            [[hooks.failure]]
+            command = "notify-send"
+            args = ["Nova failure"]
+            "#,
+        )
+        .unwrap();
+        assert!(cfg.hooks.enabled);
+        assert_eq!(cfg.hooks.tool_before.len(), 2);
+        let first = &cfg.hooks.tool_before[0];
+        assert_eq!(first.command, "node");
+        assert_eq!(first.args, vec!["check-tool.mjs", "--strict"]);
+        assert_eq!(first.timeout_secs, Some(10));
+        assert!(!first.disabled);
+        assert!(cfg.hooks.tool_before[1].disabled, "disabled 开关解析");
+        assert_eq!(cfg.hooks.tool_after.len(), 1);
+        assert_eq!(cfg.hooks.tool_after[0].timeout_secs, Some(5));
+        assert_eq!(cfg.hooks.session_start.len(), 1);
+        assert_eq!(cfg.hooks.session_end.len(), 1);
+        assert_eq!(cfg.hooks.failure.len(), 1);
+    }
+
+    #[test]
+    fn hooks_merge_keeps_user_enable_when_project_lacks_section() {
+        // 用户层显式开启 hooks；项目层缺省 [hooks]（enabled=false、空列表）
+        // 不得重置用户层显式开启。
+        let mut base = Config::default();
+        let user = Config {
+            hooks: HooksConfig {
+                enabled: true,
+                tool_before: vec![HookCommandConfig {
+                    command: "audit".into(),
+                    args: vec![],
+                    timeout_secs: None,
+                    disabled: false,
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        base.merge(user);
+        assert!(base.hooks.enabled);
+        assert_eq!(base.hooks.tool_before.len(), 1);
+
+        // 项目层只改无关段 → 用户层 hooks 保留。
+        let project = Config {
+            memory: MemoryConfig {
+                min_steps: 8,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        base.merge(project);
+        assert!(base.hooks.enabled, "项目层缺省不得清掉用户层显式开启");
+        assert_eq!(base.hooks.tool_before.len(), 1);
+
+        // 项目层显式提供 tool_before 列表 → 整体替换；enabled 未显式开启不覆盖。
+        let project2 = Config {
+            hooks: HooksConfig {
+                tool_before: vec![HookCommandConfig {
+                    command: "project-gate".into(),
+                    args: vec![],
+                    timeout_secs: Some(3),
+                    disabled: false,
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        base.merge(project2);
+        assert!(
+            base.hooks.enabled,
+            "项目层缺省 enabled=false 不得覆盖用户层 true"
+        );
+        assert_eq!(base.hooks.tool_before.len(), 1);
+        assert_eq!(base.hooks.tool_before[0].command, "project-gate");
+        assert_eq!(base.hooks.tool_before[0].timeout_secs, Some(3));
+    }
+
+    #[test]
+    fn hooks_config_is_empty_respects_all_events() {
+        let mut h = HooksConfig::default();
+        assert!(h.is_empty());
+        h.session_end.push(HookCommandConfig {
+            command: "logger".into(),
+            args: vec![],
+            timeout_secs: None,
+            disabled: true,
+        });
+        // is_empty 按配置层语义（列表非空即非空）；disabled 过滤在装配层做。
+        assert!(!h.is_empty());
     }
 }

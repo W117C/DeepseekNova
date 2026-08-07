@@ -86,6 +86,27 @@
   recursion 冗余链接、tui SessionCheckpointManager 未解析链接）。
 - **状态**：待提交。
 
+## 并行优化第七批（2026-08-08）
+
+- **P1-8 用户级 hooks**（core/config/agent/runtime）：`[hooks]` 五事件
+  （tool_before/after、session_start/end、failure）+ JSON 协议 + fail-closed
+  （tool_before 任一命令非 0/超时/裁决拒绝即阻止执行，内部链之后叠加）；
+  failure 挂 MetricsGuard emit（Paused/异常触发）。无 hooks 零进程开销。
+  core 155 / config 65 / agent 317 / runtime 59 测试。
+- **P1-7 exec 审计模式**（security/permission/cli）：`audit <cmd>` 预执行分类
+  预览（只读放行/Ask/硬拒 + 命中规则 + 形态 + 建议，md/json）；CommandAudit 与
+  分类器同源、gate preview 与 check() 共用 preflight+finalize（一致性测试
+  背书）、只计算不执行（不写缓存/限流/审计）。security 119 / permission 57 /
+  cli 89 测试 + 端到端实测。
+- **P2-2 graph 语义检索**（graph 独占）：复用 core EmbeddingProvider trait
+  （记忆侧同款融合 w*bm25+(1-w)*cos + fail-open + 同 blob 编码）；写入即嵌入，
+  SCHEMA 增量不 bump 版本（旧索引零破坏）；open_with_embedder/
+  search_hybrid[_breakdown]。49 测试。**runtime 装配待父级**（从 memory config
+  构造 embedder 喂 graph）。
+- **验证**：`make check` EXIT=0（复检修 graph store.rs:889 区间记号 `[0,1]`
+  doc 链接警告）。
+- **状态**：待提交。
+
 ## 日常体验包 + 审查修复（2026-08-07，非任务书轮）
 
 - 功能：web_search（ddg / tavily / bing / searxng）、lsp_diagnostics（写后

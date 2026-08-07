@@ -498,6 +498,33 @@ All notable changes to DeepseekNova will be documented in this file.
   只读不记召回）。core 记忆引擎新增 `MemoryScoreBreakdown`/`search_breakdown`
   /`edit`/`replay` 等最小接口（`search_hybrid` 总分管严格不变）。
 
+---
+
+### Added（并行优化第七批，2026-08-08）
+
+- **用户级 hooks（P1-8）**：`[hooks]` 配置段五事件（`tool_before` /
+  `tool_after` / `session_start` / `session_end` / `failure`），每条外部命令
+  （command/args/timeout_secs/disabled），事件间 AND 链。JSON 协议：stdin
+  传 `{event,tool,arguments,workspace,session_id}`，stdout 期望
+  `{"allowed":bool,"reason"}`。**fail-closed**：`tool_before` 任一命令非 0/
+  超时/崩溃或裁决拒绝 → 阻止工具执行（在内部 tool_hook 治理链之后叠加）；
+  `tool_after` 失败仅 warn。`session_start/end` 于 run 边界触发、`failure`
+  挂 MetricsGuard emit（Paused/异常触发，Completed/Cancelled 不触发）。
+  无 hooks 配置零进程开销。config→core 类型映射由 runtime 装配层做
+  （与 PermissionRule 映射同模式）。
+- **exec 审计模式（P1-7）**：`deepseeknova-cli audit <cmd>` 预执行分类预览——
+  输出只读放行 / Ask / 硬拒 + 命中规则 + 只读分类形态 + 建议（md/json 双
+  格式，`--rules`/`--workspace` 可选）。`security::CommandAudit` 与真实
+  分类器同源；`permission::PermissionGate::preview` 与真实 `check()` 共用
+  `preflight+finalize` 代码路径（一致性有测试背书），**只计算不执行**（不写
+  缓存/限流/审计）。
+- **graph 语义检索（P2-2）**：复用 core `EmbeddingProvider` trait（记忆侧
+  同款融合公式 `w*bm25 + (1-w)*cos` + fail-open 回落 FTS + 同 blob 编码）。
+  写入即嵌入（节点 name/signature/doc），SCHEMA 增量加 `node_embeddings`
+  表**不 bump 版本**（旧索引零破坏），按行记 model 防跨模型向量空间污染。
+  `GraphIndex::open_with_embedder`/`search_hybrid[_with_weight|_breakdown]`。
+  运行时装配（从 memory config 构造 embedder 喂给 graph）待父级后续轮。
+
 ## [0.4.0] — 2026-07-19
 
 ### 桌面前端完善
