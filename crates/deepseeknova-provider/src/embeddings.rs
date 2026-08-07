@@ -5,13 +5,19 @@
 //! `POST {base_url}/embeddings`，`Authorization: Bearer <api_key>`，
 //! body `{"model": ..., "input": text}`，取 `data[0].embedding`。
 //!
-//! 同步 trait 内做 HTTP：实例持有一个独立 tokio runtime 并在其中 `block_on`，
-//! 不阻塞/不嵌套调用方 runtime。任何失败都以 [`anyhow::Error`] 返回，
-//! 由调用方 fail-open（回落纯 FTS）。
+//! 双路径：
+//! - **同步** [`EmbeddingProvider::embed`]（兼容既有调用方）：经进程级共享
+//!   多线程 runtime `block_on`，不持独立 runtime（async 上下文 drop 安全）、
+//!   不嵌套调用方 runtime。
+//! - **异步** [`EmbeddingProvider::embed_async`]（async 调用链推荐）：直接 await
+//!   reqwest，无 runtime、不占用 tokio worker 线程。
+//!
+//! 任何失败都以 [`anyhow::Error`] 返回，由调用方 fail-open（回落纯 FTS）。
+//! 超时由构造时 `timeout_secs` 配置的 HTTP client 兜底。
 
 use anyhow::{anyhow, Context, Result};
 use deepseeknova_config::MemoryConfig;
-use deepseeknova_core::memory::embedding::EmbeddingProvider;
+use deepseeknova_core::memory::embedding::{EmbedAsyncFuture, EmbeddingProvider};
 use reqwest::Client;
 use serde::Deserialize;
 use std::env;
@@ -22,6 +28,21 @@ use std::time::Duration;
 pub const EMBED_API_KEY_ENV: &str = "DEEPSEEKNOVA_EMBED_API_KEY";
 pub const FALLBACK_API_KEY_ENV: &str = "OPENAI_API_KEY";
 
+/// 同步 [`EmbeddingProvider::embed`] 的共享执行 runtime：进程级懒加载多线程
+/// runtime。不持有在 [`RemoteEmbedder`] 内，避免在 async 上下文中 drop 一个
+/// tokio runtime 触发 `Cannot drop a runtime in a context where blocking is not
+/// allowed`（async 调用方持有/释放 embedder 均安全）。
+fn shared_sync_runtime() -> Result<&'static tokio::runtime::Runtime> {
+    static RT: std::sync::LazyLock<Result<tokio::runtime::Runtime, std::io::Error>> =
+        std::sync::LazyLock::new(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+        });
+    RT.as_ref()
+        .map_err(|e| anyhow!("failed to build shared embedding sync runtime: {e}"))
+}
+
 /// OpenAI 兼容远程嵌入提供器（`[memory] embedder = "remote"`）。
 #[derive(Debug)]
 pub struct RemoteEmbedder {
@@ -29,7 +50,6 @@ pub struct RemoteEmbedder {
     base_url: String,
     api_key: String,
     model: String,
-    rt: tokio::runtime::Runtime,
 }
 
 impl RemoteEmbedder {
@@ -39,16 +59,11 @@ impl RemoteEmbedder {
             .timeout(Duration::from_secs(timeout_secs))
             .build()
             .context("failed to build embedding HTTP client")?;
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .context("failed to build embedding runtime")?;
         Ok(Self {
             client,
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key: api_key.to_string(),
             model: model.to_string(),
-            rt,
         })
     }
 
@@ -77,7 +92,10 @@ impl RemoteEmbedder {
         )
     }
 
-    async fn embed_async(&self, text: &str) -> Result<Vec<f32>> {
+    /// 单条文本的真实 HTTP 请求：POST `/embeddings`、解析首个向量。
+    /// 仅做网络往返，不含 runtime 管理——同步路径在共享 runtime 上 `block_on`，
+    /// 异步路径由调用方直接 await。
+    async fn request_embedding(&self, text: &str) -> Result<Vec<f32>> {
         let url = format!("{}/embeddings", self.base_url);
         let resp = self
             .client
@@ -111,8 +129,14 @@ impl RemoteEmbedder {
 
 impl EmbeddingProvider for RemoteEmbedder {
     fn embed(&self, text: &str) -> Result<Vec<f32>> {
-        // 独立 runtime block_on：同步 trait 内做 HTTP，不阻塞调用方 runtime。
-        self.rt.block_on(self.embed_async(text))
+        // 同步兼容路径：共享进程级 runtime block_on（见 [`shared_sync_runtime`]）。
+        // async 调用链请使用 embed_async（直接 await reqwest，不占用 worker）。
+        shared_sync_runtime()?.block_on(self.request_embedding(text))
+    }
+
+    fn embed_async(self: Arc<Self>, text: String) -> EmbedAsyncFuture {
+        // 真实 async：直接 await reqwest，无独立 runtime、不占用 worker 线程。
+        Box::pin(async move { self.request_embedding(&text).await })
     }
 }
 
@@ -155,10 +179,19 @@ mod tests {
     /// env 相关测试串行化，避免并行测试互相污染环境变量。
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// 起一个一次性 std HTTP 服务：捕获请求原文，回指定状态与 body。
+    /// 起一个一次性 std HTTP 服务：捕获请求原文，回指定状态与 body（零延迟）。
     fn serve_once(
         status: &'static str,
         response_body: &'static str,
+    ) -> (String, std::sync::mpsc::Receiver<String>) {
+        serve_with_delay(status, response_body, Duration::ZERO)
+    }
+
+    /// 同 [`serve_once`]，但服务端在回包前先睡眠 `delay`（测客户端超时兜底用）。
+    fn serve_with_delay(
+        status: &'static str,
+        response_body: &'static str,
+        delay: Duration,
     ) -> (String, std::sync::mpsc::Receiver<String>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -178,12 +211,16 @@ mod tests {
                 }
             }
             tx.send(String::from_utf8_lossy(&buf).to_string()).unwrap();
-            let resp = format!(
-                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n\
-                 Content-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
-                response_body.len()
+            std::thread::sleep(delay);
+            // 客户端可能已超时断开，写失败属预期，忽略。
+            let _ = stream.write_all(
+                format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                    response_body.len()
+                )
+                .as_bytes(),
             );
-            stream.write_all(resp.as_bytes()).unwrap();
         });
         (format!("http://{addr}/v1"), rx)
     }
@@ -222,6 +259,63 @@ mod tests {
         let (base, _rx) = serve_once("200 OK", "not json");
         let e = RemoteEmbedder::new(&base, "sk-test", "m", 10).unwrap();
         assert!(e.embed("hello").is_err());
+    }
+
+    // ---- 异步路径（embed_async）：真实 await reqwest，不占用 worker ----
+
+    #[tokio::test]
+    async fn embed_async_posts_request_and_parses_response() {
+        let body = r#"{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.1,0.2,0.3]}]}"#;
+        let (base, rx) = serve_once("200 OK", body);
+        let e =
+            Arc::new(RemoteEmbedder::new(&base, "sk-test", "text-embedding-3-small", 10).unwrap());
+        let v = e.embed_async("hello async".to_string()).await.unwrap();
+        assert_eq!(v, vec![0.1, 0.2, 0.3]);
+        let req = rx.recv().unwrap();
+        assert!(
+            req.starts_with("POST /v1/embeddings HTTP/1.1"),
+            "请求行不对: {req}"
+        );
+        let lower = req.to_lowercase();
+        assert!(lower.contains("bearer sk-test"), "Bearer 头缺失: {req}");
+        assert!(req.contains("text-embedding-3-small"), "model 缺失: {req}");
+        assert!(req.contains("hello async"), "input 缺失: {req}");
+    }
+
+    #[tokio::test]
+    async fn embed_async_http_error_is_err() {
+        let (base, _rx) = serve_once("500 Internal Server Error", "boom");
+        let e = Arc::new(RemoteEmbedder::new(&base, "sk-test", "m", 10).unwrap());
+        let err = e.embed_async("hello".to_string()).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("500"),
+            "错误必须带状态码: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn embed_async_bad_json_is_err() {
+        let (base, _rx) = serve_once("200 OK", "not json");
+        let e = Arc::new(RemoteEmbedder::new(&base, "sk-test", "m", 10).unwrap());
+        assert!(e.embed_async("hello".to_string()).await.is_err());
+    }
+
+    /// 超时兜底：服务端比客户端超时更慢，必须在配置时限附近报错，
+    /// 而非等满服务端延迟（3s）。
+    #[tokio::test]
+    async fn embed_async_times_out_with_client_timeout() {
+        let (base, _rx) = serve_with_delay("200 OK", "{}", Duration::from_secs(3));
+        let e = Arc::new(RemoteEmbedder::new(&base, "sk-test", "m", 1).unwrap());
+        let start = std::time::Instant::now();
+        let err = e.embed_async("hello".to_string()).await.unwrap_err();
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "超时兜底必须按客户端超时触发（配置 1s），而非等满服务端 3s 延迟"
+        );
+        assert!(
+            format!("{err:#}").contains("timed out"),
+            "必须报超时错误: {err:#}"
+        );
     }
 
     fn config_with_embedder(embedder: &str, model: &str) -> MemoryConfig {

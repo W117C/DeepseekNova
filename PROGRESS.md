@@ -139,6 +139,17 @@
 - **验证**：`make check` EXIT=0（含父级补的 CLI 成本装配）。
 - **状态**：待提交。
 
+## P2-5 收尾（2026-08-08）
+
+- **RemoteEmbedder async 化**：`EmbeddingProvider::embed_async`（default
+  spawn_blocking 桥接，不阻塞 worker；Arc<Self>+String 接收器 + Send+'static
+  boxed future 保持 dyn-compatible），同步 embed 保留零破坏。RemoteEmbedder
+  真实 async + 移除独立 runtime 字段（修 async drop runtime panic 潜在 bug，
+  同步路径改共享 runtime）。provider 65 / core 153+2+1 / graph 49 测试。
+  生产调用点迁移清单（graph/memory 4 处）留待后续。
+- **验证**：`make check` EXIT=0。
+- **状态**：待提交。
+
 ## 日常体验包 + 审查修复（2026-08-07，非任务书轮）
 
 - 功能：web_search（ddg / tavily / bing / searxng）、lsp_diagnostics（写后

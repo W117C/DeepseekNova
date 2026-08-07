@@ -567,6 +567,19 @@ All notable changes to DeepseekNova will be documented in this file.
   1251→1571（实测属性数）、README_EN Reasoning Effort "4-level"→"3-level"
   对齐。
 
+---
+
+### Added（P2-5 收尾，2026-08-08）
+
+- **RemoteEmbedder async 化（P2-5）**：`EmbeddingProvider` trait 新增
+  `embed_async`（带默认实现走 `spawn_blocking` 桥接同步 `embed`，不阻塞 tokio
+  worker；`Arc<Self>` + `String` 接收器 + `Send + 'static` boxed future 保持
+  dyn-compatible），同步 `embed` 完全保留（全部既有实现/调用方零改动）。
+  RemoteEmbedder 覆写为真实 async（直接 await reqwest），并**移除独立
+  runtime 字段**（修 async 上下文 drop runtime panic 的潜在 bug；同步路径改
+  进程级共享 runtime）。超时兜底不变。生产调用点迁移清单留待后续（graph/
+  memory 写入与查询向量路径，涉及同步 rusqlite 函数签名）。
+
 ## [0.4.0] — 2026-07-19
 
 ### 桌面前端完善
