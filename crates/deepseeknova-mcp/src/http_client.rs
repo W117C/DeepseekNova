@@ -22,8 +22,29 @@ use serde_json::Value;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{info, warn};
+
+/// Failure modes for a single HTTP request. Session expiry is reported
+/// separately from other transport errors so [`McpHttpConnection::request`]
+/// can attempt a reconnect before failing.
+#[derive(Debug)]
+enum SendError {
+    /// The server signalled the session ended: an HTTP 404 carrying a
+    /// `Mcp-Session-Id` header, or an empty `Mcp-Session-Id` value.
+    SessionExpired,
+    /// Any other transport or protocol failure.
+    Other(anyhow::Error),
+}
+
+impl From<SendError> for anyhow::Error {
+    fn from(e: SendError) -> Self {
+        match e {
+            SendError::SessionExpired => anyhow::anyhow!("MCP session expired"),
+            SendError::Other(err) => err,
+        }
+    }
+}
 
 /// An MCP connection over an HTTP transport (legacy SSE or streamable HTTP).
 ///
@@ -47,6 +68,12 @@ pub struct McpHttpConnection {
     protocol_version: RwLock<Option<String>>,
     /// The server session id (`Mcp-Session-Id`), resent on every request.
     session_id: RwLock<Option<String>>,
+    /// Serializes session re-establishment so concurrent requests do not each
+    /// run their own `initialize` handshake.
+    reconnect_lock: Mutex<()>,
+    /// Bumped after every successful reconnect; used to detect that another
+    /// concurrent request already re-established the session.
+    reconnect_generation: AtomicU64,
     /// HTTP client.
     client: reqwest::Client,
 }
@@ -99,6 +126,8 @@ impl McpHttpConnection {
             }),
             protocol_version: RwLock::new(None),
             session_id: RwLock::new(None),
+            reconnect_lock: Mutex::new(()),
+            reconnect_generation: AtomicU64::new(0),
             client,
         });
 
@@ -194,13 +223,41 @@ impl McpHttpConnection {
 
     /// Send a JSON-RPC request and return the `result` field, failing when the
     /// server answers with a JSON-RPC error object.
+    ///
+    /// Session expiry (an HTTP 404 carrying `Mcp-Session-Id`, or an empty
+    /// `Mcp-Session-Id` value) triggers a single automatic reconnect: the
+    /// `initialize` handshake is re-run to obtain a fresh session and the
+    /// original request is retried once. Callers observe a successful response
+    /// as if no expiry ever happened.
     pub async fn request(
         &self,
         method: &str,
         params: Option<Value>,
         timeout_dur: Duration,
     ) -> anyhow::Result<Value> {
-        let resp = self.send_full(method, params, timeout_dur).await?;
+        // Capture the reconnect generation before the first attempt: after
+        // waiting on the reconnect lock we can tell whether a *different*
+        // concurrent request already re-established the session.
+        let generation = self.reconnect_generation.load(Ordering::SeqCst);
+
+        let resp = match self.send_full(method, params.clone(), timeout_dur).await {
+            Ok(resp) => resp,
+            Err(SendError::SessionExpired) => {
+                self.reconnect(generation).await?;
+                // Retry exactly once with the restored session. A second
+                // expiry signal means the server keeps rejecting us.
+                self.send_full(method, params, timeout_dur)
+                    .await
+                    .map_err(|e| match e {
+                        SendError::SessionExpired => anyhow::anyhow!(
+                            "MCP session expired: reconnect did not restore the session"
+                        ),
+                        SendError::Other(err) => err,
+                    })?
+            }
+            Err(SendError::Other(e)) => return Err(e),
+        };
+
         if let Some(err) = resp.get("error") {
             let msg = err
                 .get("message")
@@ -211,15 +268,45 @@ impl McpHttpConnection {
         Ok(resp.get("result").cloned().unwrap_or(Value::Null))
     }
 
+    /// Re-establish an expired MCP session by re-running the `initialize`
+    /// handshake.
+    ///
+    /// Exactly one reconnect is attempted per request. Concurrent requests
+    /// that hit the same expiry signal are serialized through
+    /// [`Self::reconnect_lock`]: only the first runs the handshake, and the
+    /// rest observe the bumped [`Self::reconnect_generation`] and skip a
+    /// redundant `initialize`.
+    async fn reconnect(&self, generation_at_request: u64) -> anyhow::Result<()> {
+        let _guard = self.reconnect_lock.lock().await;
+
+        // Another concurrent request already re-established the session while
+        // we waited for the lock — nothing left to do.
+        if self.reconnect_generation.load(Ordering::SeqCst) != generation_at_request {
+            return Ok(());
+        }
+
+        info!("MCP session expired; re-running initialize");
+        self.handshake(self.request_timeout)
+            .await
+            .context("MCP session reconnect failed")?;
+        self.reconnect_generation.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
     /// POST a JSON-RPC request and return the parsed response object (which
     /// may carry an `error` field). Handles single-JSON and SSE-framed
     /// responses, and tracks the server's `Mcp-Session-Id` header.
+    ///
+    /// Session-expiry signals — an HTTP 404 carrying `Mcp-Session-Id`, or an
+    /// empty `Mcp-Session-Id` value — are reported as
+    /// [`SendError::SessionExpired`] so the caller can reconnect; every other
+    /// failure is [`SendError::Other`].
     async fn send_full(
         &self,
         method: &str,
         params: Option<Value>,
         timeout_dur: Duration,
-    ) -> anyhow::Result<Value> {
+    ) -> Result<Value, SendError> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let req = JsonRpcRequest {
             jsonrpc: "2.0".into(),
@@ -239,7 +326,11 @@ impl McpHttpConnection {
             builder = builder.header("Mcp-Session-Id", session);
         }
 
-        let resp = builder.send().await.context("MCP HTTP POST failed")?;
+        let resp = builder
+            .send()
+            .await
+            .context("MCP HTTP POST failed")
+            .map_err(SendError::Other)?;
 
         let status = resp.status();
         let session_header = resp
@@ -256,11 +347,15 @@ impl McpHttpConnection {
         let body = resp.text().await.unwrap_or_default();
 
         // Persist or update the session id, following server-side rotations.
-        // An empty value, or a 404 carrying the header, terminates the session.
+        // An empty value — or a 404 carrying the header — terminates the
+        // session and is reported as an expiry signal so the caller can
+        // reconnect and retry.
+        let mut expired = false;
         if let Some(sess) = session_header.as_ref() {
             if sess.is_empty() {
                 *self.session_id.write().await = None;
                 warn!("MCP server terminated the session (empty Mcp-Session-Id)");
+                expired = true;
             } else {
                 *self.session_id.write().await = Some(sess.clone());
             }
@@ -268,9 +363,15 @@ impl McpHttpConnection {
         if status == StatusCode::NOT_FOUND {
             *self.session_id.write().await = None;
             if session_header.is_some() {
-                anyhow::bail!("MCP session expired: HTTP 404");
+                expired = true;
+            } else {
+                return Err(SendError::Other(anyhow::anyhow!(
+                    "MCP HTTP error 404: not found"
+                )));
             }
-            anyhow::bail!("MCP HTTP error 404: not found");
+        }
+        if expired {
+            return Err(SendError::SessionExpired);
         }
 
         if !status.is_success() {
@@ -281,15 +382,21 @@ impl McpHttpConnection {
             } else {
                 body.clone()
             };
-            anyhow::bail!("MCP HTTP error {status}: {short_body}");
+            return Err(SendError::Other(anyhow::anyhow!(
+                "MCP HTTP error {status}: {short_body}"
+            )));
         }
 
         let val: Value = if content_type.contains("text/event-stream") {
             parse_sse_response(&body, id).ok_or_else(|| {
-                anyhow::anyhow!("MCP SSE response: no event matched request id {id}")
+                SendError::Other(anyhow::anyhow!(
+                    "MCP SSE response: no event matched request id {id}"
+                ))
             })?
         } else {
-            serde_json::from_str(&body).context("failed to parse MCP HTTP response")?
+            serde_json::from_str(&body)
+                .context("failed to parse MCP HTTP response")
+                .map_err(SendError::Other)?
         };
 
         Ok(val)
@@ -433,6 +540,7 @@ fn parse_sse_response(body: &str, id: u64) -> Option<Value> {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::atomic::AtomicUsize;
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     use tokio::net::TcpListener;
@@ -1024,6 +1132,311 @@ data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"second\":true}}
             conn.session_id().await,
             None,
             "expired session id must be cleared"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn session_expired_404_reconnects_and_retries_request() {
+        // Sequence: connect initialize → sess-1; first ping → 404 + session
+        // header (expired); reconnect initialize → sess-2; retried ping → 200.
+        // The caller must observe a plain success.
+        let init_count = Arc::new(AtomicUsize::new(0));
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let init_count_c = Arc::clone(&init_count);
+        let seen_c = Arc::clone(&seen);
+        let (url, server) = spawn_http_mock(
+            || (404, "no sse".to_string()),
+            move |req_text| {
+                seen_c.lock().unwrap().push(req_text.clone());
+                let id = extract_id(&req_text);
+                if is_initialize(&req_text) {
+                    let n = init_count_c.fetch_add(1, Ordering::SeqCst);
+                    let sess = if n == 0 { "sess-1" } else { "sess-2" };
+                    (
+                        200,
+                        init_json_body(id, "2025-06-18"),
+                        vec![("Mcp-Session-Id".to_string(), sess.to_string())],
+                    )
+                } else if req_text.contains("\"method\":\"ping\"") {
+                    let lower = req_text.to_ascii_lowercase();
+                    if lower.contains("mcp-session-id: sess-2") {
+                        (
+                            200,
+                            format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{{"pong":true}}}}"#),
+                            vec![("Mcp-Session-Id".to_string(), "sess-2".to_string())],
+                        )
+                    } else {
+                        (
+                            404,
+                            String::new(),
+                            vec![("Mcp-Session-Id".to_string(), String::new())],
+                        )
+                    }
+                } else {
+                    // notifications/initialized — best effort.
+                    (200, String::new(), Vec::new())
+                }
+            },
+        );
+
+        let conn = McpHttpConnection::connect(&url, Duration::from_secs(5))
+            .await
+            .expect("connect");
+        assert_eq!(conn.session_id().await.as_deref(), Some("sess-1"));
+
+        let result = conn
+            .request("ping", None, Duration::from_secs(5))
+            .await
+            .expect("request must succeed transparently after reconnect");
+        assert_eq!(result, json!({"pong": true}));
+        assert_eq!(conn.session_id().await.as_deref(), Some("sess-2"));
+        server.abort();
+
+        let reqs = seen.lock().unwrap();
+        let inits: Vec<&String> = reqs
+            .iter()
+            .filter(|r| r.contains("\"initialize\""))
+            .collect();
+        assert_eq!(inits.len(), 2, "connect + exactly one reconnect initialize");
+        let pings: Vec<&String> = reqs
+            .iter()
+            .filter(|r| r.starts_with("POST ") && r.contains("\"method\":\"ping\""))
+            .collect();
+        assert_eq!(pings.len(), 2, "original ping + one retry after reconnect");
+    }
+
+    #[tokio::test]
+    async fn empty_session_id_on_response_triggers_reconnect() {
+        // A successful response carrying an empty Mcp-Session-Id signals that
+        // the server terminated the session: the client must reconnect and
+        // retry the request transparently.
+        let init_count = Arc::new(AtomicUsize::new(0));
+        let init_count_c = Arc::clone(&init_count);
+        let (url, server) = spawn_http_mock(
+            || (404, "no sse".to_string()),
+            move |req_text| {
+                let id = extract_id(&req_text);
+                if is_initialize(&req_text) {
+                    let n = init_count_c.fetch_add(1, Ordering::SeqCst);
+                    let sess = if n == 0 { "sess-1" } else { "sess-2" };
+                    (
+                        200,
+                        init_json_body(id, "2025-06-18"),
+                        vec![("Mcp-Session-Id".to_string(), sess.to_string())],
+                    )
+                } else if req_text.contains("\"method\":\"ping\"") {
+                    let lower = req_text.to_ascii_lowercase();
+                    if lower.contains("mcp-session-id: sess-2") {
+                        (
+                            200,
+                            format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{{"pong":true}}}}"#),
+                            vec![("Mcp-Session-Id".to_string(), "sess-2".to_string())],
+                        )
+                    } else {
+                        (
+                            200,
+                            format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{{"pong":true}}}}"#),
+                            vec![("Mcp-Session-Id".to_string(), String::new())],
+                        )
+                    }
+                } else {
+                    (200, String::new(), Vec::new())
+                }
+            },
+        );
+
+        let conn = McpHttpConnection::connect(&url, Duration::from_secs(5))
+            .await
+            .expect("connect");
+        let result = conn
+            .request("ping", None, Duration::from_secs(5))
+            .await
+            .expect("request must succeed after reconnect");
+        assert_eq!(result, json!({"pong": true}));
+        assert_eq!(conn.session_id().await.as_deref(), Some("sess-2"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn reconnect_does_not_mask_persistent_session_expiry() {
+        // initialize always succeeds (sess-1); every ping 404s with the session
+        // header. The single reconnect attempt cannot restore the session, so
+        // the request must fail with a clear error instead of looping.
+        let (url, server) = spawn_http_mock(
+            || (404, "no sse".to_string()),
+            |req_text| {
+                let id = extract_id(&req_text);
+                if is_initialize(&req_text) {
+                    (
+                        200,
+                        init_json_body(id, "2025-06-18"),
+                        vec![("Mcp-Session-Id".to_string(), "sess-1".to_string())],
+                    )
+                } else if req_text.contains("\"method\":\"ping\"") {
+                    (
+                        404,
+                        String::new(),
+                        vec![("Mcp-Session-Id".to_string(), String::new())],
+                    )
+                } else {
+                    (200, String::new(), Vec::new())
+                }
+            },
+        );
+
+        let conn = McpHttpConnection::connect(&url, Duration::from_secs(5))
+            .await
+            .expect("connect");
+        let err = conn
+            .request("ping", None, Duration::from_secs(5))
+            .await
+            .expect_err("persistently expired session must fail");
+        assert!(
+            err.to_string().contains("session expired"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            err.to_string().contains("reconnect did not restore"),
+            "error should be unambiguous about the failed reconnect: {err}"
+        );
+        assert_eq!(
+            conn.session_id().await,
+            None,
+            "session must be cleared after the failed reconnection"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn reconnect_initialize_failure_surfaces_clear_error() {
+        // The ping expires the session; the re-run initialize then fails with
+        // an HTTP 500. The request must surface that reconnect failure rather
+        // than silently retrying.
+        let init_count = Arc::new(AtomicUsize::new(0));
+        let init_count_c = Arc::clone(&init_count);
+        let (url, server) = spawn_http_mock(
+            || (404, "no sse".to_string()),
+            move |req_text| {
+                let id = extract_id(&req_text);
+                if is_initialize(&req_text) {
+                    if init_count_c.fetch_add(1, Ordering::SeqCst) == 0 {
+                        (
+                            200,
+                            init_json_body(id, "2025-06-18"),
+                            vec![("Mcp-Session-Id".to_string(), "sess-1".to_string())],
+                        )
+                    } else {
+                        (500, "reconnect exploded".to_string(), Vec::new())
+                    }
+                } else if req_text.contains("\"method\":\"ping\"") {
+                    (
+                        404,
+                        String::new(),
+                        vec![("Mcp-Session-Id".to_string(), String::new())],
+                    )
+                } else {
+                    (200, String::new(), Vec::new())
+                }
+            },
+        );
+
+        let conn = McpHttpConnection::connect(&url, Duration::from_secs(5))
+            .await
+            .expect("connect");
+        let err = conn
+            .request("ping", None, Duration::from_secs(5))
+            .await
+            .expect_err("failed reconnect must surface");
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("MCP session reconnect failed"),
+            "reconnect failure must be labelled: {err:#}"
+        );
+        assert!(
+            chain.contains("reconnect exploded"),
+            "underlying HTTP failure should be preserved: {err:#}"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn concurrent_requests_share_single_reconnect() {
+        // All pings carrying the stale session (sess-1) expire; only pings with
+        // the re-established session (sess-2) succeed. Concurrent requests must
+        // be serialized through the reconnect lock — one reconnect total — and
+        // all must complete without panicking or hanging.
+        const CONCURRENCY: usize = 8;
+
+        let init_count = Arc::new(AtomicUsize::new(0));
+        let init_count_c = Arc::clone(&init_count);
+        let (url, server) = spawn_http_mock(
+            || (404, "no sse".to_string()),
+            move |req_text| {
+                let id = extract_id(&req_text);
+                if is_initialize(&req_text) {
+                    let n = init_count_c.fetch_add(1, Ordering::SeqCst);
+                    let sess = if n == 0 { "sess-1" } else { "sess-2" };
+                    (
+                        200,
+                        init_json_body(id, "2025-06-18"),
+                        vec![("Mcp-Session-Id".to_string(), sess.to_string())],
+                    )
+                } else if req_text.contains("\"method\":\"ping\"") {
+                    let lower = req_text.to_ascii_lowercase();
+                    if lower.contains("mcp-session-id: sess-2") {
+                        (
+                            200,
+                            format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{{"pong":true}}}}"#),
+                            vec![("Mcp-Session-Id".to_string(), "sess-2".to_string())],
+                        )
+                    } else {
+                        (
+                            404,
+                            String::new(),
+                            vec![("Mcp-Session-Id".to_string(), String::new())],
+                        )
+                    }
+                } else {
+                    (200, String::new(), Vec::new())
+                }
+            },
+        );
+
+        let conn = McpHttpConnection::connect(&url, Duration::from_secs(5))
+            .await
+            .expect("connect");
+
+        let mut tasks = Vec::new();
+        for i in 0..CONCURRENCY {
+            let conn = Arc::clone(&conn);
+            tasks.push(tokio::spawn(async move {
+                conn.request("ping", Some(json!({"i": i})), Duration::from_secs(5))
+                    .await
+            }));
+        }
+
+        let results = tokio::time::timeout(Duration::from_secs(10), async {
+            futures::future::join_all(tasks).await
+        })
+        .await
+        .expect("concurrent requests must not hang during a reconnect");
+
+        for (i, result) in results.iter().enumerate() {
+            let result = result.as_ref().expect("request task must not panic");
+            assert_eq!(
+                result
+                    .as_ref()
+                    .expect("request must succeed after reconnect"),
+                &json!({"pong": true}),
+                "request {i} failed after reconnect"
+            );
+        }
+
+        assert_eq!(
+            init_count.load(Ordering::SeqCst),
+            2,
+            "connect + exactly one reconnect, not one per concurrent request"
         );
         server.abort();
     }

@@ -166,6 +166,23 @@
   警告）。
 - **状态**：待提交。
 
+## 收尾小项（2026-08-08）
+
+- **MCP 会话过期自动重连**：404+session 头 / 空 session id → 自动重发
+  initialize → 重试原请求一次；限 1 次防循环；并发双检锁 + generation 仅一次
+  重连（8 并发测试无 panic）。mcp 65 测试。
+- **embed_async 工具边界迁移**：remember/recall 工具路径 spawn_blocking 移出
+  worker（线程 id 回归测试）；graph refresh 确认在 blocking 池保留同步；
+  **graph search_hybrid 证实无生产调用方**（语义检索死路径，待产品决策）。
+  core 156 / graph 49 / tools 118 测试。runtime 同步闭包 3 处留待 agent API
+  改造。
+- **engine 递归深度传播**：Agent 主循环注入 DelegateDepth(1)（根恒 1）；
+  DelegateTool 读扩展传 run_at_depth(depth+1)，schema 去掉 no re-delegation；
+  端到端引擎递归深度链 1→2→3 测试 + 超深守门精确验证。agent 328 / tools 121
+  测试。引擎子代理自身深度注入留待 runtime。
+- **验证**：`make check` EXIT=0。
+- **状态**：待提交。
+
 ## 日常体验包 + 审查修复（2026-08-07，非任务书轮）
 
 - 功能：web_search（ddg / tavily / bing / searxng）、lsp_diagnostics（写后

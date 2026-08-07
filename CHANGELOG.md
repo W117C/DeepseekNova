@@ -602,6 +602,29 @@ All notable changes to DeepseekNova will be documented in this file.
   后续）；Windows Job Object/AppContainer 后端因无法在 macOS 验证运行时
   隔离，仅落方案文档（sandbox crate doc），实现待 Windows 环境。
 
+---
+
+### Fixed（收尾小项，2026-08-08）
+
+- **MCP 会话过期自动重连**：HTTP 请求遇"会话过期"信号（404 携带
+  `Mcp-Session-Id` 头 / 响应空 session id）→ 自动重发 `initialize` 握手 →
+  重试原请求一次（调用方无感）；重连失败/重试仍过期 → 清晰报错。每个请求
+  最多重连 1 次；并发双检锁 + generation 保证多请求并发命中过期时仅一次
+  重连，其余以新 session 重试（8 并发测试无 panic）。`initialize` 自身 404
+  视为硬错误避免自旋。stdio 零改动。
+- **embed_async 工具边界迁移**：`remember`/`recall` 工具路径的同步 HTTP
+  embed（最长 30s）经 `spawn_blocking` 移出 tokio worker（线程 id 回归测试
+  背书）。graph refresh 确认已在 blocking 线程池（runtime spawn_blocking）
+  保留同步；graph `search_hybrid*` 证实无生产调用方（语义检索未接任何工具，
+  留待产品决策）。runtime 的同步 RecallProvider/DistillHook 3 处仍待后续
+  agent API 改造。
+- **engine 递归深度传播**：Agent 主循环 `build_tool_context` 注入
+  `DelegateDepth(1)`（根恒 1，扩展应用器之前供 with_extension 覆盖）；
+  `DelegateTool` 读扩展传 `run_at_depth(depth+1)`（缺失回退 1），schema 与
+  注释去掉 "no re-delegation" 改声明深度受限递归。端到端引擎递归深度链
+  1→2→3 有测试（真实 Agent 循环 + DelegateEngine），超深守门以拒绝文本精确
+  验证。引擎子代理自身深度注入留待 runtime 装配。
+
 ## [0.4.0] — 2026-07-19
 
 ### 桌面前端完善

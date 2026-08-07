@@ -2,8 +2,14 @@
 //! 引擎句柄经 `ToolContext.extensions` 注入（`DelegateHandle`），缺失时优雅降级。
 //! 参数化任务书：`inputs` 传值（`${{ inputs.x }}` 占位符），仅对已声明 inputs
 //! 的预设生效；simple 预设的多余键被忽略。
+//!
+//! 递归：本工具支持深度受限的再派发。当前深度读 `ToolContext` 注入的
+//! [`DelegateDepth`]（Agent 主循环注入根深度 1），本次派发深度 = current + 1，
+//! 经 [`DelegateEngine::run_at_depth`] 派发；超过引擎深度上限时优雅返回错误
+//! 文本（不硬失败），语义与 agent crate 的 `RecursiveDelegateTool` 对齐。
 
 use async_trait::async_trait;
+use deepseeknova_agent::recursion::DelegateDepth;
 use deepseeknova_agent::task_spec::InputValues;
 use deepseeknova_agent::DelegateEngine;
 use deepseeknova_core::{Tool, ToolContext, ToolSchema};
@@ -39,7 +45,9 @@ impl Tool for DelegateTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "delegate".to_string(),
-            description: "Delegates a subtask to a sub-agent; no re-delegation.".to_string(),
+            description:
+                "Delegates a subtask to a sub-agent; recursion is allowed up to a depth limit."
+                    .to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -75,10 +83,19 @@ impl Tool for DelegateTool {
             _ => parsed.goal.clone(),
         };
         let values = InputValues::from(parsed.inputs.unwrap_or_default());
-        match h.run_with_inputs(&parsed.agent, &goal, values).await {
+        // 递归深度：读执行上下文注入的 DelegateDepth（缺失按 0 处理），
+        // 本次派发深度 = current + 1 —— 与 RecursiveDelegateTool 的
+        // "current 0 → next 1" 语义对齐。超深由 run_at_depth 守门拒绝。
+        let current = ctx
+            .extensions
+            .get::<DelegateDepth>()
+            .map(|d| d.0)
+            .unwrap_or(0);
+        let next = current + 1;
+        match h.run_at_depth(&parsed.agent, &goal, values, next).await {
             Ok(text) => Ok(format!("[delegate:{}] {text}", parsed.agent)),
             Err(e) => Ok(format!(
-                "delegate to '{}' failed: {e}. Available agents: {}",
+                "delegate to '{}' failed at depth {next}: {e}. Available agents: {}",
                 parsed.agent,
                 h.agent_names().join(", ")
             )),
@@ -108,6 +125,70 @@ mod tests {
         );
         let engine: DelegateHandle = Arc::new(DelegateEngine::new(agents, 2, 2000));
         ToolContext::new("t").with_extension(engine)
+    }
+
+    /// 构造带一个 explorer 子代理的引擎（指定递归深度上限）。
+    fn engine_with_explorer(max_depth: usize) -> DelegateHandle {
+        let mut agents: HashMap<String, Arc<Agent>> = HashMap::new();
+        agents.insert(
+            "explorer".into(),
+            Arc::new(
+                Agent::new(
+                    Arc::new(deepseeknova_agent::test_utils::MockProvider::text(
+                        "found the config in lib.rs",
+                    )),
+                    3,
+                )
+                .with_system_prompt("explorer"),
+            ),
+        );
+        Arc::new(DelegateEngine::new(agents, 2, 2000).with_max_depth(max_depth))
+    }
+
+    #[tokio::test]
+    async fn delegate_reads_injected_depth() {
+        // 注入当前深度 2 → 本次派发 3；引擎 max_depth=2 → 守门拒绝并暴露
+        // 请求深度（证明 DelegateTool 读取扩展并递增）。
+        let engine = engine_with_explorer(2);
+        let mut ctx = ToolContext::new("t").with_extension(engine);
+        ctx.extensions.insert(DelegateDepth(2));
+        let out = DelegateTool
+            .execute(&ctx, r#"{"agent":"explorer","goal":"find config"}"#)
+            .await
+            .unwrap();
+        assert!(out.contains("recursion depth exceeded"), "got: {out}");
+        assert!(out.contains("depth requested: 3"), "got: {out}");
+    }
+
+    #[tokio::test]
+    async fn delegate_missing_depth_uses_root_depth() {
+        // 未注入 DelegateDepth → current 0 → next 1（根深度，与
+        // RecursiveDelegateTool "current 0 → next 1" 语义对齐）；max_depth=1
+        // 放行即证明本次派发深度恰为 1。
+        let engine = engine_with_explorer(1);
+        let ctx = ToolContext::new("t").with_extension(engine);
+        let out = DelegateTool
+            .execute(&ctx, r#"{"agent":"explorer","goal":"find config"}"#)
+            .await
+            .unwrap();
+        assert!(out.contains("[delegate:explorer]"), "got: {out}");
+        assert!(out.contains("found the config"), "got: {out}");
+    }
+
+    #[tokio::test]
+    async fn delegate_over_depth_is_graceful() {
+        // 注入当前深度 3 → next 4 > max_depth=3 → 优雅错误文本（Ok 结果，
+        // 不硬失败），模型可据此降级。
+        let engine = engine_with_explorer(3);
+        let mut ctx = ToolContext::new("t").with_extension(engine);
+        ctx.extensions.insert(DelegateDepth(3));
+        let out = DelegateTool
+            .execute(&ctx, r#"{"agent":"explorer","goal":"x"}"#)
+            .await
+            .unwrap();
+        assert!(out.contains("recursion depth exceeded"), "got: {out}");
+        assert!(out.contains("depth requested: 4"), "got: {out}");
+        assert!(out.contains("Available agents: explorer"), "got: {out}");
     }
 
     #[tokio::test]

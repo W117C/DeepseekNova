@@ -1,6 +1,7 @@
 use crate::diagnose::{DiagnoseGuard, DiagnoseHook};
 use crate::memory::Memory;
 use crate::prompts::DEFAULT_SYSTEM_PROMPT;
+use crate::recursion::DelegateDepth;
 use deepseeknova_core::chunk::{Chunk, Usage};
 use deepseeknova_core::memory::skill::{TaskObservation, TaskOutcome};
 use deepseeknova_core::protocol::{Phase, PhaseGate, PhaseOutcome, PhaseTransition};
@@ -830,7 +831,8 @@ impl Agent {
 
 /// Shared ToolContext construction used by both `Agent::make_tool_context`
 /// and the spawned agent loop (which cannot borrow `self`). Keeps the
-/// injection set (workspace + security + registered extensions) in one place.
+/// injection set (workspace + security + root delegate depth + registered
+/// extensions) in one place.
 pub(crate) fn build_tool_context(
     call_id: &str,
     cancel: CancellationToken,
@@ -841,6 +843,11 @@ pub(crate) fn build_tool_context(
     let mut ctx = ToolContext::with_cancellation(call_id, cancel)
         .with_workspace(workspace_root.to_path_buf());
     ctx.extensions.insert(security.clone());
+    // Agent 主循环不嵌套，恒为根深度 1：注入当前委派深度扩展，供
+    // delegate 类工具读取后按 depth+1 派发（递归守门见 DelegateEngine /
+    // RecursiveDelegateTool）。注入放在构建期扩展之前，运行时/测试可经
+    // `with_extension` 覆盖为子代理的真实深度。
+    ctx.extensions.insert(DelegateDepth(1));
     for apply in extensions {
         apply(&mut ctx.extensions);
     }

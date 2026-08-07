@@ -75,7 +75,14 @@ impl Tool for RememberTool {
         // 形状，防持久化注入（key 会经 recall 的 `[entry.id]` 渲染回显）。
         let sanitized_key = deepseeknova_security::sanitize::sanitize_output(&parsed.key);
         let sanitized = deepseeknova_security::sanitize::sanitize_output(&parsed.value);
-        let existed = h.remember(&sanitized_key, &sanitized, parsed.tags)?;
+        // P2-5：记忆写入经 spawn_blocking 落到 blocking 线程池——写入即嵌入
+        // （同步 HTTP embed 最长 30s）不再占用 tokio worker。结果/顺序与直接
+        // 在 worker 上调用一致；嵌入失败 fail-open 回落 FTS 的语义不变。
+        let key = sanitized_key.clone();
+        let value = sanitized.clone();
+        let existed = tokio::task::spawn_blocking(move || h.remember(&key, &value, parsed.tags))
+            .await
+            .map_err(|e| anyhow::anyhow!("memory remember blocking task failed: {e}"))??;
         Ok(if existed {
             format!("updated memory '{}'", sanitized_key)
         } else {
@@ -185,18 +192,21 @@ impl Tool for RecallTool {
         };
         // C3：工具侧接 `[memory] rank_lifecycle_weight`（runtime 装配时经
         // MemoryRankWeight 扩展注入）；缺失时回落引擎默认权重 0.3，行为不变。
-        let results = match ctx.extensions.get::<MemoryRankWeight>() {
-            Some(w) => h.recall_with_weight(&parsed.query, parsed.top_k, w.0)?,
-            None => h.recall(&parsed.query, parsed.top_k)?,
-        };
+        // P2-5：检索（含查询嵌入，同步 HTTP embed 最长 30s）经 spawn_blocking
+        // 落到 blocking 线程池，不占用 tokio worker；fail-open 语义不变。
+        let rank_weight = ctx.extensions.get::<MemoryRankWeight>().map(|w| w.0);
+        let RecallArgs { query, top_k } = parsed;
+        let query_arg = query.clone();
+        let results = tokio::task::spawn_blocking(move || match rank_weight {
+            Some(w) => h.recall_with_weight(&query_arg, top_k, w),
+            None => h.recall(&query_arg, top_k),
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("memory recall blocking task failed: {e}"))??;
         if results.is_empty() {
-            return Ok(format!("no matches for '{}'", parsed.query));
+            return Ok(format!("no matches for '{}'", query));
         }
-        let mut out = format!(
-            "found {} match(es) for '{}':\n",
-            results.len(),
-            parsed.query
-        );
+        let mut out = format!("found {} match(es) for '{}':\n", results.len(), query);
         for (i, r) in results.iter().enumerate() {
             let preview: String = r.entry.content.chars().take(200).collect();
             // 回显净化（防御纵深）：内容写入时已净化；经其他路径落库的
@@ -320,6 +330,50 @@ mod tests {
             .await
             .unwrap();
         assert!(out.contains("k"), "语义独有命中必须被召回: {out}");
+    }
+
+    /// P2-5 回归：remember 工具的写入即嵌入必须经 spawn_blocking 运行在
+    /// blocking 线程池，而非 tokio worker（同步 HTTP embed 最长 30s）。
+    #[tokio::test]
+    async fn remember_embed_runs_off_tokio_worker() {
+        use deepseeknova_core::memory::embedding::EmbeddingProvider;
+        use std::sync::Mutex;
+        use std::thread::ThreadId;
+
+        struct ThreadRecording {
+            embed_thread: Mutex<Option<ThreadId>>,
+        }
+        impl EmbeddingProvider for ThreadRecording {
+            fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+                *self.embed_thread.lock().unwrap() = Some(std::thread::current().id());
+                Ok(vec![0.5, 0.5])
+            }
+        }
+
+        let recorder = Arc::new(ThreadRecording {
+            embed_thread: Mutex::new(None),
+        });
+        let engine: MemoryHandle = Arc::new(
+            MemoryEngine::open_in_memory_with_embedder(
+                true,
+                Some(recorder.clone()),
+                Some("test-model".to_string()),
+            )
+            .unwrap(),
+        );
+        let ctx = ToolContext::new("t")
+            .with_extension(engine)
+            .with_extension(deepseeknova_security::context::SecurityContext::with_safe_defaults());
+        let worker_id = std::thread::current().id();
+        RememberTool
+            .execute(&ctx, r#"{"key":"k","value":"rust borrow checker"}"#)
+            .await
+            .unwrap();
+        let embed_id = recorder.embed_thread.lock().unwrap().unwrap();
+        assert_ne!(
+            embed_id, worker_id,
+            "remember 的嵌入必须运行在 blocking 线程池而非 tokio worker"
+        );
     }
 
     // ── 能力门（C：与 fs/shell 工具一致）──

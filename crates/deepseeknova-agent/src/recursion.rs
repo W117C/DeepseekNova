@@ -17,6 +17,11 @@
 //! 深度语义：根派发（主 agent / coordinator 直接调 `run` / `run_stream`）
 //! 为 depth 1；递归委派工具内部把 `depth` 传给 sink，sink 入口校验
 //! `depth <= max_depth`，超限即拒绝。
+//!
+//! 注入点：SubAgentRunner 的子代理执行循环按实际深度注入；Agent 主循环
+//! （`build_tool_context`）以根深度 1 注入（主循环不嵌套，恒 1）。tools
+//! crate 的 `DelegateTool`（主 agent 的 delegate 工具）同样读本扩展后按
+//! depth+1 派发到 `DelegateEngine::run_at_depth`。
 
 use crate::task_spec::InputValues;
 use async_trait::async_trait;
@@ -41,7 +46,8 @@ pub trait DelegationSink: Send + Sync {
     ) -> anyhow::Result<String>;
 }
 
-/// 当前子代理调用深度的执行期扩展。由子代理循环注入每个 ToolContext；
+/// 当前子代理调用深度的执行期扩展。由子代理执行循环注入每个 ToolContext
+/// （SubAgentRunner 按实际深度；Agent 主循环以根深度 1 注入）；
 /// 未注入时递归委派工具按 depth 0 处理（根环境）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DelegateDepth(pub usize);
@@ -432,6 +438,252 @@ mod tests {
             .await
             .unwrap();
         assert!(out.contains("coder done"), "got: {out}");
+        assert_eq!(leaf_p.call_count(), 0, "超深时 leaf 不得被调用");
+    }
+
+    // -----------------------------------------------------------------------
+    // 端到端：DelegateEngine 路径（tools DelegateTool 的引擎侧）深度传播
+    // -----------------------------------------------------------------------
+    //
+    // 主 agent 的 delegate 工具读主循环注入的 DelegateDepth(1) → 经
+    // engine.run_at_depth 以深度 2 派发 coder；coder 是引擎内的普通 Agent，
+    // 其主循环同样以根深度 1 注入 DelegateDepth——为演示"子代理内再 delegate
+    // 深度递增"，测试以 with_extension(DelegateDepth(2)) 模拟运行时侧把当前
+    // 深度传入引擎子代理（P1-5：引擎侧自动深度传播由运行时注入）。深度链：
+    // 主 agent(1) → coder(2) → leaf(3)。
+
+    /// 晚绑定派发出口：先构造引擎子代理、再建引擎，引擎创建后回填
+    /// （打破"子代理需引擎、引擎需子代理"的构造环）。
+    struct LateSink(Arc<std::sync::OnceLock<Arc<dyn DelegationSink>>>);
+
+    #[async_trait]
+    impl DelegationSink for LateSink {
+        async fn delegate(
+            &self,
+            agent: &str,
+            goal: &str,
+            values: &InputValues,
+            depth: usize,
+        ) -> anyhow::Result<String> {
+            let sink = self.0.get().expect("late sink not set");
+            sink.delegate(agent, goal, values, depth).await
+        }
+    }
+
+    #[tokio::test]
+    async fn end_to_end_engine_recursion_increments_depth() {
+        use crate::agent::Agent;
+        use crate::delegate::DelegateEngine;
+        use crate::test_utils::MockProvider;
+        use deepseeknova_core::chunk::{Chunk, Usage};
+        use deepseeknova_core::{RunEvent, RunInput, Runner};
+        use std::collections::HashMap;
+        use tokio_stream::StreamExt;
+
+        let leaf_p = Arc::new(MockProvider::text("leaf output"));
+        let coder_p = Arc::new(MockProvider::sequential(vec![
+            vec![
+                Chunk::ToolCallStart {
+                    id: "call_nested".to_string(),
+                    name: "delegate".to_string(),
+                },
+                Chunk::ToolCallEnd {
+                    id: "call_nested".to_string(),
+                    name: "delegate".to_string(),
+                    arguments: r#"{"agent":"leaf","goal":"leaf work"}"#.to_string(),
+                },
+                Chunk::Done,
+            ],
+            vec![
+                Chunk::TextDelta("coder finished".to_string()),
+                Chunk::Usage(Usage::default()),
+                Chunk::Done,
+            ],
+        ]));
+
+        // 晚绑定引擎句柄：coder 的递归工具在引擎创建前构造，引擎建好后回填。
+        let sink_slot: Arc<std::sync::OnceLock<Arc<dyn DelegationSink>>> =
+            Arc::new(std::sync::OnceLock::new());
+        let late = Arc::new(LateSink(sink_slot.clone()));
+
+        let mut coder = Agent::new(coder_p.clone(), 4)
+            .with_system_prompt("coder")
+            // 模拟运行时把当前深度 2 传入引擎子代理工具上下文（P1-5）。
+            .with_extension(DelegateDepth(2));
+        coder.register_tool(
+            Arc::new(RecursiveDelegateTool::new(3).with_sink(late)) as Arc<dyn Tool>,
+        );
+        let leaf = Agent::new(leaf_p.clone(), 3).with_system_prompt("leaf");
+
+        let mut agents: HashMap<String, Arc<Agent>> = HashMap::new();
+        agents.insert("coder".into(), Arc::new(coder));
+        agents.insert("leaf".into(), Arc::new(leaf));
+        let engine = Arc::new(DelegateEngine::new(agents, 2, 2000).with_max_depth(3));
+        let _ = sink_slot.set(engine.clone() as Arc<dyn DelegationSink>);
+
+        // 主 agent（root）：经引擎路径派发 coder，深度由主循环注入的
+        // DelegateDepth(1) 递增到 2。
+        let main_p = Arc::new(MockProvider::sequential(vec![
+            vec![
+                Chunk::ToolCallStart {
+                    id: "call_main".to_string(),
+                    name: "delegate".to_string(),
+                },
+                Chunk::ToolCallEnd {
+                    id: "call_main".to_string(),
+                    name: "delegate".to_string(),
+                    arguments: r#"{"agent":"coder","goal":"code it"}"#.to_string(),
+                },
+                Chunk::Done,
+            ],
+            vec![
+                Chunk::TextDelta("main done".to_string()),
+                Chunk::Usage(Usage::default()),
+                Chunk::Done,
+            ],
+        ]));
+        let mut main_agent = Agent::new(main_p.clone(), 4).with_system_prompt("main");
+        main_agent.register_tool(
+            Arc::new(RecursiveDelegateTool::new(3).with_sink(engine.clone())) as Arc<dyn Tool>,
+        );
+
+        let mut stream = main_agent
+            .run_stream(RunInput {
+                prompt: "go".to_string(),
+                images: vec![],
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        let mut text = String::new();
+        let mut main_result = String::new();
+        while let Some(ev) = stream.next().await {
+            match ev.unwrap() {
+                RunEvent::TextDelta(t) => text.push_str(&t),
+                RunEvent::ToolResult { result, .. } => main_result = result,
+                _ => {}
+            }
+        }
+
+        assert!(text.contains("main done"), "got: {text}");
+        assert!(
+            main_result.contains("[delegate:coder]"),
+            "got: {main_result}"
+        );
+        assert!(main_result.contains("coder finished"), "got: {main_result}");
+        assert!(coder_p.call_count() >= 2, "coder 两轮：工具轮 + 收尾轮");
+        assert!(
+            leaf_p.call_count() >= 1,
+            "leaf 子代理必须被递归调用（深度 3）"
+        );
+    }
+
+    #[tokio::test]
+    async fn end_to_end_engine_depth_limit_blocks_nested() {
+        use crate::agent::Agent;
+        use crate::delegate::DelegateEngine;
+        use crate::test_utils::MockProvider;
+        use deepseeknova_core::chunk::{Chunk, Usage};
+        use deepseeknova_core::{RunEvent, RunInput, Runner};
+        use std::collections::HashMap;
+        use tokio_stream::StreamExt;
+
+        let leaf_p = Arc::new(MockProvider::text("leaf output"));
+        let coder_p = Arc::new(MockProvider::sequential(vec![
+            vec![
+                Chunk::ToolCallStart {
+                    id: "call_nested".to_string(),
+                    name: "delegate".to_string(),
+                },
+                Chunk::ToolCallEnd {
+                    id: "call_nested".to_string(),
+                    name: "delegate".to_string(),
+                    arguments: r#"{"agent":"leaf","goal":"leaf work"}"#.to_string(),
+                },
+                Chunk::Done,
+            ],
+            vec![
+                Chunk::TextDelta("coder finished".to_string()),
+                Chunk::Usage(Usage::default()),
+                Chunk::Done,
+            ],
+        ]));
+
+        let sink_slot: Arc<std::sync::OnceLock<Arc<dyn DelegationSink>>> =
+            Arc::new(std::sync::OnceLock::new());
+        let late = Arc::new(LateSink(sink_slot.clone()));
+
+        let mut coder = Agent::new(coder_p.clone(), 4)
+            .with_system_prompt("coder")
+            .with_extension(DelegateDepth(2));
+        coder.register_tool(
+            Arc::new(RecursiveDelegateTool::new(3).with_sink(late)) as Arc<dyn Tool>,
+        );
+        let leaf = Agent::new(leaf_p.clone(), 3).with_system_prompt("leaf");
+
+        let mut agents: HashMap<String, Arc<Agent>> = HashMap::new();
+        agents.insert("coder".into(), Arc::new(coder));
+        agents.insert("leaf".into(), Arc::new(leaf));
+        // max_depth=2：主 agent 派发 coder（depth 2）放行，coder 再派 leaf
+        // （depth 3）被引擎守门拒绝 → 优雅降级，不硬失败。
+        let engine = Arc::new(DelegateEngine::new(agents, 2, 2000).with_max_depth(2));
+        let _ = sink_slot.set(engine.clone() as Arc<dyn DelegationSink>);
+
+        // 引擎守门直接验证：depth 3 > max 2 → 拒绝（清晰错误文本）。
+        let err = engine
+            .run_at_depth("leaf", "x", InputValues::new(), 3)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("recursion depth exceeded (max 2"),
+            "got: {err}"
+        );
+
+        let main_p = Arc::new(MockProvider::sequential(vec![
+            vec![
+                Chunk::ToolCallStart {
+                    id: "call_main".to_string(),
+                    name: "delegate".to_string(),
+                },
+                Chunk::ToolCallEnd {
+                    id: "call_main".to_string(),
+                    name: "delegate".to_string(),
+                    arguments: r#"{"agent":"coder","goal":"code it"}"#.to_string(),
+                },
+                Chunk::Done,
+            ],
+            vec![
+                Chunk::TextDelta("main done".to_string()),
+                Chunk::Usage(Usage::default()),
+                Chunk::Done,
+            ],
+        ]));
+        let mut main_agent = Agent::new(main_p.clone(), 4).with_system_prompt("main");
+        main_agent.register_tool(
+            Arc::new(RecursiveDelegateTool::new(3).with_sink(engine.clone())) as Arc<dyn Tool>,
+        );
+
+        let mut stream = main_agent
+            .run_stream(RunInput {
+                prompt: "go".to_string(),
+                images: vec![],
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        let mut text = String::new();
+        while let Some(ev) = stream.next().await {
+            if let Ok(RunEvent::TextDelta(t)) = ev {
+                text.push_str(&t);
+            }
+        }
+
+        assert!(text.contains("main done"), "got: {text}");
+        assert_eq!(
+            coder_p.call_count(),
+            2,
+            "coder 两轮正常完成（嵌套被优雅拒绝，不硬失败）"
+        );
         assert_eq!(leaf_p.call_count(), 0, "超深时 leaf 不得被调用");
     }
 }
