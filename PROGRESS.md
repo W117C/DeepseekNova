@@ -195,6 +195,23 @@
   graph_tools 13 测试全过。
 - **状态**：待提交。
 
+## 一键安装（2026-08-08，发布就绪）
+
+- **install.sh + install.ps1**（仓库根新建）：`curl | sh` / `irm | iex` 一条命令
+  安装——GitHub Releases 下载预编译二进制 + 平台自动检测（macOS Intel/ARM、
+  Linux x86_64/ARM64、Windows x86_64）+ **SHA256 checksum 校验**（失败即删并
+  报错）+ 默认 `~/.local/bin`（`INSTALL_DIR` 可覆盖）+ 未发布平台/无效版本清晰
+  报错。**install.sh 经 v0.4.0 真实资产端到端实测**（下载/校验/安装/运行全过）。
+- **release.yml 矩阵 3→5 平台**：新增 macos-13（x86_64-apple-darwin，Intel 原生
+  runner）+ ubuntu-24.04-arm（aarch64-unknown-linux-gnu，ARM 原生 runner；
+  tree-sitter/rusqlite bundled C 依赖需原生构建）。命名与 install.sh 契约一致。
+- **README 安装节**：中英同步一键安装（推荐）+ binstall 备选 + 源码备选；
+  诚实注明 v0.4.0 仅 3 平台、v0.5.0 覆盖 5 平台。
+- **复检发现并修复**：CLI `#[command(version="0.4.0")]` 硬编码 → 
+  `env!("CARGO_PKG_VERSION")`（`--version` 现输出 0.5.0，与 workspace 一致）。
+- **验证**：`make check` EXIT=0；父级复跑 install.sh 端到端全过。
+- **状态**：待提交；tag v0.5.0 触发真实构建由用户拍板。
+
 ## 日常体验包 + 审查修复（2026-08-07，非任务书轮）
 
 - 功能：web_search（ddg / tavily / bing / searxng）、lsp_diagnostics（写后

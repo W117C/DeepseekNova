@@ -1,6 +1,6 @@
 # Release workflow — triggered by version tags (v*)
 # Builds and publishes:
-#   1. CLI binary (deepseeknova-cli) for 3 platforms
+#   1. CLI binary (deepseeknova-cli) for 5 platforms
 #   2. npm package with prebuilt binaries
 #
 # Uses the existing cargo-dist configuration from Cargo.toml
@@ -26,7 +26,14 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  # ── CLI Release Build (3 platforms) ──────────────────────────────
+  # ── CLI Release Build (5 platforms) ──────────────────────────────
+  # NOTE on runner choice:
+  #   - macos-13 is the last Intel (x86_64) macOS runner; macos-latest is
+  #     already arm64. Use a native Intel runner for x86_64-apple-darwin.
+  #   - ubuntu-24.04-arm is GitHub's native ARM64 Linux runner. The CLI's
+  #     dependency tree compiles C code (tree-sitter grammars, rusqlite
+  #     bundled SQLite), so cross-compiling aarch64 from x86_64 would need
+  #     an aarch64 cross toolchain; a native ARM runner is most reliable.
   cli-release:
     name: CLI release (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
@@ -36,8 +43,14 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             binary: deepseeknova-cli
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            binary: deepseeknova-cli
           - os: macos-latest
             target: aarch64-apple-darwin
+            binary: deepseeknova-cli
+          - os: macos-13
+            target: x86_64-apple-darwin
             binary: deepseeknova-cli
           - os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -105,6 +118,9 @@ jobs:
 
             ### Downloads
             See artifacts attached to this release.
+
+            ### Install
+            One-line install scripts (Linux/macOS `curl | sh`, Windows PowerShell) are described in the [README](README.md).
 
             ### Checksums
             SHA256 checksums are in checksums.txt attached to this release.

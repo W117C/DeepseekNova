@@ -103,9 +103,42 @@ Provider    DeepSeek V4 Pro/Flash   Tools: File · Glob · Grep · Shell
 
 ## 🚀 Quick Start
 
+### Installation
+
+#### One-line install (recommended)
+
+Downloads a prebuilt binary from GitHub Releases, verifies SHA256 checksums, and installs to `~/.local/bin`:
+
+**macOS / Linux**
+
 ```bash
-# Build CLI from source
+curl -fsSL https://raw.githubusercontent.com/W117C/DeepseekNova/main/install.sh | sh
+```
+
+**Windows (PowerShell)**
+
+```powershell
+irm https://raw.githubusercontent.com/W117C/DeepseekNova/main/install.ps1 | iex
+```
+
+- Supported platforms: macOS (Intel / Apple Silicon), Linux (x86_64 / ARM64), Windows (x86_64)
+- Installs to `~/.local/bin` by default; override with the `INSTALL_DIR` env var
+- Automatically downloads and verifies SHA256 checksums
+- If no binary is published for your platform yet, the script will tell you
+
+> 💡 The latest release is **v0.4.0**, whose assets cover only 3 platforms (macOS ARM / Linux x86_64 / Windows x86_64). **v0.5.0** will cover all 5 platforms.
+
+Already have the Rust toolchain? You can also use [cargo-binstall](https://github.com/cargo-bins/cargo-binstall) to pull a prebuilt binary straight from GitHub Releases:
+
+```bash
+cargo binstall deepseeknova-cli
+```
+
+#### Build from source (alternative)
+
+```bash
 cargo build --release -p deepseeknova-cli
+# Binary at target/release/deepseeknova-cli
 ```
 
 ### Configuration

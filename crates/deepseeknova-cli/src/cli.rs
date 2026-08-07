@@ -21,7 +21,10 @@ fn parse_require_dimension(s: &str) -> Result<(String, f32), String> {
 
 #[derive(Parser)]
 #[command(name = "deepseeknova")]
-#[command(version = "0.4.0")]
+// 版本号跟随 workspace（Cargo.toml workspace.package.version），避免
+// release tag（v0.5.0 等）与 `--version` 输出漂移——硬编码曾导致用户
+// 安装新版后 `--version` 仍显示旧号。
+#[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "A DeepSeek-native AI coding agent for your terminal", long_about = None)]
 pub struct Cli {
     #[command(subcommand)]

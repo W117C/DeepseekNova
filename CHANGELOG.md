@@ -636,6 +636,26 @@ All notable changes to DeepseekNova will be documented in this file.
   查询嵌入是 HTTP，最长 30s，与 remember/recall 工具同款模式）。语义检索只对
   显式配置嵌入的用户生效，未配置用户结果严格不变。
 
+### Added（一键安装，2026-08-08）
+
+- **一键安装脚本**：新增 `install.sh`（macOS/Linux）与 `install.ps1`（Windows
+  PowerShell）——`curl -fsSL .../install.sh | sh` / `irm .../install.ps1 | iex`
+  从 GitHub Releases 下载预编译二进制，自动检测平台（macOS Intel/ARM、Linux
+  x86_64/ARM64、Windows x86_64），**SHA256 checksum 校验**（用同 Release
+  `checksums.txt` 按资产名匹配，校验失败即删除并报错），默认装
+  `~/.local/bin`（`INSTALL_DIR` / `-InstallDir` 可覆盖），未发布平台/无效版本
+  给出清晰报错。install.sh 经 v0.4.0 真实资产端到端验证（下载/校验/安装/
+  运行全通过）。
+- **release.yml 平台矩阵扩充**：3 → 5 平台——新增 `macos-13`
+  （`x86_64-apple-darwin`，Intel 原生 runner）与 `ubuntu-24.04-arm`
+  （`aarch64-unknown-linux-gnu`，ARM 原生 runner；cli 依赖树含 tree-sitter/
+  rusqlite bundled C 编译，必须原生避免交叉工具链）。
+- **README 安装节**：中英同步改为"一键安装（推荐）+ cargo-binstall 备选 +
+  从源码构建（备选）"，诚实注明当前 v0.4.0 资产仅 3 平台、v0.5.0 覆盖 5 平台。
+- **CLI 版本号漂移修复**：`#[command(version = "0.4.0")]` 硬编码改为
+  `env!("CARGO_PKG_VERSION")`——复检发现 bump 0.5.0 后 `--version` 仍显示
+  0.4.0，用户装新版会误以为未更新；现与 workspace 版本自动一致。
+
 ## [0.4.0] — 2026-07-19
 
 ### 桌面前端完善

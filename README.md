@@ -176,9 +176,40 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 
 ### 安装
 
+#### 一键安装（推荐）
+
+从 GitHub Releases 下载预编译二进制，自动校验 SHA256 checksums，并安装到 `~/.local/bin`：
+
+**macOS / Linux**
+
 ```bash
-# 从源码构建 CLI
+curl -fsSL https://raw.githubusercontent.com/W117C/DeepseekNova/main/install.sh | sh
+```
+
+**Windows（PowerShell）**
+
+```powershell
+irm https://raw.githubusercontent.com/W117C/DeepseekNova/main/install.ps1 | iex
+```
+
+- 支持平台：macOS（Intel / Apple Silicon）、Linux（x86_64 / ARM64）、Windows（x86_64）
+- 默认安装到 `~/.local/bin`，可用环境变量 `INSTALL_DIR` 覆盖
+- 自动下载并校验 SHA256 checksums
+- 若当前版本尚未发布对应平台的二进制，脚本会给出提示
+
+> 💡 当前最新发布为 **v0.4.0**，其 assets 仅覆盖 3 个平台（macOS ARM / Linux x86_64 / Windows x86_64）；**v0.5.0** 发布后将覆盖全部 5 个平台。
+
+已安装 Rust 工具链？也可用 [cargo-binstall](https://github.com/cargo-bins/cargo-binstall) 直接从 GitHub Releases 拉取预编译二进制：
+
+```bash
+cargo binstall deepseeknova-cli
+```
+
+#### 从源码构建（备选）
+
+```bash
 cargo build --release -p deepseeknova-cli
+# 产物位于 target/release/deepseeknova-cli
 ```
 
 ### 配置
