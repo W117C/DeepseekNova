@@ -625,6 +625,17 @@ All notable changes to DeepseekNova will be documented in this file.
   1→2→3 有测试（真实 Agent 循环 + DelegateEngine），超深守门以拒绝文本精确
   验证。引擎子代理自身深度注入留待 runtime 装配。
 
+### Fixed（graph 语义检索接线，2026-08-08）
+
+- **`search_code` 接通语义检索**（此前 P2-2 的 `search_hybrid*` 无任何工具调用，
+  是死路径）：新增 `GraphIndex::search_best`——装配了嵌入后端
+  （`[memory] embedder = "remote"` + API key）时走 hybrid（语义+词法融合，
+  默认 `0.5*bm25 + 0.5*余弦`），否则**逐字节委托既有 `search`**（零行为变化，
+  有等价性测试锁定：4 组查询 search_best == search 的名称/路径/长度一致）。
+  工具侧整个 lock+检索经 `spawn_blocking` 移出 tokio worker（hybrid 路径的
+  查询嵌入是 HTTP，最长 30s，与 remember/recall 工具同款模式）。语义检索只对
+  显式配置嵌入的用户生效，未配置用户结果严格不变。
+
 ## [0.4.0] — 2026-07-19
 
 ### 桌面前端完善

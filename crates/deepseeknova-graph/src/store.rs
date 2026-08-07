@@ -224,6 +224,13 @@ impl Store {
         Self::open_with_embedder(db_path, None, "")
     }
 
+    /// 是否装配了语义嵌入后端。未装配时 [`Self::search_hybrid`] 走
+    /// `hybrid_fts_fallback`（结果与 `search` 存在过滤/截断差异），
+    /// 上层应经 `crate::GraphIndex::search_best` 保证未装配时逐字节走 `search`。
+    pub fn has_embedder(&self) -> bool {
+        self.embedder.is_some()
+    }
+
     /// 打开（或创建）数据库并建表，装配可选的语义嵌入后端（写入即嵌入 + hybrid 检索）。
     /// 嵌入不可用（None / 缺 key / 网络错）时检索回落纯词法，不阻断既有功能。
     pub fn open_with_embedder(

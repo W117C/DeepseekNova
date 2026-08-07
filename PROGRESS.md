@@ -183,6 +183,18 @@
 - **验证**：`make check` EXIT=0。
 - **状态**：待提交。
 
+## graph 语义检索接线（2026-08-08，产品决策项）
+
+- **决策（父级定）**：`search_code` 接通 `search_hybrid`——P2-2 的语义检索此前
+  无任何工具调用（死路径），按"真的有用有效"标准接通。
+- **实现**：`GraphIndex::search_best`——有 embedder（`[memory] embedder="remote"`
+  + key）→ hybrid（0.5*bm25+0.5*余弦）；无 → **逐字节委托 search**（等价性测试
+  锁定 4 组查询零回归）。工具侧 lock+检索 经 spawn_blocking 移出 worker
+  （hybrid 查询嵌入 HTTP 最长 30s）。语义只对显式配置嵌入的用户生效。
+- **验证**：`make check` EXIT=0；graph 50 测试（含 search_best==search 等价）；
+  graph_tools 13 测试全过。
+- **状态**：待提交。
+
 ## 日常体验包 + 审查修复（2026-08-07，非任务书轮）
 
 - 功能：web_search（ddg / tavily / bing / searxng）、lsp_diagnostics（写后

@@ -73,6 +73,28 @@ impl GraphIndex {
         self.store.search(query, kind, limit)
     }
 
+    /// 是否装配了语义嵌入后端（`open_with_embedder` 传入 Some）。
+    /// 未装配时 [`Self::search_best`] 逐字节走纯词法检索，结果与 [`Self::search`]
+    /// 严格一致；装配后 `search_code` 等工具自动启用 hybrid（语义 + 词法融合）。
+    pub fn has_embedder(&self) -> bool {
+        self.store.has_embedder()
+    }
+
+    /// 检索入口：装配了嵌入后端 → [`Self::search_hybrid`]（语义增强）；否则
+    /// 逐字节委托 [`Self::search`]（零行为变化）。工具调用方无需感知嵌入装配。
+    pub fn search_best(
+        &self,
+        query: &str,
+        kind: Option<NodeKind>,
+        limit: usize,
+    ) -> Result<Vec<Node>, GraphError> {
+        if self.has_embedder() {
+            self.search_hybrid(query, kind, limit)
+        } else {
+            self.search(query, kind, limit)
+        }
+    }
+
     /// 混合检索（词法 ∪ 语义），默认 `0.5*bm25 + 0.5*余弦`；嵌入不可用回落纯词法。
     pub fn search_hybrid(
         &self,
@@ -283,6 +305,32 @@ impl GraphIndex {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn search_best_without_embedder_is_byte_identical_to_search() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/lib.rs"),
+            "pub fn build_agent() {}\npub fn permission_gate_for() {}\n",
+        )
+        .unwrap();
+        let mut idx = GraphIndex::open(root, 1_048_576).unwrap();
+        idx.refresh().unwrap();
+        assert!(!idx.has_embedder(), "open 不装配嵌入后端");
+
+        for query in ["build_agent", "permission", "no_such_symbol", ""] {
+            let plain = idx.search(query, None, 10).unwrap();
+            let best = idx.search_best(query, None, 10).unwrap();
+            // 零回归保证：未装配嵌入时 search_code 的结果严格不变。
+            assert_eq!(best.len(), plain.len(), "query={query:?} 长度不一致");
+            for (b, p) in best.iter().zip(plain.iter()) {
+                assert_eq!(b.name, p.name, "query={query:?} 名称不一致");
+                assert_eq!(b.path, p.path, "query={query:?} 路径不一致");
+            }
+        }
+    }
 
     #[test]
     fn index_search_neighbors_skeleton_location_repomap() {

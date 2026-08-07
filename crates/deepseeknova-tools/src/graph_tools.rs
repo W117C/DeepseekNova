@@ -101,13 +101,25 @@ impl Tool for SearchCodeTool {
             Some(h) => h,
             None => return Ok(NO_INDEX_MSG.to_string()),
         };
-        let idx = lock_index(&handle)?;
 
         let kind = parsed.kind.as_deref().and_then(NodeKind::parse);
         let limit = parsed.limit.unwrap_or(10).min(50);
-        let nodes = match idx.search(&parsed.query, kind, limit) {
-            Ok(n) => n,
-            Err(e) => return Ok(graph_error_message("searching code", &e)),
+        let query = parsed.query.clone();
+        // `search_best`：装配了嵌入后端（`[memory] embedder = "remote"`）时走
+        // hybrid（语义+词法融合），否则逐字节委托 `search`（零行为变化）。
+        // 整个 lock+检索 经 spawn_blocking 移出 tokio worker——hybrid 路径的
+        // 查询嵌入是 HTTP（最长 30s），不能占用 worker 线程（与 remember/recall
+        // 工具同款模式）。
+        let nodes = match tokio::task::spawn_blocking(move || {
+            let idx = lock_index(&handle)?;
+            Ok::<_, anyhow::Error>(idx.search_best(&query, kind, limit))
+        })
+        .await
+        {
+            Ok(Ok(Ok(n))) => n,
+            Ok(Ok(Err(e))) => return Ok(graph_error_message("searching code", &e)),
+            Ok(Err(e)) => return Ok(format!("graph index unavailable: {e}")),
+            Err(e) => return Ok(format!("graph search task failed: {e}")),
         };
 
         if nodes.is_empty() {
