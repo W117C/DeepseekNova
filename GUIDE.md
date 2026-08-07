@@ -538,27 +538,60 @@ deepseeknova-cli scan --path crates/deepseeknova-cli --severity-min high
 
 ## Eval (CLI)
 
-`deepseeknova-cli eval` 用真实主 provider 逐条跑一个最小评估集，检查输出是否
-包含要求的关键内容，适合在迭代后快速回归「还做得到」的能力：
+`deepseeknova-cli eval` 用真实主 provider 逐条跑一个评估集，并按**分级评判**
+（评分卡综合分 / 单维 / 成本 / 子串）产出通过、失败与各断言明细，适合迭代后
+回归「还做得到」的能力，也可接入 CI 作为质量门槛：
 
 ```bash
 deepseeknova-cli eval evals.jsonl            # 默认输出 Markdown
 deepseeknova-cli eval --path evals.jsonl --format json
+deepseeknova-cli eval --require-min-score 3.5 \
+  --require-dimension governance>=0.9 --require-dimension 协议>=0.8   # CI 门禁
 ```
 
-每条用例是一行 JSON（支持 `#` 注释与空行）：
+每条用例是一行 JSON（支持 `#` 注释与空行）；**同一用例的多个断言 AND 语义**，
+全部满足才 pass：
 
 ```json
 {"prompt": "用一句话解释 Rust 的 Ownership", "must_contain": ["所有权", "move"]}
+{"prompt": "修复一个越权访问漏洞", "min_score": 0.8,
+ "dimension_min": {"governance": 0.9, "协议": 0.8}, "cost_max": 0.05, "rounds": 3,
+ "name": "越权修复"}
 ```
+
+| 断言字段 | 说明 |
+|---|---|
+| `must_contain` | 输出包含给定子串（保持兼容） |
+| `min_score` | 会话评分卡综合分下限。0..5 分制；`<= 1.0` 时按 0..1 折算（等价 `×5`），即 `0.8` 与 `4.0` 等价 |
+| `dimension_min.<name>` | 评分卡单维（0..1）下限；name 支持英文名 `governance/verification/reflection/review/protocol/composite` 与中文别名 `治理/验证/反思/审查/协议/综合` |
+| `cost_max` | 本用例全部轮次累计 token 成本（USD）上限 |
+| `rounds` | 重试轮次上限（默认 1 = 单轮；0 视为 1）。任一轮全部断言通过即停，报告记录实际轮次 |
+| `name` | 用例名（报告可读性；缺省用 `case N`） |
+
+> 成本单位为 USD（与 `[model_pointers]` 单价表口径一致）；未配置单价或调用
+> 未计量时 `cost_max` 断言判失败并注明「成本不可用」，不伪造数值。
 
 | 参数 | 说明 |
 |---|---|
 | `--path <file>` | JSONL 文件路径，默认 `evals.jsonl` |
 | `--format md\|json` | 报告格式，默认 `md` |
+| `--require-min-score <N>` | CI 门槛：全部用例综合分均值（0..5）下限 |
+| `--require-dimension <name>=<N>` | CI 门槛：单维均值（0..1）下限，可重复（name 支持英文名与中文别名） |
 
-结果按用例逐一列出 pass/fail 与缺失子串；JSON 报告包含总览与逐条明细，方便
-后续接入 CI 或脚本判定。
+结果按用例逐一列出 pass/fail 与各断言明细（实际值 vs 阈值）、综合分（0..5）、
+六维分数、成本与轮次；Markdown 报告末尾附 CI 门槛检查。进程退出码区分
+「条目级失败」与「CI 门槛失败」，供 CI 门禁：
+
+| 退出码 | 含义 |
+|---|---|
+| `0` | 全部用例通过且 CI 门槛满足 |
+| `1` | 仅条目级失败（有用例未通过，CI 门槛满足） |
+| `2` | 仅 CI 门槛失败（用例全过但均值未达门槛） |
+| `3` | 两者皆有 |
+
+> eval 的评分卡在内存中捕获，不写入 `.deepseeknova/metrics/`，避免污染
+> `GET /v1/metrics/scorecards` 的质量驾驶舱聚合；质量钩子（quality /
+> diagnose / protocol 门控）随 build_agent 照常生效。
 
 ### 检查点（A1）
 

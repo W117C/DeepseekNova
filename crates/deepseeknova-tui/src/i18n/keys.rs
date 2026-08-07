@@ -346,6 +346,38 @@ pub enum Key {
     /// 审批浮层标题。
     ApprovalTitle,
 
+    // ── 权限模式与工作区信任（P1-6）────────────────────────
+    /// 权限模式：plan。
+    PermModePlan,
+    /// 权限模式：accept_edits。
+    PermModeAcceptEdits,
+    /// 权限模式：auto。
+    PermModeAuto,
+    /// 权限模式：default（gate 未设预设，旧行为）。
+    PermModeLegacy,
+    /// 状态行权限模式指示（`{mode}`）。
+    PermModeIndicator,
+    /// 模式切换反馈（`{mode}`）。
+    PermModeNotice,
+    /// 模式切换不可用（未注入 PermissionGate）。
+    PermModeGateUnavailable,
+    /// /mode 用法。
+    PermModeUsage,
+    /// 命令描述：/mode。
+    CmdModeDesc,
+    /// 审批浮层的当前模式行（`{mode}`）。
+    ApprovalModeLine,
+    /// 信任确认浮层标题。
+    TrustTitle,
+    /// 信任确认正文（`{root}`、`{n}`）。
+    TrustPromptBody,
+    /// 信任确认键位提示。
+    TrustHint,
+    /// 已信任反馈。
+    TrustAccepted,
+    /// 未信任反馈。
+    TrustRejected,
+
     // ── 消息树系统段（model::apply）───────────────────────
     /// 暂停：步骤上限（`{n}`）。
     PauseMaxSteps,
@@ -584,7 +616,7 @@ impl Key {
             LinesIndicator => " │ lines {lines} scroll{scroll}%",
             QuitWarning => " │ ⚠ Press Esc again to exit",
             HintConversation => "{nav} navigate · {fold} fold · {copy} copy · {page} page · {top} top/bottom · Esc back to input",
-            HintInput => "/ commands · Ctrl+T mouse · Ctrl+U clear · Ctrl+W delete word · Shift+Enter newline · Esc cancel / Esc Esc exit",
+            HintInput => "/ commands · Ctrl+P perm mode · Ctrl+T mouse · Ctrl+U clear · Ctrl+W delete word · Shift+Enter newline · Esc cancel / Esc Esc exit",
             HintSidebar => "{nav} select session · Enter resume · {tab} switch panel · Esc close",
             HintCompletion => "↑↓ select · Enter insert · Esc close",
             HintHelp => "j/k or ↑/↓ scroll · PageUp/Down page · Esc/q close",
@@ -623,6 +655,23 @@ impl Key {
             RiskLabel => " Risk: {label}",
             ApprovalHint => "y allow · n deny · Esc deny",
             ApprovalTitle => "🔒 Request authorization",
+
+            // 权限模式与工作区信任
+            PermModePlan => "plan",
+            PermModeAcceptEdits => "accept_edits",
+            PermModeAuto => "auto",
+            PermModeLegacy => "default",
+            PermModeIndicator => " │ perm {mode}",
+            PermModeNotice => "Permission mode: {mode}",
+            PermModeGateUnavailable => "Permission mode switching unavailable (no gate)",
+            PermModeUsage => "Usage: /mode [plan|accept_edits|auto|cycle]",
+            CmdModeDesc => "Switch permission mode preset (plan/accept_edits/auto)",
+            ApprovalModeLine => " Current permission mode: {mode}",
+            TrustTitle => "🔒 Trust workspace?",
+            TrustPromptBody => "This project's config carries permission rules ({n}).\nTrust this workspace so project allow rules take effect?\nWorkspace: {root}\n(untrusted: project allow rules degrade to ask)",
+            TrustHint => "y trust · n untrusted · Esc untrusted",
+            TrustAccepted => "Workspace trusted — project allow rules active",
+            TrustRejected => "Workspace untrusted — project allow rules degraded to ask",
 
             // 系统段
             PauseMaxSteps => "Reached step limit ({n}), task incomplete",
@@ -820,7 +869,7 @@ impl Key {
             LinesIndicator => " │ lines {lines} 滚动{scroll}%",
             QuitWarning => " │ ⚠ 再按 Esc 退出",
             HintConversation => "{nav} 导航 · {fold} 折叠 · {copy} 复制 · {page} 翻页 · {top} 首尾 · Esc 回输入",
-            HintInput => "/ 命令 · Ctrl+T 鼠标 · Ctrl+U 清行 · Ctrl+W 删词 · Shift+Enter 换行 · Esc 取消/再按 Esc 退出",
+            HintInput => "/ 命令 · Ctrl+P 权限模式 · Ctrl+T 鼠标 · Ctrl+U 清行 · Ctrl+W 删词 · Shift+Enter 换行 · Esc 取消/再按 Esc 退出",
             HintSidebar => "{nav} 选择会话 · Enter 恢复 · {tab} 切面板 · Esc 关闭",
             HintCompletion => "↑↓ 选择 · Enter 插入 · Esc 关闭补全",
             HintHelp => "j/k 或 ↑/↓ 滚动 · PageUp/Down 翻页 · Esc/q 关闭",
@@ -858,6 +907,23 @@ impl Key {
             RiskLabel => " 风险：{label}",
             ApprovalHint => "y 允许 · n 拒绝 · Esc 拒绝",
             ApprovalTitle => "🔒 请求授权",
+
+            // 权限模式与工作区信任
+            PermModePlan => "plan",
+            PermModeAcceptEdits => "accept_edits",
+            PermModeAuto => "auto",
+            PermModeLegacy => "default",
+            PermModeIndicator => " │ 权限 {mode}",
+            PermModeNotice => "权限模式: {mode}",
+            PermModeGateUnavailable => "权限模式切换不可用（未注入 PermissionGate）",
+            PermModeUsage => "用法: /mode [plan|accept_edits|auto|cycle]",
+            CmdModeDesc => "切换权限模式预设（plan/accept_edits/auto）",
+            ApprovalModeLine => " 当前权限模式：{mode}",
+            TrustTitle => "🔒 信任该工作区？",
+            TrustPromptBody => "该项目配置带有权限规则（{n} 条）。\n信任该工作区以让项目 allow 规则生效？\n工作区: {root}\n（不信任则项目 allow 规则降级为 ask）",
+            TrustHint => "y 信任 · n 不信任 · Esc 不信任",
+            TrustAccepted => "已信任该工作区 — 项目 allow 规则生效",
+            TrustRejected => "未信任该工作区 — 项目 allow 规则降级为 ask",
 
             // 系统段
             PauseMaxSteps => "已达步骤上限（{n}），任务未完成",

@@ -17,6 +17,7 @@ ratatui = { workspace = true }
 crossterm = { workspace = true }
 unicode-width = { workspace = true }
 deepseeknova-core = { workspace = true }
+deepseeknova-permission = { workspace = true }
 deepseeknova-provider = { workspace = true }
 deepseeknova-skills = { workspace = true }
 async-trait = { workspace = true }

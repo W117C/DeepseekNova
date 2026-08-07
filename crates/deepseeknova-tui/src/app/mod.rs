@@ -160,6 +160,16 @@ pub async fn run_loop(
                 })
             });
         }
+        // 权限模式显示态：每帧从共享 gate 刷新（Ctrl+P 后立即反映）。
+        if let Some(gate) = caps
+            .runtime
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .permission
+            .clone()
+        {
+            app.permission_mode = gate.mode();
+        }
         terminal.draw(|f| app.draw(f))?;
 
         // 消费 Ctrl+K 面板待执行命令（真实 caps）。
@@ -169,6 +179,63 @@ pub async fn run_loop(
                 if cmd.handler.run(&mut ctx, &args).await == CommandOutcome::Quit {
                     return Ok(true);
                 }
+            }
+        }
+
+        // 消费 Ctrl+P 权限模式循环（真实 gate：set_mode + 反馈）。
+        if app.perm_mode_cycle {
+            app.perm_mode_cycle = false;
+            let gate = caps
+                .runtime
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .permission
+                .clone();
+            match gate {
+                Some(g) => {
+                    let next = crate::app::state::next_permission_mode(g.mode());
+                    g.set_mode(Some(next));
+                    app.permission_mode = Some(next);
+                    app.show_notice(
+                        app.tr.t_args(
+                            crate::i18n::Key::PermModeNotice,
+                            &[(
+                                "mode",
+                                app.tr
+                                    .t(crate::app::state::permission_mode_label(Some(next))),
+                            )],
+                        ),
+                    );
+                }
+                None => app.show_notice(app.tr.t(crate::i18n::Key::PermModeGateUnavailable)),
+            }
+        }
+
+        // 消费信任确认结果：y → TrustController 落盘 + gate.set_trusted(true)；
+        // n/Esc → 保持 untrusted（项目 allow 规则继续降级）。
+        if let Some(trust) = app.trust_decision.take() {
+            let (ctrl, root, gate) = {
+                let g = caps.runtime.lock().unwrap_or_else(|e| e.into_inner());
+                (
+                    caps.trust.clone(),
+                    caps.workspace_root.clone(),
+                    g.permission.clone(),
+                )
+            };
+            if trust {
+                let root = root.clone().unwrap_or_default();
+                if let Some(ctrl) = &ctrl {
+                    let _ = ctrl.trust(&root);
+                }
+                if let Some(gate) = &gate {
+                    gate.set_trusted(true);
+                }
+                app.show_notice(app.tr.t(crate::i18n::Key::TrustAccepted));
+            } else {
+                if let Some(gate) = &gate {
+                    gate.set_trusted(false);
+                }
+                app.show_notice(app.tr.t(crate::i18n::Key::TrustRejected));
             }
         }
 
@@ -558,6 +625,9 @@ mod tests {
             context_window: None,
             budget_window: None,
             approval_rx: None,
+            trust: None,
+            workspace_root: None,
+            project_rule_count: 0,
         };
         let mut app = AppState {
             tr: crate::i18n::Tr::new(crate::i18n::Lang::Zh),

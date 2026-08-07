@@ -54,7 +54,7 @@ use deepseeknova_provider::router::ModelRouter;
 
 pub use app::state::{
     McpProbe, McpServerInfo, McpStatus, ResumedLine, ResumedRole, SessionController, SessionMeta,
-    UndoController,
+    TrustController, UndoController,
 };
 pub use theme::Theme;
 
@@ -100,6 +100,14 @@ pub struct TuiRunner {
     budget_window: Option<u32>,
     /// 权限审批请求接收端（CLI 注入 agent 的 responder 通道）。
     approval_rx: Option<tokio::sync::mpsc::Receiver<crate::approval::ApprovalRequest>>,
+    /// 共享 PermissionGate（Ctrl+P / `/mode` 模式切换、信任确认）。
+    permission: Option<Arc<deepseeknova_permission::PermissionGate>>,
+    /// 工作区信任控制器（首进带权限规则的项目时弹确认浮层）。
+    trust: Option<Arc<dyn TrustController>>,
+    /// 工作区根目录（信任确认目标；`permission_gate_for` 的同一 root）。
+    workspace_root: Option<PathBuf>,
+    /// 项目层权限规则条数（信任确认浮层展示）。
+    project_rule_count: usize,
     /// 界面语言（`DEEPSEEKNOVA_LANG` 解析，缺省英文；`with_lang` 可覆盖）。
     lang: Lang,
 }
@@ -128,6 +136,10 @@ impl TuiRunner {
             context_window: None,
             budget_window: None,
             approval_rx: None,
+            permission: None,
+            trust: None,
+            workspace_root: None,
+            project_rule_count: 0,
             lang: Lang::from_env(),
         }
     }
@@ -146,6 +158,34 @@ impl TuiRunner {
         rx: tokio::sync::mpsc::Receiver<crate::approval::ApprovalRequest>,
     ) -> Self {
         self.approval_rx = Some(rx);
+        self
+    }
+
+    /// 注入共享 PermissionGate（与 agent 持有同一 gate），启用 Ctrl+P
+    /// 模式循环与 `/mode` 命令；信任确认会切换该 gate 的 trusted 状态。
+    pub fn with_permission_gate(
+        mut self,
+        gate: Arc<deepseeknova_permission::PermissionGate>,
+    ) -> Self {
+        self.permission = Some(gate);
+        self
+    }
+
+    /// 注入工作区信任控制器（`TrustStore` 实现）+ 工作区根，启用首进信任确认。
+    pub fn with_trust_controller(mut self, ctrl: Arc<dyn TrustController>) -> Self {
+        self.trust = Some(ctrl);
+        self
+    }
+
+    /// 工作区根目录（信任确认目标；与 `permission_gate_for` 的 root 一致）。
+    pub fn with_workspace_root(mut self, root: PathBuf) -> Self {
+        self.workspace_root = Some(root);
+        self
+    }
+
+    /// 项目层权限规则条数（信任确认浮层展示；0 = 无需确认）。
+    pub fn with_project_rule_count(mut self, n: usize) -> Self {
+        self.project_rule_count = n;
         self
     }
 
@@ -271,6 +311,7 @@ impl TuiRunner {
             baseline_effort: self.baseline_effort,
             factory: self.factory.clone(),
             router: self.router.clone(),
+            permission: self.permission.clone(),
         };
         let mut caps = TuiCaps {
             runtime: Arc::new(Mutex::new(runtime)),
@@ -282,6 +323,9 @@ impl TuiRunner {
             context_window: self.context_window,
             budget_window: self.budget_window,
             approval_rx: self.approval_rx.take(),
+            trust: self.trust.clone(),
+            workspace_root: self.workspace_root.clone(),
+            project_rule_count: self.project_rule_count,
         };
 
         let mut app = AppState {
@@ -291,6 +335,21 @@ impl TuiRunner {
             tr,
             ..Default::default()
         };
+        // 权限模式显示态：从 gate 首读（Ctrl+P 前即正确）。
+        if let Some(gate) = &self.permission {
+            app.permission_mode = gate.mode();
+        }
+        // 首进带权限规则的项目 → 信任确认浮层（未信任默认 fail-closed）。
+        let needs_prompt = self.project_rule_count > 0
+            && self.trust.is_some()
+            && self.workspace_root.is_some()
+            && self.permission.as_ref().is_some_and(|g| !g.trusted());
+        if needs_prompt {
+            app.trust_prompt = Some(crate::app::state::TrustPrompt {
+                workspace_root: self.workspace_root.clone().unwrap(),
+                rule_count: self.project_rule_count,
+            });
+        }
         // 与上方 EnableMouseCapture 保持一致：鼠标捕获默认开启。
         app.mouse_capture = true;
         // 用户键位定制（keybindings.json）：启动时加载，事件循环轮询热重载。

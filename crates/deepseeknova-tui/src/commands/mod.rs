@@ -87,6 +87,8 @@ pub struct TuiRuntime {
     pub factory: Option<RunnerFactory>,
     /// ModelRouter（启用 `/model use` 与 `/cost`）。
     pub router: Option<Arc<ModelRouter>>,
+    /// 共享 PermissionGate（Ctrl+P / `/mode` 模式切换、信任确认）。
+    pub permission: Option<Arc<deepseeknova_permission::PermissionGate>>,
 }
 
 impl Default for TuiRuntime {
@@ -99,6 +101,7 @@ impl Default for TuiRuntime {
             baseline_effort: ReasoningEffort::Disabled,
             factory: None,
             router: None,
+            permission: None,
         }
     }
 }
@@ -124,6 +127,12 @@ pub struct TuiCaps {
     pub budget_window: Option<u32>,
     /// 权限审批请求接收端（CLI 注入 agent 的 responder 通道）。
     pub approval_rx: Option<tokio::sync::mpsc::Receiver<crate::approval::ApprovalRequest>>,
+    /// 工作区信任控制器（首进带权限规则的项目时弹确认浮层）。
+    pub trust: Option<Arc<dyn crate::app::state::TrustController>>,
+    /// 工作区根目录（信任确认目标）。
+    pub workspace_root: Option<std::path::PathBuf>,
+    /// 项目层权限规则条数（信任确认浮层展示）。
+    pub project_rule_count: usize,
 }
 
 /// 命令执行上下文：AppState（渲染/回显/折叠）+ 注入能力。

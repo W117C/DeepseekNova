@@ -728,10 +728,19 @@ impl AppState {
         ));
         f.render_widget(hint, hint_area);
 
-        // ── 浮层（审批居中 / @ 补全与 /help 锚定输入框上方）────
-        if let Some(approval) = &self.pending_approval {
+        // ── 浮层（信任确认 / 审批居中 / @ 补全与 /help 锚定输入框上方）────
+        if let Some(trust) = &self.trust_prompt {
+            crate::render::trust::render_trust_prompt(
+                trust,
+                self.tr,
+                &theme,
+                f,
+                overlay(conv_area),
+            );
+        } else if let Some(approval) = &self.pending_approval {
             crate::render::approval::render_approval(
                 approval,
+                self.permission_mode,
                 self.tr,
                 &theme,
                 f,

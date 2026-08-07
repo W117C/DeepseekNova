@@ -22,6 +22,8 @@ pub enum Action {
     AppCancel,
     /// 切换侧边栏。
     AppToggleSidebar,
+    /// 循环切换权限模式预设（plan → accept_edits → auto）。
+    PermModeCycle,
     // ── 输入（Chat context）──────────────────────────────
     /// 提交输入。
     ChatSubmit,
@@ -93,6 +95,7 @@ impl Action {
             AppQuit => "app:quit",
             AppCancel => "app:cancel",
             AppToggleSidebar => "app:toggleSidebar",
+            PermModeCycle => "perm:cycleMode",
             ChatSubmit => "chat:submit",
             ChatNewline => "chat:newline",
             ChatClearInput => "chat:clearInput",
@@ -143,6 +146,7 @@ pub const ALL_ACTIONS: &[Action] = &[
     Action::AppQuit,
     Action::AppCancel,
     Action::AppToggleSidebar,
+    Action::PermModeCycle,
     Action::ChatSubmit,
     Action::ChatNewline,
     Action::ChatClearInput,
@@ -323,6 +327,11 @@ pub const BINDINGS: &[(ActionContext, Binding, Action)] = &[
         ActionContext::Input,
         Binding::new(KeyCode::Char('\\'), KeyModifiers::CONTROL),
         Action::AppToggleSidebar,
+    ),
+    (
+        ActionContext::Input,
+        Binding::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        Action::PermModeCycle,
     ),
     // ── Chat（输入聚焦）──────────────────────────────────
     (

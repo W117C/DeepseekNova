@@ -993,6 +993,7 @@ dependencies = [
  "async-trait",
  "crossterm",
  "deepseeknova-core",
+ "deepseeknova-permission",
  "deepseeknova-provider",
  "deepseeknova-skills",
  "dirs",

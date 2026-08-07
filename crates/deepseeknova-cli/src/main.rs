@@ -368,9 +368,20 @@ async fn main() -> anyhow::Result<()> {
         }
 
         // ── Eval ─────────────────────────────────────────────────────────
-        Some(Commands::Eval { path, format }) => {
+        Some(Commands::Eval {
+            path,
+            format,
+            require_min_score,
+            require_dimension,
+        }) => {
+            use deepseeknova_metrics::{Scorecard, SessionStats};
             use deepseeknova_provider::cost::ModelRole;
+
             let cases = eval::load_cases(path)?;
+            let ci = eval::CiThresholds {
+                min_score: *require_min_score,
+                dimension_min: require_dimension.clone(),
+            };
             let provider = model_router.provider_for(ModelRole::Main, None)?;
             let mcp_tools = deepseeknova_runtime::discover_mcp_tools(&config).await;
             let agent = build_agent(
@@ -384,18 +395,109 @@ async fn main() -> anyhow::Result<()> {
                 None,
             )?;
 
+            // eval 专属 metrics hook：把每次 run 的评分卡捕获进内存（替换
+            // build_agent 挂的落盘 hook，避免 eval 评分卡污染
+            // `.deepseeknova/metrics/` 质量驾驶舱聚合；quality/diagnose/
+            // protocol 等其他钩子不受影响）。每 run 恰好推一张卡，用例循环
+            // 按轮依次 pop。
+            let captured: Arc<std::sync::Mutex<Vec<Scorecard>>> =
+                Arc::new(std::sync::Mutex::new(Vec::new()));
+            let capture_hook: deepseeknova_agent::MetricsHook = {
+                let captured = Arc::clone(&captured);
+                Arc::new(
+                    move |stats: SessionStats, summary: deepseeknova_agent::QualitySummary| {
+                        let session_id = summary.session_id.clone().unwrap_or_default();
+                        let mut card = Scorecard::compute(
+                            &session_id,
+                            &stats,
+                            &summary.findings,
+                            summary.reflection_count,
+                            summary.review_issues,
+                            summary.review_passes,
+                        );
+                        card.fill_protocol(summary.protocol_violations, summary.phase_transitions);
+                        captured
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push(card);
+                    },
+                )
+            };
+            let agent = agent.with_metrics_hook(capture_hook);
+
+            // 成本按轮差分（CostLedger 为进程级累计，before/after 之差即本轮）。
+            let ledger = model_router.ledger();
+            let prices = model_router.price_table();
             let mut results = Vec::new();
-            for case in cases {
-                let output = run_eval_case(&agent, case.prompt.clone()).await?;
+            for (idx, case) in cases.iter().enumerate() {
+                let rounds = case.effective_rounds();
+                let mut round_passed = Vec::with_capacity(rounds as usize);
+                let mut round_values: Vec<eval::CaseValues> = Vec::with_capacity(rounds as usize);
+                let mut total_cost: Option<f64> = None;
+                let mut case_error: Option<String> = None;
+
+                for _ in 0..rounds {
+                    let cost_before = ledger.report(&prices).total_usd;
+                    let run = run_eval_case(&agent, case.prompt.clone()).await;
+                    let cost_after = ledger.report(&prices).total_usd;
+                    if let (Some(a), Some(b)) = (cost_before, cost_after) {
+                        let delta = (b - a).max(0.0);
+                        total_cost = Some(total_cost.unwrap_or(0.0) + delta);
+                    }
+                    // 本轮评分卡（metrics hook 每 run 恰好推一张）；run 失败时
+                    // hook 仍会经 Drop 兜底推一张（outcome=None），此处一并取出，
+                    // 避免残留污染下一轮。
+                    let card = captured.lock().unwrap_or_else(|e| e.into_inner()).pop();
+                    match run {
+                        Ok(output) => {
+                            let values = eval::CaseValues {
+                                output,
+                                card,
+                                cost_usd: total_cost,
+                            };
+                            let passed =
+                                eval::evaluate_case(case, &values).iter().all(|c| c.passed);
+                            round_passed.push(passed);
+                            round_values.push(values);
+                            if passed {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            round_passed.push(false);
+                            case_error = Some(format!("{e:#}"));
+                            break;
+                        }
+                    }
+                }
+
+                // 多轮选择：取首个通过轮，无通过轮取最后一轮。
+                let (used_idx, rounds_used) = eval::select_round(&round_passed);
+                let values = round_values.get(used_idx).cloned().unwrap_or_default();
+                let checks = eval::evaluate_case(case, &values);
+                let passed = checks.iter().all(|c| c.passed) && case_error.is_none();
                 results.push(eval::EvalResult {
-                    passed: eval::case_passes(&case, &output),
-                    case,
-                    output,
+                    name: case.label(idx),
+                    prompt: case.prompt.clone(),
+                    passed,
+                    checks,
+                    card: values.card,
+                    cost_usd: values.cost_usd,
+                    rounds: rounds_used as u32,
+                    output: values.output,
+                    error: case_error,
                 });
             }
+
+            let summary = eval::summarize(&results, ci);
+            let exit_code = eval::eval_exit_code(&summary);
             match format.as_str() {
-                "json" => println!("{}", eval::render_json(&results)),
-                _ => println!("{}", eval::render_markdown(&results)),
+                "json" => println!("{}", eval::render_json(&results, &summary)),
+                _ => println!("{}", eval::render_markdown(&results, &summary)),
+            }
+            if exit_code != 0 {
+                // 供 CI 门禁：1 = 条目级失败；2 = CI 门槛失败；3 = 两者。
+                std::process::exit(exit_code);
             }
         }
 
@@ -518,6 +620,20 @@ async fn main() -> anyhow::Result<()> {
                 }
                 tui = tui.with_context_window(context_window);
                 tui = tui.with_budget_window(budget_window);
+                // 权限模式切换（Ctrl+P / /mode）与工作区信任确认：gate 与 agent
+                // 持有同一实例（运行时已接 mode/trusted 初始状态）；TrustController
+                // 委托 config TrustStore（`~/.deepseeknova/trusted.toml`）。
+                let workspace_root = std::env::current_dir().unwrap_or_default();
+                if let Some(g) = deepseeknova_runtime::permission_gate_for(&config, &workspace_root)
+                {
+                    tui = tui.with_permission_gate(g.clone());
+                }
+                tui = tui
+                    .with_trust_controller(Arc::new(CliTrustController(
+                        deepseeknova_config::TrustStore::load(),
+                    )))
+                    .with_workspace_root(workspace_root)
+                    .with_project_rule_count(config.permissions.rules.len());
                 // @ 文件补全候选：工作区文件清单（GUIDE 声称"由 CLI 注入"）。
                 tui = tui.with_at_files(collect_at_files());
                 tui.run().await?;
@@ -1395,6 +1511,30 @@ async fn build_chat_persistence(
 /// `/resume` 与回合落盘（TUI crate 不依赖 CLI 类型）。
 struct TuiSessionController {
     persist: tokio::sync::Mutex<chat::ChatPersistence>,
+}
+
+/// TUI 工作区信任控制器：委托 config `TrustStore`（`~/.deepseeknova/trusted.toml`）。
+/// 首进带项目层权限规则的工作区时，TUI 弹信任确认浮层，`trust`/`untrust` 落盘
+/// 并切换共享 PermissionGate 的 trusted 状态（未信任则项目层 allow 降级 ask）。
+#[derive(Clone)]
+struct CliTrustController(deepseeknova_config::TrustStore);
+
+impl deepseeknova_tui::TrustController for CliTrustController {
+    fn is_trusted(&self, root: &std::path::Path) -> bool {
+        self.0.is_trusted(root)
+    }
+
+    fn trust(&self, root: &std::path::Path) -> anyhow::Result<()> {
+        let mut store = self.0.clone();
+        store.trust(root);
+        store.save()
+    }
+
+    fn untrust(&self, root: &std::path::Path) -> anyhow::Result<()> {
+        let mut store = self.0.clone();
+        store.untrust(root);
+        store.save()
+    }
 }
 
 #[async_trait::async_trait]

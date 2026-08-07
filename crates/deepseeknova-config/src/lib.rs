@@ -870,6 +870,11 @@ pub struct PermissionsConfig {
     #[serde(default)]
     pub default_mode: PermissionMode,
 
+    /// 权限模式预设（`plan` / `accept_edits` / `auto`）。`None`（缺省）保持旧
+    /// 行为（写工具回退到 `default_mode`）；显式配置时预设覆盖写工具默认裁决。
+    #[serde(default)]
+    pub mode: Option<ModePreset>,
+
     /// 无审批 responder（非交互/库级调用）时 `Ask` 决策的兜底行为。
     /// 默认 `deny`（fail-closed，与子代理侧 Ask 一律视作拒绝的语义一致）；
     /// 显式 `allow` 恢复旧的自动放行契约。
@@ -884,6 +889,12 @@ pub struct PermissionsConfig {
     /// Rules ordered by priority. First match wins.
     #[serde(default)]
     pub rules: Vec<PermissionRule>,
+
+    /// allow 规则是否源自项目层（`deepseeknova.toml`）。由 `Config::load` 在
+    /// 合并项目层后置位，不参与 TOML 序列化。untrusted 工作区据此把项目层
+    /// allow 规则降级为 ask（不能静默放行陌生项目的自配置规则）。
+    #[serde(skip)]
+    pub project_owns_rules: bool,
 }
 
 impl Default for PermissionsConfig {
@@ -891,9 +902,11 @@ impl Default for PermissionsConfig {
         Self {
             enabled: true,
             default_mode: PermissionMode::Ask,
+            mode: None,
             ask_without_responder: AskFallback::Deny,
             rate_limit_per_minute: None,
             rules: Vec::new(),
+            project_owns_rules: false,
         }
     }
 }
@@ -905,6 +918,25 @@ pub enum PermissionMode {
     Ask,
     Allow,
     Deny,
+}
+
+/// 权限模式预设（`[permissions] mode`）：一键切换写工具的默认裁决强度。
+///
+/// 三档（对齐 Codex sandbox_mode / Claude Code 权限模式循环）：
+/// - `plan`：写工具（write/edit/move、shell 写形态）默认 Ask；只读放行——最安全，
+///   等价零配置默认姿态；
+/// - `accept_edits`：文件编辑（write/edit/move）放行，shell 写形态仍 Ask；
+/// - `auto`：写工具全部放行（用户显式选择信任）。
+///
+/// `PermissionsConfig.mode` 为 `Option<ModePreset>`：`None`（缺省）保持旧行为
+/// （写工具回退到 `default_mode` / `Policy.mode`），显式配置才启用预设语义。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ModePreset {
+    #[default]
+    Plan,
+    AcceptEdits,
+    Auto,
 }
 
 /// 无审批 responder 时 `Ask` 决策的兜底（`permissions.ask_without_responder`）。
@@ -935,6 +967,105 @@ pub struct PermissionRule {
 
     /// What to do when this rule matches.
     pub mode: PermissionMode,
+}
+
+// ---------------------------------------------------------------------------
+// Workspace trust (工作区信任)
+// ---------------------------------------------------------------------------
+
+/// 工作区信任存储（`~/.deepseeknova/trusted.toml`）。
+///
+/// - **untrusted** 项目：项目层（`deepseeknova.toml`）的 allow 规则降级为 ask，
+///   不能静默放行陌生项目的自配置规则；
+/// - **trusted** 项目：项目层规则完整生效。
+///
+/// 默认（文件不存在/条目不含当前工作区）视为 untrusted——fail-closed，与
+/// 项目"默认安全姿态"一致。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TrustStore {
+    /// 已信任的工作区根目录（canonical 形式）。
+    #[serde(default)]
+    pub trusted: Vec<PathBuf>,
+}
+
+impl TrustStore {
+    /// 信任清单默认路径：`~/.deepseeknova/trusted.toml`。
+    pub fn default_path() -> PathBuf {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".deepseeknova")
+            .join("trusted.toml")
+    }
+
+    /// 从默认路径加载；文件缺失/解析失败返回空存储（不报错，fail-closed）。
+    pub fn load() -> Self {
+        Self::load_from(&Self::default_path())
+    }
+
+    /// 从指定路径加载（测试/嵌入方）。
+    pub fn load_from(path: &Path) -> Self {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|s| toml::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    /// 工作区根是否在信任清单中（先 canonicalize 归一化，失败回退词法）。
+    pub fn is_trusted(&self, root: &Path) -> bool {
+        let root = canon_or_lex(root);
+        self.trusted.iter().any(|t| canon_or_lex(t) == root)
+    }
+
+    /// 标记为信任（幂等；加入清单后由调用方 `save` 落盘）。
+    pub fn trust(&mut self, root: &Path) {
+        let root = canon_or_lex(root);
+        if !self.trusted.iter().any(|t| canon_or_lex(t) == root) {
+            self.trusted.push(root);
+        }
+    }
+
+    /// 撤销信任（幂等；由调用方 `save` 落盘）。
+    pub fn untrust(&mut self, root: &Path) {
+        let root = canon_or_lex(root);
+        self.trusted.retain(|t| canon_or_lex(t) != root);
+    }
+
+    /// 写入默认路径（父目录不存在时创建）。
+    pub fn save(&self) -> anyhow::Result<()> {
+        self.save_to(&Self::default_path())
+    }
+
+    /// 写入指定路径（测试/嵌入方）。
+    pub fn save_to(&self, path: &Path) -> anyhow::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let content = toml::to_string_pretty(self)?;
+        std::fs::write(path, content)?;
+        Ok(())
+    }
+}
+
+/// 路径归一化：优先 canonicalize（解析 symlink 与 `..`），失败回退词法折叠
+/// （如目录尚不存在时）。macOS 的 `/var` → `/private/var` 会在此对齐。
+fn canon_or_lex(p: &Path) -> PathBuf {
+    p.canonicalize().unwrap_or_else(|_| lexical(p))
+}
+
+/// 词法路径折叠（不访问文件系统）。
+fn lexical(p: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for comp in p.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -1422,21 +1553,41 @@ impl Config {
 
     /// Load with layered precedence: defaults → user → project → env.
     pub fn load() -> anyhow::Result<Self> {
+        let user_path = user_config_path();
+        Self::load_from_layers(
+            user_path.as_deref(),
+            PathBuf::from("deepseeknova.toml").as_path(),
+        )
+    }
+
+    /// 分层加载的路径显式版（测试/嵌入方传入 `~/.deepseeknova/config.toml` 与
+    /// `deepseeknova.toml` 的显式路径，避免依赖 cwd）。
+    ///
+    /// 与 [`Config::load`] 语义完全一致；额外在项目层贡献权限规则时置位
+    /// `permissions.project_owns_rules`（untrusted 工作区降级项目层 allow 用）。
+    #[doc(hidden)]
+    pub fn load_from_layers(user_path: Option<&Path>, project_path: &Path) -> anyhow::Result<Self> {
         let mut config = Config::default();
 
         // Layer 1: user-global config (~/.deepseeknova/config.toml)
-        if let Some(user_path) = user_config_path() {
+        if let Some(user_path) = user_path {
             if user_path.exists() {
-                let user = Self::load_from_file(&user_path)?;
+                let user = Self::load_from_file(user_path)?;
                 config.merge(user);
             }
         }
 
         // Layer 2: project-local config (./deepseeknova.toml)
-        let project_path = PathBuf::from("deepseeknova.toml");
+        let mut project_owns_rules = false;
         if project_path.exists() {
-            let project = Self::load_from_file(&project_path)?;
+            let project = Self::load_from_file(project_path)?;
+            if !project.permissions.rules.is_empty() {
+                project_owns_rules = true;
+            }
             config.merge(project);
+        }
+        if project_owns_rules {
+            config.permissions.project_owns_rules = true;
         }
 
         // Layer 3: environment variables
@@ -1749,6 +1900,9 @@ impl PermissionsConfig {
         }
         if other.default_mode != d.default_mode {
             self.default_mode = other.default_mode;
+        }
+        if other.mode.is_some() {
+            self.mode = other.mode;
         }
         if other.ask_without_responder != d.ask_without_responder {
             self.ask_without_responder = other.ask_without_responder;
@@ -2779,5 +2933,123 @@ mod tests {
         let c: Config = toml::from_str(toml).unwrap();
         assert!(!c.checkpoint.enabled);
         assert_eq!(c.checkpoint.path, "custom/ck.jsonl");
+    }
+
+    #[test]
+    fn permission_mode_preset_defaults_none_and_parses() {
+        // 缺省：None（旧行为），显式 `mode = "accept_edits"` 解析为预设。
+        let c = Config::default();
+        assert_eq!(c.permissions.mode, None, "缺省必须 None（保持旧行为）");
+        let c: Config = toml::from_str("[permissions]\nmode = \"accept_edits\"\n").unwrap();
+        assert_eq!(c.permissions.mode, Some(ModePreset::AcceptEdits));
+        let c: Config = toml::from_str("[permissions]\nmode = \"auto\"\n").unwrap();
+        assert_eq!(c.permissions.mode, Some(ModePreset::Auto));
+        let c: Config = toml::from_str("[permissions]\nmode = \"plan\"\n").unwrap();
+        assert_eq!(c.permissions.mode, Some(ModePreset::Plan));
+        // 未知值 → serde 报错（不静默回退）。
+        assert!(toml::from_str::<Config>("[permissions]\nmode = \"banana\"\n").is_err());
+    }
+
+    #[test]
+    fn permission_mode_preset_merges_across_layers() {
+        let mut base = Config::default();
+        // 用户层显式 accept_edits；项目层缺省（None）不得清掉。
+        base.merge(Config {
+            permissions: PermissionsConfig {
+                mode: Some(ModePreset::AcceptEdits),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        assert_eq!(base.permissions.mode, Some(ModePreset::AcceptEdits));
+        base.merge(Config {
+            memory: MemoryConfig {
+                min_steps: 8,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        assert_eq!(
+            base.permissions.mode,
+            Some(ModePreset::AcceptEdits),
+            "项目层缺省不得清掉用户层预设"
+        );
+        // 项目层显式 auto → 覆盖。
+        base.merge(Config {
+            permissions: PermissionsConfig {
+                mode: Some(ModePreset::Auto),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        assert_eq!(base.permissions.mode, Some(ModePreset::Auto));
+    }
+
+    #[test]
+    fn load_from_layers_marks_project_owned_rules() {
+        let tmp = tempfile::tempdir().unwrap();
+        // 项目层带 allow 规则 → project_owns_rules 置位。
+        let project = tmp.path().join("deepseeknova.toml");
+        std::fs::write(
+            &project,
+            "[permissions]\nmode = \"accept_edits\"\n\n[[permissions.rules]]\ntool = \"write_file\"\nmode = \"allow\"\n",
+        )
+        .unwrap();
+        let cfg = Config::load_from_layers(None, &project).unwrap();
+        assert!(cfg.permissions.project_owns_rules, "项目层规则必须置位");
+        assert_eq!(cfg.permissions.mode, Some(ModePreset::AcceptEdits));
+        assert_eq!(cfg.permissions.rules.len(), 1);
+
+        // 项目层无规则（只有无关段）→ 不置位。
+        let project2 = tmp.path().join("deepseeknova2.toml");
+        std::fs::write(&project2, "[metrics]\nenabled = false\n").unwrap();
+        let cfg = Config::load_from_layers(None, &project2).unwrap();
+        assert!(!cfg.permissions.project_owns_rules);
+        assert_eq!(cfg.permissions.mode, None);
+    }
+
+    #[test]
+    fn trust_store_roundtrip_and_lookup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("trusted.toml");
+        let root = tmp.path().join("some-workspace");
+        // 默认 untrusted（fail-closed）。
+        let store = TrustStore::load_from(&path);
+        assert!(!store.is_trusted(&root), "空存储默认 untrusted");
+
+        // trust → save → 重新 load 仍信任；untrust → 撤销。
+        let mut store = TrustStore::default();
+        store.trust(&root);
+        store.save_to(&path).unwrap();
+        let reloaded = TrustStore::load_from(&path);
+        assert!(reloaded.is_trusted(&root), "落盘后应识别为 trusted");
+        assert!(!reloaded.is_trusted(tmp.path()), "无关路径仍 untrusted");
+
+        let mut store = reloaded;
+        store.untrust(&root);
+        store.save_to(&path).unwrap();
+        assert!(
+            !TrustStore::load_from(&path).is_trusted(&root),
+            "untrust 后撤销"
+        );
+
+        // trust 幂等：重复加入不产生重复条目。
+        let mut store = TrustStore::default();
+        store.trust(&root);
+        store.trust(&root);
+        assert_eq!(store.trusted.len(), 1);
+    }
+
+    #[test]
+    fn trust_store_is_trusted_normalizes_paths() {
+        // 词法等价（`.`/`..` 折叠）应命中：trust 的目录尚不存在时 canonicalize
+        // 回退词法折叠，两个写法折叠后相同。
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = TrustStore::default();
+        let root = tmp.path().join("a").join("b");
+        store.trust(&root);
+        let variant = tmp.path().join("a").join("..").join("a").join("b");
+        assert!(store.is_trusted(&variant), "词法折叠后应命中");
+        assert!(!store.is_trusted(tmp.path()), "无关路径仍 untrusted");
     }
 }

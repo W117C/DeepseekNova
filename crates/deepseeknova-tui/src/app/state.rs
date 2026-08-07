@@ -40,6 +40,31 @@ pub fn display_mode_label(mode: DisplayMode) -> Key {
     }
 }
 
+/// 权限模式预设的用户可见标签键（状态栏/浮层指示）。
+pub fn permission_mode_label(mode: Option<deepseeknova_permission::PermissionMode>) -> Key {
+    use deepseeknova_permission::PermissionMode::*;
+    match mode {
+        None => Key::PermModeLegacy,
+        Some(Plan) => Key::PermModePlan,
+        Some(AcceptEdits) => Key::PermModeAcceptEdits,
+        Some(Auto) => Key::PermModeAuto,
+    }
+}
+
+/// 权限模式循环顺序（Ctrl+P / `/mode cycle`）：
+/// default(None) → plan → accept_edits → auto → plan → …
+pub fn next_permission_mode(
+    current: Option<deepseeknova_permission::PermissionMode>,
+) -> deepseeknova_permission::PermissionMode {
+    use deepseeknova_permission::PermissionMode::*;
+    match current {
+        None => Plan,
+        Some(Plan) => AcceptEdits,
+        Some(AcceptEdits) => Auto,
+        Some(Auto) => Plan,
+    }
+}
+
 /// 回显行（命令反馈）。
 #[derive(Debug, Clone)]
 pub struct UiLine {
@@ -101,6 +126,29 @@ pub trait UndoController: Send + Sync {
     async fn list(&self) -> anyhow::Result<Vec<String>>;
     async fn rollback_one(&self) -> anyhow::Result<Option<String>>;
     async fn rollback_all(&self) -> anyhow::Result<usize>;
+}
+
+/// 工作区信任控制器（由 CLI 用 config 的 `TrustStore` 实现）。
+///
+/// 首进带权限规则的项目时 TUI 弹信任确认浮层：`trust` 把工作区根写入
+/// `~/.deepseeknova/trusted.toml` 并解锁项目层 allow 规则；`untrusted` 项目
+/// 的项目层 allow 降级为 ask（不能静默放行陌生项目的自配置规则）。
+pub trait TrustController: Send + Sync {
+    /// 工作区根是否已信任。
+    fn is_trusted(&self, root: &std::path::Path) -> bool;
+    /// 标记为信任并落盘。
+    fn trust(&self, root: &std::path::Path) -> anyhow::Result<()>;
+    /// 撤销信任并落盘。
+    fn untrust(&self, root: &std::path::Path) -> anyhow::Result<()>;
+}
+
+/// 信任确认浮层内容（首次进入带权限规则的项目时展示）。
+#[derive(Debug, Clone)]
+pub struct TrustPrompt {
+    /// 工作区根目录（信任写入目标）。
+    pub workspace_root: std::path::PathBuf,
+    /// 项目层权限规则条数（展示用）。
+    pub rule_count: usize,
 }
 
 /// `/mcp` 展示的一个已启用 MCP server。
@@ -202,6 +250,15 @@ pub struct AppState {
     pub keymap_mtime: Option<std::time::SystemTime>,
     /// 待审批请求（agent 阻塞等待 y/n；无挂起请求为 None）。
     pub pending_approval: Option<crate::approval::ApprovalRequest>,
+    /// 当前权限模式预设（每帧从 PermissionGate 刷新；None = 旧行为）。
+    /// 状态栏指示 + 审批浮层模式上下文用。
+    pub permission_mode: Option<deepseeknova_permission::PermissionMode>,
+    /// Ctrl+P 循环切换权限模式的待消费标记（事件循环用真实 gate 消费）。
+    pub perm_mode_cycle: bool,
+    /// 信任确认浮层（首进带权限规则的项目时展示；None = 无需确认）。
+    pub trust_prompt: Option<TrustPrompt>,
+    /// 信任确认结果（y=true / n|Esc=false；事件循环用 TrustController 消费）。
+    pub trust_decision: Option<bool>,
     /// Esc 二次确认退出：首次 Esc 置位（提示再按一次退出），
     /// 3 秒无后续按键或任意非 Esc 键复位；与 Claude Code
     /// "Esc Esc / press Esc again to exit" 防误触设计一致。
@@ -1199,4 +1256,82 @@ mod tests {
     }
 
     // 迁移占位：原 lib.rs 的输入/滚动测试在 input/editor 模块，见 Task 4。
+
+    #[test]
+    fn permission_mode_cycle_order() {
+        use deepseeknova_permission::PermissionMode::*;
+        assert_eq!(next_permission_mode(None), Plan, "default → plan");
+        assert_eq!(next_permission_mode(Some(Plan)), AcceptEdits);
+        assert_eq!(next_permission_mode(Some(AcceptEdits)), Auto);
+        assert_eq!(next_permission_mode(Some(Auto)), Plan, "auto 回绕到 plan");
+    }
+
+    #[test]
+    fn permission_mode_label_maps_to_keys() {
+        use deepseeknova_permission::PermissionMode::*;
+        assert_eq!(permission_mode_label(None), Key::PermModeLegacy);
+        assert_eq!(permission_mode_label(Some(Plan)), Key::PermModePlan);
+        assert_eq!(
+            permission_mode_label(Some(AcceptEdits)),
+            Key::PermModeAcceptEdits
+        );
+        assert_eq!(permission_mode_label(Some(Auto)), Key::PermModeAuto);
+        // 模式名中英一致（词表值）。
+        let tr = Tr::new(crate::i18n::Lang::En);
+        assert_eq!(
+            tr.t(permission_mode_label(Some(AcceptEdits))),
+            "accept_edits"
+        );
+        let tr_zh = Tr::new(crate::i18n::Lang::Zh);
+        assert_eq!(
+            tr_zh.t(permission_mode_label(Some(AcceptEdits))),
+            "accept_edits"
+        );
+    }
+
+    #[test]
+    fn trust_prompt_key_handling() {
+        let mut app = AppState {
+            trust_prompt: Some(TrustPrompt {
+                workspace_root: std::path::PathBuf::from("/ws"),
+                rule_count: 2,
+            }),
+            ..Default::default()
+        };
+        // y → 决策 true，浮层关闭。
+        app.handle_key(&KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert_eq!(app.trust_decision, Some(true));
+        assert!(app.trust_prompt.is_none());
+        // 再次弹出 → n → 决策 false。
+        app.trust_prompt = Some(TrustPrompt {
+            workspace_root: std::path::PathBuf::from("/ws"),
+            rule_count: 2,
+        });
+        app.handle_key(&KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert_eq!(app.trust_decision, Some(false));
+        assert!(app.trust_prompt.is_none());
+    }
+
+    #[test]
+    fn ctrl_p_cycles_perm_mode_via_modal_shortcuts() {
+        let mut app = AppState {
+            tr: Tr::new(crate::i18n::Lang::Zh),
+            ..Default::default()
+        };
+        let key = |code: KeyCode, modifiers: KeyModifiers| KeyEvent {
+            code,
+            modifiers,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        };
+        assert!(
+            app.handle_modal_shortcuts(&key(KeyCode::Char('p'), KeyModifiers::CONTROL)),
+            "Ctrl+P 是全局热键"
+        );
+        assert!(app.perm_mode_cycle, "置位循环标记");
+        // 其余键不影响 perm_mode_cycle。
+        app.perm_mode_cycle = false;
+        assert!(!app.handle_modal_shortcuts(&key(KeyCode::Char('q'), KeyModifiers::NONE)));
+        assert!(!app.perm_mode_cycle);
+    }
 }

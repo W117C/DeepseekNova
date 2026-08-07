@@ -22,6 +22,74 @@ pub enum Decision {
 }
 
 // ---------------------------------------------------------------------------
+// PermissionMode — 权限模式预设（PermissionGate 运行时状态，可切换）
+// ---------------------------------------------------------------------------
+
+/// 权限模式预设（对齐 Codex sandbox_mode / Claude Code 权限模式循环）。
+///
+/// 作为 [`PermissionGate`] 的运行时状态：`None`（缺省）保持旧行为（写工具
+/// 回退到 [`Policy::mode`]），显式设置后按工具类别决定写工具的默认裁决。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionMode {
+    /// plan：写工具（文件编辑 + shell 写形态）默认询问；只读放行（最安全）。
+    #[default]
+    Plan,
+    /// accept_edits：文件编辑（write/edit/move）放行，shell 写形态询问。
+    AcceptEdits,
+    /// auto：写工具全部放行（用户显式选择信任）。
+    Auto,
+}
+
+impl PermissionMode {
+    /// 当前预设下，无规则命中时写工具的默认裁决。
+    pub fn fallback_for(self, tool_name: &str) -> Decision {
+        match self {
+            PermissionMode::Plan => Decision::Ask,
+            PermissionMode::AcceptEdits => {
+                if is_file_edit_tool(tool_name) {
+                    Decision::Allow
+                } else {
+                    Decision::Ask
+                }
+            }
+            PermissionMode::Auto => Decision::Allow,
+        }
+    }
+}
+
+impl From<deepseeknova_config::ModePreset> for PermissionMode {
+    fn from(p: deepseeknova_config::ModePreset) -> Self {
+        match p {
+            deepseeknova_config::ModePreset::Plan => PermissionMode::Plan,
+            deepseeknova_config::ModePreset::AcceptEdits => PermissionMode::AcceptEdits,
+            deepseeknova_config::ModePreset::Auto => PermissionMode::Auto,
+        }
+    }
+}
+
+/// 文件编辑类工具（accept_edits 模式放行的集合）。
+///
+/// 覆盖 snake_case 工具名；别名（`patch`/`apply_patch` 等）一并包含，
+/// 未知名称不命中（落入 Ask）。
+fn is_file_edit_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name.to_ascii_lowercase().as_str(),
+        "write"
+            | "write_file"
+            | "edit"
+            | "edit_file"
+            | "move"
+            | "move_file"
+            | "todo_write"
+            | "patch"
+            | "apply_patch"
+            | "applypatch"
+            | "create_file"
+    )
+}
+
+// ---------------------------------------------------------------------------
 // CheckVerdict — decision contract (behavior + reason + suggestions)
 // ---------------------------------------------------------------------------
 
@@ -190,7 +258,28 @@ impl Rule {
 
 impl Policy {
     /// Evaluate the policy for a given tool call.
+    ///
+    /// 旧契约：写工具回退到 `self.mode`，allow 规则恒生效。等价于
+    /// `decide_effective(..., None, false)`——无模式预设、无信任降级。
     pub fn decide(&self, tool_name: &str, read_only: bool, args: &Value) -> Decision {
+        self.decide_effective(tool_name, read_only, args, None, false)
+    }
+
+    /// 统一裁决链（模式预设 + 信任降级感知）。
+    ///
+    /// 规则优先级不变：deny > ask > allow > 回退。
+    /// - `preset`（Some）：覆盖写工具默认回退（按工具类别，见
+    ///   [`PermissionMode::fallback_for`]）；`None` 用 `self.mode`（旧行为）。
+    /// - `degrade_allow`：为真时 allow 规则命中降级为 `Ask`——untrusted
+    ///   工作区的项目层 allow 规则不得静默放行陌生项目的自配置规则。
+    pub fn decide_effective(
+        &self,
+        tool_name: &str,
+        read_only: bool,
+        args: &Value,
+        preset: Option<PermissionMode>,
+        degrade_allow: bool,
+    ) -> Decision {
         // Deny always wins
         if self.matches_any(tool_name, args, &self.deny) {
             return Decision::Deny;
@@ -201,13 +290,20 @@ impl Policy {
         }
         // Explicit allow
         if self.matches_any(tool_name, args, &self.allow) {
-            return Decision::Allow;
+            return if degrade_allow {
+                Decision::Ask
+            } else {
+                Decision::Allow
+            };
         }
-        // Fallback: reader tools are allowed, writers follow mode
+        // Fallback: reader tools are allowed, writers follow mode/preset
         if read_only {
             Decision::Allow
         } else {
-            self.mode
+            match preset {
+                Some(m) => m.fallback_for(tool_name),
+                None => self.mode,
+            }
         }
     }
 
@@ -355,6 +451,13 @@ pub struct PermissionGate {
     rate_limit_per_minute: Option<u32>,
     /// Timestamps of recent gated calls (rolling 60s window).
     call_times: std::sync::Mutex<std::collections::VecDeque<std::time::Instant>>,
+    /// 权限模式预设（运行时状态，可切换）。`None` = 旧行为（回退
+    /// [`Policy::mode`]）；`Some` = 按工具类别决定写工具默认裁决。
+    mode: std::sync::Mutex<Option<PermissionMode>>,
+    /// 工作区信任状态：`false`（默认，fail-closed）时项目层 allow 规则降级。
+    trusted: std::sync::Mutex<bool>,
+    /// allow 规则是否源自项目层（untrusted 时降级为 ask）。
+    allow_project_scoped: bool,
 }
 
 impl PermissionGate {
@@ -365,6 +468,9 @@ impl PermissionGate {
             workspace_root: None,
             rate_limit_per_minute: None,
             call_times: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            mode: std::sync::Mutex::new(None),
+            trusted: std::sync::Mutex::new(false),
+            allow_project_scoped: false,
         }
     }
 
@@ -372,6 +478,57 @@ impl PermissionGate {
     pub fn with_workspace_root(mut self, root: impl Into<std::path::PathBuf>) -> Self {
         self.workspace_root = Some(root.into());
         self
+    }
+
+    /// 设置初始权限模式预设（config `[permissions] mode` 注入）。
+    pub fn with_mode(self, mode: Option<PermissionMode>) -> Self {
+        if let Ok(mut m) = self.mode.lock() {
+            *m = mode;
+        }
+        self
+    }
+
+    /// 标记 allow 规则是否源自项目层（trust 降级开关）。
+    pub fn with_allow_project_scoped(mut self, scoped: bool) -> Self {
+        self.allow_project_scoped = scoped;
+        self
+    }
+
+    /// 设置初始工作区信任状态（`TrustStore` 解析结果注入）。
+    pub fn with_trusted(self, trusted: bool) -> Self {
+        if let Ok(mut t) = self.trusted.lock() {
+            *t = trusted;
+        }
+        self
+    }
+
+    /// 切换权限模式预设（TUI Ctrl+P / `/mode` 运行时调用）。
+    pub fn set_mode(&self, mode: Option<PermissionMode>) {
+        if let Ok(mut m) = self.mode.lock() {
+            *m = mode;
+        }
+    }
+
+    /// 当前权限模式预设（`None` = 旧行为）。
+    pub fn mode(&self) -> Option<PermissionMode> {
+        self.mode.lock().map(|m| *m).unwrap_or(None)
+    }
+
+    /// 切换工作区信任状态（TUI 信任确认后调用）。
+    pub fn set_trusted(&self, trusted: bool) {
+        if let Ok(mut t) = self.trusted.lock() {
+            *t = trusted;
+        }
+    }
+
+    /// 当前工作区信任状态。
+    pub fn trusted(&self) -> bool {
+        self.trusted.lock().map(|t| *t).unwrap_or(false)
+    }
+
+    /// allow 规则是否源自项目层。
+    pub fn allow_project_scoped(&self) -> bool {
+        self.allow_project_scoped
     }
 
     /// Enable rate limiting: at most `limit` gated tool calls per rolling minute.
@@ -475,24 +632,42 @@ impl PermissionGate {
         }
 
         // Evaluate policy; attach "拒绝即教育" suggestions on ask/deny.
-        match self.policy.decide(tool_name, tool.read_only(), &args_value) {
+        // - 模式预设（self.mode）覆盖写工具默认回退；
+        // - untrusted + 项目层 allow 规则 → 降级为 Ask（不能静默放行陌生
+        //   项目的自配置规则），此时不附加"添加规则即可放行"建议（规则已存在，
+        //   正确做法是信任项目而非新增规则）。
+        let degrade_allow = !self.trusted() && self.allow_project_scoped;
+        let allow_hit = degrade_allow
+            && self
+                .policy
+                .matching_rule(tool_name, &args_value, &self.policy.allow)
+                .is_some();
+        match self.policy.decide_effective(
+            tool_name,
+            tool.read_only(),
+            &args_value,
+            self.mode(),
+            degrade_allow,
+        ) {
             Decision::Allow => CheckVerdict::allow(),
             Decision::Ask => {
                 // 区分"显式 ask 规则命中"与"mode 回退 Ask"：
                 // - 显式规则命中 → 只读命令也不得短路（用户明确要求确认，
                 //   F3 修复：与 deny 同优先级语义，方向对称）
                 // - mode 回退（无规则命中）→ 只读命令免询问放行
-                if readonly_cmd
-                    && self
-                        .policy
-                        .matching_rule(tool_name, &args_value, &self.policy.ask)
-                        .is_none()
-                {
+                let explicit_ask = self
+                    .policy
+                    .matching_rule(tool_name, &args_value, &self.policy.ask)
+                    .is_some();
+                if readonly_cmd && !explicit_ask {
                     CheckVerdict::allow()
                 } else {
                     let mut v = CheckVerdict::ask("requires user approval");
-                    for s in suggest_allow(tool_name, &args_value) {
-                        v = v.with_suggestion(s);
+                    // 仅当 Ask 来自被降级的 allow 规则时抑制建议。
+                    if !(allow_hit && !explicit_ask) {
+                        for s in suggest_allow(tool_name, &args_value) {
+                            v = v.with_suggestion(s);
+                        }
                     }
                     v
                 }
@@ -1606,5 +1781,229 @@ mod tests {
         });
         let paths = extract_paths(&v);
         assert_eq!(paths, vec!["s.txt", "d.txt", "nested.rs"]);
+    }
+
+    // --- 权限模式预设：同一规则不同模式下裁决不同 ---
+
+    /// 无规则、模式回退驱动的 gate（写工具默认裁决由预设决定）。
+    fn ask_policy_gate() -> PermissionGate {
+        PermissionGate::new(Policy {
+            mode: Decision::Ask,
+            allow: vec![],
+            ask: vec![],
+            deny: vec![],
+        })
+    }
+
+    #[test]
+    fn mode_plan_asks_writers_allows_readers() {
+        let gate = ask_policy_gate().with_mode(Some(PermissionMode::Plan));
+        let writer = NamedTool::writer("write_file");
+        assert_eq!(gate.check(&writer, "{}").decision(), Decision::Ask);
+        let shell = NamedTool::writer("bash");
+        assert_eq!(
+            gate.check(&shell, r#"{"command": "git push"}"#).decision(),
+            Decision::Ask
+        );
+        let reader = NamedTool {
+            name: "read_file",
+            read_only: true,
+        };
+        // 只读工具按 read_only fallback 放行
+        let v = gate.check(&reader, "{}");
+        assert_eq!(v.decision(), Decision::Allow);
+    }
+
+    #[test]
+    fn mode_accept_edits_allows_file_edits_asks_shell_writes() {
+        let gate = ask_policy_gate().with_mode(Some(PermissionMode::AcceptEdits));
+        let writer = NamedTool::writer("write_file");
+        assert_eq!(gate.check(&writer, "{}").decision(), Decision::Allow);
+        let editor = NamedTool::writer("edit_file");
+        assert_eq!(gate.check(&editor, "{}").decision(), Decision::Allow);
+        let mover = NamedTool::writer("move_file");
+        assert_eq!(
+            gate.check(&mover, r#"{"source":"a","destination":"b"}"#)
+                .decision(),
+            Decision::Allow
+        );
+        let shell = NamedTool::writer("bash");
+        assert_eq!(
+            gate.check(&shell, r#"{"command": "git push"}"#).decision(),
+            Decision::Ask,
+            "accept_edits 下 shell 写形态仍询问"
+        );
+        // 只读命令仍免询问
+        assert_eq!(
+            gate.check(&shell, r#"{"command": "git status"}"#)
+                .decision(),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn mode_auto_allows_all_writers() {
+        let gate = ask_policy_gate().with_mode(Some(PermissionMode::Auto));
+        let writer = NamedTool::writer("write_file");
+        assert_eq!(gate.check(&writer, "{}").decision(), Decision::Allow);
+        let shell = NamedTool::writer("bash");
+        assert_eq!(
+            gate.check(&shell, r#"{"command": "git push"}"#).decision(),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn mode_none_keeps_legacy_policy_mode() {
+        // 预设 None（缺省）→ 写工具回退 Policy.mode（Ask）。
+        let gate = ask_policy_gate(); // mode: None by default
+        assert_eq!(gate.mode(), None);
+        let writer = NamedTool::writer("write_file");
+        assert_eq!(gate.check(&writer, "{}").decision(), Decision::Ask);
+        // 显式回退 None：恢复旧行为。
+        let gate = ask_policy_gate().with_mode(Some(PermissionMode::Auto));
+        gate.set_mode(None);
+        assert_eq!(gate.check(&writer, "{}").decision(), Decision::Ask);
+    }
+
+    #[test]
+    fn mode_does_not_override_deny_or_ask_rules() {
+        // 规则优先级不因模式改变：deny/ask 恒优先于 allow/回退。
+        let gate = PermissionGate::new(Policy {
+            mode: Decision::Ask,
+            allow: vec![],
+            ask: vec![Rule::with_subject("bash", "git *")],
+            deny: vec![Rule::with_subject("bash", "rm *")],
+        })
+        .with_mode(Some(PermissionMode::Auto));
+        let shell = NamedTool::writer("bash");
+        // deny 优先
+        assert_eq!(
+            gate.check(&shell, r#"{"command": "rm -rf /tmp/x"}"#)
+                .decision(),
+            Decision::Deny
+        );
+        // 显式 ask 规则优先（即使 auto 模式）
+        assert_eq!(
+            gate.check(&shell, r#"{"command": "git push"}"#).decision(),
+            Decision::Ask
+        );
+    }
+
+    #[test]
+    fn permission_mode_serde_roundtrip() {
+        let s = serde_json::to_string(&PermissionMode::AcceptEdits).unwrap();
+        assert_eq!(s, "\"accept_edits\"");
+        assert_eq!(
+            serde_json::from_str::<PermissionMode>("\"plan\"").unwrap(),
+            PermissionMode::Plan
+        );
+        assert_eq!(
+            serde_json::from_str::<PermissionMode>("\"auto\"").unwrap(),
+            PermissionMode::Auto
+        );
+    }
+
+    // --- 工作区信任：untrusted 项目层 allow 降级为 ask ---
+
+    fn project_allow_gate() -> PermissionGate {
+        PermissionGate::new(Policy {
+            mode: Decision::Ask,
+            allow: vec![Rule::new("write_file")],
+            ask: vec![],
+            deny: vec![],
+        })
+        .with_allow_project_scoped(true)
+    }
+
+    #[test]
+    fn untrusted_project_allow_degrades_to_ask() {
+        let gate = project_allow_gate(); // trusted=false 默认
+        assert!(!gate.trusted());
+        let writer = NamedTool::writer("write_file");
+        let v = gate.check(&writer, "{}");
+        assert_eq!(
+            v.decision(),
+            Decision::Ask,
+            "untrusted 下项目层 allow 规则必须降级为 ask"
+        );
+        // 降级 Ask 不附"添加规则即可放行"建议（规则已存在，应信任项目）。
+        assert!(
+            v.suggestions().is_empty(),
+            "降级 ask 不应建议添加规则: {:?}",
+            v.suggestions()
+        );
+    }
+
+    #[test]
+    fn trusted_project_allow_works() {
+        let gate = project_allow_gate().with_trusted(true);
+        assert!(gate.trusted());
+        let writer = NamedTool::writer("write_file");
+        assert_eq!(gate.check(&writer, "{}").decision(), Decision::Allow);
+        // 运行时切换回 untrusted → 降级恢复。
+        gate.set_trusted(false);
+        assert_eq!(gate.check(&writer, "{}").decision(), Decision::Ask);
+    }
+
+    #[test]
+    fn user_scoped_allow_is_not_degraded_when_untrusted() {
+        // allow_project_scoped=false（用户层规则）→ untrusted 也不降级。
+        let gate = PermissionGate::new(Policy {
+            mode: Decision::Ask,
+            allow: vec![Rule::new("write_file")],
+            ask: vec![],
+            deny: vec![],
+        }); // allow_project_scoped=false, trusted=false
+        let writer = NamedTool::writer("write_file");
+        assert_eq!(gate.check(&writer, "{}").decision(), Decision::Allow);
+    }
+
+    #[test]
+    fn untrusted_downgraded_allow_readonly_still_auto_allows() {
+        // 项目层 allow 规则命中只读命令并被降级 → 只读仍免询问放行
+        //（只读命令本就安全，降级针对写操作）。
+        let gate = PermissionGate::new(Policy {
+            mode: Decision::Ask,
+            allow: vec![Rule::with_subject("bash", "git *")],
+            ask: vec![],
+            deny: vec![],
+        })
+        .with_allow_project_scoped(true);
+        let shell = NamedTool::writer("bash");
+        assert_eq!(
+            gate.check(&shell, r#"{"command": "git status"}"#)
+                .decision(),
+            Decision::Allow,
+            "只读命令在降级下仍放行"
+        );
+    }
+
+    #[test]
+    fn decide_effective_honors_precedence_with_degrade() {
+        // 直接测 Policy 层：degrade_allow 只影响 allow 命中，不影响 deny/ask。
+        let policy = Policy {
+            mode: Decision::Ask,
+            allow: vec![Rule::new("write_file")],
+            ask: vec![Rule::with_subject("write_file", "secret*")],
+            deny: vec![],
+        };
+        let args = serde_json::json!({ "path": "x" });
+        // allow 命中 + degrade → Ask
+        assert_eq!(
+            policy.decide_effective("write_file", false, &args, None, true),
+            Decision::Ask
+        );
+        // allow 命中 + 不 degrade → Allow
+        assert_eq!(
+            policy.decide_effective("write_file", false, &args, None, false),
+            Decision::Allow
+        );
+        // 显式 ask 规则优先于降级
+        let secret = serde_json::json!({ "path": "secret-file" });
+        assert_eq!(
+            policy.decide_effective("write_file", false, &secret, None, true),
+            Decision::Ask
+        );
     }
 }

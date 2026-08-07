@@ -23,9 +23,16 @@ fn risk_label_key(label: &str) -> Option<Key> {
     }
 }
 
-/// 审批浮层渲染：标题「🔒 请求授权」+ 请求内容 + y/n 提示。
-/// 文案按 `tr` 语言取词表。
-pub fn render_approval(req: &ApprovalRequest, tr: Tr, theme: &Theme, f: &mut Frame, area: Rect) {
+/// 审批浮层渲染：标题「🔒 请求授权」+ 请求内容 + 当前权限模式 + y/n 提示。
+/// 文案按 `tr` 语言取词表。`mode` 为当前权限模式预设（None = 旧行为，不显示）。
+pub fn render_approval(
+    req: &ApprovalRequest,
+    mode: Option<deepseeknova_permission::PermissionMode>,
+    tr: Tr,
+    theme: &Theme,
+    f: &mut Frame,
+    area: Rect,
+) {
     let border = Style::default().fg(theme
         .verification_fail
         .fg
@@ -35,6 +42,19 @@ pub fn render_approval(req: &ApprovalRequest, tr: Tr, theme: &Theme, f: &mut Fra
         req.title.clone(),
         Style::default().add_modifier(Modifier::BOLD),
     )));
+    // 当前权限模式上下文（安全可见性：审批时用户看到预设裁决强度）。
+    if let Some(m) = mode {
+        lines.push(Line::from(Span::styled(
+            tr.t_args(
+                Key::ApprovalModeLine,
+                &[(
+                    "mode",
+                    tr.t(crate::app::state::permission_mode_label(Some(m))),
+                )],
+            ),
+            Style::default().add_modifier(Modifier::DIM),
+        )));
+    }
     // 风险标签（agent Ask 描述前缀 `[风险:只读|非只读|危险]`）。
     let mut risk: Option<String> = None;
     if let Some(desc) = &req.description {
@@ -111,7 +131,7 @@ mod tests {
         terminal
             .draw(|f| {
                 let area = f.area();
-                render_approval(&sample(), tr, &theme, f, area);
+                render_approval(&sample(), None, tr, &theme, f, area);
             })
             .unwrap();
     }
@@ -132,7 +152,7 @@ mod tests {
         terminal
             .draw(|f| {
                 let area = f.area();
-                render_approval(&req, tr, &theme, f, area);
+                render_approval(&req, None, tr, &theme, f, area);
             })
             .unwrap();
         let text: String = terminal
@@ -155,7 +175,7 @@ mod tests {
         terminal
             .draw(|f| {
                 let area = f.area();
-                render_approval(&req, tr_en, &theme, f, area);
+                render_approval(&req, None, tr_en, &theme, f, area);
             })
             .unwrap();
         let text: String = terminal
@@ -168,6 +188,74 @@ mod tests {
         assert!(
             text.replace(' ', "").contains("Risk:non-read-only"),
             "英文风险标签: {text}"
+        );
+    }
+
+    #[test]
+    fn renders_current_mode_context() {
+        let (reply, _rx) = oneshot::channel();
+        let req = ApprovalRequest {
+            id: "a3".into(),
+            title: "Allow tool: write_file".into(),
+            description: None,
+            reply,
+        };
+        let theme = Theme::default();
+        let tr = Tr::new(crate::i18n::Lang::En);
+        let buf = ratatui::backend::TestBackend::new(50, 12);
+        let mut terminal = ratatui::Terminal::new(buf).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render_approval(
+                    &req,
+                    Some(deepseeknova_permission::PermissionMode::AcceptEdits),
+                    tr,
+                    &theme,
+                    f,
+                    area,
+                );
+            })
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            text.replace(' ', "")
+                .contains("Currentpermissionmode:accept_edits"),
+            "审批浮层应显示当前模式: {text}"
+        );
+        // 中文模式：模式名本身中英一致（accept_edits）。
+        let tr_zh = Tr::new(crate::i18n::Lang::Zh);
+        let buf = ratatui::backend::TestBackend::new(50, 12);
+        let mut terminal = ratatui::Terminal::new(buf).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render_approval(
+                    &req,
+                    Some(deepseeknova_permission::PermissionMode::AcceptEdits),
+                    tr_zh,
+                    &theme,
+                    f,
+                    area,
+                );
+            })
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            text.replace(' ', "").contains("当前权限模式：accept_edits"),
+            "{text}"
         );
     }
 }

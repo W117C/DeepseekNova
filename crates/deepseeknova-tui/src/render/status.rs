@@ -14,6 +14,7 @@ use crate::theme::Theme;
 /// 先丢 usage 明细 → lines → turn → 折叠 → 成本 → ctx → 模型/运行态 → 退出警示。
 const PRIO_QUIT: u8 = 10;
 const PRIO_MODEL: u8 = 9;
+const PRIO_MODE: u8 = 9;
 const PRIO_CTX: u8 = 8;
 const PRIO_COST: u8 = 7;
 const PRIO_FOLD: u8 = 6;
@@ -107,6 +108,24 @@ fn tagged_segments(app: &AppState, theme: &Theme, scroll_pct: usize) -> Vec<(u8,
             dim,
         ),
     ));
+    // 权限模式预设指示：高优先级（安全相关，窄终端优先保留）。
+    // gate 未注入（permission_mode=None）时不显示。
+    if let Some(mode) = app.permission_mode {
+        segments.push((
+            PRIO_MODE,
+            Span::styled(
+                app.tr.t_args(
+                    Key::PermModeIndicator,
+                    &[(
+                        "mode",
+                        app.tr
+                            .t(crate::app::state::permission_mode_label(Some(mode))),
+                    )],
+                ),
+                dim,
+            ),
+        ));
+    }
     // ── 组 3：计数（静默） ───────────────────────────────
     segments.push((
         PRIO_TURN,
@@ -376,6 +395,39 @@ mod tests {
         let app = AppState::default();
         let segments = status_segments(&app, &theme, 0);
         assert!(!segments.iter().any(|s| s.content.contains('█')));
+    }
+
+    #[test]
+    fn status_segments_show_permission_mode_when_set() {
+        let theme = Theme::default();
+        // 未注入 gate（None）→ 不显示权限段。
+        let app = AppState::default();
+        let segments = status_segments(&app, &theme, 0);
+        assert!(!segments.iter().any(|s| s.content.contains("perm")));
+        // accept_edits → 显示。
+        let app = AppState {
+            permission_mode: Some(deepseeknova_permission::PermissionMode::AcceptEdits),
+            tr: Tr::new(crate::i18n::Lang::En),
+            ..Default::default()
+        };
+        let segments = status_segments(&app, &theme, 0);
+        let mode = segments
+            .iter()
+            .find(|s| s.content.contains("perm"))
+            .expect("权限模式段存在");
+        assert!(mode.content.contains("accept_edits"), "{}", mode.content);
+        // 中文：`权限 accept_edits`。
+        let app = AppState {
+            permission_mode: Some(deepseeknova_permission::PermissionMode::Plan),
+            tr: Tr::new(crate::i18n::Lang::Zh),
+            ..Default::default()
+        };
+        let segments = status_segments(&app, &theme, 0);
+        let mode = segments
+            .iter()
+            .find(|s| s.content.contains("权限"))
+            .expect("中文权限段存在");
+        assert!(mode.content.contains("plan"), "{}", mode.content);
     }
 
     #[test]

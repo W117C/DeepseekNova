@@ -155,7 +155,11 @@ pub fn build_permission_gate(config: &Config) -> PermissionGate {
         allow,
         ask,
         deny,
-    });
+    })
+    // 权限模式预设（`[permissions] mode`，缺省 None = 旧行为）。
+    .with_mode(config.permissions.mode.map(Into::into))
+    // 项目层 allow 规则标记（untrusted 工作区降级为 ask 的依据）。
+    .with_allow_project_scoped(config.permissions.project_owns_rules);
     // 可选速率限制：滚动一分钟内超出上限的工具调用直接 Deny。
     match config.permissions.rate_limit_per_minute {
         Some(limit) => gate.with_rate_limit(limit),
@@ -171,8 +175,12 @@ pub fn permission_gate_for(
     workspace_root: &std::path::Path,
 ) -> Option<Arc<PermissionGate>> {
     if config.permissions.enabled {
+        // 工作区信任：默认 untrusted（fail-closed），TrustStore 命中才 trusted。
+        let trusted = deepseeknova_config::TrustStore::load().is_trusted(workspace_root);
         Some(Arc::new(
-            build_permission_gate(config).with_workspace_root(workspace_root.to_path_buf()),
+            build_permission_gate(config)
+                .with_workspace_root(workspace_root.to_path_buf())
+                .with_trusted(trusted),
         ))
     } else {
         None

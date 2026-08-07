@@ -9,3 +9,4 @@ pub mod layout;
 pub mod message;
 pub mod sidebar;
 pub mod status;
+pub mod trust;

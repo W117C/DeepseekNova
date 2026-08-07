@@ -452,6 +452,29 @@ All notable changes to DeepseekNova will be documented in this file.
   重发当前代码不可行。已全 workspace bump 至 0.5.0（workspace.package +
   23 处内部依赖 + 20 个 crate docs URL）。
 
+---
+
+### Added（并行优化第五批，2026-08-08）
+
+- **权限模式预设（P1-6）**：`[permissions] mode = "plan" | "accept_edits" |
+  "auto"`——三档一键切换写工具默认裁决强度（plan=写工具全 Ask；accept_edits=
+  文件编辑放行、shell 写形态仍 Ask；auto=写工具全放行）。`None`（缺省）保持旧
+  行为（回退 `default_mode`），不引入静默安全回归。规则优先级不变
+  （deny > ask > allow > 预设回退）。TUI `Ctrl+P` 循环切换 + 状态栏
+  `perm {mode}` 段 + 审批浮层模式上下文 + `/mode` 命令（i18n 键已补）。
+- **工作区信任（P1-6）**：`~/.deepseeknova/trusted.toml`（`TrustStore`，
+  空存储默认 untrusted = fail-closed）。**untrusted 项目**的项目层 allow 规则
+  降级为 ask（不能静默放行陌生项目的自配置规则）；`Config::load` 置位
+  `project_owns_rules` 识别规则来源。TUI 首次进入带项目层规则的工作区弹信任
+  确认浮层（y 信任落盘 / n 不信任）。CLI 已接线（gate 与 agent 同实例 +
+  TrustController 委托 TrustStore）。
+- **eval 分级升级（P1-2）**：断言扩展为 AND 语义——`must_contain`（兼容）/
+  `min_score`（评分卡综合分，0..5，≤1.0 按 0..1 折算）/ `dimension_min.
+  {name}`（单维，含中文别名）/ `cost_max`（跨轮累计成本）/ `rounds`（重试上限，
+  任一轮全过即停）。CI 门槛：`--require-min-score <N>` / `--require-dimension
+  <name>=<N>`，退出码区分条目失败(1)/CI 门槛失败(2)/两者(3)。评分卡走内存
+  捕获 hook，不污染 `.deepseeknova/metrics/` 聚合。
+
 ## [0.4.0] — 2026-07-19
 
 ### 桌面前端完善

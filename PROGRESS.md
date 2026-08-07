@@ -46,6 +46,24 @@
 - **状态**：待提交（34 文件；版本 bump / gh repo edit / docs/superpowers 处置
   等发布动作待用户裁决）。
 
+## 并行优化第五批 + 发布准备（2026-08-08）
+
+- **发布准备**（0d9ccc4 提交）：版本 bump **0.5.0**（workspace.package + 23 内部
+  依赖 + 20 docs URL；crates.io 0.4.0 被旧快照占用实证必须）；gh repo edit
+  description 去 Desktop + topics 清 tauri/goap；docs/superpowers 加 internal
+  planning archive 标注。
+- **P1-6 权限模式 + 工作区信任**：`[permissions] mode` 三档预设（plan/
+  accept_edits/auto，`Option` 缺省 None 保持旧行为防安全回归）+ TUI Ctrl+P 循环/
+  状态栏/审批浮层/`/mode` 命令；`TrustStore`（trusted.toml，untrusted 项目层
+  allow 降级 ask）+ 首进信任确认浮层。**CLI 已补接线**（gate 与 agent 同实例 +
+  CliTrustController 委托 TrustStore，父级收尾完成）。
+- **P1-2 eval 分级升级**：`min_score`/`dimension_min`（中文别名）/`cost_max`/
+  `rounds` AND 语义断言 + `--require-min-score`/`--require-dimension` CI 门槛
+  （退出码 1/2/3 区分条目/门槛失败）+ 评分卡内存钩子不污染 metrics 目录。
+- **验证**：`make check` EXIT=0（复检修 2 处：P1-6 trust 测试 clippy
+  field_reassign_with_default、P1-2 `dimension.<name>` doc HTML 标签警告）。
+- **状态**：待提交。
+
 ## 日常体验包 + 审查修复（2026-08-07，非任务书轮）
 
 - 功能：web_search（ddg / tavily / bing / searxng）、lsp_diagnostics（写后

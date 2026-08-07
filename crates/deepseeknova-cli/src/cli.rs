@@ -1,5 +1,24 @@
 use clap::{Args, Parser, Subcommand};
 
+/// 解析 `--require-dimension name>=N`：校验维度名（含中文别名）与 0..1 阈值。
+fn parse_require_dimension(s: &str) -> Result<(String, f32), String> {
+    let (name, rest) = s
+        .split_once(">=")
+        .or_else(|| s.split_once('>'))
+        .ok_or_else(|| format!("expected `name>=threshold`, got `{s}`"))?;
+    let threshold: f32 = rest
+        .trim()
+        .parse()
+        .map_err(|_| format!("invalid threshold `{rest}` in `{s}`"))?;
+    let name = name.trim().to_string();
+    if !deepseeknova_metrics::ScoreDimensions::is_valid_name(&name) {
+        return Err(format!(
+            "unknown dimension `{name}` in `{s}` (governance/verification/reflection/review/protocol/composite)"
+        ));
+    }
+    Ok((name, threshold))
+}
+
 #[derive(Parser)]
 #[command(name = "deepseeknova")]
 #[command(version = "0.4.0")]
@@ -82,15 +101,25 @@ pub enum Commands {
         #[arg(long, default_value = "low")]
         severity_min: String,
     },
-    /// Run eval cases from a JSONL file and print a pass/fail report.
+    /// Run eval cases from a JSONL file and print a graded pass/fail report.
     Eval {
         /// Path to JSONL eval file (default: evals.jsonl). Each line:
-        /// {"prompt":"...","must_contain":["..."]}
+        /// {"prompt":"...","must_contain":["..."],"min_score":0.8,
+        ///  "dimension_min":{"governance":0.9},"cost_max":0.05,"rounds":3}
         #[arg(long, default_value = "evals.jsonl")]
         path: String,
         /// Output format: "md" or "json".
         #[arg(long, default_value = "md")]
         format: String,
+        /// CI 门槛：全部用例综合分均值（0..5；<=1.0 按 0..1 折算 ×5）下限。
+        /// 任一 run 均值低于门槛 → 进程退出非零（供 CI 门禁）。
+        #[arg(long)]
+        require_min_score: Option<f32>,
+        /// CI 门槛：单维均值下限，`name>=N`（可重复）。name 支持英文名
+        /// (governance/verification/reflection/review/protocol/composite) 与
+        /// 中文别名 (治理/验证/反思/审查/协议/综合)，N 为 0..1 阈值。
+        #[arg(long = "require-dimension", value_parser = parse_require_dimension)]
+        require_dimension: Vec<(String, f32)>,
     },
     /// Interactive chat session
     Chat {
@@ -264,5 +293,51 @@ mod tests {
             Some(Commands::Init { legacy }) => assert!(legacy, "--legacy must set legacy=true"),
             _ => panic!("expected Init command"),
         }
+    }
+
+    #[test]
+    fn eval_require_dimension_parses_and_validates() {
+        // 英文名 + 中文别名均可解析。
+        let parsed = Cli::try_parse_from([
+            "deepseeknova",
+            "eval",
+            "--require-dimension",
+            "governance>=0.9",
+            "--require-dimension",
+            "协议>=0.8",
+            "--require-min-score",
+            "3.5",
+        ])
+        .unwrap();
+        match parsed.command {
+            Some(Commands::Eval {
+                require_min_score,
+                require_dimension,
+                ..
+            }) => {
+                assert_eq!(require_min_score, Some(3.5));
+                assert_eq!(
+                    require_dimension,
+                    vec![("governance".to_string(), 0.9), ("协议".to_string(), 0.8)]
+                );
+            }
+            _ => panic!("expected Eval command"),
+        }
+        // 非法格式 / 未知维度 / 非法阈值 → 解析失败。
+        assert!(
+            Cli::try_parse_from(["deepseeknova", "eval", "--require-dimension", "governance"])
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["deepseeknova", "eval", "--require-dimension", "nope>=0.5"])
+                .is_err()
+        );
+        assert!(Cli::try_parse_from([
+            "deepseeknova",
+            "eval",
+            "--require-dimension",
+            "governance>=abc"
+        ])
+        .is_err());
     }
 }

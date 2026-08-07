@@ -117,6 +117,23 @@ impl AppState {
                 _ => KeyAction::None,
             };
         }
+        // 信任确认浮层：y 信任 / n|Esc 不信任（未确认按 untrusted 处理）。
+        // 结果经 trust_decision 由事件循环用真实 TrustController 消费。
+        if self.trust_prompt.is_some() {
+            return match key.code {
+                KeyCode::Char('y') | KeyCode::Enter => {
+                    self.trust_decision = Some(true);
+                    self.trust_prompt = None;
+                    KeyAction::None
+                }
+                KeyCode::Char('n') | KeyCode::Esc => {
+                    self.trust_decision = Some(false);
+                    self.trust_prompt = None;
+                    KeyAction::None
+                }
+                _ => KeyAction::None,
+            };
+        }
         // 任意非 Esc 键复位退出确认。
         if key.code != KeyCode::Esc {
             self.disarm_quit();
@@ -355,6 +372,11 @@ impl AppState {
         match action {
             Action::AppToggleSidebar => {
                 self.sidebar_visible = !self.sidebar_visible;
+                true
+            }
+            Action::PermModeCycle => {
+                // Ctrl+P：循环权限模式预设（事件循环用真实 gate 消费）。
+                self.perm_mode_cycle = true;
                 true
             }
             _ => false,

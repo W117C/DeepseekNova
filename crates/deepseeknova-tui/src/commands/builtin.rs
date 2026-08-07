@@ -661,6 +661,71 @@ impl CommandHandler for CopyCmd {
     }
 }
 
+// ── mode（权限模式预设）─────────────────────────────────────────
+
+/// 权限模式标签（经 i18n 词表取当前语言值）。
+fn mode_label(tr: Tr, mode: Option<deepseeknova_permission::PermissionMode>) -> String {
+    tr.t(crate::app::state::permission_mode_label(mode))
+        .to_string()
+}
+
+struct ModeCmd;
+
+#[async_trait]
+impl CommandHandler for ModeCmd {
+    async fn run(&self, ctx: &mut CommandCtx<'_>, args: &str) -> CommandOutcome {
+        let tr = ctx.app.tr;
+        let arg = args.trim();
+        let gate = ctx
+            .caps
+            .runtime
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .permission
+            .clone();
+        let Some(gate) = gate else {
+            ctx.app.show_notice(tr.t(Key::PermModeGateUnavailable));
+            return CommandOutcome::Handled;
+        };
+        let current = gate.mode();
+        match arg {
+            "" | "show" => {
+                ctx.app.show_notice(
+                    tr.t_args(Key::PermModeNotice, &[("mode", &mode_label(tr, current))]),
+                );
+            }
+            "cycle" => {
+                let next = crate::app::state::next_permission_mode(current);
+                gate.set_mode(Some(next));
+                ctx.app.permission_mode = Some(next);
+                ctx.app.show_notice(tr.t_args(
+                    Key::PermModeNotice,
+                    &[("mode", &mode_label(tr, Some(next)))],
+                ));
+            }
+            other => {
+                use deepseeknova_permission::PermissionMode;
+                let next = match other {
+                    "plan" => PermissionMode::Plan,
+                    "accept_edits" => PermissionMode::AcceptEdits,
+                    "auto" => PermissionMode::Auto,
+                    _ => {
+                        ctx.app.show_notice(tr.t(Key::PermModeUsage));
+                        return CommandOutcome::Handled;
+                    }
+                };
+                gate.set_mode(Some(next));
+                ctx.app.permission_mode = Some(next);
+                ctx.app.show_notice(tr.t_args(
+                    Key::PermModeNotice,
+                    &[("mode", &mode_label(tr, Some(next)))],
+                ));
+            }
+        }
+        CommandOutcome::Handled
+    }
+}
+
 // ── quit ────────────────────────────────────────────────────────
 
 struct QuitCmd;
@@ -688,6 +753,7 @@ static UNDO: UndoCmd = UndoCmd;
 static RAW: RawCmd = RawCmd;
 static FOLD: FoldCmd = FoldCmd;
 static COPY: CopyCmd = CopyCmd;
+static MODE: ModeCmd = ModeCmd;
 static QUIT: QuitCmd = QuitCmd;
 
 /// 内建命令表（顺序即 /help 与命令面板展示顺序）。
@@ -810,6 +876,14 @@ pub const BUILTIN: &[Command] = &[
         handler: &COPY,
     },
     Command {
+        name: "mode",
+        desc: &Key::CmdModeDesc,
+        keywords: &["权限", "模式", "perm", "mode"],
+        args_spec: ArgsSpec::Enum(&["plan", "accept_edits", "auto", "cycle"]),
+        args_hint: Some(&["plan", "accept_edits", "auto", "cycle"]),
+        handler: &MODE,
+    },
+    Command {
         name: "quit",
         desc: &Key::CmdQuitDesc,
         keywords: &["退出", "exit", "q"],
@@ -850,7 +924,7 @@ fn effort_label(effort: ReasoningEffort) -> &'static str {
 mod tests {
     use super::*;
     use crate::app::state::{AppState, DisplayMode};
-    use crate::commands::{CommandRegistry, TuiCaps};
+    use crate::commands::{CommandRegistry, TuiCaps, TuiRuntime};
     use crate::model::conversation::{done_output, LineKind as LK};
     use deepseeknova_core::runner::RunEvent;
     use std::path::PathBuf;
@@ -868,6 +942,9 @@ mod tests {
             context_window: None,
             budget_window: None,
             approval_rx: None,
+            trust: None,
+            workspace_root: None,
+            project_rule_count: 0,
         }
     }
 
@@ -894,6 +971,7 @@ mod tests {
             "fold",
             "copy",
             "scorecard",
+            "mode",
             "quit",
         ] {
             assert!(CommandRegistry::find(name).is_some(), "missing {name}");
@@ -1009,5 +1087,68 @@ mod tests {
             .notice
             .as_ref()
             .is_some_and(|(t, _)| t.contains("模型切换不可用")));
+    }
+
+    #[tokio::test]
+    async fn mode_command_cycles_and_sets_permission_mode() {
+        use deepseeknova_permission::{Decision, PermissionGate, PermissionMode, Policy};
+        let gate = Arc::new(PermissionGate::new(Policy {
+            mode: Decision::Ask,
+            allow: vec![],
+            ask: vec![],
+            deny: vec![],
+        }));
+        let caps = TuiCaps {
+            runtime: Arc::new(Mutex::new(TuiRuntime {
+                permission: Some(gate.clone()),
+                ..Default::default()
+            })),
+            session: None,
+            skills_paths: vec![PathBuf::from(".deepseeknova/skills")],
+            mcp_servers: vec![],
+            mcp_probe: None,
+            undo: None,
+            context_window: None,
+            budget_window: None,
+            approval_rx: None,
+            trust: None,
+            workspace_root: None,
+            project_rule_count: 0,
+        };
+        let mut app = AppState::default();
+        // 默认 None → cycle → Plan。
+        run_cmd("mode", "cycle", &mut app, &caps).await;
+        assert_eq!(gate.mode(), Some(PermissionMode::Plan));
+        assert_eq!(app.permission_mode, Some(PermissionMode::Plan));
+        // 显式 auto。
+        run_cmd("mode", "auto", &mut app, &caps).await;
+        assert_eq!(gate.mode(), Some(PermissionMode::Auto));
+        // 未知参数 → 用法提示。
+        let mut app = AppState {
+            tr: Tr::new(crate::i18n::Lang::Zh),
+            ..Default::default()
+        };
+        run_cmd("mode", "banana", &mut app, &caps).await;
+        assert!(
+            app.notice.as_ref().is_some_and(|(t, _)| t.contains("用法")),
+            "未知参数应给用法: {:?}",
+            app.notice
+        );
+        // 仍停在 auto（未知参数不改变状态）。
+        assert_eq!(gate.mode(), Some(PermissionMode::Auto));
+    }
+
+    #[tokio::test]
+    async fn mode_without_gate_degrades() {
+        let caps = empty_caps();
+        let mut app = AppState {
+            tr: Tr::new(crate::i18n::Lang::Zh),
+            ..Default::default()
+        };
+        run_cmd("mode", "", &mut app, &caps).await;
+        assert!(app
+            .notice
+            .as_ref()
+            .is_some_and(|(t, _)| t.contains("不可用")));
     }
 }

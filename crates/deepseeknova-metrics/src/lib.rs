@@ -186,6 +186,44 @@ pub struct ScoreDimensions {
     pub composite: f32,
 }
 
+impl ScoreDimensions {
+    /// 按名称读取维度分数（0.0..=1.0）。支持英文名
+    /// governance / verification / reflection / review / protocol / composite
+    /// 及中文别名 治理 / 验证 / 反思 / 审查 / 协议 / 综合。
+    /// 未知名称返回 `None`。供 eval 分级评判 `dimension.{name} >= N` 断言读取。
+    pub fn get(&self, name: &str) -> Option<f32> {
+        match name.trim() {
+            "governance" | "治理" => Some(self.governance),
+            "verification" | "验证" => Some(self.verification),
+            "reflection" | "反思" => Some(self.reflection),
+            "review" | "审查" => Some(self.review),
+            "protocol" | "协议" => Some(self.protocol),
+            "composite" | "综合" => Some(self.composite),
+            _ => None,
+        }
+    }
+
+    /// 维度名是否合法（与 [`ScoreDimensions::get`] 同口径，含中文别名）。
+    /// 供 CLI `--require-dimension name>=N` 解析时 fail-fast 校验。
+    pub fn is_valid_name(name: &str) -> bool {
+        matches!(
+            name.trim(),
+            "governance"
+                | "治理"
+                | "verification"
+                | "验证"
+                | "reflection"
+                | "反思"
+                | "review"
+                | "审查"
+                | "protocol"
+                | "协议"
+                | "composite"
+                | "综合"
+        )
+    }
+}
+
 /// [`ScoreDimensions::protocol`] / [`ScoreDimensions::composite`] 的 serde
 /// 反序列化默认值：与 [`protocol_dim`] 的 0/0 口径（无数据按 1.0）一致。
 fn protocol_default() -> f32 {
@@ -1012,5 +1050,57 @@ mod tests {
             err.is_err(),
             "真实 IO 错误必须 Err 传播，不得与损坏文件同口径静默 Ok"
         );
+    }
+
+    #[test]
+    fn dimension_get_reads_canonical_and_alias_names() {
+        let dims = ScoreDimensions {
+            governance: 0.9,
+            verification: 0.8,
+            reflection: 0.7,
+            review: 0.6,
+            protocol: 0.5,
+            composite: 0.75,
+        };
+        // 英文名。
+        assert_eq!(dims.get("governance"), Some(0.9));
+        assert_eq!(dims.get("verification"), Some(0.8));
+        assert_eq!(dims.get("reflection"), Some(0.7));
+        assert_eq!(dims.get("review"), Some(0.6));
+        assert_eq!(dims.get("protocol"), Some(0.5));
+        assert_eq!(dims.get("composite"), Some(0.75));
+        // 中文别名（eval 分级评判 `dimension.{治理|验证|反思|审查|协议|综合}`）。
+        assert_eq!(dims.get("治理"), Some(0.9));
+        assert_eq!(dims.get("验证"), Some(0.8));
+        assert_eq!(dims.get("反思"), Some(0.7));
+        assert_eq!(dims.get("审查"), Some(0.6));
+        assert_eq!(dims.get("协议"), Some(0.5));
+        assert_eq!(dims.get("综合"), Some(0.75));
+        // 未知名称 → None；首尾空白容忍。
+        assert_eq!(dims.get("nope"), None);
+        assert_eq!(dims.get(" governance "), Some(0.9));
+    }
+
+    #[test]
+    fn dimension_name_validation_matches_get() {
+        for valid in [
+            "governance",
+            "verification",
+            "reflection",
+            "review",
+            "protocol",
+            "composite",
+            "治理",
+            "验证",
+            "反思",
+            "审查",
+            "协议",
+            "综合",
+        ] {
+            assert!(ScoreDimensions::is_valid_name(valid), "`{valid}`");
+        }
+        assert!(!ScoreDimensions::is_valid_name("unknown"));
+        assert!(!ScoreDimensions::is_valid_name(""));
+        assert!(ScoreDimensions::is_valid_name(" 协议 "));
     }
 }
