@@ -446,8 +446,8 @@ embed-backfill: attempted=0 ok=0
 - 基线证据（本轮实测）：任务书 `docs/superpowers/plans/2026-08-07-frontend-tui-plan.md`；上一轮 CLOSEOUT 已记录 P0（会话级 HTTP API + serve 认证）未提交工作区 `make check` EXIT=0；本轮基线 `make check` 结果待本轮任务 0 回填。
 
 ## 自验收清单（2026-08-07 前端+TUI 轮，执行者逐条打勾，命令亲跑）
-- [x] A1 基线说明：上一轮 P0 未提交改动与本轮改动同树（P0 已由前序审查轮覆盖），
-      交付时一次性提交（排除 `repro_tmp.rs` 用户调试文件）
+- [x] A1 提交完成：`fdefbd9`（含上一轮 P0 + 设计资产 + 本轮改动；排除
+      `repro_tmp.rs` 用户调试文件）；未 push
 - [x] A2 最终 `make check` EXIT=0（fmt / clippy -D warnings / 全 workspace 测试 /
       doctest / cargo doc 零警告）；TUI 154 单测 + 1 doctest（≥ 基线 + 新增）
 - [x] A3 desktop：`cd crates/deepseeknova-desktop/frontend && npm run build` EXIT=0；

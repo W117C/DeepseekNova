@@ -177,3 +177,36 @@
 ### 遗留（如实）
 - 未提交：13 个文件（含 Cargo.lock），待用户决定 commit / push。
 - 无未消除的构建或审计 warning；BLOCKED 待裁决项均非本轮范围。
+
+---
+
+# CLOSEOUT — 观测台前端 UI + TUI 演进（2026-08-07 dev-loop 轮）
+
+## 六事实面状态
+
+| 事实面 | 状态 | 证据 |
+|--------|------|------|
+| 代码 | changed-and-verified | 提交 `fdefbd9`；桌面端纯前端脚手架（Vite+SolidJS+TS+Tailwind4）首屏实现 A×B 合并构图；TUI 五项演进（浅色档 token / 夜次分组+星点 / 审批风险标签+mono 命令 / 测光评分卡+/scorecard / 欢迎卡圆顶字形）；permission 新增 `shell_readonly_kind`，agent Ask 描述携带风险标签；最终 `make check` EXIT=0（fmt / clippy -D warnings / 全 workspace / doctest / doc 零警告） |
+| 运行态 | verified-current（前端） | `npm run build` EXIT=0；`vitest run` 14/14 绿；`vite preview` + Chrome 截图 `obs-comp-d-desktop-p1.png`（1536×1024），Agnes 视觉核对双带/侧栏/对话流正常 |
+| 文档 | changed-and-verified | GUIDE（配色/上下文占用/斜杠命令）、CHANGELOG、BUILDING（前端构建）、AGENTS.md（桌面端非 cargo 说明）、BLOCKED、REVIEW、PROGRESS、任务书 `docs/superpowers/plans/2026-08-07-frontend-tui-plan.md` |
+| 规则 | verified-current | AGENTS.md 无新增防错条目需求（跨 permission/agent/tui 改动按 §1 记录于 REVIEW 覆盖声明）；未新增依赖（前端 devDeps 属脚手架） |
+| 记忆 | not-applicable | 平台记忆 generated-read-only，无写入 |
+| 工作区 | changed-and-verified | 已提交 `fdefbd9`（含上一轮 P0 未提交改动 + 设计资产 + 本轮）；未 push（由用户决定）；`repro_tmp.rs` 用户调试文件未提交、保留；`obs-comp-d-combined-agnes-v2.png` 为删除候选（未确认不删）；无 stash |
+
+## 本轮交付物核对（dev-loop 六件证据）
+1. 任务书：`docs/superpowers/plans/2026-08-07-frontend-tui-plan.md`（六节齐全，≤4000 字符）。
+2. 测试全绿：最终 `make check` EXIT=0（真实输出见 PROGRESS A2）；permission 35、
+   agent 239、tui 154+1 doctest；前端 vitest 14；反向验证 TUI + 前端均真红→真绿。
+3. 审查报告：`crates/REVIEW.md` 本轮分节——1 high（R1 TUI 审批风险标签接线）已修、
+   1 medium（端到端断言盲区）记录接受、2 low 接受；修复后全量 `make check` EXIT=0。
+4. 收尾报告：本文件。
+5. BLOCKED.md：Tauri 壳 P1 / 桌面后续页 / 文案语言 / logo / 风险接线 e2e /
+   repro_tmp.rs / agnes-v2 删除候选；无执行阻塞。
+6. 提交：`fdefbd9`（不 push，是否推送由用户决定）。
+
+## 遗留（如实）
+- Tauri 壳（P1）与桌面后续页面（P3/P4）未做，BLOCKED 已记。
+- `repro_tmp.rs` 为用户调试文件，保留未提交；`obs-comp-d-combined-agnes-v2.png`
+  为被否决稿备份（删除候选，未确认不删）。
+- 风险标签缺少 agent 集成级“responder 收到前缀”断言（R2，记录接受）。
+- 未跑 `make audit`（cargo-deny 未预装时目标会提示；本轮以 `make check` 为验收）。
