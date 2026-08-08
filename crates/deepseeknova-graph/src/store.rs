@@ -1567,7 +1567,7 @@ fn normalize_rel_path(path: &str) -> String {
     parts.join("/")
 }
 
-/// 把 JS/TS 相对 specifier 解析为索引中的文件节点 id（补常见扩展名探测）。
+/// 把相对 specifier 解析为索引中的文件节点 id（补常见扩展名探测）。
 fn resolve_file_node(
     tx: &rusqlite::Transaction<'_>,
     path: &str,
@@ -1581,7 +1581,7 @@ fn resolve_file_node(
     let mut candidates = vec![base.clone()];
     let has_ext = base.rsplit('/').next().unwrap_or("").contains('.');
     if !has_ext {
-        for ext in ["ts", "tsx", "js", "jsx", "mjs", "cjs", "py", "rs"] {
+        for ext in ["ts", "tsx", "js", "jsx", "mjs", "cjs", "py", "rs", "go"] {
             candidates.push(format!("{base}.{ext}"));
         }
     }
@@ -1590,6 +1590,25 @@ fn resolve_file_node(
             .query_row(
                 "SELECT id FROM nodes WHERE path = ?1 AND kind = 'file'",
                 [&cand],
+                |r| r.get(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })?;
+        if let Some(id) = found {
+            return Ok(Some(id));
+        }
+    }
+    // 目录型导入（Go `./pkg` 指包目录、JS `./util` 指目录入口）：取该目录下
+    // 按路径排序的首个源码文件作为代表节点（确定性，不依赖目录遍历顺序）。
+    if !base.is_empty() {
+        let found: Option<String> = tx
+            .query_row(
+                "SELECT id FROM nodes WHERE kind = 'file' AND path GLOB ?1 || '/*' \
+                 ORDER BY path LIMIT 1",
+                [&base],
                 |r| r.get(0),
             )
             .map(Some)
@@ -1785,6 +1804,137 @@ mod tests {
     }
 
     #[test]
+    fn fts_multi_word_query_uses_or_semantics_and_ranks_both_highest() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "src/mw.rs",
+            "/// alpha\npub fn only_alpha() {}\n\
+             /// beta\npub fn only_beta() {}\n\
+             /// alpha beta\npub fn both_terms() {}\n",
+        );
+        let mut store = Store::open(&root.join(".deepseeknova/graph.db")).unwrap();
+        store.refresh(root, 1_048_576).unwrap();
+
+        // OR 语义：任一 token 命中即返回；双词命中文档凭 BM25 加性居首。
+        let hits = store.search("alpha beta", None, 10).unwrap();
+        let names: Vec<&str> = hits.iter().map(|n| n.name.as_str()).collect();
+        assert!(
+            names.contains(&"only_alpha"),
+            "OR 语义应返回单词命中：{names:?}"
+        );
+        assert!(
+            names.contains(&"only_beta"),
+            "OR 语义应返回单词命中：{names:?}"
+        );
+        assert_eq!(names[0], "both_terms", "双词文档应凭 BM25 居首：{names:?}");
+    }
+
+    #[test]
+    fn fts_underscore_token_positive_and_mid_token_negative() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "src/tok.rs",
+            "pub fn build_agent() {}\npub fn normalize_path() {}\n",
+        );
+        let mut store = Store::open(&root.join(".deepseeknova/graph.db")).unwrap();
+        store.refresh(root, 1_048_576).unwrap();
+
+        // unicode61 把下划线当分隔符：整 token "build" 命中 "build_agent"。
+        let hits = store.search("build", None, 10).unwrap();
+        assert!(
+            hits.iter().any(|n| n.name == "build_agent"),
+            "查询 build 应命中 build_agent：{:?}",
+            hits.iter().map(|n| &n.name).collect::<Vec<_>>()
+        );
+        // 边界：FTS 按整 token 匹配，"norm" 不是 "normalize" 的 token → 空。
+        // （≥3 字符的部分英文词不走 LIKE 回退，此为当前检索边界。）
+        let empty = store.search("norm", None, 10).unwrap();
+        assert!(
+            empty.is_empty(),
+            "部分英文词（≥3 字符）不得经 FTS 命中：{:?}",
+            empty.iter().map(|n| &n.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn fts_case_insensitive_query() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "src/ci.rs",
+            "/// permission gate\npub struct PermissionGate {}\n",
+        );
+        let mut store = Store::open(&root.join(".deepseeknova/graph.db")).unwrap();
+        store.refresh(root, 1_048_576).unwrap();
+
+        let hits = store.search("PERMISSIONGATE", None, 10).unwrap();
+        assert_eq!(hits[0].name, "PermissionGate");
+        // 多词 + 大小写混用
+        let multi = store.search("PERMISSION gate", None, 10).unwrap();
+        assert!(
+            multi.iter().any(|n| n.name == "PermissionGate"),
+            "{:?}",
+            multi.iter().map(|n| &n.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn fts_kind_filter_limits_results() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "src/k.rs",
+            "pub struct Gate {}\npub fn gate_check() {}\n",
+        );
+        let mut store = Store::open(&root.join(".deepseeknova/graph.db")).unwrap();
+        store.refresh(root, 1_048_576).unwrap();
+
+        let funcs = store.search("gate", Some(NodeKind::Function), 10).unwrap();
+        let func_names: Vec<&str> = funcs.iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(func_names, vec!["gate_check"], "{func_names:?}");
+        let structs = store.search("gate", Some(NodeKind::Struct), 10).unwrap();
+        let struct_names: Vec<&str> = structs.iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(struct_names, vec!["Gate"], "{struct_names:?}");
+    }
+
+    #[test]
+    fn search_empty_or_whitespace_query_returns_empty() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write(root, "src/e.rs", "pub fn something() {}\n");
+        let mut store = Store::open(&root.join(".deepseeknova/graph.db")).unwrap();
+        store.refresh(root, 1_048_576).unwrap();
+
+        for q in ["", "   "] {
+            let hits = store.search(q, None, 10).unwrap();
+            assert!(hits.is_empty(), "query {q:?} 应返回空");
+        }
+    }
+
+    #[test]
+    fn cjk_trigram_query_does_not_false_positive() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write(root, "src/zh.rs", "/// 文件读写操作\npub fn file_io() {}\n");
+        let mut store = Store::open(&root.join(".deepseeknova/graph.db")).unwrap();
+        store.refresh(root, 1_048_576).unwrap();
+
+        // 与库中文本无共享 trigram 的中文查询 → 空，不得误命中。
+        let hits = store.search("网络请求重试", None, 10).unwrap();
+        assert!(
+            hits.is_empty(),
+            "无共享 trigram 不得误命中：{:?}",
+            hits.iter().map(|n| &n.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn parses_go_mod_deps_block_and_single_line() {
         let src = "module example.com/app\n\
 \ngo 1.21\n\
@@ -1866,6 +2016,148 @@ require github.com/single/dep v1.0.0\n";
         // main.go 的实体应被索引
         let hits = store.find_by_name("main").unwrap();
         assert!(!hits.is_empty());
+    }
+
+    #[test]
+    fn package_json_deps_indexed() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "package.json",
+            "{\n  \"name\": \"x\",\n  \"dependencies\": { \"react\": \"^18\", \"@scope/pkg\": \"^1\" },\n  \"devDependencies\": { \"vitest\": \"^1\" }\n}\n",
+        );
+        write(
+            root,
+            "src/main.js",
+            "import React from 'react';\nexport function main_fn() {}\n",
+        );
+        let mut store = Store::open(&root.join(".deepseeknova/graph.db")).unwrap();
+        store.refresh(root, 1_048_576).unwrap();
+
+        let deps = store.external_deps().unwrap();
+        for want in ["react", "@scope/pkg", "vitest"] {
+            assert!(
+                deps.iter().any(|(_, d)| d == want),
+                "外部依赖应含 {want}：{deps:?}"
+            );
+        }
+        let file_deps = store.external_deps_for_file("src/main.js").unwrap();
+        assert!(file_deps.contains(&"react".to_string()), "{file_deps:?}");
+    }
+
+    #[test]
+    fn pyproject_toml_deps_indexed() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "pyproject.toml",
+            "[project]\nname = \"x\"\nversion = \"0.1.0\"\ndependencies = [\n  \"requests\",\n  \"flask>=2.0\",\n]\n",
+        );
+        write(
+            root,
+            "src/app.py",
+            "import requests\ndef main():\n    pass\n",
+        );
+        let mut store = Store::open(&root.join(".deepseeknova/graph.db")).unwrap();
+        store.refresh(root, 1_048_576).unwrap();
+
+        let deps = store.external_deps().unwrap();
+        assert!(deps.iter().any(|(_, d)| d == "requests"), "{deps:?}");
+        assert!(deps.iter().any(|(_, d)| d == "flask>=2.0"), "{deps:?}");
+        let file_deps = store.external_deps_for_file("src/app.py").unwrap();
+        assert!(file_deps.contains(&"requests".to_string()), "{file_deps:?}");
+    }
+
+    #[test]
+    fn manifest_without_deps_yields_empty_external_deps() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "Cargo.toml",
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n",
+        );
+        write(root, "src/lib.rs", "pub fn f() {}\n");
+        let mut store = Store::open(&root.join(".deepseeknova/graph.db")).unwrap();
+        store.refresh(root, 1_048_576).unwrap();
+        assert!(store.external_deps().unwrap().is_empty());
+
+        // 无清单文件的纯源码项目同样为空。
+        let dir2 = tempdir().unwrap();
+        write(dir2.path(), "src/a.rs", "pub fn g() {}\n");
+        let mut store2 = Store::open(&dir2.path().join(".deepseeknova/graph.db")).unwrap();
+        store2.refresh(dir2.path(), 1_048_576).unwrap();
+        assert!(store2.external_deps().unwrap().is_empty());
+    }
+
+    #[test]
+    fn circular_imports_produce_edges_in_both_directions() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "src/a.js",
+            "import { b } from './b.js';\nexport const a = 1;\n",
+        );
+        write(
+            root,
+            "src/b.js",
+            "import { a } from './a.js';\nexport const b = 2;\n",
+        );
+        let mut store = Store::open(&root.join(".deepseeknova/graph.db")).unwrap();
+        store.refresh(root, 1_048_576).unwrap();
+
+        let imports: Vec<_> = store
+            .all_edges()
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == EdgeKind::Imports)
+            .collect();
+        assert!(
+            imports
+                .iter()
+                .any(|e| e.src.contains("a.js") && e.dst.contains("b.js")),
+            "a→b 环边：{imports:?}"
+        );
+        assert!(
+            imports
+                .iter()
+                .any(|e| e.src.contains("b.js") && e.dst.contains("a.js")),
+            "b→a 环边：{imports:?}"
+        );
+    }
+
+    #[test]
+    fn go_relative_import_creates_file_to_file_edge() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "main.go",
+            "package main\n\nimport (\n    \"fmt\"\n    \"./localpkg\"\n)\n\nfunc main() { fmt.Println(\"hi\") }\n",
+        );
+        write(
+            root,
+            "localpkg/localpkg.go",
+            "package localpkg\n\nfunc Helper() int { return 1 }\n",
+        );
+        let mut store = Store::open(&root.join(".deepseeknova/graph.db")).unwrap();
+        store.refresh(root, 1_048_576).unwrap();
+
+        let imports: Vec<_> = store
+            .all_edges()
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == EdgeKind::Imports)
+            .collect();
+        assert!(
+            imports
+                .iter()
+                .any(|e| e.src.contains("main.go") && e.dst.contains("localpkg.go")),
+            "main.go → localpkg.go Imports 边：{imports:?}"
+        );
     }
 
     /// 确定性嵌入替身：子串 → 向量，命中靠语义（查询 token 不与目标共词也能召回）。
@@ -2042,6 +2334,195 @@ require github.com/single/dep v1.0.0\n";
             );
         }
         assert_eq!(bd[0].node.name, "alpha_needle", "0.5 融合双命中应居首");
+    }
+
+    #[test]
+    fn hybrid_breakdown_decomposition_is_additive_across_weights() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "src/a.rs",
+            "/// needle alpha formatter\npub fn alpha_needle() {}\n\
+             /// ferris crab language\npub fn ferris_crab() {}\n",
+        );
+        let mut store = Store::open_with_embedder(
+            &root.join(".deepseeknova/graph.db"),
+            Some(Arc::new(FakeEmbed)),
+            "test-model",
+        )
+        .unwrap();
+        store.refresh(root, 1_048_576).unwrap();
+
+        for w in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let bd = store
+                .search_hybrid_breakdown("needle", None, 10, w)
+                .unwrap();
+            for h in &bd {
+                assert!(
+                    (h.bm25 + h.cosine - h.score).abs() < 1e-9,
+                    "w={w} 分解必须严格加性：{h:?}"
+                );
+            }
+            // alpha_needle 是唯一 FTS 命中 → 归一化 bm25=1.0、余弦=1.0，
+            // 分量恰为权重，score 恒为 1.0。
+            let alpha = bd
+                .iter()
+                .find(|h| h.node.name == "alpha_needle")
+                .expect("alpha 命中必须存在");
+            assert!(
+                (alpha.bm25 - w).abs() < 1e-9,
+                "w={w} alpha.bm25={}",
+                alpha.bm25
+            );
+            assert!(
+                (alpha.cosine - (1.0 - w)).abs() < 1e-9,
+                "w={w} alpha.cosine={}",
+                alpha.cosine
+            );
+            assert!(
+                (alpha.score - 1.0).abs() < 1e-9,
+                "w={w} alpha.score={}",
+                alpha.score
+            );
+            // ferris_crab 纯语义命中：词法分为 0，仅余弦贡献。
+            let ferris = bd.iter().find(|h| h.node.name == "ferris_crab");
+            if w < 1.0 {
+                let ferris = ferris.expect("w<1 时语义命中应保留");
+                assert_eq!(ferris.bm25, 0.0, "语义独有命中词法分必须为 0");
+                let expected = (1.0 - w) * cosine(&[1.0, 0.0], &[0.9, 0.1]) as f64;
+                assert!(
+                    (ferris.cosine - expected).abs() < 1e-4,
+                    "w={w} ferris.cosine={} expected={expected}",
+                    ferris.cosine
+                );
+            } else {
+                assert!(ferris.is_none(), "w=1.0 零分语义命中应被剔除");
+            }
+        }
+    }
+
+    #[test]
+    fn hybrid_kind_filter_excludes_semantic_only_other_kind() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "src/a.rs",
+            "/// needle alpha formatter\npub fn alpha_needle() {}\n\
+             /// ferris crab language\npub struct FerrisCrab {}\n",
+        );
+        let mut store = Store::open_with_embedder(
+            &root.join(".deepseeknova/graph.db"),
+            Some(Arc::new(FakeEmbed)),
+            "test-model",
+        )
+        .unwrap();
+        store.refresh(root, 1_048_576).unwrap();
+
+        // 无 kind：语义独有命中 FerrisCrab 被召回。
+        let all = store.search_hybrid("needle", None, 10).unwrap();
+        assert!(
+            all.iter().any(|n| n.name == "FerrisCrab"),
+            "{:?}",
+            all.iter().map(|n| &n.name).collect::<Vec<_>>()
+        );
+        // kind=Function：语义扫描按 kind 过滤，struct 不得进入结果。
+        let funcs = store
+            .search_hybrid("needle", Some(NodeKind::Function), 10)
+            .unwrap();
+        let func_names: Vec<&str> = funcs.iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(func_names, vec!["alpha_needle"], "{func_names:?}");
+    }
+
+    #[test]
+    fn hybrid_with_weight_and_breakdown_orders_agree() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "src/a.rs",
+            "/// needle alpha formatter\npub fn alpha_needle() {}\n\
+             /// needle beta utils\npub fn beta_needle() {}\n\
+             /// ferris crab language\npub fn ferris_crab() {}\n",
+        );
+        let mut store = Store::open_with_embedder(
+            &root.join(".deepseeknova/graph.db"),
+            Some(Arc::new(FakeEmbed)),
+            "test-model",
+        )
+        .unwrap();
+        store.refresh(root, 1_048_576).unwrap();
+
+        for w in [0.25, 0.5, 0.75] {
+            let via_weight = store
+                .search_hybrid_with_weight("needle", None, 10, w)
+                .unwrap();
+            let bd = store
+                .search_hybrid_breakdown("needle", None, 10, w)
+                .unwrap();
+            let via_w: Vec<&str> = via_weight.iter().map(|n| n.name.as_str()).collect();
+            let via_bd: Vec<&str> = bd.iter().map(|h| h.node.name.as_str()).collect();
+            assert_eq!(
+                via_w, via_bd,
+                "w={w} 两条公开 API 路径必须同序：{via_w:?} vs {via_bd:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn incremental_refresh_updates_fts_on_content_change() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write(root, "src/a.rs", "/// needle alpha\npub fn alpha_fn() {}\n");
+        let mut store = Store::open(&root.join(".deepseeknova/graph.db")).unwrap();
+        store.refresh(root, 1_048_576).unwrap();
+        assert!(
+            !store.search("needle", None, 10).unwrap().is_empty(),
+            "初建：needle 应可检索"
+        );
+
+        // 改 doc：旧 token 消失、新 token 可检索（FTS 行随文件增量同步）。
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        write(root, "src/a.rs", "/// ferris beta\npub fn alpha_fn() {}\n");
+        store.refresh(root, 1_048_576).unwrap();
+
+        let old = store.search("needle", None, 10).unwrap();
+        assert!(
+            old.is_empty(),
+            "旧 doc token 不得残留：{:?}",
+            old.iter().map(|n| &n.name).collect::<Vec<_>>()
+        );
+        let new = store.search("ferris", None, 10).unwrap();
+        assert!(
+            new.iter().any(|n| n.name == "alpha_fn"),
+            "{:?}",
+            new.iter().map(|n| &n.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn like_fallback_respects_kind_filter() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "src/k.rs",
+            "pub struct GoThing {}\npub fn go_run() {}\n",
+        );
+        let mut store = Store::open(&root.join(".deepseeknova/graph.db")).unwrap();
+        store.refresh(root, 1_048_576).unwrap();
+
+        // "go" 仅 2 字符 → LIKE 回退；kind 过滤仍生效。
+        let funcs = store.search("go", Some(NodeKind::Function), 10).unwrap();
+        let func_names: Vec<&str> = funcs.iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(func_names, vec!["go_run"], "{func_names:?}");
+        let structs = store.search("go", Some(NodeKind::Struct), 10).unwrap();
+        assert!(
+            structs.iter().any(|n| n.name == "GoThing"),
+            "{:?}",
+            structs.iter().map(|n| &n.name).collect::<Vec<_>>()
+        );
     }
 
     #[test]

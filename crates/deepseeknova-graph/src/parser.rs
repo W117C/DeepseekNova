@@ -1015,4 +1015,76 @@ func internal() {
             "引用采集必须受限：{huge_refs}"
         );
     }
+
+    #[test]
+    fn parses_js_and_ts_class_methods() {
+        let js = parse_source(
+            Lang::JavaScript,
+            "src/widget.js",
+            "class Widget {\n  render() { return 1; }\n}\nfunction helper() { return 1; }\nfunction make() { return helper(); }\n",
+        )
+        .unwrap();
+        let js_kinds: Vec<_> = js.nodes.iter().map(|n| (n.kind, n.name.as_str())).collect();
+        assert!(
+            js_kinds.contains(&(NodeKind::Class, "Widget")),
+            "{js_kinds:?}"
+        );
+        assert!(
+            js_kinds.contains(&(NodeKind::Method, "render")),
+            "JS 类方法应为 Method：{js_kinds:?}"
+        );
+        assert!(
+            js_kinds.contains(&(NodeKind::Function, "make")),
+            "{js_kinds:?}"
+        );
+        assert!(
+            js.calls.iter().any(|(c, e)| c == "make" && e == "helper"),
+            "{:?}",
+            js.calls
+        );
+
+        let ts = parse_source(
+            Lang::TypeScript,
+            "src/svc.ts",
+            "class Service {\n  run(): void {}\n}\n",
+        )
+        .unwrap();
+        let ts_kinds: Vec<_> = ts.nodes.iter().map(|n| (n.kind, n.name.as_str())).collect();
+        assert!(
+            ts_kinds.contains(&(NodeKind::Class, "Service")),
+            "{ts_kinds:?}"
+        );
+        assert!(
+            ts_kinds.contains(&(NodeKind::Method, "run")),
+            "TS 类方法应为 Method：{ts_kinds:?}"
+        );
+    }
+
+    #[test]
+    fn parses_python_decorated_function_and_empty_source() {
+        let py = parse_source(
+            Lang::Python,
+            "src/app.py",
+            "@app.route(\"/\")\ndef index():\n    return render()\n\ndef render():\n    return \"x\"\n",
+        )
+        .unwrap();
+        let names: Vec<_> = py.nodes.iter().map(|n| (n.kind, n.name.as_str())).collect();
+        assert!(
+            names.contains(&(NodeKind::Function, "index")),
+            "装饰器函数应提取：{names:?}"
+        );
+        assert!(names.contains(&(NodeKind::Function, "render")), "{names:?}");
+        assert!(
+            py.calls.iter().any(|(c, e)| c == "index" && e == "render"),
+            "{:?}",
+            py.calls
+        );
+
+        // 空文件 / shebang / 纯注释 → 零实体，不报错。
+        for src in ["", "#!/usr/bin/env python3\n", "# only a comment\n"] {
+            let fp = parse_source(Lang::Python, "src/e.py", src).unwrap();
+            assert!(fp.nodes.is_empty(), "空源文件不得产出实体：{src:?}");
+            assert!(fp.calls.is_empty());
+        }
+    }
 }

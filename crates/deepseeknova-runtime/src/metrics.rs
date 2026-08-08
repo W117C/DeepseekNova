@@ -799,4 +799,53 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// 留存防御：max_reports=0 视为不清理（即使目录已有报告）。
+    #[test]
+    fn metrics_retention_max_reports_zero_is_noop() {
+        let dir = std::env::temp_dir().join(format!("dsn-metrics-zero-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for n in ["a.json", "b.json", "c.json"] {
+            std::fs::write(dir.join(n), "{}").unwrap();
+        }
+        enforce_metrics_retention(&dir, 0);
+        let count = std::fs::read_dir(&dir).unwrap().count();
+        assert_eq!(count, 3, "max_reports=0 不清理");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 留存容错：目录不存在时静默跳过（不 panic）。
+    #[test]
+    fn metrics_retention_missing_dir_is_silent() {
+        let dir = std::env::temp_dir().join(format!("dsn-metrics-missing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir); // 确保不存在
+        enforce_metrics_retention(&dir, 5);
+    }
+
+    /// F12 大小写双向：大写 `.JSON` 报告同样参与留存裁剪（按 mtime 删最旧），
+    /// 而非只识别小写扩展名。
+    #[test]
+    fn metrics_retention_counts_uppercase_json_reports() {
+        let dir = std::env::temp_dir().join(format!("dsn-metrics-upjson-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // z.JSON 最旧（大写），a.json 最新。
+        std::fs::write(dir.join("z.JSON"), "{}").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        std::fs::write(dir.join("a.json"), "{}").unwrap();
+        enforce_metrics_retention(&dir, 1);
+        let mut names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["a.json".to_string()],
+            "大写 .JSON 应参与裁剪（z 被删）"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

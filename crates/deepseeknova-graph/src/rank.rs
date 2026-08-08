@@ -99,4 +99,27 @@ mod tests {
         let seeded = pagerank(&nodes, &edges, &["a".to_string()], 0.85, 50);
         assert!(seeded["a"] > base["a"], "seed should raise its own score");
     }
+
+    #[test]
+    fn pagerank_cycle_is_symmetric_and_normalized() {
+        // a→b→c→a 纯环：无悬空节点，图对称 → 三节点分数相等，总和为 1。
+        let edges = vec![
+            ("a".to_string(), "b".to_string()),
+            ("b".to_string(), "c".to_string()),
+            ("c".to_string(), "a".to_string()),
+        ];
+        let nodes = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let scores = pagerank(&nodes, &edges, &[], 0.85, 50);
+        let sum: f64 = scores.values().sum();
+        assert!((sum - 1.0).abs() < 1e-9, "sum={sum}");
+        assert!((scores["a"] - scores["b"]).abs() < 1e-9);
+        assert!((scores["b"] - scores["c"]).abs() < 1e-9);
+    }
+
+    #[test]
+    fn pagerank_empty_and_single_node() {
+        assert!(pagerank(&[], &[], &[], 0.85, 50).is_empty());
+        let single = pagerank(&["a".to_string()], &[], &["a".to_string()], 0.85, 50);
+        assert!((single["a"] - 1.0).abs() < 1e-9, "{single:?}");
+    }
 }

@@ -166,4 +166,33 @@ mod tests {
             "protocol enabled must emit at least one phase transition, got {transitions}"
         );
     }
+
+    /// 对抗审查开关独立于 enabled：`adversarial_review=true` 时即使
+    /// enabled=false 也走 with_adversarial_review 装配路径（run 正常结束，
+    /// 不 panic）；门注入保持零成本。
+    #[tokio::test]
+    async fn protocol_gates_adversarial_review_flag_wires_independent_of_enabled() {
+        use deepseeknova_core::Runner;
+        use futures::StreamExt;
+
+        let mut config = Config::default();
+        config.protocol.enabled = false;
+        config.protocol.adversarial_review = true;
+        let agent = attach_protocol_gates(
+            deepseeknova_agent::Agent::new(Arc::new(stub_provider()), 2),
+            &config,
+            std::path::Path::new(""),
+        );
+        let mut stream = agent
+            .run_stream(deepseeknova_core::RunInput {
+                prompt: "hi".into(),
+                images: Vec::new(),
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while let Some(ev) = stream.next().await {
+            ev.unwrap();
+        }
+    }
 }

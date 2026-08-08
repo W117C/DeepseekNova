@@ -619,4 +619,240 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    // -----------------------------------------------------------------------
+    // M8b：TOML 覆盖对称性 / 冻结 deny 注入 / 默认 max_depth 守门
+    // -----------------------------------------------------------------------
+
+    /// 记录每条 System 消息文本的 provider（供引擎/runner 双侧断言）。
+    struct SystemCaptureProvider {
+        seen: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl deepseeknova_provider::Provider for SystemCaptureProvider {
+        async fn generate(
+            &self,
+            v: deepseeknova_provider::ValidatedRequest<'_>,
+        ) -> anyhow::Result<deepseeknova_core::Message> {
+            let mut texts: Vec<String> = v
+                .messages
+                .iter()
+                .filter(|m| m.role == deepseeknova_core::Role::System)
+                .map(|m| m.content.clone())
+                .collect();
+            self.seen.lock().unwrap().append(&mut texts);
+            Ok(deepseeknova_core::Message {
+                role: deepseeknova_core::Role::Assistant,
+                content: "ok".into(),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            })
+        }
+    }
+
+    /// 对称性：同一 `config.delegate.agents` TOML 覆盖（自定义 system_prompt）
+    /// 必须在 delegate 引擎与 SubAgentRunner 两条路径都生效（M3 接线后共用
+    /// `merged_delegate_presets`，两边不漂移）。
+    #[tokio::test]
+    async fn toml_preset_override_applies_to_engine_and_runner_symmetrically() {
+        use deepseeknova_agent::task_spec::InputValues;
+
+        let mut config = Config::default();
+        config
+            .delegate
+            .agents
+            .push(deepseeknova_config::DelegateAgentOverride {
+                name: "explorer".into(),
+                system_prompt: Some("TOML_OVERRIDE_EXPLORER_PROMPT".into()),
+                tools: None,
+                max_steps: None,
+                inputs: None,
+            });
+        let security = SecurityContext::with_safe_defaults();
+
+        // 引擎路径。
+        let engine_seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let engine = build_delegate_engine(
+            &config,
+            Arc::new(SystemCaptureProvider {
+                seen: engine_seen.clone(),
+            }),
+            &std::env::temp_dir(),
+            &security,
+            None,
+            None,
+            None,
+            None,
+        );
+        let _ = engine
+            .run_at_depth("explorer", "investigate", InputValues::new(), 1)
+            .await
+            .expect("engine run must succeed");
+        let engine_texts = engine_seen.lock().unwrap().join("\n");
+        assert!(
+            engine_texts.contains("TOML_OVERRIDE_EXPLORER_PROMPT"),
+            "引擎路径必须使用 TOML 覆盖的 system prompt: {engine_texts}"
+        );
+
+        // runner 路径。
+        let runner_seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let runner = build_sub_agent_runner(
+            &config,
+            Arc::new(SystemCaptureProvider {
+                seen: runner_seen.clone(),
+            }),
+            None,
+            &[],
+            None,
+            None,
+            &std::env::temp_dir(),
+        );
+        use deepseeknova_core::Runner;
+        use futures::StreamExt;
+        let mut stream = runner
+            .run_stream(deepseeknova_core::RunInput {
+                prompt: "sub_agent:explorer\ngoal: investigate".into(),
+                images: Vec::new(),
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        let runner_texts = runner_seen.lock().unwrap().join("\n");
+        assert!(
+            runner_texts.contains("TOML_OVERRIDE_EXPLORER_PROMPT"),
+            "SubAgentRunner 路径必须使用同一 TOML 覆盖: {runner_texts}"
+        );
+    }
+
+    /// 新增（非内置）TOML 预设同样注册进引擎：`merged_delegate_presets` 的
+    /// 新增分支生效，且内置预设仍保留。
+    #[test]
+    fn delegate_engine_registers_custom_toml_agent() {
+        let mut config = Config::default();
+        config
+            .delegate
+            .agents
+            .push(deepseeknova_config::DelegateAgentOverride {
+                name: "analyst".into(),
+                system_prompt: Some("You are an analyst".into()),
+                tools: Some(vec!["read_file".into()]),
+                max_steps: Some(7),
+                inputs: None,
+            });
+        let security = SecurityContext::with_safe_defaults();
+        let engine = build_delegate_engine(
+            &config,
+            std::sync::Arc::new(stub_provider()),
+            &std::env::temp_dir(),
+            &security,
+            None,
+            None,
+            None,
+            None,
+        );
+        let names = engine.agent_names();
+        assert!(
+            names.iter().any(|n| n == "analyst"),
+            "自定义 TOML 预设必须注册，实得: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "explorer"),
+            "内置预设必须仍在: {names:?}"
+        );
+    }
+
+    /// L4 门禁补面：gate 含 deny 规则时，delegate 引擎把父级 deny 冻结清单
+    /// 注入子代理 system prompt（prompt 层防线），子代理模型发起调用前即
+    /// 知晓禁止边界（执行层仍由共享 gate 强制）。
+    #[tokio::test]
+    async fn delegate_engine_injects_frozen_denies_into_sub_agent_prompt() {
+        use deepseeknova_agent::task_spec::InputValues;
+
+        let ws = std::env::temp_dir().join(format!("dnv-frozen-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&ws);
+        let mut gate_cfg = Config::default();
+        gate_cfg.permissions.rules = vec![deepseeknova_config::PermissionRule {
+            tool: "bash".into(),
+            subject: Some("rm -rf *".into()),
+            mode: deepseeknova_config::PermissionMode::Deny,
+        }];
+        let gate = Arc::new(crate::security::build_permission_gate(&gate_cfg));
+
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let config = Config::default();
+        let security = SecurityContext::with_safe_defaults();
+        let engine = build_delegate_engine(
+            &config,
+            Arc::new(SystemCaptureProvider { seen: seen.clone() }),
+            &ws,
+            &security,
+            Some(gate),
+            None,
+            None,
+            None,
+        );
+        let _ = engine
+            .run_at_depth("explorer", "investigate", InputValues::new(), 1)
+            .await
+            .expect("engine run must succeed");
+        let texts = seen.lock().unwrap().join("\n");
+        assert!(
+            texts.contains("禁止操作（父级冻结") && texts.contains("bash rm -rf *"),
+            "子代理 system prompt 必须含冻结 deny 清单: {texts}"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// M5 默认值守门：默认 max_depth=3（无显式配置）时 depth=3 放行、
+    /// depth=4 拒绝——配置上限在生产路径生效（非仅显式配置场景）。
+    #[tokio::test]
+    async fn delegate_engine_default_max_depth_guards_excess() {
+        use deepseeknova_agent::task_spec::InputValues;
+        let root = std::env::temp_dir().join(format!("dnv-depth-default-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let config = Config::default(); // max_depth 默认 3
+        let security = SecurityContext::with_safe_defaults();
+        let engine = build_delegate_engine(
+            &config,
+            std::sync::Arc::new(stub_provider()),
+            &root,
+            &security,
+            None,
+            None,
+            None,
+            None,
+        );
+        let ok = engine
+            .run_at_depth("explorer", "investigate", InputValues::new(), 3)
+            .await;
+        assert!(ok.is_ok(), "depth=默认上限 应放行: {ok:?}");
+        let err = engine
+            .run_at_depth("explorer", "investigate", InputValues::new(), 4)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("recursion depth exceeded"),
+            "depth 超默认上限必须被拒绝: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 冻结 deny 渲染：空规则 → None（不追加）；非空规则 → 行格式
+    /// `- <tool> <subject>` / `- <tool>`（prompt 层冻结清单文本）。
+    #[test]
+    fn render_frozen_denies_formats_rules_and_empty() {
+        use deepseeknova_permission::Rule;
+        assert!(render_frozen_denies(&[]).is_none(), "空规则不产生追加");
+        let rules = vec![Rule::new("bash"), Rule::with_subject("bash", "rm -rf *")];
+        let rendered = render_frozen_denies(&rules).unwrap();
+        assert!(rendered.contains("- bash"), "无 subject: - bash");
+        assert!(
+            rendered.contains("- bash rm -rf *"),
+            "有 subject: - bash <subject>"
+        );
+    }
 }

@@ -2455,4 +2455,252 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    // -----------------------------------------------------------------------
+    // M8b：builder disabled-set 过滤补全 + 预算/验证接线
+    // -----------------------------------------------------------------------
+
+    /// 记忆关闭时必须把所有记忆工具（remember/recall/forget）从注册表剔除，
+    /// 模型看不到其 schema（与 graph 同款处理）。既有测试只查 recall，
+    /// 这里补 remember/forget 全覆盖。
+    #[test]
+    fn build_agent_skips_all_memory_tools_when_disabled() {
+        let mut config = Config::default();
+        config.memory.enabled = false;
+        config.graph.enabled = false;
+        let provider = std::sync::Arc::new(stub_provider());
+        let agent = build_agent(&config, std::env::temp_dir(), provider, 5, None, vec![]).unwrap();
+        let names = agent.tool_names();
+        for tool in ["remember", "recall", "forget"] {
+            assert!(
+                !names.iter().any(|n| n == tool),
+                "{tool} 必须在 memory 关闭时被排除，实得: {names:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn build_agent_registers_remember_and_forget_when_memory_enabled() {
+        let mut config = Config::default();
+        config.memory.enabled = true;
+        config.graph.enabled = false;
+        let root = std::env::temp_dir().join(format!("dnv-mem-forget-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let provider = std::sync::Arc::new(stub_provider());
+        let agent = build_agent(&config, root.clone(), provider, 5, None, vec![]).unwrap();
+        let names = agent.tool_names();
+        for tool in ["remember", "recall", "forget"] {
+            assert!(
+                names.iter().any(|n| n == tool),
+                "{tool} 必须在 memory 开启时注册，实得: {names:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// tools.overrides 对内置工具同样生效：禁用 web_search 后模型看不到其
+    /// schema（与既有 extra_tools 覆盖同款 disabled-set 过滤）。
+    #[test]
+    fn build_agent_disables_builtin_tool_via_overrides() {
+        let mut config = Config::default();
+        config.graph.enabled = false;
+        config.memory.enabled = false;
+        config.tools.overrides = vec![deepseeknova_config::ToolOverride {
+            name: "web_search".into(),
+            disabled: true,
+            timeout_secs: None,
+            max_file_size: None,
+        }];
+        let provider = std::sync::Arc::new(stub_provider());
+        let agent = build_agent(&config, std::env::temp_dir(), provider, 5, None, vec![]).unwrap();
+        let names = agent.tool_names();
+        assert!(
+            !names.iter().any(|n| n == "web_search"),
+            "web_search 必须被 overrides 禁用，实得: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "read_file"),
+            "其他内置工具不受影响"
+        );
+    }
+
+    /// B2 预算接线：`[budget] enabled=true` 时运行时挂 PromptBudgetController。
+    /// 极小 system prompt + 极低 max_total_tokens → 首步预算 Reject → 优雅
+    /// Paused（reason 含 "budget"），证明预算守门在生产路径真实生效。
+    #[tokio::test]
+    async fn build_agent_wires_token_budget_and_pauses_on_excess() {
+        use deepseeknova_core::Runner;
+        use futures::StreamExt;
+        let mut config = Config::default();
+        config.agent.system_prompt = Some("tiny".into()); // 极小 system prompt
+        config.budget.enabled = true;
+        config.budget.max_total_tokens = 64;
+        config.budget.max_memory_tokens = 16;
+        config.graph.enabled = false;
+        config.memory.enabled = false;
+        config.delegate.enabled = false;
+        config.verify.enabled = false;
+        config.review.enabled = false;
+        config.agent.l3_compaction = false;
+        let provider = std::sync::Arc::new(stub_provider());
+        let agent = build_agent(&config, std::env::temp_dir(), provider, 5, None, vec![]).unwrap();
+        let mut stream = agent
+            .run_stream(RunInput {
+                prompt: "hi".into(),
+                images: Vec::new(),
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        let mut paused_reason: Option<String> = None;
+        while let Some(ev) = stream.next().await {
+            if let Ok(deepseeknova_core::runner::RunEvent::Paused { reason, .. }) = ev {
+                paused_reason = Some(reason);
+            }
+        }
+        assert!(
+            paused_reason.is_some(),
+            "budget Reject 必须 Paused（而非跑满 max_steps）"
+        );
+        assert!(
+            paused_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("budget"),
+            "Paused reason 必须说明预算: {paused_reason:?}"
+        );
+    }
+
+    /// P2-4 团队级花费上限接线：build_agent 后叠加 `with_cost_budget`（CLI
+    /// 同款装配），账本已超限时首步即 Paused（reason 含 "cost"）。
+    #[tokio::test]
+    async fn build_agent_wires_cost_budget_pausing_on_exceeded_spend() {
+        use deepseeknova_core::Runner;
+        use deepseeknova_provider::cost::{CostLedger, ModelPrices, ModelRole};
+        use futures::StreamExt;
+
+        // 预置账本：模型 "big" 有完整单价，1M prompt → 2.0 USD ≥ 上限 1.0。
+        let ledger = Arc::new(CostLedger::new());
+        let mut prices = deepseeknova_provider::cost::PriceTable::new();
+        prices.insert(
+            "big".to_string(),
+            ModelPrices {
+                input_per_mtok: Some(2.0),
+                output_per_mtok: Some(8.0),
+                cache_hit_per_mtok: Some(0.2),
+            },
+        );
+        ledger.record(
+            ModelRole::Main,
+            "big",
+            &deepseeknova_core::chunk::Usage {
+                prompt_tokens: 1_000_000,
+                completion_tokens: 0,
+                total_tokens: 1_000_000,
+                cache_hit_tokens: 0,
+                cache_miss_tokens: 1_000_000,
+                reasoning_tokens: 0,
+            },
+        );
+
+        let mut config = Config::default();
+        config.graph.enabled = false;
+        config.memory.enabled = false;
+        config.delegate.enabled = false;
+        config.verify.enabled = false;
+        config.review.enabled = false;
+        let agent = build_agent(
+            &config,
+            std::env::temp_dir(),
+            Arc::new(stub_provider()),
+            5,
+            None,
+            vec![],
+        )
+        .unwrap()
+        .with_cost_budget(deepseeknova_agent::budget::cost::CostBudget::new(
+            ledger, prices, 1.0,
+        ));
+        let mut stream = agent
+            .run_stream(RunInput {
+                prompt: "hi".into(),
+                images: Vec::new(),
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        let mut paused_reason: Option<String> = None;
+        while let Some(ev) = stream.next().await {
+            if let Ok(deepseeknova_core::runner::RunEvent::Paused { reason, .. }) = ev {
+                paused_reason = Some(reason);
+            }
+        }
+        assert!(paused_reason.is_some(), "成本超限必须 Paused");
+        assert!(
+            paused_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("cost"),
+            "Paused reason 必须指出成本上限: {paused_reason:?}"
+        );
+    }
+
+    /// P4 验证接线：`[verify] enabled=true` + commands 非空时装配验证链
+    /// （构建不 panic）；llm=false 不要求额外 provider 解析。
+    #[test]
+    fn build_agent_wires_verify_with_command() {
+        let mut config = Config::default();
+        config.graph.enabled = false;
+        config.memory.enabled = false;
+        config.verify.enabled = true;
+        config.verify.commands = vec!["echo ok".into()];
+        config.verify.llm = false;
+        let provider = std::sync::Arc::new(stub_provider());
+        let agent = build_agent(&config, std::env::temp_dir(), provider, 5, None, vec![]).unwrap();
+        let _ = agent;
+    }
+
+    /// disabled-set 过滤与 graph 开关叠加：graph 启用但 tools.overrides
+    /// 禁用 search_code 时，该工具仍被剔除（overrides 与功能开关两路
+    /// disabled 集合合并，模型看不到被禁 schema）。
+    #[tokio::test]
+    async fn build_agent_disables_graph_tool_via_overrides_even_when_graph_enabled() {
+        let mut config = Config::default();
+        config.graph.enabled = true;
+        config.memory.enabled = false;
+        config.tools.overrides = vec![deepseeknova_config::ToolOverride {
+            name: "search_code".into(),
+            disabled: true,
+            timeout_secs: None,
+            max_file_size: None,
+        }];
+        let provider = std::sync::Arc::new(stub_provider());
+        let agent = build_agent(&config, std::env::temp_dir(), provider, 5, None, vec![]).unwrap();
+        let names = agent.tool_names();
+        assert!(
+            !names.iter().any(|n| n == "search_code"),
+            "overrides 禁用必须叠加到 graph 启用的工具集，实得: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "traverse_graph"),
+            "其他图工具仍保留"
+        );
+    }
+
+    /// A1 检查点接线：`[checkpoint] enabled=true` 时装配 CheckpointManager
+    ///（构建不 panic；缺文件时 warn 后新建，行为与默认一致）。
+    #[test]
+    fn build_agent_wires_checkpoint_when_enabled() {
+        let mut config = Config::default();
+        config.checkpoint.enabled = true;
+        config.graph.enabled = false;
+        config.memory.enabled = false;
+        let root = std::env::temp_dir().join(format!("dnv-cp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let provider = std::sync::Arc::new(stub_provider());
+        let agent = build_agent(&config, root.clone(), provider, 5, None, vec![]).unwrap();
+        let _ = agent;
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

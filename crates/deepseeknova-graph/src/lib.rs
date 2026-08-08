@@ -697,4 +697,135 @@ mod tests {
         );
         assert_eq!(hy[0].name, "alpha_needle", "双命中应居首");
     }
+
+    #[test]
+    fn search_best_with_embedder_routes_to_hybrid() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/lib.rs"),
+            "/// needle alpha formatter\npub fn alpha_needle() {}\n\
+             /// ferris crab language\npub fn ferris_crab() {}\n",
+        )
+        .unwrap();
+        let mut idx = GraphIndex::open_with_embedder(
+            root,
+            1_048_576,
+            Some(Arc::new(FakeEmbed)),
+            "test-model",
+        )
+        .unwrap();
+        idx.refresh().unwrap();
+
+        assert!(idx.has_embedder());
+        // 纯词法不得召回语义命中。
+        assert!(idx
+            .search("needle", None, 10)
+            .unwrap()
+            .iter()
+            .all(|n| n.name != "ferris_crab"));
+        // search_best 装配嵌入后必须路由到 hybrid：召回语义独有命中。
+        let best = idx.search_best("needle", None, 10).unwrap();
+        assert!(
+            best.iter().any(|n| n.name == "ferris_crab"),
+            "{:?}",
+            best.iter().map(|n| &n.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn short_query_like_fallback_orders_by_pagerank() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/a.rs"), "pub fn alpha_go() { beta_go(); }\n").unwrap();
+        std::fs::write(root.join("src/b.rs"), "pub fn beta_go() {}\n").unwrap();
+        let mut idx = GraphIndex::open(root, 1_048_576).unwrap();
+        idx.refresh().unwrap();
+
+        // "go" 仅 2 字符 → LIKE 回退按 PageRank score 降序；beta_go 有入边 → 分更高。
+        let hits = idx.search("go", None, 10).unwrap();
+        let names: Vec<&str> = hits.iter().map(|n| n.name.as_str()).collect();
+        assert!(names.contains(&"alpha_go"), "{names:?}");
+        assert!(names.contains(&"beta_go"), "{names:?}");
+        assert_eq!(
+            names[0], "beta_go",
+            "更高 PageRank 的 beta_go 应居首：{names:?}"
+        );
+    }
+
+    #[test]
+    fn repo_map_personalization_ranks_seed_first() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/a.rs"),
+            "pub fn seed_fn() {}\npub fn other_fn() {}\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/b.rs"), "pub fn zeta_fn() {}\n").unwrap();
+        let mut idx = GraphIndex::open(root, 1_048_576).unwrap();
+        idx.refresh().unwrap();
+
+        let map = idx.repo_map(512, &["seed_fn".to_string()]).unwrap();
+        assert!(map.contains("seed_fn"), "{map}");
+        assert!(map.contains("zeta_fn"), "{map}");
+        let seed_pos = map.find("pub fn seed_fn").expect("seed_fn 签名在 map 中");
+        let other_pos = map.find("pub fn other_fn").expect("other_fn 签名在 map 中");
+        assert!(
+            seed_pos < other_pos,
+            "个性化种子符号应排在普通符号前：{map}"
+        );
+    }
+
+    #[test]
+    fn repo_map_empty_repo_and_zero_budget() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let mut idx = GraphIndex::open(root, 1_048_576).unwrap();
+        idx.refresh().unwrap();
+        assert_eq!(idx.repo_map(0, &[]).unwrap(), "");
+        assert_eq!(idx.repo_map(1024, &[]).unwrap(), "");
+
+        // 有节点但零预算 → 空。
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/a.rs"), "pub fn f() {}\n").unwrap();
+        let mut idx2 = GraphIndex::open(root, 1_048_576).unwrap();
+        idx2.refresh().unwrap();
+        assert_eq!(idx2.repo_map(0, &[]).unwrap(), "");
+    }
+
+    #[test]
+    fn edges_filters_by_kind() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/a.rs"),
+            "use crate::helper;\npub fn alpha() { helper(); }\npub fn helper() {}\n",
+        )
+        .unwrap();
+        let mut idx = GraphIndex::open(root, 1_048_576).unwrap();
+        idx.refresh().unwrap();
+
+        // 混合边库中按 kind 隔离：Contains/Calls/Imports 互不泄漏。
+        let contains = idx.edges(EdgeKind::Contains).unwrap();
+        assert_eq!(contains.len(), 2, "{contains:?}");
+        let calls = idx.edges(EdgeKind::Calls).unwrap();
+        assert!(
+            calls
+                .iter()
+                .any(|(s, d)| s.contains("alpha") && d.contains("helper")),
+            "{calls:?}"
+        );
+        let imports = idx.edges(EdgeKind::Imports).unwrap();
+        assert!(
+            imports
+                .iter()
+                .any(|(s, d)| s.contains("a.rs") && d.contains("helper")),
+            "use crate::helper → file→helper Imports 边：{imports:?}"
+        );
+    }
 }

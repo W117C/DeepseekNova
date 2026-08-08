@@ -149,4 +149,24 @@ mod tests {
         let deduped = repo_map_seeds("token token token again again");
         assert!(deduped.len() <= 2, "seeds must dedupe, got {deduped:?}");
     }
+
+    /// repo_map_seeds 大小写去重 + 停用词/短 token（<3 字符）过滤。
+    #[test]
+    fn repo_map_seeds_dedupes_case_insensitively_and_filters_underscores() {
+        let seeds = repo_map_seeds("Token token and OK net _x my-code");
+        // Token/token 大小写去重；and/code 停用词；OK/my/_x 短 token（<3）。
+        assert_eq!(
+            seeds,
+            vec!["Token".to_string(), "net".to_string()],
+            "实得: {seeds:?}"
+        );
+    }
+
+    /// run_blocking_work 无 tokio runtime 上下文时直接调用闭包（不 panic，
+    /// 测试与单线程场景行为与旧版一致）。
+    #[test]
+    fn run_blocking_work_without_runtime_calls_directly() {
+        let value = run_blocking_work(|| 42);
+        assert_eq!(value, 42);
+    }
 }

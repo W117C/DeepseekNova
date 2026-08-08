@@ -1,7 +1,13 @@
 //! 自举冒烟测试：对 DeepseekNova 本仓库建索引，验证真实规模下的检索行为。
 //!
-//! 默认 `#[ignore]`（依赖运行环境的仓库布局、耗时秒级）。手动运行：
-//! `cargo test -p deepseeknova-graph --test self_index -- --ignored --nocapture`
+//! 保持 `#[ignore]` 的原因（M8 复查后确认，2026-08-08）：
+//! 1. 依赖运行环境仓库布局——在 CI 检出深度/子模块缺失时会行为漂移；
+//! 2. 对真实仓库全量解析耗时秒级且会写入 root/.deepseeknova/graph.db
+//!    （派生数据），不适合进常规测试门禁；
+//! 3. 公开 API 端到端链路已由 `tests/e2e.rs` 在临时目录上覆盖
+//!    （refresh → search/trace/repo_map/deps），可稳定进 CI。
+//!
+//! 手动运行：`cargo test -p deepseeknova-graph --test self_index -- --ignored --nocapture`
 
 use deepseeknova_graph::{Direction, EdgeKind, GraphIndex};
 

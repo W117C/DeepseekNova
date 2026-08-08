@@ -318,4 +318,179 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&ws);
     }
+
+    // -----------------------------------------------------------------------
+    // AUDIT M1：gate 拒绝审计（permission_gate_for 注入的 AuditLogger）
+    // -----------------------------------------------------------------------
+
+    /// 供 PermissionGate::check 使用的极简工具桩（默认写工具语义）。
+    struct GateStubTool(&'static str);
+
+    #[async_trait::async_trait]
+    impl deepseeknova_core::Tool for GateStubTool {
+        fn schema(&self) -> deepseeknova_core::types::ToolSchema {
+            deepseeknova_core::types::ToolSchema {
+                name: self.0.to_string(),
+                description: "gate stub".into(),
+                parameters: serde_json::json!({"type": "object"}),
+            }
+        }
+        async fn execute(
+            &self,
+            _ctx: &deepseeknova_core::tool::ToolContext,
+            _args: &str,
+        ) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+    }
+
+    /// M1 回归：`permission_gate_for` 注入的审计器必须把 gate 拒绝落盘到
+    /// `<ws>/.deepseeknova/security/audit.jsonl`（此前仅 enforce_capability
+    /// 覆盖，gate 层拒绝是取证盲区）。default_mode=Deny → 任意工具 check 即
+    /// 拒绝 → 审计行含 `gate_deny` 与工具名。
+    #[test]
+    fn permission_gate_for_denies_and_writes_audit_jsonl() {
+        let ws = std::env::temp_dir().join(format!("dnv-gate-audit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(&ws).unwrap();
+        let mut config = Config::default();
+        config.permissions.enabled = true;
+        config.permissions.default_mode = deepseeknova_config::PermissionMode::Deny;
+        let gate = permission_gate_for(&config, &ws).expect("enabled → Some gate");
+        let verdict = gate.check(&GateStubTool("web_search"), r#"{"query":"x"}"#);
+        assert_eq!(
+            verdict.decision(),
+            deepseeknova_permission::Decision::Deny,
+            "default_mode=Deny 必须拒绝"
+        );
+        let audit_file = ws.join(".deepseeknova/security/audit.jsonl");
+        let content = std::fs::read_to_string(&audit_file)
+            .unwrap_or_else(|e| panic!("audit.jsonl must be written on gate denial: {e}"));
+        assert!(
+            content.contains("gate_deny"),
+            "must record gate_deny: {content}"
+        );
+        assert!(
+            content.contains("web_search"),
+            "must cite tool name: {content}"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// `permissions.enabled=false` 时 permission_gate_for 返回 None（零装配
+    /// 零开销），与 build_agent 的 gate 激活语义一致。
+    #[test]
+    fn permission_gate_for_returns_none_when_permissions_disabled() {
+        let mut config = Config::default();
+        config.permissions.enabled = false;
+        assert!(
+            permission_gate_for(&config, std::path::Path::new("/tmp")).is_none(),
+            "disabled → no gate (zero overhead)"
+        );
+    }
+
+    /// 权限模式预设接线：`[permissions] mode = "auto"` 必须覆盖 default_mode
+    /// （写工具放行），验证 runtime 侧 `build_permission_gate` 的
+    /// `.with_mode(...)` 装配生效；未配置预设时保留 default_mode 语义。
+    #[test]
+    fn build_permission_gate_mode_preset_auto_overrides_default_deny() {
+        let mut config = Config::default();
+        config.permissions.default_mode = deepseeknova_config::PermissionMode::Deny;
+        config.permissions.mode = Some(deepseeknova_config::ModePreset::Auto);
+        let gate = build_permission_gate(&config);
+        let verdict = gate.check(&GateStubTool("write_file"), r#"{"path":"/tmp/x"}"#);
+        assert_eq!(
+            verdict.decision(),
+            deepseeknova_permission::Decision::Allow,
+            "mode=auto 必须放行写工具（覆盖 default_mode=Deny）"
+        );
+
+        let mut legacy = Config::default();
+        legacy.permissions.default_mode = deepseeknova_config::PermissionMode::Deny;
+        let gate_legacy = build_permission_gate(&legacy);
+        let verdict = gate_legacy.check(&GateStubTool("write_file"), r#"{"path":"/tmp/x"}"#);
+        assert_eq!(verdict.decision(), deepseeknova_permission::Decision::Deny);
+    }
+
+    /// deny 规则优先于 default_mode（fail-closed 方向）：default_mode=Allow
+    /// 但显式 deny 规则命中时仍拒绝——规则表优先级语义在装配层不丢失。
+    #[test]
+    fn build_permission_gate_deny_rule_beats_default_allow() {
+        let mut config = Config::default();
+        config.permissions.default_mode = deepseeknova_config::PermissionMode::Allow;
+        config.permissions.rules = vec![deepseeknova_config::PermissionRule {
+            tool: "bash".into(),
+            subject: None,
+            mode: deepseeknova_config::PermissionMode::Deny,
+        }];
+        let gate = build_permission_gate(&config);
+        let denied = gate.check(&GateStubTool("bash"), "echo hi");
+        assert_eq!(
+            denied.decision(),
+            deepseeknova_permission::Decision::Deny,
+            "deny 规则必须压过 default_mode=Allow"
+        );
+        let allowed = gate.check(&GateStubTool("read_file"), r#"{"path":"/x"}"#);
+        assert_eq!(
+            allowed.decision(),
+            deepseeknova_permission::Decision::Allow,
+            "未命中 deny 规则的工具仍按 default_mode 放行"
+        );
+    }
+
+    /// 能力名解析：大小写不敏感 + 别名（fileread/file_read 等价）；未知
+    /// 能力名被静默忽略（不 panic、不误伤其他能力）。
+    #[test]
+    fn build_security_context_parses_capability_name_case_insensitively() {
+        let mut config = Config::default();
+        config.security.disabled_capabilities = vec![
+            "fileread".into(),           // 别名 + 小写
+            "NetworkAccess".into(),      // 混合大小写
+            "FILE_WRITE".into(),         // 大写 + 下划线
+            "commandexecute".into(),     // 别名 + 小写
+            "no-such-capability".into(), // 未知 → 忽略
+        ];
+        let ws = std::env::temp_dir().join(format!("dnv-sec-caps-{}", std::process::id()));
+        std::fs::create_dir_all(&ws).unwrap();
+        let ctx = super::build_security_context(&config, &ws).unwrap();
+        assert!(!ctx.capabilities.contains(&Capability::FileRead));
+        assert!(!ctx.capabilities.contains(&Capability::NetworkAccess));
+        assert!(!ctx.capabilities.contains(&Capability::FileWrite));
+        assert!(!ctx.capabilities.contains(&Capability::CommandExecute));
+        // 未列出的能力不受影响。
+        assert!(ctx.capabilities.contains(&Capability::McpInvoke));
+        assert!(ctx.capabilities.contains(&Capability::MemoryRead));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// 默认配置的 build_security_context 能力面/限额面与 with_safe_defaults
+    /// 等价（唯一差异是工作区根被加入允许路径首位）。
+    #[test]
+    fn build_security_context_matches_with_safe_defaults() {
+        let ws = std::env::temp_dir().join(format!("dnv-sec-safe-{}", std::process::id()));
+        std::fs::create_dir_all(&ws).unwrap();
+        let ctx = super::build_security_context(&Config::default(), &ws).unwrap();
+        let safe = SecurityContext::with_safe_defaults();
+        assert!(
+            ctx.capabilities.is_subset(&safe.capabilities)
+                && safe.capabilities.is_subset(&ctx.capabilities),
+            "能力面必须与 safe defaults 一致"
+        );
+        // ResourceLimits 不实现 PartialEq：逐字段比对。
+        assert_eq!(ctx.limits.max_files, safe.limits.max_files);
+        assert_eq!(ctx.limits.max_file_size, safe.limits.max_file_size);
+        assert_eq!(
+            ctx.limits.max_total_read_bytes,
+            safe.limits.max_total_read_bytes
+        );
+        assert_eq!(
+            ctx.limits.max_execution_time,
+            safe.limits.max_execution_time
+        );
+        assert_eq!(ctx.limits.max_output_bytes, safe.limits.max_output_bytes);
+        assert_eq!(ctx.limits.max_tool_calls, safe.limits.max_tool_calls);
+        // 差异点：工作区根自动进入允许路径。
+        assert!(ctx.policy.allowed_paths.iter().any(|p| p == &ws));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
 }

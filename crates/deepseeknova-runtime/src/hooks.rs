@@ -126,4 +126,108 @@ mod tests {
         let hooks = user_hooks_from_config(&cfg);
         assert!(hooks.is_empty(), "全部 disabled 时必须映射为空");
     }
+
+    // -----------------------------------------------------------------------
+    // M8b：attach_quality_hook 装配正确性（enabled=true 挂钩 / false 零开销）
+    // -----------------------------------------------------------------------
+
+    use deepseeknova_core::tool::{Tool, ToolContext};
+    use deepseeknova_core::types::ToolSchema;
+    use deepseeknova_core::{RunInput, Runner};
+    use futures::StreamExt;
+    use std::sync::Mutex;
+
+    /// 记录执行次数的假写工具（名字固定 write_file，覆盖内置）。
+    struct RecordingWriteTool {
+        calls: Arc<Mutex<usize>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for RecordingWriteTool {
+        fn schema(&self) -> ToolSchema {
+            ToolSchema {
+                name: "write_file".to_string(),
+                description: "recording write tool".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            }
+        }
+        fn read_only(&self) -> bool {
+            false
+        }
+        async fn execute(&self, _ctx: &ToolContext, _args: &str) -> anyhow::Result<String> {
+            *self.calls.lock().unwrap() += 1;
+            Ok("written".into())
+        }
+    }
+
+    /// 驱动一轮「write .env」的 mock provider run（工具调用 → 文本回复）。
+    async fn run_write_env(agent: deepseeknova_agent::Agent) {
+        let mut stream = agent
+            .run_stream(RunInput {
+                prompt: "write .env".into(),
+                images: Vec::new(),
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+    }
+
+    /// quality 钩子装配：enabled=true 时挂载 QualityHook——写 `.env`（禁写
+    /// 路径）在 before 阶段被 Deny，工具不执行（无写发生）。
+    #[tokio::test]
+    async fn attach_quality_hook_denies_forbidden_path_write_when_enabled() {
+        let ws = std::env::temp_dir().join(format!("dnv-quality-on-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(&ws).unwrap();
+        let calls = Arc::new(Mutex::new(0usize));
+        let provider = deepseeknova_agent::test_utils::MockProvider::tool_call(
+            "write_file",
+            r#"{"path":".env","content":"SECRET=1"}"#,
+            "ignored",
+            "done",
+        );
+        let mut agent =
+            deepseeknova_agent::Agent::new(Arc::new(provider), 5).with_workspace_root(ws.clone());
+        agent.register_tool(Arc::new(RecordingWriteTool {
+            calls: calls.clone(),
+        }));
+        let mut config = Config::default();
+        config.quality.enabled = true;
+        let agent = attach_quality_hook(agent, &config);
+        run_write_env(agent).await;
+        assert_eq!(
+            *calls.lock().unwrap(),
+            0,
+            "quality hook 必须在执行前拒绝禁写路径写"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// quality 关闭时零开销：attach_quality_hook 原样返回 agent，写工具正常
+    /// 执行（对照上例，证明 enabled=false 不挂钩）。
+    #[tokio::test]
+    async fn attach_quality_hook_disabled_leaves_write_unrestricted() {
+        let ws = std::env::temp_dir().join(format!("dnv-quality-off-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(&ws).unwrap();
+        let calls = Arc::new(Mutex::new(0usize));
+        let provider = deepseeknova_agent::test_utils::MockProvider::tool_call(
+            "write_file",
+            r#"{"path":".env","content":"SECRET=1"}"#,
+            "ignored",
+            "done",
+        );
+        let mut agent =
+            deepseeknova_agent::Agent::new(Arc::new(provider), 5).with_workspace_root(ws.clone());
+        agent.register_tool(Arc::new(RecordingWriteTool {
+            calls: calls.clone(),
+        }));
+        let mut config = Config::default();
+        config.quality.enabled = false;
+        let agent = attach_quality_hook(agent, &config);
+        run_write_env(agent).await;
+        assert_eq!(*calls.lock().unwrap(), 1, "quality 关闭时写工具应正常执行");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
 }
