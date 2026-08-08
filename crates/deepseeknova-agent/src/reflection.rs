@@ -4,6 +4,7 @@
 //! 原文案，绝不阻断循环。JSON 契约：
 //! `{"root_cause":"...","fix_plan":"...","lesson":"..."}`。
 
+use crate::review::extract_json;
 use deepseeknova_core::{Message, Role};
 use deepseeknova_provider::{Provider, ValidatedRequest};
 use std::sync::Arc;
@@ -26,41 +27,6 @@ pub(crate) struct ReflectSettings {
 
 /// 教训沉淀钩子（runtime 注入：落 core 记忆库；None = 仅对话内）。
 pub type LessonHook = Arc<dyn Fn(String) + Send + Sync>;
-
-/// 提取首个平衡的 JSON 对象（与 review.rs 同款宽松解析；main 上该函数私有，
-/// 改可见性不在任务书白名单，故本模块自带等价实现）。
-fn extract_json(raw: &str) -> Option<String> {
-    if let Some(start) = raw.find("```json") {
-        let rest = &raw[start + 7..];
-        if let Some(end) = rest.find("```") {
-            return Some(rest[..end].trim().to_string());
-        }
-    }
-    let bytes = raw.as_bytes();
-    let start = raw.find('{')?;
-    let mut depth = 0usize;
-    let mut in_string = false;
-    let mut escape = false;
-    for (i, &b) in bytes.iter().enumerate().skip(start) {
-        if escape {
-            escape = false;
-            continue;
-        }
-        match b {
-            b'\\' if in_string => escape = true,
-            b'"' => in_string = !in_string,
-            b'{' if !in_string => depth += 1,
-            b'}' if !in_string => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    return Some(raw[start..=i].to_string());
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
 
 /// 渲染反思 prompt：任务 + 失败摘要 + 最后完成文本 → 严格要求 JSON 判定。
 pub fn render_reflection_prompt(task: &str, failure: &str, completion: &str) -> String {

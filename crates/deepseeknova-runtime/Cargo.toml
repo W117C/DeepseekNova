@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 description = "Composition root wiring registry, context, event bus, permission, security, and LLM provider into an agent runtime."
 readme = "README.md"
-documentation = "https://docs.rs/deepseeknova-runtime/0.5.0"
+documentation = "https://docs.rs/deepseeknova-runtime"
 
 [dependencies]
 anyhow = { workspace = true }

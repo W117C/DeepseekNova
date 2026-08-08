@@ -213,8 +213,6 @@ pub fn builtin_phase_gates(levels: &HashMap<String, GateLevel>) -> Vec<Arc<dyn P
 
 /// 会话级阶段运行器（每个 `run_stream` 实例化一个，局部于主循环）。
 pub struct PhaseRunner {
-    /// 最近一次推进到的阶段。
-    current: Option<Phase>,
     /// 阶段迁移计数（QualitySummary.phase_transitions）。
     transitions: u32,
     /// 门控违规累计（QualitySummary.protocol_violations）。
@@ -254,7 +252,6 @@ impl PhaseRunner {
     /// 新建运行器（以当前时刻为 run 起始零刻）。
     pub fn new() -> Self {
         Self {
-            current: None,
             transitions: 0,
             violations: 0,
             verify_passed: 0,
@@ -290,7 +287,6 @@ impl PhaseRunner {
         gates: &[Arc<dyn PhaseGate>],
         ctx: &PhaseGateCtx,
     ) -> Vec<GateViolation> {
-        self.current = Some(phase);
         self.transitions += 1;
         // Bugbot #4：drift 门存在 → 计数/附加启用（Off 时 builtin_phase_gates
         // 已摘除该门，此处探测得到 false）。
@@ -389,11 +385,6 @@ impl PhaseRunner {
     /// 统计快照 `(violations, transitions)`，供 QualitySummary 消费。
     pub fn stats(&self) -> (u32, u32) {
         (self.violations, self.transitions)
-    }
-
-    /// 当前阶段（未推进时为 `None`）。
-    pub fn current_phase(&self) -> Option<Phase> {
-        self.current
     }
 
     /// 构造门控上下文（verify 计数/滑动窗口/计划文本等来自本运行器状态）。

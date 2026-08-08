@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 description = "Layered TOML configuration with merge semantics (defaults, user, project, env, CLI flags)."
 readme = "README.md"
-documentation = "https://docs.rs/deepseeknova-config/0.5.0"
+documentation = "https://docs.rs/deepseeknova-config"
 
 [dependencies]
 anyhow = { workspace = true }

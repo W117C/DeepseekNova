@@ -25,6 +25,14 @@ use tracing::{info, warn};
 /// Approximate characters-per-token for rough heuristics.
 use crate::tokens::estimate_tokens;
 
+/// Mutex 毒化恢复：另一线程在持锁临界区内 panic 后，`lock()` 返回
+/// `PoisonError`。`into_inner()` 取回被污染的数据（可能不完整），warn 记录
+/// 后再继续——比 `unwrap()` 崩溃更优雅，语义与项目其他 poison 处理对齐。
+fn recover_poisoned<T>(e: std::sync::PoisonError<T>) -> T {
+    warn!("mutex poisoned by a panicking thread; recovering locked value");
+    e.into_inner()
+}
+
 /// 子代理递归深度上限默认值（根派发 depth 1；可再派 depth 2…直至上限）。
 pub const DEFAULT_MAX_DEPTH: usize = 3;
 
@@ -307,7 +315,7 @@ impl SubAgentRunner {
     /// 运行时在 `Arc::new(runner)` 之后调用：
     /// `runner.set_delegation_sink(runner.clone());`
     pub fn set_delegation_sink(&self, sink: Arc<dyn DelegationSink>) {
-        *self.delegation_sink.lock().unwrap() = Some(sink);
+        *self.delegation_sink.lock().unwrap_or_else(recover_poisoned) = Some(sink);
     }
 
     /// Parse the input prompt to extract sub-agent name, goal, and input values.
@@ -505,7 +513,11 @@ impl SubAgentRunner {
         let max_steps = config.max_steps;
         let tool_hooks = self.tool_hooks.clone();
         let user_hooks = self.user_hooks.clone();
-        let delegation_sink = self.delegation_sink.lock().unwrap().clone();
+        let delegation_sink = self
+            .delegation_sink
+            .lock()
+            .unwrap_or_else(recover_poisoned)
+            .clone();
         let mut system_prompt = config.system_prompt.clone();
         if !config.frozen_denies.is_empty() {
             system_prompt.push_str("\n\n## 禁止操作（父级冻结，不可执行）\n");
@@ -1616,6 +1628,38 @@ mod tests {
         let runner = SubAgentRunner::new(Arc::new(MockProvider::text("x"))).with_max_depth(0);
         // 私有字段在测试内可见
         assert_eq!(runner.max_depth, 1);
+    }
+
+    // --- Mutex 毒化恢复（L3）---
+
+    #[test]
+    fn delegation_sink_poison_recovers_without_panic() {
+        use crate::test_utils::MockProvider;
+        let runner = SubAgentRunner::new(Arc::new(MockProvider::text("x")));
+
+        // 毒化 delegation_sink：另一线程持锁 panic，释放后 mutex 进入 poisoned 态。
+        let m = Arc::clone(&runner.delegation_sink);
+        let t = std::thread::spawn(move || {
+            let _guard = m.lock().unwrap();
+            panic!("intentional poison");
+        });
+        assert!(t.join().is_err(), "poisoning thread must panic");
+        assert!(runner.delegation_sink.is_poisoned());
+
+        // 写路径（set_delegation_sink）不得 panic，须恢复并写入。
+        let sink: Arc<dyn DelegationSink> = Arc::new(runner.clone());
+        runner.set_delegation_sink(sink);
+
+        // 读路径（与 run_stream 克隆 delegation_sink 槽同款）经 recover_poisoned 恢复。
+        let stored = runner
+            .delegation_sink
+            .lock()
+            .unwrap_or_else(recover_poisoned)
+            .clone();
+        assert!(
+            stored.is_some(),
+            "sink must be stored after poison recovery"
+        );
     }
 
     // --- per-agent 模型覆盖 ---

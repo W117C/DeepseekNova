@@ -231,6 +231,41 @@ mod tests {
     }
 
     #[test]
+    fn unified_extract_json_covers_all_former_variants() {
+        // M9 统一：memory_distill / reflection / coordinator 的重复实现并入
+        // 本函数。此测试锁定统一后单一实现须覆盖全部前身行为——
+        // markdown json fence / plain fence / 裸对象 / 字符串内花括号 / 无 JSON。
+        let cases: &[(&str, Option<&str>)] = &[
+            // 原 coordinator extract_json_block 的 markdown json fence
+            (
+                "Here's the plan:\n```json\n{\"nodes\":[],\"edges\":[]}\n```\nDone.",
+                Some("{\"nodes\":[],\"edges\":[]}"),
+            ),
+            // 原 coordinator plain fence（无 json 标注）
+            (
+                "```\n{\"nodes\":[{\"id\":\"x\"}]}\n```",
+                Some("{\"nodes\":[{\"id\":\"x\"}]}"),
+            ),
+            // 原 coordinator 裸对象提取
+            (
+                " some text {\"key\": \"value\"} trailing ",
+                Some("{\"key\": \"value\"}"),
+            ),
+            // 无平衡花括号 → None（协调器侧走 fallback 计划）
+            ("not json at all", None),
+        ];
+        for (raw, expected) in cases {
+            assert_eq!(extract_json(raw).as_deref(), *expected, "input: {raw}");
+        }
+        // 字符串内字面花括号不得误截（review/蒸馏/反思共用的退化输入）。
+        let nested = r#"note {"verdict":"issues","issues":["fix `impl Foo { bar }` block"]} end"#;
+        assert_eq!(
+            extract_json(nested).as_deref(),
+            Some(r#"{"verdict":"issues","issues":["fix `impl Foo { bar }` block"]}"#)
+        );
+    }
+
+    #[test]
     fn prompt_contains_all_sections_and_feedback_lists_issues() {
         let p = render_review_prompt("fix auth", "done", "diff body");
         for s in ["# Task", "# Completion claim", "# Diff", "verdict"] {

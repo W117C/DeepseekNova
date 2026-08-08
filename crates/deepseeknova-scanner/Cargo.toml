@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Security scanning for the deepseeknova agent framework: static regex rules, optional one-shot agent investigation, and severity-grouped reports."
+readme = "README.md"
 keywords = ["security", "scanner", "static-analysis", "agent", "deepseek"]
 
 [dependencies]

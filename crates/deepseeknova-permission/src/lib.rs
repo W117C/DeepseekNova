@@ -5,9 +5,12 @@
 //! permission caching.
 
 use deepseeknova_core::tool::Tool;
+use deepseeknova_security::audit::{AuditLogger, SecurityEvent};
+use deepseeknova_security::capability::Capability;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::Path;
+use std::sync::{atomic::Ordering, Arc};
 
 // ---------------------------------------------------------------------------
 // Permission Gate — intercept layer
@@ -510,6 +513,11 @@ pub struct PermissionGate {
     trusted: std::sync::Mutex<bool>,
     /// allow 规则是否源自项目层（untrusted 时降级为 ask）。
     allow_project_scoped: bool,
+    /// 可选的 gate 拒绝审计器（`None` = 不记录，向后兼容）。
+    /// 由 runtime/cli 装配点注入；写盘失败仅 warn、不阻断判定（fail-open）。
+    audit_logger: Option<Arc<dyn AuditLogger>>,
+    /// gate 拒绝事件的自增序号（生成 call_id）。
+    audit_seq: std::sync::atomic::AtomicU64,
 }
 
 impl PermissionGate {
@@ -523,6 +531,8 @@ impl PermissionGate {
             mode: std::sync::Mutex::new(None),
             trusted: std::sync::Mutex::new(false),
             allow_project_scoped: false,
+            audit_logger: None,
+            audit_seq: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -589,6 +599,15 @@ impl PermissionGate {
         self
     }
 
+    /// 注入审计日志器：gate 拒绝（越界路径/危险命令/deny 规则/限流/缓存
+    /// 拒绝）写入安全审计（JSONL），消除对抗性场景下拒绝取证的盲区
+    /// （AUDIT M1）。缺省 `None` 时不记录，完全向后兼容。审计持久化
+    /// fail-open：写盘失败仅 warn、绝不改变安全判定。
+    pub fn with_audit_logger(mut self, logger: Arc<dyn AuditLogger>) -> Self {
+        self.audit_logger = Some(logger);
+        self
+    }
+
     /// Record the current call and return true when the rolling-minute
     /// window already holds `limit` calls (i.e. this call must be denied).
     fn rate_limited(&self) -> bool {
@@ -617,11 +636,17 @@ impl PermissionGate {
     ///
     /// 返回完整裁决（行为 + 原因 + 规则建议）；硬拒（限流/越界路径/危险命令）
     /// 不可通过规则覆盖。旧调用方可经 [`CheckVerdict::decision`] 取三态。
+    ///
+    /// 审计：全部拒绝分支（限流/越界/危险/畸形参数/缓存拒绝/deny 规则）
+    /// 在注入审计器时记录 `gate_deny` 事件（AUDIT M1），供对抗性取证；
+    /// 写盘失败仅 warn、不阻断判定（fail-open）。`preview` 不记审计。
     pub fn check(&self, tool: &dyn Tool, args: &str) -> CheckVerdict {
         // Rate limit first: a hard cap independent of per-tool decisions.
         // （预览 API 不触发限流计数——见 [`PermissionGate::preview`]。）
         if self.rate_limited() {
-            return CheckVerdict::hard_deny("rate limit exceeded");
+            let v = CheckVerdict::hard_deny("rate limit exceeded");
+            self.audit_denial(tool, args, None, v.reason());
+            return v;
         }
 
         let tool_name = &tool.schema().name;
@@ -630,6 +655,9 @@ impl PermissionGate {
         // 预检：参数解析 + 路径守卫 + 只读分类（与 preview 同源）。
         let preflight = self.preflight(tool_name, read_only, args);
         if let Some(v) = preflight.hard_deny {
+            // 越界路径/危险命令/畸形参数硬拒：附带越界路径取证字段。
+            let path = preflight.capability.path_outside_workspace.clone();
+            self.audit_denial(tool, args, path, v.reason());
             return v;
         }
 
@@ -640,19 +668,56 @@ impl PermissionGate {
                 return match *cached {
                     Decision::Allow => CheckVerdict::allow(),
                     Decision::Ask => CheckVerdict::ask("cached: requires approval"),
-                    Decision::Deny => CheckVerdict::deny("cached: denied by user"),
+                    Decision::Deny => {
+                        let v = CheckVerdict::deny("cached: denied by user");
+                        self.audit_denial(tool, args, None, v.reason());
+                        v
+                    }
                 };
             }
         }
 
         // 策略裁决（与 preview 同源）。
         let outcome = self.finalize(tool_name, read_only, &preflight);
-        CheckVerdict {
+        let v = CheckVerdict {
             decision: outcome.decision,
             hard: outcome.hard,
             reason: outcome.reason,
             suggestions: outcome.suggestions,
+        };
+        if v.decision() == Decision::Deny {
+            // deny 规则（或 Deny 回退）：记录拒绝取证。
+            self.audit_denial(tool, args, None, v.reason());
         }
+        v
+    }
+
+    /// 在 gate 拒绝分支记录审计事件（AUDIT M1）。
+    ///
+    /// fail-open：无审计器或写盘失败都只是跳过/告警，绝不改变拒绝判定。
+    /// `path` 为越界路径等取证字段；能力类别由工具名 + 只读标志推断
+    /// （审计事件 schema 需要 capability 字段）。审计 reason 附加**原始
+    /// 调用参数**——对抗性取证需要看到被拒的命令/路径原文（如危险命令
+    /// 具体是什么），而非仅通用原因。
+    fn audit_denial(&self, tool: &dyn Tool, args: &str, path: Option<String>, reason: &str) {
+        let Some(logger) = &self.audit_logger else {
+            return;
+        };
+        let tool_name = &tool.schema().name;
+        let event = SecurityEvent {
+            event_type: "gate_deny".to_string(),
+            call_id: format!("gate-{}", self.audit_seq.fetch_add(1, Ordering::Relaxed)),
+            tool_name: tool_name.clone(),
+            capability: Some(gate_capability(tool_name, tool.read_only())),
+            path,
+            allowed: false,
+            reason: if args.is_empty() {
+                reason.to_string()
+            } else {
+                format!("{reason} | args: {args}")
+            },
+        };
+        logger.record(&event);
     }
 
     /// 预执行决策预览（exec 审计模式）。
@@ -991,6 +1056,21 @@ fn is_shell_tool(tool_name: &str) -> bool {
     matches!(tool_name, "Bash" | "bash" | "shell")
 }
 
+/// 为 gate 拒绝事件推断最贴切的能力类别（审计事件需要 capability 字段）。
+///
+/// 尽力而为的启发式：shell 工具 → CommandExecute；写工具 → FileWrite；
+/// 读工具 → FileRead。网络/记忆等细粒度类别 gate 层无法精确区分，
+/// 取证时以 `tool_name` + `reason` 定位。
+fn gate_capability(tool_name: &str, read_only: bool) -> Capability {
+    if is_shell_tool(tool_name) {
+        Capability::CommandExecute
+    } else if read_only {
+        Capability::FileRead
+    } else {
+        Capability::FileWrite
+    }
+}
+
 /// 路径字段名（含 move_file 双路径 source/destination）。
 const PATH_KEYS: &[&str] = &[
     "path",
@@ -1249,6 +1329,7 @@ pub enum PermissionError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use deepseeknova_security::audit::JsonlAuditLogger;
 
     // --- Tool matching ---
 
@@ -2400,5 +2481,107 @@ mod tests {
             json.contains("\"readonly_kind\":\"not_read_only\""),
             "{json}"
         );
+    }
+
+    // ── AUDIT M1：gate 拒绝持久化到 JSONL 审计（消除取证盲区）──
+
+    #[test]
+    fn gate_denial_written_to_jsonl_audit() {
+        // 越界路径硬拒 → JSONL 落盘（tool_name/capability/path/allowed/reason）
+        let dir = tempfile::tempdir().unwrap();
+        let logger = Arc::new(JsonlAuditLogger::at_workspace(dir.path()));
+        let root = dir.path().join("ws");
+        let gate = allow_all_gate()
+            .with_workspace_root(root)
+            .with_audit_logger(logger);
+        let tool = NamedTool::writer("write");
+
+        let v = gate.check(&tool, r#"{"path": "/etc/passwd"}"#);
+        assert_eq!(v.decision(), Decision::Deny);
+        assert!(v.is_hard_deny());
+
+        let log = dir.path().join(".deepseeknova/security/audit.jsonl");
+        let content = std::fs::read_to_string(&log).expect("audit log must be written");
+        assert!(content.contains(r#""event_type":"gate_deny""#), "{content}");
+        assert!(content.contains(r#""tool_name":"write""#), "{content}");
+        assert!(content.contains(r#""capability":"FileWrite""#), "{content}");
+        assert!(content.contains(r#""path":"/etc/passwd""#), "{content}");
+        assert!(content.contains(r#""allowed":false"#), "{content}");
+        assert!(content.contains("path outside workspace"), "{content}");
+        assert_eq!(content.trim_end().lines().count(), 1, "每事件一行 JSON");
+    }
+
+    #[test]
+    fn gate_denies_dangerous_denyrule_ratelimit_all_audited() {
+        // 危险命令硬拒 / deny 规则拒绝 / 限流拒绝三类分支均落盘
+        let dir = tempfile::tempdir().unwrap();
+        let logger = Arc::new(JsonlAuditLogger::at_workspace(dir.path()));
+        let shell = NamedTool::writer("bash");
+
+        // 1) 危险命令硬拒
+        let gate = allow_all_gate().with_audit_logger(logger.clone());
+        let v = gate.check(
+            &shell,
+            r#"{"command": "git -c core.pager='cat /etc/passwd' log"}"#,
+        );
+        assert_eq!(v.decision(), Decision::Deny);
+        assert!(v.is_hard_deny());
+
+        // 2) deny 规则拒绝（非硬拒）
+        let policy = Policy {
+            mode: Decision::Ask,
+            allow: vec![],
+            ask: vec![],
+            deny: vec![Rule::with_subject("bash", "rm *")],
+        };
+        let gate = PermissionGate::new(policy).with_audit_logger(logger.clone());
+        let v = gate.check(&shell, r#"{"command": "rm -f x.txt"}"#);
+        assert_eq!(v.decision(), Decision::Deny);
+        assert!(!v.is_hard_deny());
+
+        // 3) 限流拒绝
+        let gate = allow_all_gate()
+            .with_rate_limit(1)
+            .with_audit_logger(logger.clone());
+        let stub = StubTool;
+        assert_eq!(gate.check(&stub, "{}").decision(), Decision::Allow);
+        let v = gate.check(&stub, "{}");
+        assert_eq!(v.decision(), Decision::Deny);
+        assert!(v.is_hard_deny());
+
+        let log = dir.path().join(".deepseeknova/security/audit.jsonl");
+        let content = std::fs::read_to_string(&log).expect("audit log must be written");
+        assert_eq!(content.trim_end().lines().count(), 3, "三类拒绝各记一行");
+        assert!(content.contains("dangerous command detected"), "{content}");
+        assert!(content.contains("blocked by deny rule"), "{content}");
+        assert!(
+            content.contains(r#""reason":"rate limit exceeded"#),
+            "{content}"
+        );
+        assert!(
+            content.contains(r#""capability":"CommandExecute""#),
+            "{content}"
+        );
+        // 取证字段：审计 reason 附加原始调用参数（对抗性取证需看到被拒命令原文）
+        assert!(
+            content.contains("rm -f x.txt"),
+            "审计应含被拒命令原文: {content}"
+        );
+        assert!(
+            content.contains("rate limit exceeded | args: {}"),
+            "限流拒绝应附原始参数: {content}"
+        );
+    }
+
+    #[test]
+    fn gate_without_audit_logger_records_nothing() {
+        // 向后兼容：缺省无审计器 → 拒绝照常、不写审计文件、不 panic。
+        let dir = tempfile::tempdir().unwrap();
+        let gate = allow_all_gate().with_workspace_root(dir.path().join("ws"));
+        let tool = NamedTool::writer("write");
+        let v = gate.check(&tool, r#"{"path": "/etc/passwd"}"#);
+        assert_eq!(v.decision(), Decision::Deny);
+        let log = dir.path().join(".deepseeknova/security/audit.jsonl");
+        assert!(!log.exists(), "无审计器不得写审计文件");
     }
 }

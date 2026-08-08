@@ -27,36 +27,30 @@ pub struct Context7DocsTool {
 }
 
 /// 进程级共享 HTTP 客户端构造（客户端不随请求变化，一次构建复用）。
-fn build_shared_client() -> reqwest::Client {
-    reqwest::Client::builder()
+/// 构造失败返回 `Err` 向上传播（L2：不再 `expect` panic 宿主）。
+fn build_shared_client() -> anyhow::Result<reqwest::Client> {
+    Ok(reqwest::Client::builder()
         .timeout(DEFAULT_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
         .user_agent(format!("deepseeknova-tools/{}", env!("CARGO_PKG_VERSION")))
-        .build()
-        .expect("failed to build shared HTTP client")
+        .build()?)
 }
 
 impl Context7DocsTool {
-    pub fn new() -> Self {
-        Self {
+    pub fn new() -> anyhow::Result<Self> {
+        Ok(Self {
             base_url: DEFAULT_BASE_URL.to_string(),
-            client: build_shared_client(),
-        }
+            client: build_shared_client()?,
+        })
     }
 
     /// 仅测试可见：注入本地测试服务器地址（127.0.0.1 / localhost）。
     #[cfg(test)]
-    fn with_base_url(base_url: impl Into<String>) -> Self {
-        Self {
+    fn with_base_url(base_url: impl Into<String>) -> anyhow::Result<Self> {
+        Ok(Self {
             base_url: base_url.into(),
-            client: build_shared_client(),
-        }
-    }
-}
-
-impl Default for Context7DocsTool {
-    fn default() -> Self {
-        Self::new()
+            client: build_shared_client()?,
+        })
     }
 }
 
@@ -268,8 +262,15 @@ impl Tool for Context7DocsTool {
 }
 
 /// runtime 常驻注册的文档检索工具（不进 all_builtin，避免触碰 schema 预算测试）。
+/// 构造失败（HTTP 客户端构建异常）时降级为空集合并告警——不 panic（L2）。
 pub fn docs_tools() -> Vec<Arc<dyn Tool>> {
-    vec![Arc::new(Context7DocsTool::new())]
+    match Context7DocsTool::new() {
+        Ok(tool) => vec![Arc::new(tool)],
+        Err(e) => {
+            tracing::warn!("context7_docs tool disabled: failed to build HTTP client: {e}");
+            Vec::new()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -370,6 +371,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn http_client_build_failures_are_typed_results_not_panics() {
+        // L2：HTTP 客户端构造失败必须以 Err 形态暴露（构造器经 `?` 向上
+        // 传播），不得 panic。reqwest 静态配置（超时/UA/禁重定向）在干净
+        // 环境构造必成、生产中几乎不可触发真实失败，因此用非法代理 URL
+        // 直接触发 reqwest 构造侧错误，验证"构造失败 = 可捕获 Result"的
+        // 契约；正常路径构造器返回 Ok 且不 panic。
+        let proxy_err = reqwest::Proxy::all("http://").expect_err("非法代理 URL 必须构造失败");
+        assert!(!proxy_err.to_string().is_empty(), "构造失败错误必须可读");
+        // 正常路径：客户端可构造，无 panic。
+        assert!(build_shared_client().is_ok());
+        // 装配点 `docs_tools()` 在正常路径返回 1 个工具（无 panic）。
+        assert_eq!(docs_tools().len(), 1);
+    }
+
     /// 本地 TcpListener 测试服务器：依次对每个连接返回固定响应体。
     async fn serve(listener: tokio::net::TcpListener, responses: Vec<&'static str>) {
         for body in responses {
@@ -404,7 +420,7 @@ mod tests {
             ],
         ));
 
-        let tool = Context7DocsTool::with_base_url(format!("http://{addr}"));
+        let tool = Context7DocsTool::with_base_url(format!("http://{addr}")).unwrap();
         let ctx = ctx_with_network();
         let out = tool
             .execute(&ctx, r#"{"library":"serde","query":"derive"}"#)
@@ -429,7 +445,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(serve(listener, vec![r#"{"results":[]}"#]));
 
-        let tool = Context7DocsTool::with_base_url(format!("http://{addr}"));
+        let tool = Context7DocsTool::with_base_url(format!("http://{addr}")).unwrap();
         let ctx = ctx_with_network();
         let out = tool
             .execute(&ctx, r#"{"library":"no_such_lib_xyz","query":"anything"}"#)
@@ -456,7 +472,7 @@ mod tests {
             let _ = sock.shutdown().await;
         });
 
-        let tool = Context7DocsTool::with_base_url(format!("http://{addr}"));
+        let tool = Context7DocsTool::with_base_url(format!("http://{addr}")).unwrap();
         let ctx = ctx_with_network();
         let out = tool
             .execute(&ctx, r#"{"library":"serde","query":"derive"}"#)

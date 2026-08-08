@@ -110,6 +110,25 @@ impl CommandAudit {
 // 第一层：任意参数安全的命令
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// 第一层：任意参数安全的命令
+// ---------------------------------------------------------------------------
+
+/// 多词"任意参数安全"条目中**保持前缀匹配**的白名单（L5 例外清单）。
+///
+/// 仅当写形态是独立子命令/动词、尾部参数是只读过滤器时才允许前缀匹配：
+/// `systemctl status sshd`、`log show --predicate ...`、`defaults read key`。
+/// 这些命令的写操作（`systemctl start`、`log erase`、`defaults write`）是
+/// 不同位置参数，前缀不可能命中；链式/重定向已在注入检测短路。
+/// 其余多词条目一律**精确 argv 匹配**——`sysctl -a -w`、`ssh-keygen -y -f`、
+/// `fc -l -s` 等尾部 flag 转写/泄密形态不得免询问逃逸。
+const MULTIWORD_PREFIX_SAFE: &[&str] = &[
+    "systemctl list-units",
+    "systemctl status",
+    "log show",
+    "defaults read",
+];
+
 const READONLY_COMMANDS: &[&str] = &[
     "ls",
     "cat",
@@ -165,8 +184,6 @@ const READONLY_COMMANDS: &[&str] = &[
     "readelf",
     "ldd",
     "zipinfo",
-    "unzip -l",
-    "7z l",
     "openssl version",
     "ssh-keygen -l",
     "ssh-keygen -y",
@@ -185,14 +202,15 @@ const READONLY_COMMANDS: &[&str] = &[
     "system_profiler",
     "mdls",
     "mdfind",
-    "plutil -lint",
 ];
 
 // 注：以下命令**不可**进入"任意参数安全"表，均为专项白名单处理：
 // `find`（-delete/-exec/-execdir 写）、`env`（程序执行器）、`xargs`（执行器）、
 // `tar -t`（-txf 组合解包）、`openssl x509`（-req/-out 写证书）、
 // `xattr`（-w/-c/-d 写属性）、`gpg --list-keys`（--export-secret-keys 泄私钥）、
-// `journalctl`（--vacuum-time 删日志）、`plutil -p`（-convert 组合）、`gh auth status`
+// `journalctl`（--vacuum-time 删日志）、`plutil -p`（-convert 组合）、`gh auth status`、
+// `unzip -l`（-d/-o 解包写文件）、`7z l`（-o 输出目录写文件）
+// （L5：凡可因尾部 flag 转写操作的多词条目一律精确 argv 匹配或专项白名单）
 
 /// 零参数安全的命令。
 const READONLY_NOARGS: &[&str] = &[
@@ -1295,6 +1313,46 @@ fn docker_allowed(args: &[String]) -> bool {
         .any(|s| joined.starts_with(s))
 }
 
+/// unzip 只读判定：必须出现 list 形态（短 flag 含 `l`），可带只读展示
+/// flag（`-v`/`-z`/`-t`/`-Z`/`-q` 等）；解包/写形态字符（`-d` 输出目录、
+/// `-o` 覆盖、`-j` 丢弃路径、`-n` 不覆盖、`-p` 管道提取、`-P` 口令）
+/// 出现即拒绝。位置参数 = 归档文件/通配模式（只读）。
+/// `unzip -l archive.zip` 放行；`unzip -l /tmp/x -d /etc` 拒绝（L5）。
+fn unzip_list_allowed(args: &[String]) -> bool {
+    let mut list_seen = false;
+    for a in args {
+        if a == "--" {
+            continue;
+        }
+        let Some(body) = a.strip_prefix('-') else {
+            continue; // 位置参数（归档文件/通配模式），只读
+        };
+        if body.is_empty() {
+            continue;
+        }
+        for c in body.chars() {
+            match c {
+                'l' => list_seen = true,
+                'd' | 'o' | 'j' | 'n' | 'p' | 'P' => return false,
+                _ => {} // v/z/t/Z/q/s 等只读展示 flag
+            }
+        }
+    }
+    list_seen
+}
+
+/// 7z 只读判定：仅 list 动词（位置参数 `l`），后续 flag 只允许只读展示/
+/// 过滤；`-o`（输出目录）与 `-w`（工作目录）是解包写形态，出现即拒绝。
+/// 解包动词（`x`/`e`）是不同位置参数，不可能命中 `l`（L5）。
+fn sevenz_list_allowed(args: &[String]) -> bool {
+    if args.get(1).map(|s| s.as_str()) != Some("l") {
+        return false;
+    }
+    args[2..]
+        .iter()
+        .all(|a| !a.starts_with("-o") && !a.starts_with("-w"))
+}
+
 // ---------------------------------------------------------------------------
 // 入口
 // ---------------------------------------------------------------------------
@@ -1347,6 +1405,8 @@ fn classify_with_form(cmd: &str) -> (ReadOnlyKind, ReadonlyForm) {
         }
         "gh" => gh_allowed(&args),
         "docker" => docker_allowed(&args),
+        "unzip" => unzip_list_allowed(&args[1..]),
+        "7z" => sevenz_list_allowed(&args),
         "file" => file_allowed(&args[1..]),
         "printenv" => args.len() == 2 && !args[1].starts_with('-'),
         "find" => find_allowed(&args[1..]),
@@ -1375,10 +1435,18 @@ fn classify_with_form(cmd: &str) -> (ReadOnlyKind, ReadonlyForm) {
     // 第一层：任意参数安全（含 "uname -a" 这类带固定参数的条目）。
     // 多词条目按 argv 边界匹配（`uname -a` 不匹配 `uname -all`），
     // 避免粘连 flag 误入只读表。
+    // L5：多词条目默认**精确 argv 匹配**（完整参数序列相等）——尾部 flag
+    // 可把只读形态转写成操作/泄密形态（`ssh-keygen -y -f /etc/shadow`、
+    // `sysctl -a -w key=val`、`fc -l -s 10`）时不得免询问逃逸。仅
+    // [`MULTIWORD_PREFIX_SAFE`] 中"写形态是独立子命令"的条目保持前缀匹配。
     let joined = args.join(" ");
     if READONLY_COMMANDS.iter().any(|c| {
         if c.contains(' ') {
-            joined == *c || joined.starts_with(&format!("{c} "))
+            if MULTIWORD_PREFIX_SAFE.contains(c) {
+                joined == *c || joined.starts_with(&format!("{c} "))
+            } else {
+                joined == *c
+            }
         } else {
             first == *c
         }
@@ -1654,6 +1722,74 @@ mod tests {
         assert!(!is_readonly_command("timedatectl statusx"));
         assert!(is_readonly_command("systemctl list-units --state=running"));
         assert!(!is_readonly_command("systemctl list-unitsx"));
+    }
+
+    // ── L5：多词白名单尾部 flag 转写逃逸（AUDIT-2026-08-08 L5）──
+
+    #[test]
+    fn multiword_readonly_entries_reject_trailing_write_flags() {
+        // ssh-keygen -y 放行，-y -f（读任意文件泄入输出）拒绝
+        assert!(is_readonly_command("ssh-keygen -y"));
+        assert!(!is_readonly_command("ssh-keygen -y -f /etc/shadow"));
+        assert!(!is_readonly_command("ssh-keygen -y -f ~/.ssh/id_rsa"));
+        // ssh-keygen -l 放行，-l -p（改私钥口令 = 写）拒绝
+        assert!(is_readonly_command("ssh-keygen -l"));
+        assert!(!is_readonly_command("ssh-keygen -l -p -f ~/.ssh/id_rsa"));
+        // sysctl -a 放行，-a -w（写内核参数）拒绝
+        assert!(is_readonly_command("sysctl -a"));
+        assert!(!is_readonly_command("sysctl -a -w net.ipv4.ip_forward=1"));
+        // fc -l 放行，-s（重执行历史命令 = 执行）拒绝
+        assert!(is_readonly_command("fc -l"));
+        assert!(!is_readonly_command("fc -l -s 10"));
+        // 精确多词条目：尾部位置参数不再免询问（走权限流程）
+        assert!(!is_readonly_command("openssl version -a extra"));
+        assert!(!is_readonly_command("timedatectl status set-time 12:00"));
+        assert!(!is_readonly_command(
+            "pkgutil --pkg-info com.foo.pkg --forget"
+        ));
+    }
+
+    #[test]
+    fn unzip_list_only_readonly() {
+        // unzip -l 放行（含归档位置参数/只读展示 flag），解包形态拒绝
+        assert!(is_readonly_command("unzip -l"));
+        assert!(is_readonly_command("unzip -l archive.zip"));
+        assert!(is_readonly_command("unzip -lv archive.zip"));
+        assert!(is_readonly_command("unzip -l /tmp/x.zip '*.rs'"));
+        assert!(!is_readonly_command("unzip -l /tmp/x -d /etc"));
+        assert!(!is_readonly_command("unzip -l archive.zip -o"));
+        assert!(!is_readonly_command("unzip -lo archive.zip"));
+        assert!(!is_readonly_command("unzip archive.zip")); // 裸解包
+        assert!(!is_readonly_command("unzip -d /etc archive.zip"));
+    }
+
+    #[test]
+    fn sevenz_list_only_readonly() {
+        // 7z l 放行，-o 输出目录（解包写）拒绝；解包动词 x 拒绝
+        assert!(is_readonly_command("7z l archive.7z"));
+        assert!(is_readonly_command("7z l -r archive.7z"));
+        assert!(!is_readonly_command("7z l archive.7z -o/tmp"));
+        assert!(!is_readonly_command("7z l archive.7z -w/tmp"));
+        assert!(!is_readonly_command("7z x archive.7z"));
+    }
+
+    #[test]
+    fn subcommand_style_prefix_entries_keep_useful_trailing_args() {
+        // 写形态是独立子命令的条目仍允许尾部只读参数
+        assert!(is_readonly_command("systemctl status sshd"));
+        assert!(is_readonly_command("systemctl list-units --state=running"));
+        assert!(is_readonly_command(
+            "defaults read com.apple.finder AppleShowAllFiles"
+        ));
+        assert!(is_readonly_command(
+            "log show --predicate 'process == \"sshd\"'"
+        ));
+        // 对应的写形态（不同子命令）不受前缀影响
+        assert!(!is_readonly_command("systemctl start sshd"));
+        assert!(!is_readonly_command(
+            "defaults write com.apple.finder AppleShowAllFiles YES"
+        ));
+        assert!(!is_readonly_command("log erase"));
     }
 
     #[test]

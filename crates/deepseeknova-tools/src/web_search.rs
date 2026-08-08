@@ -20,8 +20,15 @@ const MAX_RESULTS_CAP: usize = 10;
 const MAX_SEARCH_REDIRECTS: u32 = 5;
 
 /// Build the optional web-search tool set for agent registration.
+/// HTTP 客户端构造失败时降级为空集合并告警——不 panic（L2）。
 pub fn web_search_tools(cfg: &deepseeknova_config::ToolsConfig) -> Vec<Arc<dyn Tool>> {
-    vec![Arc::new(WebSearchTool::new(cfg.web_search.clone()))]
+    match WebSearchTool::new(cfg.web_search.clone()) {
+        Ok(tool) => vec![Arc::new(tool)],
+        Err(e) => {
+            tracing::warn!("web_search tool disabled: failed to build HTTP client: {e}");
+            Vec::new()
+        }
+    }
 }
 
 pub struct WebSearchTool {
@@ -32,15 +39,16 @@ pub struct WebSearchTool {
 }
 
 impl WebSearchTool {
-    pub fn new(cfg: WebSearchConfig) -> Self {
+    /// 构造工具。HTTP 客户端构建失败返回 `Err` 向上传播（L2：不再
+    /// `expect` panic 宿主）。
+    pub fn new(cfg: WebSearchConfig) -> anyhow::Result<Self> {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(cfg.timeout_secs.max(1)))
             .user_agent(format!("deepseeknova-tools/{}", env!("CARGO_PKG_VERSION")))
             // 不自动跟随重定向：每个跳点都要重新做域名/SSRF 校验（同 web_fetch）。
             .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .expect("failed to build shared HTTP client");
-        Self { cfg, client }
+            .build()?;
+        Ok(Self { cfg, client })
     }
 }
 
@@ -463,7 +471,7 @@ mod tests {
             provider: "bogus".to_string(),
             ..Default::default()
         };
-        let tool = WebSearchTool::new(cfg);
+        let tool = WebSearchTool::new(cfg).unwrap();
         let ctx = ToolContext::new("t")
             .with_extension(deepseeknova_security::context::SecurityContext::with_safe_defaults());
         let err = tool

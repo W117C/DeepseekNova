@@ -4,6 +4,60 @@ All notable changes to DeepseekNova will be documented in this file.
 
 ## [Unreleased]
 
+### ⚠ Breaking
+
+- **CLI 退出码重排**（消除与 eval 子命令退出码 2/3 的冲突）：
+  - `on_max_steps = "pause"` 的非交互结束退出码 `3` → **`10`**（仍打印 resume 提示）；
+  - 配置/路由构建错误退出码 `2` → **`6`**；
+  - eval 子命令保留 `1`（条目失败）/ `2`（CI 门槛失败）/ `3`（两者）。
+  - 依赖旧退出码判定 paused / config 错误的自动化（脚本、CI）需更新为新值。
+- **内置工具数 17 → 16**：delegate 委派工具从 `deepseeknova-tools` 移入
+  `deepseeknova-agent`（`DelegateTool`，消除 tools→agent 依赖反转），工具数
+  以当前实现为准。
+
+### Fixed（审计批次 2026-08-08，AUDIT-2026-08-08.md）
+
+- **权限门拒绝持久化审计（M1）**：`PermissionGate` 新增 `with_audit_logger`
+  注入（缺省 None 向后兼容）；`permission_gate_for` 生产路径注入
+  `JsonlAuditLogger::at_workspace`，越界路径/危险命令/deny 规则/限流四类
+  拒绝均落盘 `.deepseeknova/security/audit.jsonl`（含工具名/能力/路径/被拒
+  命令原文）。fail-open：无审计器或写盘失败不阻断判定。
+- **readonly 多词白名单尾部 flag 逃逸（L5）**：`uname -a`/`fc -l`/`ssh-keygen
+  -y`/`sysctl -a`/`pkgutil --pkg-info` 等改精确 argv 匹配；`unzip -l`/`7z l`
+  改专项白名单（拒绝解包字符 `-d/-o/-j/-n/-p/-P/-w`）；仅"写形态为独立
+  子命令"的条目（`systemctl status`/`defaults read` 等）保留前缀匹配。封死
+  `ssh-keygen -y -f /etc/shadow` 类尾部 flag 转写/泄密面。
+- **库路径构造不 panic（L2）**：docs_tools/web_fetch/web_search 的
+  `.build().expect()` 改返回 `anyhow::Result`（构造失败传播错误不 panic）。
+- **async 主循环 embed 不再阻塞 worker（H4）**：runtime 起点/中途召回与
+  DistillHook 三处同步闭包包 `block_in_place`（多线程 runtime 释放 worker，
+  current_thread 环境直调保兼容）；补"阻塞窗口内心跳推进"双向测试。
+- **`.deepseeknova/agents/*.md` 子代理声明接线（M3）**：`[delegate]
+  agents_dir` 配置（缺省 `.deepseeknova/agents`）经 `AgentManifest::load_dir`
+  解析注册到 build_delegate_engine / build_sub_agent_runner，与 TOML 预设
+  合并（同名 markdown 覆盖）；缺目录 warn 跳过。
+- **delegate 引擎 max_depth 守门（M5）**：`build_delegate_engine` 透传
+  `config.delegate.max_depth` 到 `DelegateEngine::with_max_depth`，配置上限
+  在生产路径生效；修 `DelegateConfig::merge` 漏合并
+  `allow_recursion`/`max_depth`/`agents_dir`。
+- **agent 死代码清理（M2）**：Memory repeat-guard（record_call/
+  reset_repeat_guard/idle_duration）、Coordinator goal_mode（GoalContract/
+  with_goal_mode/PLANNER_SYSTEM_PROMPT_GOAL）、PhaseRunner current_phase
+  全部删除（grep 零消费者实证）。
+- **extract_json 统一（M9）**：memory_distill/reflection/coordinator 3 处
+  重复实现统一为 `crate::review::extract_json`（等价性测试锁定）。
+- **Mutex 锁毒恢复（L3）**：sub_agent 的 `.lock().unwrap()` 改 poison 恢复
+  （warn + into_inner），真毒化测试。
+- **DelegateTool 能力门禁（L4）**：execute 入口 `enforce_capability` 要求
+  `CommandExecute`（库级裸装配不再绕过受限能力上下文）。
+- **Runtime/EventBus/ContextEngine 标注库级 API（M4）**：event crate doc
+  标注未接入生产路径；BLOCKED 条目关闭。
+- **文档/CI 同步（G4）**：README/GUIDE 补 hooks/权限预设/信任/audit/预算/
+  network_allow_domains//rename /checkpoint/mode/语义检索/记忆用户面/worktree/
+  i18n；工具数 16；CHANGELOG 退出码；ci.yml release job 删除（release.yml
+  专管）；release.sh/bump-version.sh 重写；dotenvy 死依赖删除；20 crate
+  docs URL 去版本号；SECURITY 版本表 0.5.x；PROMPT_DESIGN 删除项标注。
+
 ## [0.5.0] — 2026-08-08
 
 ### ⚠ Breaking

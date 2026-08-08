@@ -15,7 +15,7 @@ use deepseeknova_core::{
 use deepseeknova_permission::{Decision, PermissionGate};
 use deepseeknova_provider::Provider;
 use deepseeknova_security::context::SecurityContext;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tracing::{info, warn};
@@ -70,77 +70,6 @@ struct PlanEdge {
 }
 
 // ---------------------------------------------------------------------------
-// Goal Contract — forces planner to reason about what before how
-// ---------------------------------------------------------------------------
-
-/// A Goal Contract forces the planner to reason about the what and why
-/// before the how. Mirrors the Context / Request / Output / Constraints /
-/// Pause structure used by DeepSeek-DeepseekNova's TASK_CONTRACT.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GoalContract {
-    /// Background the planner needs (project shape, prior decisions, etc.)
-    #[serde(default)]
-    pub context: String,
-    /// The concrete deliverable: what should exist / be true when done.
-    pub request: String,
-    /// The exact shape of the expected output (file path, format, content).
-    #[serde(default)]
-    pub expected_output: String,
-    /// Hard constraints (non-functional requirements, limits, things to avoid).
-    #[serde(default)]
-    pub constraints: Vec<String>,
-    /// When the agent should stop and ask for human input.
-    #[serde(default)]
-    pub pause_when: Vec<String>,
-}
-
-impl GoalContract {
-    /// Render to a compact, cache-stable string injected as the planner's
-    /// user message. The format is fixed — do not add dynamic per-turn
-    /// fields above the `---` divider or prefix-cache hits will regress.
-    pub fn to_planner_prompt(&self) -> String {
-        let mut s = String::new();
-        s.push_str("# GOAL CONTRACT\n\n");
-        if !self.context.is_empty() {
-            s.push_str("## Context\n");
-            s.push_str(&self.context);
-            s.push_str("\n\n");
-        }
-        s.push_str("## Request\n");
-        s.push_str(&self.request);
-        s.push_str("\n\n");
-        if !self.expected_output.is_empty() {
-            s.push_str("## Expected Output\n");
-            s.push_str(&self.expected_output);
-            s.push_str("\n\n");
-        }
-        if !self.constraints.is_empty() {
-            s.push_str("## Constraints\n");
-            for c in &self.constraints {
-                s.push_str(&format!("- {c}\n"));
-            }
-            s.push('\n');
-        }
-        if !self.pause_when.is_empty() {
-            s.push_str("## Pause When\n");
-            for p in &self.pause_when {
-                s.push_str(&format!("- {p}\n"));
-            }
-            s.push('\n');
-        }
-        s.push_str("---\n");
-        s.push_str("Produce an execution plan as JSON. Each step MUST be one of:\n");
-        s.push_str("- `think` for reasoning (no side-effects)\n");
-        s.push_str("- `call_read_tool` for read-only tool calls\n");
-        s.push_str("- `delegate` for sub-agent dispatch\n");
-        s.push_str(
-            "NEVER use `call_tool` in the plan — only the executor may call mutating tools.\n",
-        );
-        s
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Reasoning language control
 // ---------------------------------------------------------------------------
 
@@ -168,7 +97,7 @@ impl std::fmt::Display for ReasoningLanguage {
 // Planner prompts
 // ---------------------------------------------------------------------------
 
-/// Standard (non-Goal-Mode) system prompt. Fixed byte-for-byte across turns
+/// Standard planner system prompt. Fixed byte-for-byte across turns
 /// so the provider's prefix cache stays warm.
 const PLANNER_SYSTEM_PROMPT: &str = r#"You are a planning assistant operating in the Plan phase of the Observe → Plan → Tool → Verify → Reflect → Next Action loop. Your job is to break down a user's goal into a structured execution plan.
 
@@ -203,42 +132,6 @@ Rules:
 - "delegate" nodes: include "sub_agent" and "goal"
 - Edges define the execution order (from → to); independent branches run in parallel automatically
 - Optional edge field "condition": "success" (default), "failure" (advance downstream when the source node fails), "retry", or "tool_call:<id>" (advance when the source tool result mentions <id>)
-- Optional node field "depends_on": array of node ids that must finish first (deprecated; prefer edges)
-- Optional node field "parallel": array of child node objects that run concurrently inside this node
-- Keep plans concise: 3–8 nodes typically
-- Output ONLY the JSON object. No markdown, no explanation, no backticks."#;
-
-/// Goal-Mode system prompt. Fixed byte-for-byte across turns.
-const PLANNER_SYSTEM_PROMPT_GOAL: &str = r#"You are a planning assistant operating in Goal Mode and the Plan phase of the Observe → Plan → Tool → Verify → Reflect → Next Action loop. Your job is to analyze a structured Goal Contract (Context / Request / Output / Constraints / Pause) and produce an execution plan that satisfies it.
-
-CRITICAL: You may ONLY use these action types:
-- "think" — pure reasoning (no side effects)
-- "call_read_tool" — invoke a READ-ONLY tool to gather information
-- "delegate" — dispatch to a named sub-agent
-
-You MAY NEVER use "call_tool" — only the executor phase may invoke mutating tools.
-
-Output ONLY valid JSON with this exact structure:
-{
-  "nodes": [
-    {"id": "understand", "action": "think", "prompt": "Confirm understanding of the Goal Contract"},
-    {"id": "gather", "action": "call_read_tool", "tool": "<read_tool>", "args": {...}},
-    {"id": "synthesize", "action": "think", "prompt": "Synthesize findings into a concrete deliverable"},
-    {"id": "verify", "action": "reflect", "prompt": "Verify the deliverable against all Goal Contract criteria", "criteria": ["Matches expected output?", "All constraints satisfied?", "Within scope?"]}
-  ],
-  "edges": [
-    {"from": "understand", "to": "gather"},
-    {"from": "gather", "to": "synthesize"},
-    {"from": "synthesize", "to": "verify"}
-  ]
-}
-
-Rules:
-- "id" must be unique for every node
-- Valid actions: "think", "call_read_tool" (read-only only), "reflect", "delegate"
-- The Goal Contract's Constraints and Pause When must appear in your plan's reflect criteria
-- Edges define the execution order (from → to); independent branches run in parallel automatically
-- Optional edge field "condition": "success" (default), "failure", "retry", or "tool_call:<id>"
 - Optional node field "depends_on": array of node ids that must finish first (deprecated; prefer edges)
 - Optional node field "parallel": array of child node objects that run concurrently inside this node
 - Keep plans concise: 3–8 nodes typically
@@ -286,45 +179,6 @@ fn build_planning_prompt(goal: &str, read_only_tools: &[&dyn Tool]) -> Vec<Messa
     ]
 }
 
-fn build_goal_planning_prompt(
-    contract: &GoalContract,
-    read_only_tools: &[&dyn Tool],
-) -> Vec<Message> {
-    let mut extra = String::new();
-    if !read_only_tools.is_empty() {
-        extra.push_str("\n\nRead-only tools available for call_read_tool nodes:\n");
-        for t in read_only_tools {
-            extra.push_str(&format!(
-                "- {}: {}\n",
-                t.schema().name,
-                t.schema().description
-            ));
-        }
-    }
-
-    let mut system = PLANNER_SYSTEM_PROMPT_GOAL.to_string();
-    system.push_str(&extra);
-
-    vec![
-        Message {
-            role: Role::System,
-            content: system,
-            name: None,
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: None,
-        },
-        Message {
-            role: Role::User,
-            content: contract.to_planner_prompt(),
-            name: None,
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: None,
-        },
-    ]
-}
-
 // ---------------------------------------------------------------------------
 // CoordinatorRunner — two-model (Planner + Executor)
 // ---------------------------------------------------------------------------
@@ -342,8 +196,6 @@ pub struct CoordinatorRunner {
     max_graph_nodes: usize,
     /// Optional sub-agent runner for handling Delegate actions.
     sub_agent_runner: Option<Arc<SubAgentRunner>>,
-    /// When true, receive a `GoalContract` and use the Goal-Mode prompt.
-    goal_mode: bool,
     /// Language hint for model reasoning output (cache-neutral).
     reasoning_language: ReasoningLanguage,
     /// When true (default), planner system prompt is pinned byte-for-byte
@@ -368,7 +220,6 @@ impl CoordinatorRunner {
             read_only_tools: HashMap::new(),
             max_graph_nodes: 20,
             sub_agent_runner: None,
-            goal_mode: false,
             reasoning_language: ReasoningLanguage::Auto,
             cache_stable_prefix: true,
             workspace_root: std::env::current_dir().unwrap_or_default(),
@@ -403,14 +254,6 @@ impl CoordinatorRunner {
     /// Attach a sub-agent runner for handling `Action::Delegate` nodes.
     pub fn with_sub_agent_runner(mut self, runner: SubAgentRunner) -> Self {
         self.sub_agent_runner = Some(Arc::new(runner));
-        self
-    }
-
-    /// Enable Goal Mode: the planner receives a Goal Contract instead of a
-    /// free-form prompt. Forces reasoning about success criteria before
-    /// generating any nodes.
-    pub fn with_goal_mode(mut self, enabled: bool) -> Self {
-        self.goal_mode = enabled;
         self
     }
 
@@ -472,7 +315,6 @@ impl Runner for CoordinatorRunner {
         let read_only_refs: Vec<Arc<dyn Tool>> = self.read_only_tools.values().cloned().collect();
         let max_nodes = self.max_graph_nodes;
         let sub_agent_runner = self.sub_agent_runner.clone();
-        let goal_mode = self.goal_mode;
         let workspace_root = self.workspace_root.clone();
         let security = self.security.clone();
         let permission = self.permission.clone();
@@ -486,7 +328,6 @@ impl Runner for CoordinatorRunner {
                 read_only_refs,
                 max_nodes,
                 sub_agent_runner,
-                goal_mode,
                 workspace_root,
                 security,
                 permission,
@@ -516,7 +357,6 @@ async fn run_coordinator(
     read_only_tools: Vec<Arc<dyn Tool>>,
     max_nodes: usize,
     sub_agent_runner: Option<Arc<SubAgentRunner>>,
-    goal_mode: bool,
     workspace_root: PathBuf,
     security: SecurityContext,
     permission: Option<Arc<PermissionGate>>,
@@ -525,30 +365,12 @@ async fn run_coordinator(
     tx: &mpsc::Sender<anyhow::Result<RunEvent>>,
 ) -> anyhow::Result<()> {
     // ---- Phase 1: Planning ----
-    info!("coordinator: planning phase (goal_mode={goal_mode})");
+    info!("coordinator: planning phase");
 
-    // Build prompt depending on mode.
+    // Build prompt for the standard planner.
     let read_only_views: Vec<&dyn Tool> = read_only_tools.iter().map(|t| t.as_ref()).collect();
 
-    let plan_messages = if goal_mode {
-        // In goal mode, the prompt field is JSON-encoded GoalContract.
-        let contract: GoalContract = match serde_json::from_str::<GoalContract>(&input.prompt) {
-            Ok(c) => c,
-            Err(_) => {
-                // Fallback: wrap the raw prompt as the Request field.
-                GoalContract {
-                    context: String::new(),
-                    request: input.prompt.clone(),
-                    expected_output: String::new(),
-                    constraints: Vec::new(),
-                    pause_when: Vec::new(),
-                }
-            }
-        };
-        build_goal_planning_prompt(&contract, &read_only_views)
-    } else {
-        build_planning_prompt(&input.prompt, &read_only_views)
-    };
+    let plan_messages = build_planning_prompt(&input.prompt, &read_only_views);
 
     let validated = deepseeknova_provider::ValidatedRequest::new(&plan_messages, &[]).map_err(
         |violations| {
@@ -568,7 +390,7 @@ async fn run_coordinator(
     .ok();
 
     // Parse the planner's JSON output.
-    let graph = parse_plan(&plan_response.content, &input.prompt, max_nodes, goal_mode);
+    let graph = parse_plan(&plan_response.content, &input.prompt, max_nodes);
     info!(
         "coordinator: plan parsed — {} nodes, {} edges",
         graph.nodes.len(),
@@ -683,8 +505,13 @@ fn validate_plan_tool_boundary(graph: &ExecutionGraph, read_only: &[Arc<dyn Tool
 // Plan parsing — JSON → ExecutionGraph (with fallback)
 // ---------------------------------------------------------------------------
 
-fn parse_plan(plan_text: &str, goal: &str, max_nodes: usize, goal_mode: bool) -> ExecutionGraph {
-    let json_str = extract_json_block(plan_text);
+fn parse_plan(plan_text: &str, goal: &str, max_nodes: usize) -> ExecutionGraph {
+    // 统一复用 review 模块的宽松 JSON 提取（fenced / 平衡花括号）。无平衡
+    // 花括号（无 JSON 可提取）时直接走 fallback 线性计划。
+    let Some(json_str) = crate::review::extract_json(plan_text) else {
+        warn!("coordinator: no JSON in planner output; using fallback plan");
+        return fallback_plan(goal);
+    };
 
     match serde_json::from_str::<PlanOutput>(&json_str) {
         Ok(plan) if !plan.nodes.is_empty() => {
@@ -725,17 +552,22 @@ fn parse_plan(plan_text: &str, goal: &str, max_nodes: usize, goal_mode: bool) ->
         _ => {
             // Fallback: simple linear execution.
             warn!("coordinator: failed to parse planner output as JSON; using fallback plan");
-            let label = if goal_mode { "satisfy" } else { "execute" };
-            let mut graph = ExecutionGraph::new(label.into());
-            graph.add_node(ExecutionNode::new(
-                label,
-                Action::Think {
-                    prompt: goal.to_string(),
-                },
-            ));
-            graph
+            fallback_plan(goal)
         }
     }
+}
+
+/// 解析失败时的兜底：单节点线性计划（Think 节点承载原始目标）。
+fn fallback_plan(goal: &str) -> ExecutionGraph {
+    let label = "execute";
+    let mut graph = ExecutionGraph::new(label.into());
+    graph.add_node(ExecutionNode::new(
+        label,
+        Action::Think {
+            prompt: goal.to_string(),
+        },
+    ));
+    graph
 }
 
 /// Map a `PlanNode` to its `Action`. A node carrying `parallel` children
@@ -785,38 +617,6 @@ fn parse_edge_condition(condition: Option<&str>) -> Option<EdgeCondition> {
         c.strip_prefix("tool_call:")
             .map(|id| EdgeCondition::ToolCall(id.trim().to_string()))
     }
-}
-
-/// Extract JSON from a model response that may contain markdown fences or
-/// surrounding commentary.
-fn extract_json_block(text: &str) -> String {
-    // ```json ... ```
-    if let Some(start) = text.find("```json") {
-        let after = &text[start + 7..];
-        if let Some(end) = after.find("```") {
-            let inner = after[..end].trim();
-            if !inner.is_empty() {
-                return inner.to_string();
-            }
-        }
-    }
-    // ``` ... ```
-    if let Some(start) = text.find("```") {
-        let after = &text[start + 3..];
-        if let Some(end) = after.find("```") {
-            let inner = after[..end].trim();
-            if !inner.is_empty() {
-                return inner.to_string();
-            }
-        }
-    }
-    // Raw { ... }
-    if let (Some(start), Some(end)) = (text.find('{'), text.rfind('}')) {
-        if start < end {
-            return text[start..=end].to_string();
-        }
-    }
-    text.to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -1074,38 +874,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn extract_json_from_markdown_fence() {
-        let input = "Here's the plan:\n```json\n{\"nodes\":[],\"edges\":[]}\n```\nDone.";
-        let json = extract_json_block(input);
-        assert_eq!(json, "{\"nodes\":[],\"edges\":[]}");
-    }
-
-    #[test]
-    fn extract_json_from_plain_fence() {
-        let input = "```\n{\"nodes\":[{\"id\":\"x\"}]}\n```";
-        let json = extract_json_block(input);
-        assert!(json.contains("\"nodes\""));
-    }
-
-    #[test]
-    fn extract_json_raw() {
-        let input = " some text {\"key\": \"value\"} trailing ";
-        let json = extract_json_block(input);
-        assert_eq!(json, "{\"key\": \"value\"}");
-    }
-
-    #[test]
     fn parse_plan_falls_back_when_invalid() {
-        let graph = parse_plan("not json at all", "do something", 20, false);
+        let graph = parse_plan("not json at all", "do something", 20);
         assert_eq!(graph.nodes.len(), 1);
         assert_eq!(graph.entry, "execute");
-    }
-
-    #[test]
-    fn parse_plan_falls_back_goal_mode() {
-        let graph = parse_plan("not json at all", "satisfy goal", 20, true);
-        assert_eq!(graph.nodes.len(), 1);
-        assert_eq!(graph.entry, "satisfy");
     }
 
     #[test]
@@ -1122,7 +894,7 @@ mod tests {
             ]
         }"#;
 
-        let graph = parse_plan(json, "goal", 20, false);
+        let graph = parse_plan(json, "goal", 20);
         assert_eq!(graph.nodes.len(), 3);
         assert_eq!(graph.entry, "a");
         assert_eq!(graph.edges.len(), 2);
@@ -1131,7 +903,7 @@ mod tests {
     #[test]
     fn parse_plan_empty_nodes_triggers_fallback() {
         let json = r#"{"nodes":[],"edges":[]}"#;
-        let graph = parse_plan(json, "goal", 20, false);
+        let graph = parse_plan(json, "goal", 20);
         assert_eq!(graph.nodes.len(), 1);
     }
 
@@ -1145,42 +917,8 @@ mod tests {
         }
         let json = format!(r#"{{"nodes":[{}],"edges":[]}}"#, nodes.join(","));
 
-        let graph = parse_plan(&json, "goal", 4, false);
+        let graph = parse_plan(&json, "goal", 4);
         assert_eq!(graph.nodes.len(), 4);
-    }
-
-    #[test]
-    fn goal_contract_renders_structured_prompt() {
-        let contract = GoalContract {
-            context: "project uses Rust".into(),
-            request: "add a new endpoint".into(),
-            expected_output: "file: src/handler.rs".into(),
-            constraints: vec!["no async".into()],
-            pause_when: vec!["database schema changes".into()],
-        };
-        let prompt = contract.to_planner_prompt();
-        assert!(prompt.contains("GOAL CONTRACT"));
-        assert!(prompt.contains("add a new endpoint"));
-        assert!(prompt.contains("no async"));
-        assert!(prompt.contains("database schema changes"));
-        assert!(prompt.contains("NEVER use `call_tool`"));
-    }
-
-    #[test]
-    fn goal_contract_serializes_to_json() {
-        let contract = GoalContract {
-            context: "ctx".into(),
-            request: "req".into(),
-            expected_output: "out".into(),
-            constraints: vec!["c1".into()],
-            pause_when: vec!["p1".into()],
-        };
-        let json = serde_json::to_string(&contract).unwrap();
-        assert!(json.contains("\"request\":\"req\""));
-        assert!(json.contains("\"context\":\"ctx\""));
-        let parsed: GoalContract = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.request, "req");
-        assert_eq!(parsed.constraints, vec!["c1"]);
     }
 
     #[test]
@@ -1197,7 +935,7 @@ mod tests {
             ]
         }"#;
 
-        let graph = parse_plan(json, "build API", 20, false);
+        let graph = parse_plan(json, "build API", 20);
         assert_eq!(graph.nodes.len(), 3);
         match graph.nodes.get("spec").map(|n| &n.action) {
             Some(Action::Delegate { sub_agent, goal }) => {
@@ -1231,7 +969,7 @@ mod tests {
             ]
         }"#;
 
-        let graph = parse_plan(json, "goal", 20, false);
+        let graph = parse_plan(json, "goal", 20);
         assert_eq!(graph.nodes.len(), 4);
 
         // depends_on (no explicit edge) becomes a default Success edge.
@@ -1279,7 +1017,7 @@ mod tests {
             ],
             "edges": []
         }"#;
-        let graph = parse_plan(json, "goal", 20, false);
+        let graph = parse_plan(json, "goal", 20);
         assert_eq!(graph.nodes.len(), 2);
         assert!(
             graph.edges.iter().any(|e| e.from == "a" && e.to == "b"),
@@ -1302,7 +1040,7 @@ mod tests {
             ]
         }"#;
 
-        let graph = parse_plan(json, "goal", 20, false);
+        let graph = parse_plan(json, "goal", 20);
         assert_eq!(graph.nodes.len(), 2);
         assert_eq!(graph.edges.len(), 1);
         assert!(matches!(graph.nodes["a"].action, Action::Think { .. }));
@@ -1343,18 +1081,19 @@ mod tests {
 
     #[test]
     fn planner_prompts_keep_json_action_contract() {
-        for p in [PLANNER_SYSTEM_PROMPT, PLANNER_SYSTEM_PROMPT_GOAL] {
-            for token in [
-                "\"nodes\"",
-                "\"edges\"",
-                "\"think\"",
-                "\"call_read_tool\"",
-                "\"reflect\"",
-                "\"delegate\"",
-                "Plan phase",
-            ] {
-                assert!(p.contains(token), "planner prompt missing {token}");
-            }
+        for token in [
+            "\"nodes\"",
+            "\"edges\"",
+            "\"think\"",
+            "\"call_read_tool\"",
+            "\"reflect\"",
+            "\"delegate\"",
+            "Plan phase",
+        ] {
+            assert!(
+                PLANNER_SYSTEM_PROMPT.contains(token),
+                "planner prompt missing {token}"
+            );
         }
     }
 

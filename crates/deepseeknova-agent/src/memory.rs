@@ -1,6 +1,5 @@
 use deepseeknova_core::{Message, Role};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::time::{Duration, Instant};
 
 const TRUNCATION_HEAD_RATIO: f32 = 0.2;
 
@@ -19,15 +18,6 @@ pub struct Memory {
 
     /// Pinned messages never removed by compaction (system prompt, first user turn).
     pinned: Vec<Message>,
-
-    /// Last activity instant — used by idle-compaction.
-    last_activity: Option<Instant>,
-
-    /// Counter tracking consecutive identical tool calls for repeat-guard.
-    call_counts: HashMap<String, u32>,
-
-    /// Previous tool call key for repeat-guard detection.
-    last_call_key: Option<String>,
 }
 
 impl Memory {
@@ -37,15 +27,11 @@ impl Memory {
             full_results: HashMap::new(),
             shrunk_messages: HashSet::new(),
             pinned: Vec::new(),
-            last_activity: None,
-            call_counts: HashMap::new(),
-            last_call_key: None,
         }
     }
 
     pub fn add_message(&mut self, message: Message) {
         self.messages.push_back(message);
-        self.bump_activity();
     }
 
     pub fn get_all(&self) -> Vec<Message> {
@@ -97,9 +83,6 @@ impl Memory {
         self.messages.clear();
         self.full_results.clear();
         self.shrunk_messages.clear();
-        self.call_counts.clear();
-        self.last_call_key = None;
-        self.bump_activity();
     }
 
     /// Retrieve full original result if truncated.
@@ -138,8 +121,6 @@ impl Memory {
 
         self.messages.clear();
         self.shrunk_messages.clear();
-        self.call_counts.clear();
-        self.last_call_key = None;
 
         // Prepend the digest as a tool message the model can read.
         self.messages.push_back(Message {
@@ -150,8 +131,6 @@ impl Memory {
             tool_call_id: None,
             reasoning_content: reasoning_summary,
         });
-
-        self.bump_activity();
     }
 
     /// Check whether the conversation has any unresolved must_replay
@@ -162,32 +141,6 @@ impl Memory {
                 .map(|rb| rb.must_replay)
                 .unwrap_or(false)
         })
-    }
-
-    /// Return the duration since last activity, used by idle-compaction.
-    pub fn idle_duration(&self) -> Option<Duration> {
-        self.last_activity.map(|t| t.elapsed())
-    }
-
-    /// Record a tool call for repeat-guard detection. Returns the current
-    /// repeat count for this tool+args key.
-    pub fn record_call(&mut self, tool_name: &str, args_key: &str) -> u32 {
-        let key = format!("{tool_name}:{args_key}");
-        let count = if self.last_call_key.as_deref() == Some(key.as_str()) {
-            self.call_counts.get(&key).copied().unwrap_or(0) + 1
-        } else {
-            1
-        };
-        self.call_counts.insert(key.clone(), count);
-        self.last_call_key = Some(key);
-        self.bump_activity();
-        count
-    }
-
-    /// Reset the repeat-guard counter (e.g. after a successful non-repeated action).
-    pub fn reset_repeat_guard(&mut self) {
-        self.call_counts.clear();
-        self.last_call_key = None;
     }
 
     /// Turn-end compaction: shrink large tool results (Head/Tail Truncation).
@@ -251,7 +204,6 @@ impl Memory {
                 self.shrunk_messages.insert(call_id.clone());
             }
         }
-        self.bump_activity();
     }
 
     /// Atomic sliding window fallback.
@@ -319,16 +271,10 @@ impl Memory {
             self.full_results.remove(&id);
             self.shrunk_messages.remove(&id);
         }
-        self.bump_activity();
     }
 
     pub fn pin_message(&mut self, message: Message) {
         self.pinned.push(message);
-        self.bump_activity();
-    }
-
-    fn bump_activity(&mut self) {
-        self.last_activity = Some(Instant::now());
     }
 }
 

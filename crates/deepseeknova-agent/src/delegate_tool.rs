@@ -78,6 +78,15 @@ impl Tool for DelegateTool {
         if ctx.cancellation.is_cancelled() {
             anyhow::bail!("cancelled");
         }
+        // 能力门禁（L4）：裸装配 DelegateEngine（SecurityContext 缺失或未授予
+        // CommandExecute）时拒绝，防库级装配绕过能力系统。生产 CLI 路径继承
+        // 共享 gate+security（默认全能力），无提权；子代理递归走
+        // RecursiveDelegateTool（独立深度守门），不在此工具覆盖范围内。
+        deepseeknova_security::context::enforce_capability(
+            ctx,
+            "delegate",
+            deepseeknova_security::capability::Capability::CommandExecute,
+        )?;
         let parsed: DelegateArgs = serde_json::from_str(args)?;
         let h = match handle(ctx) {
             Some(h) => h,
@@ -113,6 +122,7 @@ mod tests {
     use super::*;
     use crate::test_utils::MockProvider;
     use crate::{Agent, DelegateEngine};
+    use deepseeknova_security::context::SecurityContext;
     use std::collections::HashMap;
 
     fn ctx_with_engine() -> ToolContext {
@@ -128,7 +138,11 @@ mod tests {
             ),
         );
         let engine: DelegateHandle = Arc::new(DelegateEngine::new(agents, 2, 2000));
-        ToolContext::new("t").with_extension(engine)
+        // 生产路径的 ToolContext 恒注入 SecurityContext（默认全能力含
+        // CommandExecute）；测试对齐该装配，能力门禁（L4）方能放行。
+        ToolContext::new("t")
+            .with_extension(SecurityContext::with_safe_defaults())
+            .with_extension(engine)
     }
 
     /// 构造带一个 explorer 子代理的引擎（指定递归深度上限）。
@@ -152,7 +166,9 @@ mod tests {
         // 注入当前深度 2 → 本次派发 3；引擎 max_depth=2 → 守门拒绝并暴露
         // 请求深度（证明 DelegateTool 读取扩展并递增）。
         let engine = engine_with_explorer(2);
-        let mut ctx = ToolContext::new("t").with_extension(engine);
+        let mut ctx = ToolContext::new("t")
+            .with_extension(SecurityContext::with_safe_defaults())
+            .with_extension(engine);
         ctx.extensions.insert(DelegateDepth(2));
         let out = DelegateTool
             .execute(&ctx, r#"{"agent":"explorer","goal":"find config"}"#)
@@ -168,7 +184,9 @@ mod tests {
         // RecursiveDelegateTool "current 0 → next 1" 语义对齐）；max_depth=1
         // 放行即证明本次派发深度恰为 1。
         let engine = engine_with_explorer(1);
-        let ctx = ToolContext::new("t").with_extension(engine);
+        let ctx = ToolContext::new("t")
+            .with_extension(SecurityContext::with_safe_defaults())
+            .with_extension(engine);
         let out = DelegateTool
             .execute(&ctx, r#"{"agent":"explorer","goal":"find config"}"#)
             .await
@@ -182,7 +200,9 @@ mod tests {
         // 注入当前深度 3 → next 4 > max_depth=3 → 优雅错误文本（Ok 结果，
         // 不硬失败），模型可据此降级。
         let engine = engine_with_explorer(3);
-        let mut ctx = ToolContext::new("t").with_extension(engine);
+        let mut ctx = ToolContext::new("t")
+            .with_extension(SecurityContext::with_safe_defaults())
+            .with_extension(engine);
         ctx.extensions.insert(DelegateDepth(3));
         let out = DelegateTool
             .execute(&ctx, r#"{"agent":"explorer","goal":"x"}"#)
@@ -217,12 +237,48 @@ mod tests {
 
     #[tokio::test]
     async fn delegate_degrades_without_handle() {
-        let ctx = ToolContext::new("t");
+        let ctx = ToolContext::new("t").with_extension(SecurityContext::with_safe_defaults());
         let out = DelegateTool
             .execute(&ctx, r#"{"agent":"explorer","goal":"x"}"#)
             .await
             .unwrap();
         assert!(out.contains("未启用"), "got: {out}");
+    }
+
+    #[tokio::test]
+    async fn delegate_denied_without_command_execute_capability() {
+        // L4 门禁：裸装配 + 受限能力上下文（仅 FileRead，未授予
+        // CommandExecute）→ 拒绝。生产 CLI 路径无提权（继承共享 gate+security），
+        // 此门禁防库级裸装配绕过能力系统。
+        let engine = engine_with_explorer(1);
+        let mut sec = SecurityContext::with_safe_defaults();
+        sec.capabilities = {
+            let mut caps = std::collections::HashSet::new();
+            caps.insert(deepseeknova_security::capability::Capability::FileRead);
+            caps
+        };
+        let ctx = ToolContext::new("t")
+            .with_extension(sec)
+            .with_extension(engine);
+        let err = DelegateTool
+            .execute(&ctx, r#"{"agent":"explorer","goal":"x"}"#)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("CommandExecute"),
+            "restricted context must be denied: {err}"
+        );
+
+        // 完全无 SecurityContext 的裸装配 → 同样拒绝（能力系统强制存在）。
+        let bare = ToolContext::new("t").with_extension(engine_with_explorer(1));
+        let err = DelegateTool
+            .execute(&bare, r#"{"agent":"explorer","goal":"x"}"#)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("SecurityContext"),
+            "bare assembly must be denied: {err}"
+        );
     }
 
     #[tokio::test]
@@ -256,7 +312,9 @@ mod tests {
             },
             InputValues::new(),
         );
-        let ctx = ToolContext::new("t").with_extension(Arc::new(engine) as DelegateHandle);
+        let ctx = ToolContext::new("t")
+            .with_extension(SecurityContext::with_safe_defaults())
+            .with_extension(Arc::new(engine) as DelegateHandle);
         let out = DelegateTool
             .execute(
                 &ctx,
@@ -299,7 +357,9 @@ mod tests {
             },
             InputValues::new(),
         );
-        let ctx = ToolContext::new("t").with_extension(Arc::new(engine) as DelegateHandle);
+        let ctx = ToolContext::new("t")
+            .with_extension(SecurityContext::with_safe_defaults())
+            .with_extension(Arc::new(engine) as DelegateHandle);
         let out = DelegateTool
             .execute(&ctx, r#"{"agent":"reviewer","goal":"go"}"#)
             .await

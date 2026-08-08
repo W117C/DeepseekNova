@@ -73,7 +73,7 @@ impl Tool for WebFetchTool {
         validate_host_ssrf(host).await?;
 
         // Step 3 — Shared HTTP client (no automatic redirects — we re-validate each hop)
-        let client = shared_http_client();
+        let client = shared_http_client()?;
 
         // Step 4 — Fetch with timeout, manually following redirects with
         // per-hop re-validation of BOTH the domain policy and SSRF safety
@@ -242,17 +242,21 @@ fn is_ipv6_ipv4_mapped_unsafe(ip: &Ipv6Addr) -> bool {
 const MAX_REDIRECTS: u32 = 10;
 
 /// 共享 HTTP 客户端（进程级一次构造）。无自动重定向——每跳手动重校验
-/// 域名策略与 SSRF。
-fn shared_http_client() -> &'static reqwest::Client {
-    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .timeout(DEFAULT_FETCH_TIMEOUT)
-            .redirect(reqwest::redirect::Policy::none())
-            .user_agent(format!("deepseeknova-tools/{}", env!("CARGO_PKG_VERSION")))
-            .build()
-            .expect("failed to build shared HTTP client")
-    })
+/// 域名策略与 SSRF。构造失败缓存 `Err` 并向上传播（L2：不再 `expect`
+/// panic 宿主）。
+fn shared_http_client() -> anyhow::Result<&'static reqwest::Client> {
+    static CLIENT: std::sync::OnceLock<reqwest::Result<reqwest::Client>> =
+        std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(DEFAULT_FETCH_TIMEOUT)
+                .redirect(reqwest::redirect::Policy::none())
+                .user_agent(format!("deepseeknova-tools/{}", env!("CARGO_PKG_VERSION")))
+                .build()
+        })
+        .as_ref()
+        .map_err(|e| anyhow::anyhow!("failed to build shared HTTP client: {e}"))
 }
 
 /// Follow redirects manually, re-validating the domain policy + SSRF safety of

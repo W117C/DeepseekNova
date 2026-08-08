@@ -44,13 +44,17 @@ if ! git diff --quiet; then
 fi
 
 # ── 更新 Cargo.toml ─────────────────────────────────────────────
+# 除 `[workspace.package] version` 外，`[workspace.dependencies]` 中 22 个内部
+# crate 钉（`deepseeknova-* = { version = "0.5.0", path = ... }`）同样需要提升，
+# 因此用非锚定 + 全局替换（两处之外的 `version = "<当前版>"` 不存在）。
+# 各 crate 的 `documentation` URL 已改为不带版本（docs.rs 自动跳转最新版），无需同步。
 if [[ "$(uname -s)" == "Darwin" ]]; then
-    sed -i '' "s/^version = \"$CURRENT_VERSION\"/version = \"$NEW_VERSION\"/" Cargo.toml
+    sed -i '' "s/version = \"$CURRENT_VERSION\"/version = \"$NEW_VERSION\"/g" Cargo.toml
 else
-    sed -i "s/^version = \"$CURRENT_VERSION\"/version = \"$NEW_VERSION\"/" Cargo.toml
+    sed -i "s/version = \"$CURRENT_VERSION\"/version = \"$NEW_VERSION\"/g" Cargo.toml
 fi
 
-echo "✅ Cargo.toml 已更新: $CURRENT_VERSION → $NEW_VERSION"
+echo "✅ Cargo.toml 已更新: $CURRENT_VERSION → $NEW_VERSION（workspace 版本 + 内部依赖钉）"
 echo ""
 echo "⚠️  请手动更新 CHANGELOG.md，然后运行:"
 echo "   git add Cargo.toml CHANGELOG.md"

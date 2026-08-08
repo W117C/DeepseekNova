@@ -106,29 +106,6 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
-  # ── Release build (CLI binary) ────────────────────────────────
-  release:
-    name: release build (${{ matrix.target }})
-    runs-on: ${{ matrix.os }}
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: macos-latest
-            target: aarch64-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release --target ${{ matrix.target }} -p deepseeknova-cli
-      - uses: actions/upload-artifact@v4
-        with:
-          name: deepseeknova-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/deepseeknova-cli*
-          if-no-files-found: error
+  # Release assets 由 release.yml 专管（tag push + workflow_dispatch 触发，
+  # 5 平台矩阵 + checksums + GitHub Release 资产）。本工作流不重复构建，
+  # 避免每次 main push 白跑 3 平台 release 构建且产物无人消费。

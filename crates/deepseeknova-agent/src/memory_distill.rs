@@ -4,6 +4,7 @@
 //! 启发式 record_task 兜底），绝不阻断 run。JSON 契约：
 //! `{"kind":"skill"|"lesson","title":"...","body":"...","tags":[...]}`。
 
+use crate::review::extract_json;
 use deepseeknova_core::memory::skill::{SkillManager, TaskObservation};
 use deepseeknova_core::{Message, Role};
 use deepseeknova_provider::{Provider, ValidatedRequest};
@@ -17,41 +18,6 @@ pub struct DistilledKnowledge {
     pub title: String,
     pub body: String,
     pub tags: Vec<String>,
-}
-
-/// 提取首个平衡的 JSON 对象（与 review.rs 同款宽松解析；review.rs 的该函数
-/// 在 main 上是私有的，改可见性不在任务书白名单，故在本模块自带一份等价实现）。
-fn extract_json(raw: &str) -> Option<String> {
-    if let Some(start) = raw.find("```json") {
-        let rest = &raw[start + 7..];
-        if let Some(end) = rest.find("```") {
-            return Some(rest[..end].trim().to_string());
-        }
-    }
-    let bytes = raw.as_bytes();
-    let start = raw.find('{')?;
-    let mut depth = 0usize;
-    let mut in_string = false;
-    let mut escape = false;
-    for (i, &b) in bytes.iter().enumerate().skip(start) {
-        if escape {
-            escape = false;
-            continue;
-        }
-        match b {
-            b'\\' if in_string => escape = true,
-            b'"' => in_string = !in_string,
-            b'{' if !in_string => depth += 1,
-            b'}' if !in_string => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    return Some(raw[start..=i].to_string());
-                }
-            }
-            _ => {}
-        }
-    }
-    None
 }
 
 /// 渲染蒸馏 prompt：任务观察 → 严格要求 JSON 判定。

@@ -689,13 +689,21 @@ pub struct DelegateConfig {
     pub agents: Vec<DelegateAgentOverride>,
     /// 允许子代理再派子代理（递归委派）。默认 false（保持既有禁递归现状）。
     /// 开启后 coordinator 子代理（SubAgentRunner 路径）可递归派发，深度受
-    /// `max_depth` 约束，超深优雅降级。主 agent 的 delegate 引擎路径递归
-    /// 深度传播仍依赖后续 Agent 主循环注入 `DelegateDepth`（见 P1-5 遗留）。
+    /// `max_depth` 约束，超深优雅降级。**主 agent 的 delegate 引擎路径禁递归**
+    /// （引擎装配时恒剔除 `delegate` 工具，无递归出口）；`max_depth` 仍透传给
+    /// 引擎（`DelegateEngine::with_max_depth`），作为深度守门上限备用。
     #[serde(default)]
     pub allow_recursion: bool,
-    /// 递归深度上限（`allow_recursion = true` 时生效；默认 3）。
+    /// 递归深度上限（默认 3）。对 SubAgentRunner 递归路径与 delegate 引擎路径
+    /// 均生效：`allow_recursion = true` 时子代理可递归到该深度，超深拒绝。
     #[serde(default = "default_delegate_max_depth")]
     pub max_depth: usize,
+    /// `.deepseeknova/agents/*.md` markdown 子代理声明目录（AgentManifest
+    /// 通道，与 TOML 预设合并注册）。`None` = 默认
+    /// `<workspace_root>/.deepseeknova/agents`；目录缺失或解析失败仅 warn
+    /// （build 时跳过），不阻断。
+    #[serde(default)]
+    pub agents_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -739,6 +747,7 @@ impl Default for DelegateConfig {
             agents: Vec::new(),
             allow_recursion: false,
             max_depth: 3,
+            agents_dir: None,
         }
     }
 }
@@ -2140,6 +2149,18 @@ impl DelegateConfig {
         if !other.agents.is_empty() {
             self.agents = other.agents;
         }
+        // allow_recursion/max_depth 此前漏合并：项目层显式设置无法覆盖用户层。
+        // 补上非默认值覆盖（与其它字段同款）。
+        if other.allow_recursion != d.allow_recursion {
+            self.allow_recursion = other.allow_recursion;
+        }
+        if other.max_depth != d.max_depth {
+            self.max_depth = other.max_depth;
+        }
+        // agents_dir 为 Option：项目层显式提供时覆盖。
+        if other.agents_dir.is_some() {
+            self.agents_dir = other.agents_dir;
+        }
     }
 }
 
@@ -2950,6 +2971,7 @@ mod tests {
                 }],
                 allow_recursion: false,
                 max_depth: 3,
+                agents_dir: None,
             },
             ..Default::default()
         };
@@ -2985,6 +3007,7 @@ mod tests {
                 }],
                 allow_recursion: false,
                 max_depth: 3,
+                agents_dir: None,
             },
             ..Default::default()
         };
@@ -3002,6 +3025,46 @@ mod tests {
         assert_eq!(c.delegate.max_concurrent, 2);
         assert_eq!(c.delegate.output_cap_tokens, 2000);
         assert!(c.delegate.agents.is_empty());
+        assert_eq!(c.delegate.max_depth, 3);
+        assert!(!c.delegate.allow_recursion);
+        assert_eq!(c.delegate.agents_dir, None);
+    }
+
+    #[test]
+    fn delegate_merge_carries_max_depth_and_agents_dir() {
+        // 此前 max_depth/allow_recursion 漏合并：用户层设了上限，项目层显式
+        // 覆盖时必须生效（M5 的 config 层透传）。
+        let mut base = Config {
+            delegate: DelegateConfig {
+                enabled: true,
+                max_concurrent: 2,
+                output_cap_tokens: 2000,
+                agents: Vec::new(),
+                allow_recursion: true,
+                max_depth: 5,
+                agents_dir: None,
+            },
+            ..Default::default()
+        };
+        let project = Config {
+            delegate: DelegateConfig {
+                enabled: true,
+                max_concurrent: 2,
+                output_cap_tokens: 2000,
+                agents: Vec::new(),
+                allow_recursion: true,
+                max_depth: 1,
+                agents_dir: Some(PathBuf::from("custom-agents")),
+            },
+            ..Default::default()
+        };
+        base.merge(project);
+        assert_eq!(base.delegate.max_depth, 1, "项目层显式 max_depth 必须覆盖");
+        assert!(base.delegate.allow_recursion);
+        assert_eq!(
+            base.delegate.agents_dir.as_deref(),
+            Some(PathBuf::from("custom-agents").as_path())
+        );
     }
 
     #[test]

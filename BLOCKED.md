@@ -54,7 +54,9 @@
 - SECURITY.md 支持版本表过期 + GitHub 元数据（description 仍写 Desktop）。
 
 ### 待领导后续裁决（非本批阻塞）
-- Runtime/EventBus/ContextEngine 三选一（接线 / 标注库级 API / 删除）。
+- ~~Runtime/EventBus/ContextEngine 三选一（接线 / 标注库级 API / 删除）~~ **已按
+  "标注库级 API"执行（2026-08-08 审计 M4**：event crate doc 标注未接入生产路径；
+  `Runtime` 结构体保留供库级使用；若长期无人用，后续轮删除连带 context 死面）。
 - ~~README"三层缓存"承诺（实现真实命中率 vs 撤稿）~~ **已按撤稿路线执行
   （2026-08-08 P2-6**：README/README_EN 改如实表述（API 级前缀缓存真实 +
   会话级命中率标注 [规划中]），core `session_cache_hit_tokens` 字段 doc 标注

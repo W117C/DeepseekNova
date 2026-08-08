@@ -3,6 +3,12 @@
 //! Defines event types emitted throughout the agent's lifecycle
 //! (tool calls, model responses, errors) and provides a pub-sub bus
 //! for observers.
+//!
+//! **库级公开 API（未接入生产路径）**：本 crate 的 `EventBus`/`AgentEvent` 当前
+//! 仅被 `deepseeknova-runtime` 的组合根 `Runtime` 结构体引用，而该结构体在生产
+//! 路径零使用（仅测试构造，见 AUDIT-2026-08-08 M4）。保留为库级 API 供嵌入方
+//! 自行接线；若长期无人使用，建议在 M4 后续轮删除连带 `Runtime` 与
+//! `context::ContextEngine` 死面。
 
 use deepseeknova_core::chunk::{Chunk, Usage};
 use deepseeknova_core::graph::{NodeId, NodeOutput};

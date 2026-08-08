@@ -20,7 +20,7 @@ Cost & Context Care。工具 schema 不写入，由 `context::PromptBuilder` 运
 |---|---|---|---|---|
 | 1 | plan_mode.rs DEFAULT_PLANNING_SYSTEM_PROMPT | 泛化规划助理 | 定位为 Plan 阶段；输出契约显式化 | 5 个章节名不变 |
 | 2 | coordinator.rs PLANNER_SYSTEM_PROMPT | 泛化规划助理 | 首行点明 Plan 阶段 | JSON nodes/edges、action 类型、示例逐字保留 |
-| 3 | coordinator.rs PLANNER_SYSTEM_PROMPT_GOAL | Goal Mode 规划 | 首行点明 Plan 阶段 | 同上 |
+| ~~3~~ | ~~coordinator.rs PLANNER_SYSTEM_PROMPT_GOAL~~ | ~~Goal Mode 规划~~ | ~~首行点明 Plan 阶段~~ | ~~同上~~（2026-08-08 已随 goal_mode 死代码删除，见 AUDIT M2b） |
 | 4 | delegate.rs 4 预设 | 角色一行无阶段定位 | 每个预设标注所在阶段（explorer=Observe、coder=Tool、tester=Verify、reviewer=Reflect）+ 输出契约 | 工具清单与角色名不变 |
 | 5 | review.rs render_review_prompt | 泛化审查者 | 定位 Reflect 阶段 | `# Task`/`# Completion claim`/`# Diff`、JSON verdict 指令不变 |
 | 6 | compaction.rs render_l3_prompt | 泛化压缩 | 定位为循环的记忆压缩阶段 | 7 个 `##` 章节名逐字保留 |

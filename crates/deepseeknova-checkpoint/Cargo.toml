@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 description = "Transactional file-system checkpoint and rollback manager for safe agent file operations."
 readme = "README.md"
-documentation = "https://docs.rs/deepseeknova-checkpoint/0.5.0"
+documentation = "https://docs.rs/deepseeknova-checkpoint"
 
 [dependencies]
 anyhow = { workspace = true }

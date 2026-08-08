@@ -7,15 +7,17 @@
 3. [Configuration](#configuration)
 4. [Tools Reference](#tools-reference)
 5. [Security Scan (CLI)](#security-scan-cli)
-6. [Skills](#skills)
-7. [HTTP API](#http-api)
-8. [TUI](#tui)
-9. [MCP Integration](#mcp-integration)
-10. [Plan Mode](#plan-mode)
-11. [Sub-Agents](#sub-agents)
-12. [Sandbox](#sandbox)
-13. [Worktrees (CLI)](#worktrees-cli)
-14. [Advanced Configuration](#advanced-configuration)
+6. [Exec Audit (CLI)](#exec-audit-cli)
+7. [Eval (CLI)](#eval-cli)
+8. [Skills](#skills)
+9. [HTTP API](#http-api)
+10. [TUI](#tui)
+11. [MCP Integration](#mcp-integration)
+12. [Plan Mode](#plan-mode)
+13. [Sub-Agents](#sub-agents)
+14. [Sandbox](#sandbox)
+15. [Worktrees (CLI)](#worktrees-cli)
+16. [Advanced Configuration](#advanced-configuration)
 
 ## Concepts
 
@@ -61,7 +63,7 @@ When the context approaches token limits, older messages are summarized to make 
 
 ### Prerequisites
 
-- Rust 1.75 or later (`rustup update stable`)
+- Rust 1.97 or later (`rustup update stable`)
 - An API key for your LLM provider (OpenAI, Anthropic, or compatible)
 
 ### Build from Source
@@ -181,6 +183,8 @@ enabled = false                    # 默认关闭；开启后后端缺失（macO
                                    # Linux bwrap）时 shell 执行 fail-closed 拒绝
 writable_paths = []                # 额外可写根（工作区默认可写）
 allow_network = false              # 默认禁网（ReadOnly/WorkspaceWrite 档强制）
+# network_allow_domains = ["api.github.com"]   # 域名白名单（warn-not-fail 校验；
+                                   # seatbelt/bwrap 当前仅支持整网开关，域名级过滤为后续）
 
 [permissions]
 enabled = true                     # true（默认，默认安全姿态）：工具经 allow/ask/deny 门控
@@ -224,6 +228,21 @@ coordinator 模式（`run --planner-model ...`）的 Delegate 子代理使用 `t
 其历史压缩使用 `compact` 指针并按 Compact 角色计量。Agent 的 L3 压缩同样走
 `compact` 指针（`agent.compact_model` 仅在指针未设时作为覆盖，照样计量）；
 完成前自审门禁（`[review]`）走 `quick` 指针（`review.review_model` 同理作为覆盖）。
+
+### 会话级花费上限（`[budget]`）
+
+Token 预算之上可再加 **USD 花费上限**：`max_total_cost_usd` 由共享
+`CostLedger` 按 `[[models]]` 单价估算会话累计花费，超限即以
+`Paused(budget: cost limit ...)` 结束（保留 `budget:` 前缀对齐 CLI 退出码）；
+与 `max_total_tokens` 并列，任一先到先停。无单价可估时该上限退化为不生效
+（fail-open on unknown cost）：
+
+```toml
+[budget]
+enabled = true                 # 步边界预算守卫（默认 true）
+max_total_tokens = 128000      # 上下文 token 硬上限（默认值）
+max_total_cost_usd = 0.50      # 可选：会话级花费上限（None = 不限；拒绝负数/NaN/inf）
+```
 
 ### 完成前确定性验证（`[verify]`）
 
@@ -345,6 +364,28 @@ enabled = true    # 默认 true；false 时质量钩子关闭（写后策略评�
 `after` panic 按空 findings 处理（不阻断执行）。bash 写路径启发式：重定向写敏感
 路径（如 `.env`）在 before 拒绝、after 记为 Warning。诊断报告与评分卡落盘见
 「会话效能度量（SessionMetrics）」节，HTTP 查询见 HTTP API 节。
+
+### 用户级 hooks（`[hooks]`）
+
+把事件接到外部命令（区别于上文的内部 ToolHook 链）：五事件
+`tool_before` / `tool_after` / `session_start` / `session_end` / `failure`，
+事件间 **AND 链**——`tool_before` 的全部命令通过（exit 0 且裁决放行）才执行
+工具，任一失败（非 0 / 超时 / 崩溃 / `allowed=false`）即阻止（**fail-closed**，
+叠加在内部治理链之后）；`tool_after` / `session_*` / `failure` 失败仅 warn。
+无 hooks 配置零进程开销：
+
+```toml
+[hooks]
+enabled = true                            # 总开关（默认 false → 不装配）
+tool_before = [
+  { command = "scripts/guard.sh", args = ["--check"], timeout_secs = 10 },
+]
+```
+
+JSON 协议：stdin 传 `{"event","tool","arguments","workspace","session_id"}`，
+stdout 期望 `{"allowed":bool,"reason"}`。`session_start`/`session_end` 于 run
+边界触发，`failure` 挂 MetricsGuard emit（Paused/异常触发，Completed/Cancelled
+不触发）。单条命令可配 `disabled = true` 保留配置但跳过执行。
 
 ### 协议增强能力包（`[protocol]`）
 
@@ -582,6 +623,26 @@ severity 分组输出，`--no-ai` 跳过 AI 调查只出 matcher 结果。
 deepseeknova-cli scan --format json --no-ai
 deepseeknova-cli scan --path crates/deepseeknova-cli --severity-min high
 ```
+
+## Exec Audit (CLI)
+
+`deepseeknova-cli audit` 对一条 shell 命令（或「工具名 + JSON 参数」）做
+**预执行**安全决策预览——只计算不执行：输出只读放行 / Ask / 硬拒 + 命中规则 +
+只读分类形态 + 建议，与真实 permission gate 共用同一 preflight 代码路径
+（一致性有测试背书），适合在接入 agent 前人工核对命令会被如何判定：
+
+```bash
+deepseeknova-cli audit "git status"                  # 只读放行
+deepseeknova-cli audit "rm -rf /tmp/x"               # Ask / 规则命中
+deepseeknova-cli audit bash '{"command":"git status"}'
+deepseeknova-cli audit --format json --rules         # 导出当前规则表（md/json）
+```
+
+| 参数 | 说明 |
+|---|---|
+| `--format md\|json` | 报表格式，默认 `md` |
+| `--rules` | 只导出规则表（不审计具体命令，此时可省略命令） |
+| `--workspace <dir>` | 工作区根（路径守卫按此判定），缺省当前目录 |
 
 ## Eval (CLI)
 
@@ -1139,6 +1200,7 @@ DEEPSEEKNOVA_THEME=light  deepseeknova-cli chat --tui   # 印刷星图浅色档�
 | `/new` | 开始新会话（更换 session id） |
 | `/sessions` | 列出已保存会话 |
 | `/resume <id>` | 恢复指定会话并渲染进对话面板 |
+| `/rename <title>` | 为当前会话命名（`titles.json` 落盘，无 title 回退 id） |
 | `/model` | 显示模型与指针；`/model effort <level>`、`/model thinking`、`/model switch <name>`、`/model use <role> <name>` |
 | `/cost` | 按模型×角色输出 token 用量与美元估算 |
 | `/scorecard` | 读取 `.deepseeknova/metrics` 最新评分卡，输出六维测光表 |
@@ -1150,6 +1212,8 @@ DEEPSEEKNOVA_THEME=light  deepseeknova-cli chat --tui   # 印刷星图浅色档�
 | `/undo` | 回滚最近一个检查点快照 |
 | `/undo all` | 回滚全部快照 |
 | `/undo list` | 列出快照与 ✓/✗ 状态 |
+| `/checkpoint` | 会话级检查点：`save [label]` / `list` / `rollback [id]`（快照对话行 + 容量 FIFO + JSONL 持久化，回退同步重写模型上下文） |
+| `/mode` | 权限模式循环/切换：`plan` / `accept_edits` / `auto` / `cycle`（写工具默认裁决强度） |
 | `/quit` | 退出 TUI |
 
 ## System Prompts
@@ -1223,7 +1287,9 @@ synthesizes their results.
 
 When `[sandbox] enabled = true`, shell commands run in an OS-level sandbox
 (runtime 按平台选择三档中的 `WorkspaceWrite`：工作区默认可写，网络按
-`allow_network` 配置，默认禁网):
+`allow_network` 配置，默认禁网；`network_allow_domains` 为域名白名单配置接口，
+条目格式非法时 warn-not-fail——seatbelt/bwrap 当前仅支持整网开关，域名级过滤
+需 DNS 解析后按 IP 过滤，属后续增强):
 
 - **macOS**: Seatbelt (Apple Sandbox)
 - **Linux**: bubblewrap (bwrap)
@@ -1375,3 +1441,27 @@ mode = "deny"
 ```
 
 普通 shell 组合（链式/重定向/命令替换等）按非只读走权限审批/规则，可由 allow 规则覆盖；工具级注入面（`git -c`/`--config-env`、格式串注入、UNC/URL 路径形态等）直接硬拒，不可通过规则覆盖。
+
+### 权限模式预设（`[permissions] mode`）
+
+三档一键切换写工具的默认裁决强度（对齐 Codex sandbox_mode / Claude Code 权限
+模式循环；`None`（缺省）保持旧行为——回退 `default_mode`，不引入静默安全回归）：
+
+```toml
+[permissions]
+mode = "plan"   # plan | accept_edits | auto
+                # plan：写工具（write/edit/move、shell 写形态）默认 Ask，最安全
+                # accept_edits：文件编辑放行，shell 写形态仍 Ask
+                # auto：写工具全部放行（显式选择信任）
+```
+
+规则优先级不变（deny > ask > allow > 预设回退）。TUI 内 `Ctrl+P` 循环切换 +
+状态栏 `perm {mode}` 段 + `/mode plan|accept_edits|auto|cycle` 命令实时切换。
+
+### 工作区信任（TrustStore）
+
+`~/.deepseeknova/trusted.toml` 维护工作区信任清单（`TrustStore`，空存储默认
+**untrusted = fail-closed**）：**untrusted 项目**的项目层 allow 规则降级为 ask
+（不能静默放行陌生项目的自配置规则），`Config::load` 置位 `project_owns_rules`
+识别规则来源。TUI 首次进入带项目层规则的工作区时弹信任确认浮层（y 信任落盘 /
+n 不信任）；CLI 已接线（gate 与 agent 同实例 + TrustController 委托 TrustStore）。

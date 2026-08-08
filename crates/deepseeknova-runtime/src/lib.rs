@@ -40,6 +40,26 @@ read_file once the target is confirmed;\n\
 /// recall 闭包签名（`Fn(&str)`）无 session 参数，故由运行时持有。
 static SKILL_SESSION_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// H4：在同步闭包（`RecallProvider` / `DistillHook`）内执行潜在阻塞工作
+/// （remote embedder 的同步 HTTP 调用，最长 `embed_timeout_secs`）。
+///
+/// 当前位于 tokio 多线程 runtime 的 worker 线程时用 [`tokio::task::block_in_place`]
+/// 把 worker 让回调度器：阻塞发生在当前线程，但该线程不再被 runtime 视为
+/// worker，其它任务照常调度（agent 运行不再被 embed 的 block_on 停顿）。
+/// 无 runtime 上下文 / current_thread runtime / blocking 池线程时直接调用
+/// （不 panic，测试与单线程场景行为与旧版一致）。
+/// `block_in_place` 不要求闭包 `Send`，借用 `&str` 等非 `'static` 捕获安全。
+fn run_blocking_work<T>(f: impl FnOnce() -> T) -> T {
+    let multi_thread = tokio::runtime::Handle::try_current()
+        .map(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
+        .unwrap_or(false);
+    if multi_thread {
+        tokio::task::block_in_place(f)
+    } else {
+        f()
+    }
+}
+
 /// A3 从用户输入提取 repo map 个性化 seeds：标识符 token（≥3 字符、
 /// 去停用词、去重、上限 8），用于对图节点做 personalized PageRank。
 fn repo_map_seeds(query: &str) -> Vec<String> {
@@ -180,7 +200,13 @@ pub fn permission_gate_for(
         Some(Arc::new(
             build_permission_gate(config)
                 .with_workspace_root(workspace_root.to_path_buf())
-                .with_trusted(trusted),
+                .with_trusted(trusted)
+                // M1 审计盲区修复：gate 拒绝（越界/危险/deny 规则/限流）持久化
+                // 到 workspace 的审计 JSONL（缺 root 的库级 build_permission_gate
+                // 保持无审计器，向后兼容）。
+                .with_audit_logger(Arc::new(
+                    deepseeknova_security::audit::JsonlAuditLogger::at_workspace(workspace_root),
+                )),
         ))
     } else {
         None
@@ -629,87 +655,91 @@ pub fn build_agent_with_role_providers(
                     );
                     let recall: deepseeknova_agent::RecallProvider =
                         Arc::new(move |query: &str| {
-                            let hits = rp
-                                .recall_with_weight(query, top_k, rank_weight)
-                                .ok()
-                                .unwrap_or_default();
-                            let mut block = String::new();
-                            let mut budget = cap_chars;
-                            if !hits.is_empty() {
-                                block.push_str("## Recalled Context\n");
-                                for h in &hits {
-                                    let snippet: String =
-                                        h.entry.content.chars().take(160).collect();
-                                    let line = format!("- [{}] {}\n", h.entry.id, snippet);
-                                    if line.len() > budget {
-                                        break;
-                                    }
-                                    budget -= line.len();
-                                    block.push_str(&line);
-                                }
-                            }
-                            // 设计 C：追加匹配 skill。draft 仅高匹配度注入且排最后
-                            // （低优先级试用）；verified/active 常规注入。
-                            if let Ok(mut sm) = skills_for_recall.lock() {
-                                // 先取 owned (name, description)，结束不可变借用
-                                // 后再 record_use（需要 &mut）。
-                                let matched: Vec<(String, String)> = sm
-                                    .find_matching_skills(query)
-                                    .iter()
-                                    .map(|s| {
-                                        (
-                                            s.frontmatter.name.clone(),
-                                            s.frontmatter.description.clone(),
-                                        )
-                                    })
-                                    .collect();
-                                if !matched.is_empty() {
-                                    let mut lines = String::from("## Available Skills\n");
-                                    // P2 修复：只对真正写入注入内容（lines）的 skill
-                                    // 计数。受 take(top_k) 与字符预算双重约束，超预算
-                                    // break 后剩余的匹配项未进入 prompt，不得 record_use
-                                    // （否则「匹配即计 use」会污染 draft → verified 晋升）。
-                                    let mut injected: Vec<&str> = Vec::new();
-                                    for (name, desc) in matched.iter().take(top_k) {
-                                        let line = format!("- **{name}**: {desc}\n");
-                                        if lines.len() > budget {
+                            // H4：起点召回含同步 embed（remote embedder 的 HTTP
+                            // block_on），经 run_blocking_work 释放 tokio worker。
+                            run_blocking_work(|| {
+                                let hits = rp
+                                    .recall_with_weight(query, top_k, rank_weight)
+                                    .ok()
+                                    .unwrap_or_default();
+                                let mut block = String::new();
+                                let mut budget = cap_chars;
+                                if !hits.is_empty() {
+                                    block.push_str("## Recalled Context\n");
+                                    for h in &hits {
+                                        let snippet: String =
+                                            h.entry.content.chars().take(160).collect();
+                                        let line = format!("- [{}] {}\n", h.entry.id, snippet);
+                                        if line.len() > budget {
                                             break;
                                         }
-                                        lines.push_str(&line);
-                                        injected.push(name);
+                                        budget -= line.len();
+                                        block.push_str(&line);
                                     }
-                                    if lines.len() > "## Available Skills\n".len() {
-                                        block.push_str(&lines);
-                                    }
-                                    // 三态闭环：注入即计一次 use（成功语义）。
-                                    // 失败仅 warn（record_use 落盘失败不阻断注入）。
-                                    // P 任务 2：把实际注入的技能名同时写入
-                                    // session_skills 收集器（去重），供会话结束
-                                    // fitness record_use/record_result（spec §13
-                                    // #9 接线；None = 不收集，行为与旧版一致）。
-                                    for name in injected {
-                                        if let Err(e) =
-                                            sm.record_use(name, true, Some(&skill_session_id))
-                                        {
-                                            tracing::warn!(
-                                                "skill record_use failed for '{name}': {e}"
-                                            );
+                                }
+                                // 设计 C：追加匹配 skill。draft 仅高匹配度注入且排最后
+                                // （低优先级试用）；verified/active 常规注入。
+                                if let Ok(mut sm) = skills_for_recall.lock() {
+                                    // 先取 owned (name, description)，结束不可变借用
+                                    // 后再 record_use（需要 &mut）。
+                                    let matched: Vec<(String, String)> = sm
+                                        .find_matching_skills(query)
+                                        .iter()
+                                        .map(|s| {
+                                            (
+                                                s.frontmatter.name.clone(),
+                                                s.frontmatter.description.clone(),
+                                            )
+                                        })
+                                        .collect();
+                                    if !matched.is_empty() {
+                                        let mut lines = String::from("## Available Skills\n");
+                                        // P2 修复：只对真正写入注入内容（lines）的 skill
+                                        // 计数。受 take(top_k) 与字符预算双重约束，超预算
+                                        // break 后剩余的匹配项未进入 prompt，不得 record_use
+                                        // （否则「匹配即计 use」会污染 draft → verified 晋升）。
+                                        let mut injected: Vec<&str> = Vec::new();
+                                        for (name, desc) in matched.iter().take(top_k) {
+                                            let line = format!("- **{name}**: {desc}\n");
+                                            if lines.len() > budget {
+                                                break;
+                                            }
+                                            lines.push_str(&line);
+                                            injected.push(name);
                                         }
-                                        if let Some(ref sink) = skills_sink {
-                                            if let Ok(mut guard) = sink.lock() {
-                                                if !guard.iter().any(|s| s == name) {
-                                                    guard.push(name.to_string());
+                                        if lines.len() > "## Available Skills\n".len() {
+                                            block.push_str(&lines);
+                                        }
+                                        // 三态闭环：注入即计一次 use（成功语义）。
+                                        // 失败仅 warn（record_use 落盘失败不阻断注入）。
+                                        // P 任务 2：把实际注入的技能名同时写入
+                                        // session_skills 收集器（去重），供会话结束
+                                        // fitness record_use/record_result（spec §13
+                                        // #9 接线；None = 不收集，行为与旧版一致）。
+                                        for name in injected {
+                                            if let Err(e) =
+                                                sm.record_use(name, true, Some(&skill_session_id))
+                                            {
+                                                tracing::warn!(
+                                                    "skill record_use failed for '{name}': {e}"
+                                                );
+                                            }
+                                            if let Some(ref sink) = skills_sink {
+                                                if let Ok(mut guard) = sink.lock() {
+                                                    if !guard.iter().any(|s| s == name) {
+                                                        guard.push(name.to_string());
+                                                    }
                                                 }
                                             }
                                         }
                                     }
                                 }
-                            }
-                            if block.is_empty() {
-                                None
-                            } else {
-                                Some(block)
-                            }
+                                if block.is_empty() {
+                                    None
+                                } else {
+                                    Some(block)
+                                }
+                            })
                         });
                     agent = agent.with_recall_provider(recall);
 
@@ -732,56 +762,65 @@ pub fn build_agent_with_role_providers(
                                 if mid_cap == 0 {
                                     return None;
                                 }
-                                let mut block = String::new();
-                                let mut budget = mid_cap;
-                                if let Ok(hits) =
-                                    mid_mem.recall_with_weight(query, mid_top_k, mid_rank_weight)
-                                {
-                                    let mut lines: Vec<String> = Vec::new();
-                                    for h in hits {
-                                        let snippet: String =
-                                            h.entry.content.chars().take(120).collect();
-                                        let line = format!("- [memory] {snippet}\n");
-                                        if line.len() > budget {
-                                            break;
-                                        }
-                                        lines.push(line);
-                                    }
-                                    if !lines.is_empty() {
-                                        block.push_str("## Recalled Context\n");
-                                        for l in lines {
-                                            budget -= l.len();
-                                            block.push_str(&l);
-                                        }
-                                    }
-                                }
-                                if let Some(ref g) = mid_graph {
-                                    if let Ok(idx) = g.lock() {
-                                        if let Ok(nodes) = idx.search(query, None, mid_graph_top_k)
-                                        {
-                                            let mut lines: Vec<String> = Vec::new();
-                                            for n in nodes {
-                                                let line =
-                                                    format!("- [graph] {} ({})\n", n.name, n.path);
-                                                if line.len() > budget {
-                                                    break;
-                                                }
-                                                lines.push(line);
+                                // H4：中途召回含同步 embed（remote embedder 的
+                                // HTTP block_on），经 run_blocking_work 释放 worker。
+                                run_blocking_work(|| {
+                                    let mut block = String::new();
+                                    let mut budget = mid_cap;
+                                    if let Ok(hits) = mid_mem.recall_with_weight(
+                                        query,
+                                        mid_top_k,
+                                        mid_rank_weight,
+                                    ) {
+                                        let mut lines: Vec<String> = Vec::new();
+                                        for h in hits {
+                                            let snippet: String =
+                                                h.entry.content.chars().take(120).collect();
+                                            let line = format!("- [memory] {snippet}\n");
+                                            if line.len() > budget {
+                                                break;
                                             }
-                                            if !lines.is_empty() {
-                                                block.push_str("## Graph Hits\n");
-                                                for l in lines {
-                                                    block.push_str(&l);
-                                                }
+                                            lines.push(line);
+                                        }
+                                        if !lines.is_empty() {
+                                            block.push_str("## Recalled Context\n");
+                                            for l in lines {
+                                                budget -= l.len();
+                                                block.push_str(&l);
                                             }
                                         }
                                     }
-                                }
-                                if block.is_empty() {
-                                    None
-                                } else {
-                                    Some(block)
-                                }
+                                    if let Some(ref g) = mid_graph {
+                                        if let Ok(idx) = g.lock() {
+                                            if let Ok(nodes) =
+                                                idx.search(query, None, mid_graph_top_k)
+                                            {
+                                                let mut lines: Vec<String> = Vec::new();
+                                                for n in nodes {
+                                                    let line = format!(
+                                                        "- [graph] {} ({})\n",
+                                                        n.name, n.path
+                                                    );
+                                                    if line.len() > budget {
+                                                        break;
+                                                    }
+                                                    lines.push(line);
+                                                }
+                                                if !lines.is_empty() {
+                                                    block.push_str("## Graph Hits\n");
+                                                    for l in lines {
+                                                        block.push_str(&l);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if block.is_empty() {
+                                        None
+                                    } else {
+                                        Some(block)
+                                    }
+                                })
                             });
                         agent = agent
                             .with_mid_run_retrieval(mid, config.memory.mid_run_require_tool_turn);
@@ -841,9 +880,13 @@ pub fn build_agent_with_role_providers(
                 // （`[memory] max_auto_draft_skills`，默认 20，对齐 skill.rs 常量）。
                 let max_auto_draft_skills = config.memory.max_auto_draft_skills;
                 let distill: deepseeknova_agent::DistillHook = Arc::new(move |obs| {
-                    if let Err(e) = dh.record_task(&obs, &guards) {
-                        tracing::warn!("memory distill failed: {e}");
-                    }
+                    // H4：record_task 含同步 embed（最多约 22 次 HTTP block_on），
+                    // 经 run_blocking_work 释放 tokio worker。
+                    run_blocking_work(|| {
+                        if let Err(e) = dh.record_task(&obs, &guards) {
+                            tracing::warn!("memory distill failed: {e}");
+                        }
+                    });
                     if let (true, Some(handle)) = (llm_distill_on, tokio_handle.as_ref()) {
                         let engine = dh.clone();
                         let llm = llm_distill_provider.clone();
@@ -1816,9 +1859,46 @@ fn merged_delegate_presets(config: &Config) -> Vec<deepseeknova_agent::DelegateP
     presets
 }
 
-/// 构建委派引擎：合并内置预设与配置覆盖，为每个预设造一个受限工具集的子 Agent
-/// （共享主 agent 的 graph/memory 句柄与安全策略）。禁递归：剔除任何 "delegate" 工具。
-/// `attribution` 提供子代理失败归因重试（None = 旧行为，失败直接上抛）。
+/// M3：把 `.deepseeknova/agents/*.md` markdown 子代理声明并入委派预设集合
+/// （AgentManifest 通道接线：`agent_manifest::load_dir` 解析 →
+/// `to_delegate_preset`，与 TOML 预设合并）。目录缺失/解析失败仅 warn
+/// （跳过），不阻断构建。同名冲突：markdown 声明后注册，覆盖内置/TOML 预设
+/// （用户声明优先，与 `load_dir` 的"用户通道新于既有通道"定位一致）。
+fn merged_delegate_presets_with_manifests(
+    config: &Config,
+    workspace_root: &std::path::Path,
+) -> Vec<deepseeknova_agent::DelegatePreset> {
+    let mut presets = merged_delegate_presets(config);
+    let agents_dir = config
+        .delegate
+        .agents_dir
+        .clone()
+        .unwrap_or_else(|| workspace_root.join(deepseeknova_agent::DEFAULT_AGENT_DIR));
+    match deepseeknova_agent::agent_manifest::load_dir(&agents_dir) {
+        Ok(manifests) => {
+            for m in manifests {
+                if presets.iter().any(|p| p.name == m.name) {
+                    tracing::warn!(
+                        "markdown agent '{}' overrides an existing delegate preset (TOML/builtin)",
+                        m.name
+                    );
+                }
+                presets.push(m.to_delegate_preset());
+            }
+        }
+        Err(e) => {
+            tracing::warn!("agents dir '{}' skipped: {e}", agents_dir.display());
+        }
+    }
+    presets
+}
+
+/// 构建委派引擎：合并内置预设 + 配置覆盖 + `.deepseeknova/agents/*.md`
+/// markdown 声明（AgentManifest 通道），为每个预设造一个受限工具集的子 Agent
+/// （共享主 agent 的 graph/memory 句柄与安全策略）。**禁递归**：剔除任何
+/// "delegate" 工具（引擎路径无递归出口）。`config.delegate.max_depth` 透传给
+/// 引擎（`with_max_depth`），作为深度守门上限备用；`attribution` 提供子代理
+/// 失败归因重试（None = 旧行为，失败直接上抛）。
 #[allow(clippy::too_many_arguments)]
 fn build_delegate_engine(
     config: &Config,
@@ -1846,8 +1926,8 @@ fn build_delegate_engine(
         deepseeknova_tools::all_builtin_tools()
     };
 
-    // 合并内置预设 + 配置覆盖。
-    let presets = merged_delegate_presets(config);
+    // 合并内置预设 + 配置覆盖 + markdown 声明。
+    let presets = merged_delegate_presets_with_manifests(config, workspace_root);
 
     let mut agents: std::collections::HashMap<String, Arc<deepseeknova_agent::Agent>> =
         std::collections::HashMap::new();
@@ -1901,8 +1981,14 @@ fn build_delegate_engine(
         config.delegate.max_concurrent,
         config.delegate.output_cap_tokens,
     );
+    // M5：max_depth 透传——配置上限在生产路径生效（引擎按 max_depth 守门，
+    // depth > max 拒绝；禁递归默认下根派发 depth=1 不受影响）。
+    engine = engine.with_max_depth(config.delegate.max_depth);
     for p in &presets {
         engine.register_spec(p.name.clone(), p.spec.clone(), p.config_inputs.clone());
+        // M3：markdown 声明/TOML 预设的 per-agent 模型覆盖 → RunInput.model_override
+        //（内置/TOML 预设恒 None，无行为变化）。
+        engine.register_model(p.name.clone(), p.model.clone());
     }
     if let Some(a) = attribution {
         engine = engine.with_attribution((*a).clone());
@@ -1932,7 +2018,8 @@ fn render_frozen_denies(rules: &[deepseeknova_permission::Rule]) -> Option<Strin
 /// `compact` pointer), falling back to the task provider when `None`.
 ///
 /// Presets and tool restrictions mirror the delegate engine: merged builtin
-/// presets + `config.delegate.agents` overrides, sandbox-aware builtin
+/// presets + `config.delegate.agents` overrides + `.deepseeknova/agents/*.md`
+/// markdown declarations (AgentManifest channel), sandbox-aware builtin
 /// tools, `"delegate"` always excluded (no recursion), no MCP tools.
 pub fn build_sub_agent_runner(
     config: &Config,
@@ -1966,7 +2053,7 @@ pub fn build_sub_agent_runner(
     let mut runner = deepseeknova_agent::SubAgentRunner::new(task_provider);
     let allow_recursion = config.delegate.allow_recursion;
     let max_depth = config.delegate.max_depth.max(1);
-    for p in merged_delegate_presets(config) {
+    for p in merged_delegate_presets_with_manifests(config, workspace_root) {
         let sub_tools: Vec<Arc<dyn Tool>> = if allow_recursion {
             // 递归开启：子代理可再派子代理（RecursiveDelegateTool 自带深度守门）。
             let mut tools: Vec<Arc<dyn Tool>> = base
@@ -2002,6 +2089,9 @@ pub fn build_sub_agent_runner(
                 .with_frozen_denies(frozen_lines.clone())
                 .with_tools(sub_tools)
                 .with_max_steps(p.spec.max_steps)
+                // M3：markdown 声明的 per-agent 模型覆盖透传（TOML 预设恒 None；
+                // 生效需装配 ModelResolver，未装配时 warn 并回退默认 provider）。
+                .with_model(p.model.clone())
                 .with_config_inputs(p.config_inputs.clone()),
         );
     }
@@ -2285,6 +2375,374 @@ mod tests {
         let task = std::sync::Arc::new(stub_provider());
         let _runner =
             build_sub_agent_runner(&config, task, None, &[], None, None, &std::env::temp_dir());
+    }
+
+    // -----------------------------------------------------------------------
+    // H4：同步闭包（RecallProvider / DistillHook）内的阻塞工作不占用 tokio
+    // worker（仅 `[memory] embedder="remote"` 时命中，条件性 high）
+    // -----------------------------------------------------------------------
+
+    /// H4 回归：`run_blocking_work` 在单一 worker 的多线程 runtime 上必须把
+    /// worker 让回调度器。若退化为直接调用，阻塞 sleep 期间该 worker 无法
+    /// 调度其它任务，心跳在阻塞窗口 [block_start, block_end] 内饿死。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn run_blocking_work_releases_worker_for_concurrent_tasks() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Mutex;
+
+        let block_window = Arc::new(Mutex::new(None::<(std::time::Instant, std::time::Instant)>));
+        let ticks = Arc::new(Mutex::new(Vec::<std::time::Instant>::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+
+        // 心跳：2ms 周期记录 tick 时间戳。
+        let (tk, st) = (ticks.clone(), stop.clone());
+        let heartbeat = tokio::spawn(async move {
+            while !st.load(Ordering::SeqCst) {
+                tk.lock().unwrap().push(std::time::Instant::now());
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            }
+        });
+
+        // 阻塞任务：记录 [start, end] 阻塞窗口。
+        let bw = block_window.clone();
+        let blocker = tokio::spawn(async move {
+            run_blocking_work(move || {
+                let start = std::time::Instant::now();
+                // 400ms 阻塞：期间若 worker 未释放，心跳无法推进。
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                *bw.lock().unwrap() = Some((start, std::time::Instant::now()));
+            });
+        });
+
+        blocker.await.unwrap();
+        let (start, end) = block_window.lock().unwrap().expect("blocker must run");
+        stop.store(true, Ordering::SeqCst);
+        heartbeat.await.unwrap();
+
+        let all_ticks = ticks.lock().unwrap().clone();
+        let in_window = all_ticks.iter().any(|t| t >= &start && t <= &end);
+        assert!(
+            in_window,
+            "阻塞窗口 {start:?}..{end:?} 内无心跳（{} 个 tick 均在外）：worker 被占用",
+            all_ticks.len()
+        );
+    }
+
+    /// H4 端到端回归：remote embedder 配置下，起点召回闭包内的同步 embed
+    /// （真实 HTTP 往返，服务端延迟 500ms）不得阻塞 tokio worker。
+    /// 断言：embed 阻塞窗口 [server_started, server_responded] 内心跳必须
+    /// 持续推进（证明 worker 已被 block_in_place 释放）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn recall_embed_does_not_starve_the_worker_thread() {
+        use deepseeknova_core::Runner;
+        use futures::StreamExt;
+        use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Mutex;
+
+        // 本地一次性 embed 服务：请求到达 → 记录时间 → 延迟 500ms → 回复。
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_started = Arc::new(Mutex::new(None::<std::time::Instant>));
+        let server_responded = Arc::new(Mutex::new(None::<std::time::Instant>));
+        {
+            let (ss, sr) = (server_started.clone(), server_responded.clone());
+            std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                // 读至 headers 结束（\r\n\r\n）；单条小 body 随 headers 同包到达。
+                while buf.windows(4).all(|w| w != b"\r\n\r\n") {
+                    let n = stream.read(&mut tmp).unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&tmp[..n]);
+                }
+                *ss.lock().unwrap() = Some(std::time::Instant::now());
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                *sr.lock().unwrap() = Some(std::time::Instant::now());
+                let body = r#"{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.1,0.2,0.3]}]}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            });
+        }
+        let base = format!("http://{addr}/v1");
+
+        // 保存/恢复 embed key 环境变量（remote embedder 装配必需）。
+        let prev_key = std::env::var("DEEPSEEKNOVA_EMBED_API_KEY").ok();
+        std::env::set_var("DEEPSEEKNOVA_EMBED_API_KEY", "sk-h4-test");
+        let restore_env = || match &prev_key {
+            Some(v) => std::env::set_var("DEEPSEEKNOVA_EMBED_API_KEY", v),
+            None => std::env::remove_var("DEEPSEEKNOVA_EMBED_API_KEY"),
+        };
+
+        let root = std::env::temp_dir().join(format!("dnv-h4-embed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut config = Config::default();
+        config.memory.embedder = "remote".into();
+        config.memory.embed_model = "test-model".into();
+        config.memory.embed_base_url = base;
+
+        let agent = build_agent(
+            &config,
+            root.clone(),
+            std::sync::Arc::new(stub_provider()),
+            5,
+            None,
+            vec![],
+        )
+        .expect("build_agent with remote embedder should succeed");
+
+        // 心跳：2ms 周期记录 tick 时间戳。
+        let ticks = Arc::new(Mutex::new(Vec::<std::time::Instant>::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        {
+            let (tk, st) = (ticks.clone(), stop.clone());
+            let heartbeat = tokio::spawn(async move {
+                while !st.load(Ordering::SeqCst) {
+                    tk.lock().unwrap().push(std::time::Instant::now());
+                    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                }
+            });
+            // run 起点召回触发 embed（HTTP 500ms 阻塞窗口）。
+            let mut stream = agent
+                .run_stream(deepseeknova_core::RunInput {
+                    prompt: "h4 run".into(),
+                    images: Vec::new(),
+                    model_override: None,
+                })
+                .await
+                .unwrap();
+            while stream.next().await.is_some() {}
+            stop.store(true, Ordering::SeqCst);
+            heartbeat.await.unwrap();
+        }
+
+        restore_env();
+        let start = server_started
+            .lock()
+            .unwrap()
+            .expect("embed request must arrive");
+        let end = server_responded
+            .lock()
+            .unwrap()
+            .expect("embed must respond");
+        let all_ticks = ticks.lock().unwrap().clone();
+        let in_window = all_ticks.iter().any(|t| t >= &start && t <= &end);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            in_window,
+            "embed 阻塞窗口 {start:?}..{end:?} 内无心跳（{} 个 tick 均在外）：worker 被占用",
+            all_ticks.len()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // M3：`.deepseeknova/agents/*.md` markdown 子代理声明通道接线
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn delegate_engine_registers_markdown_agents() {
+        let root = std::env::temp_dir().join(format!("dnv-m3-engine-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let agents_dir = root.join(".deepseeknova/agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(
+            agents_dir.join("researcher.md"),
+            "---\nname: researcher\ndescription: Read-only research.\ntools: [read_file]\nmax_turns: 4\n---\nYou are a researcher sub-agent.\n",
+        )
+        .unwrap();
+        // 非 md 文件忽略
+        std::fs::write(agents_dir.join("notes.txt"), "not a manifest").unwrap();
+
+        let config = Config::default();
+        let security = SecurityContext::with_safe_defaults();
+        let engine = build_delegate_engine(
+            &config,
+            std::sync::Arc::new(stub_provider()),
+            &root,
+            &security,
+            None,
+            None,
+            None,
+            None,
+        );
+        let names = engine.agent_names();
+        assert!(
+            names.iter().any(|n| n == "researcher"),
+            "markdown agent 'researcher' 必须注册，实得: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "explorer"),
+            "内置预设必须仍在: {names:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn delegate_engine_skips_missing_agents_dir() {
+        let root = std::env::temp_dir().join(format!("dnv-m3-empty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let config = Config::default();
+        let security = SecurityContext::with_safe_defaults();
+        let engine = build_delegate_engine(
+            &config,
+            std::sync::Arc::new(stub_provider()),
+            &root,
+            &security,
+            None,
+            None,
+            None,
+            None,
+        );
+        // 缺目录 → 仅内置 4 预设（跳过，不阻断）。
+        assert_eq!(
+            engine.agent_names(),
+            vec!["coder", "explorer", "reviewer", "tester"]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn delegate_engine_reads_custom_agents_dir_from_config() {
+        let root = std::env::temp_dir().join(format!("dnv-m3-custom-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let custom = root.join("custom-agents");
+        std::fs::create_dir_all(&custom).unwrap();
+        std::fs::write(
+            custom.join("auditor.md"),
+            "---\nname: auditor\ntools: []\n---\nYou audit.\n",
+        )
+        .unwrap();
+
+        let mut config = Config::default();
+        config.delegate.agents_dir = Some(custom);
+        let security = SecurityContext::with_safe_defaults();
+        let engine = build_delegate_engine(
+            &config,
+            std::sync::Arc::new(stub_provider()),
+            &root,
+            &security,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            engine.agent_names().iter().any(|n| n == "auditor"),
+            "自定义 agents_dir 的 markdown 声明必须注册"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// M3：SubAgentRunner（coordinator Delegate 路径）同样注册 markdown 声明。
+    #[tokio::test]
+    async fn sub_agent_runner_registers_markdown_agents() {
+        use deepseeknova_core::{Message, Role, Runner};
+        use futures::StreamExt;
+        use std::sync::Mutex;
+
+        struct ManifestCaptureProvider {
+            seen: Arc<Mutex<Vec<String>>>,
+        }
+        #[async_trait::async_trait]
+        impl deepseeknova_provider::Provider for ManifestCaptureProvider {
+            async fn generate(
+                &self,
+                v: deepseeknova_provider::ValidatedRequest<'_>,
+            ) -> anyhow::Result<Message> {
+                let mut texts: Vec<String> = v.messages.iter().map(|m| m.content.clone()).collect();
+                self.seen.lock().unwrap().append(&mut texts);
+                Ok(Message {
+                    role: Role::Assistant,
+                    content: "ok".into(),
+                    name: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                })
+            }
+        }
+
+        let root = std::env::temp_dir().join(format!("dnv-m3-runner-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let agents_dir = root.join(".deepseeknova/agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(
+            agents_dir.join("researcher.md"),
+            "---\nname: researcher\ndescription: Read-only research.\ntools: [read_file]\n---\nYou are a researcher sub-agent.\n",
+        )
+        .unwrap();
+
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let config = Config::default();
+        let task: Arc<dyn deepseeknova_provider::Provider> =
+            Arc::new(ManifestCaptureProvider { seen: seen.clone() });
+        let runner = build_sub_agent_runner(&config, task, None, &[], None, None, &root);
+
+        let mut stream = runner
+            .run_stream(deepseeknova_core::RunInput {
+                prompt: "sub_agent:researcher\ngoal: investigate".into(),
+                images: Vec::new(),
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+
+        let all: String = seen.lock().unwrap().join("\n");
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            all.contains("You are a researcher sub-agent."),
+            "markdown 声明的 system prompt 必须被 SubAgentRunner 使用，实得: {all}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // M5：delegate 引擎路径 max_depth 守门（配置上限透传）
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn delegate_engine_respects_config_max_depth() {
+        use deepseeknova_agent::task_spec::InputValues;
+
+        let root = std::env::temp_dir().join(format!("dnv-m5-depth-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut config = Config::default();
+        config.delegate.max_depth = 2;
+        let security = SecurityContext::with_safe_defaults();
+        let engine = build_delegate_engine(
+            &config,
+            std::sync::Arc::new(stub_provider()),
+            &root,
+            &security,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        // depth 2 = 配置上限 → 放行。
+        let ok = engine
+            .run_at_depth("explorer", "investigate", InputValues::new(), 2)
+            .await
+            .unwrap();
+        assert!(!ok.is_empty(), "depth=上限 应放行: {ok}");
+
+        // depth 3 > max 2 → 拒绝（守门生效）。
+        let err = engine
+            .run_at_depth("explorer", "investigate", InputValues::new(), 3)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("recursion depth exceeded"),
+            "超深派发必须被引擎拒绝，实得: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]

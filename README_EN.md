@@ -36,7 +36,7 @@ A Rust-from-scratch AI agent framework — not a wrapper. Built specifically for
 
 ## 🎯 Key Features
 
-- **Deep reasoning + tool calling** — streaming reasoning output, 3-level reasoning effort (disabled / high / max; `low`/`medium` fold into high), 17 built-in tools
+- **Deep reasoning + tool calling** — streaming reasoning output, 3-level reasoning effort (disabled / high / max; `low`/`medium` fold into high), 16 built-in tools
 - **Daily experience** — `web_search` (DuckDuckGo / Tavily / Bing / SearXNG),
   `lsp_diagnostics` (auto-injected into tool results after write/edit/move),
   auto model+thinking routing (`[agent] auto_route = true`), and durable
@@ -55,7 +55,10 @@ A Rust-from-scratch AI agent framework — not a wrapper. Built specifically for
   UNC/URL/SMB path forms) are hard-denied and cannot be overridden by rules
 - **Multi-agent delegation** — delegate-based sub-agents (explorer / coder / tester / reviewer) with constrained tool sets, semaphore concurrency, and capped result summaries; isolated context, bounded recursion (`[delegate] allow_recursion = true`, depth capped by `max_depth`, default 3). Historical GOAP/Swarm/Federation experiments were removed in B0 (see DESIGN.md).
 - **MCP protocol** — stdio + HTTP dual transport, auto-discovery
-- **Project knowledge** — Wiki generation, knowledge cards, 4-layer memory distillation, file checkpoints
+- **Project knowledge** — Wiki generation, knowledge cards, 4-layer memory distillation (ShortTerm · Task · Skill · UserProfile), file checkpoints; optional semantic retrieval (`[memory] embedder = "remote"` → hybrid `0.5*bm25 + 0.5*cosine` recall over memory and the code graph, fail-open to plain FTS); CLI memory user surface (`memory list / edit / delete / replay / search / stats / embed-backfill / cleanup`)
+- **User-level hooks** — `[hooks]` external command hooks for five events (`tool_before` / `tool_after` / `session_start` / `session_end` / `failure`) chained with AND semantics; `tool_before` failures block the tool (fail-closed); zero process overhead when unconfigured
+- **i18n bilingual UI** — TUI interface language via `[ui] lang = "en" | "zh"` or the `DEEPSEEKNOVA_LANG` env var (CLI takes precedence); ~190 user-facing strings moved into a vocabulary table with fail-safe English fallback
+- **Worktree parallel sessions** — `deepseeknova-cli worktree new|list|switch|delete|clean` isolates parallel sessions via `git worktree`; each session writes its runtime state (graph/memory/audit/metrics) under its own workspace root, so sessions never interfere
 - **Protocol execution engine (`[protocol]`)** — DNA five-phase gating (Understand→Plan→Execute→Verify→Distill) with built-in gates (plan-before-execute / verify-evidence / distill-on-complex / drift-detection), `hard|soft|off` levels, off by default with zero overhead; evidence-anchored verification (blocking on configured-but-unverified, `unverified` diagnose outcome); adversarial review sub-agent on trigger conditions
 - **Skill self-evolution** — usage/success tracking (fitness), deprecate / merge / promote suggestions, deprecated filtering
 - **Failure-pattern feedback** — failed sessions clustered into a redacted store, top-3 patterns auto-injected into the next session's first system prompt
@@ -71,7 +74,7 @@ Runtime     Agent Loop · Coordinator · Plan-Mode Runner
 Core        Runner Trait · Tool Trait · Registry · WireEvent
                │                    │
 Provider    DeepSeek V4 Pro/Flash   Tools: File · Glob · Grep · Shell
-            Streaming + Tools       WebFetch · Task · MCP Bridge · 17
+            Streaming + Tools       WebFetch · Task · MCP Bridge · 16
 ```
 
 ## 📦 Crates
@@ -81,7 +84,7 @@ Provider    DeepSeek V4 Pro/Flash   Tools: File · Glob · Grep · Shell
 | `deepseeknova-core` | Core types: Runner / Tool trait, Registry, WireEvent |
 | `deepseeknova-agent` | Agent loop, Coordinator, Plan-Mode Runner |
 | `deepseeknova-provider` | DeepSeek / OpenAI-compatible / Anthropic streaming |
-| `deepseeknova-tools` | 17 built-in tools + web search + LSP diagnostics + Context7 docs |
+| `deepseeknova-tools` | 16 built-in tools + web search + LSP diagnostics + Context7 docs (delegate tool lives in the agent crate) |
 | `deepseeknova-mcp` | MCP protocol client (stdio / HTTP) |
 | `deepseeknova-metrics` | Session-level effectiveness metrics + JSON reports |
 | `deepseeknova-graph` | Code graph engine (tree-sitter + SQLite FTS5 + PageRank + repo map) |

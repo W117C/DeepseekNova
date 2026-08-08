@@ -40,7 +40,7 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 
 ### 🧠 深度推理 + 工具调用
 - 流式推理输出，支持 Reasoning Effort 三级调节（disabled / high / max；配置串 `low`/`medium` 折叠为 high）
-- 17 个内置工具 + web 搜索 + LSP 编辑后诊断 + Context7 文档检索：文件 I/O、
+- 16 个内置工具 + web 搜索 + LSP 编辑后诊断 + Context7 文档检索：文件 I/O、
   glob、grep、shell、web fetch、任务管理、MCP 桥接、代码图等
 - 工具调用全链路流式：start → delta → end → result，前端实时渲染
 - **编辑后诊断** — write/edit/move 成功后自动调用语言服务器
@@ -95,8 +95,26 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 - **Wiki 生成器** — 自动文档生成
 - **知识卡片** — 置信度标注的结构化知识
 - **记忆蒸馏** — 跨会话记忆持久化（短期 / 任务 / 技能 / 用户画像四类：
-  ShortTerm · Task · Skill · UserProfile）
+  ShortTerm · Task · Skill · UserProfile）；语义检索可选
+  （`[memory] embedder = "remote"` → 记忆与代码图 `0.5*bm25 + 0.5*余弦` 融合召回，
+  缺 key/网络错 fail-open 回落纯 FTS）
+- **记忆用户面** — `memory list / edit / delete / replay / search / stats /
+  embed-backfill / cleanup` 直接浏览与管理记忆库（生命周期阶段 + 召回分解回放）
 - **文件检查点** — 事务性快照 + 回滚
+
+### 🧩 用户级 Hooks
+- **`[hooks]` 外部命令钩子** — `tool_before` / `tool_after` /
+  `session_start` / `session_end` / `failure` 五事件，事件间 AND 链；
+  `tool_before` 任一失败即阻止工具执行（fail-closed），无 hooks 配置零进程开销
+
+### 🌐 i18n 双语界面
+- **TUI 界面语言** — `[ui] lang = "en" | "zh"` 或 `DEEPSEEKNOVA_LANG` 环境变量
+  （CLI 优先），约 190 处用户可见文案入词表，缺键 fail-safe 回退英文
+
+### 🧱 Worktree 并行会话
+- **`deepseeknova-cli worktree new|list|switch|delete|clean`** — `git worktree`
+  隔离副本，各会话按工作区根独立落盘运行时状态（graph/memory/审计/metrics），
+  并行开发互不干扰
 
 ### 🧬 协议执行引擎与自进化（`[protocol]`）
 - **DNA 五阶段门控** — Understand→Plan→Execute→Verify→Distill 运行时门控，内置
@@ -133,7 +151,7 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 │    Provider 层       │ │      工具层 (Tools)           │
 │  DeepSeek V4 Pro    │ │  File · Glob · Grep · Shell   │
 │  DeepSeek V4 Flash  │ │  WebFetch · Task · MCP Bridge │
-│  Streaming + Tools  │ │  17 Built-in Tools           │
+│  Streaming + Tools  │ │  16 Built-in Tools           │
 └─────────────────────┘ └──────────────────────────────┘
 ```
 
@@ -144,7 +162,7 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 | `deepseeknova-core` | 核心类型：Runner / Tool trait、Registry、WireEvent |
 | `deepseeknova-agent` | Agent 主循环、Coordinator、Plan-Mode Runner |
 | `deepseeknova-provider` | DeepSeek / OpenAI 兼容 / Anthropic 流式 Provider |
-| `deepseeknova-tools` | 17 个内置工具 + web 搜索 + LSP 诊断 + Context7 文档检索 |
+| `deepseeknova-tools` | 16 个内置工具 + web 搜索 + LSP 诊断 + Context7 文档检索（delegate 委派工具由 agent crate 提供） |
 | `deepseeknova-mcp` | MCP 协议客户端（stdio / HTTP） |
 | `deepseeknova-metrics` | 会话级效能度量 + 评分卡（四维 + protocol/composite）落盘 |
 | `deepseeknova-graph` | 代码图检索引擎（tree-sitter + SQLite FTS5 + PageRank + repo map） |
