@@ -58,6 +58,60 @@ All notable changes to DeepseekNova will be documented in this file.
   专管）；release.sh/bump-version.sh 重写；dotenvy 死依赖删除；20 crate
   docs URL 去版本号；SECURITY 版本表 0.5.x；PROMPT_DESIGN 删除项标注。
 
+### Refactor / Test（2026-08-08 第二轮，793fed2 / 4c6929d）
+
+- **M7 大文件拆分**：`deepseeknova-agent` 的 agent.rs（7188→6571 行）抽
+  approval/render/agent_diag/classify/path/tools 六子模块；`deepseeknova-runtime`
+  lib.rs（5089→2458 行）抽 helpers/security/metrics/hooks/diagnose/protocol/
+  delegate/test_support 八子模块。纯机械搬移，对外 API 经 `pub use` 保持。
+- **M7 拆分续**：`agent.rs` → `agent/mod.rs` + 新增 `agent/loop_impl.rs`，
+  主循环 `run_agent_loop` / `run_review_pass` / `stream_and_process_turn` /
+  回合级工具执行与审查/反思/归因助手（含 `MidRunRetrieval` 结构体）整段迁出。
+  均为自由函数（状态经参数传入），`agent/mod.rs` 生产代码 3296→1284 行，
+  新模块 2026 行；对外经 `pub(crate) use` 保留原名，333 测试全绿零告警。
+- **M8 测试密度**：graph 78 条（15.97/1kLOC）、runtime 93 条（15.32/1kLOC），
+  新增非 ignore 集成 e2e；顺带修复 graph Go 相对导入 file 边 bug。
+
+### Fixed（TUI 冷启动与交互批次）
+
+- **冷启动崩溃修复**：fresh 环境（无任何配置）裸命令 / `chat --tui` 曾因
+  `resolve_provider_cfg` 对空 providers 取 `[0]` 直接 panic（exit 101）；现改为
+  打印「运行 `deepseeknova-cli setup` 或添加 `[[providers]]`」引导并以退出码 6
+  退出。有配置但 API key 缺失时同样给出 `export DEEPSEEK_API_KEY=...` 引导。
+- **TUI 配置状态警示**：`TuiRunner::with_config_status` 注入 provider/key 状态；
+  欢迎块、状态栏、`/model` 在未配置时给出红色 setup 引导（库级嵌入兜底）。
+  状态栏模型名不再显示无意义的 `default`（回落 provider 自带 model）。
+- **键位真相修复**：空闲 `Ctrl+C` 与 `Esc` 同语义（二次确认退出）而非静默无
+  响应；空输入 `Ctrl+D` 退出（shell 惯例）；`Ctrl+Z` 提示 raw 模式不可挂起；
+  `keybindings.json` 保留键清单与事实对齐（`Ctrl+\` 改为可重绑的默认绑定，
+  `Ctrl+X` 补入保留；Reserved 文案改为 app 占用而非「OS 保留」）。
+- **Input 编辑键接入 keymap（P1-1）**：`handle_editor_key` 改 keymap 感知分派
+  （用户覆盖/解绑优先 → 编译期绑定表 → 保留键/自由插入硬编码），Enter/Ctrl+A/E/
+  U/W/Tab/方向键/Home/End 等编辑键现在可经 `keybindings.json` 重绑或解绑；
+  Home/End 拆分行内（Home/End 键）与缓冲区（Ctrl+A/E）语义（`chat:homeLine`/
+  `chat:endLine`）。
+- **F1 / Ctrl+L / 键位表补齐**：`F1` 打开 `/help`，`Ctrl+L` 清屏重绘；BINDINGS
+  补齐 Input 实际存在的编辑键（`Ctrl+A/E`、`Ctrl+Enter`）；`/help` 补 Tab /
+  `Ctrl+\` / `Ctrl+P` / Esc Esc / 侧边栏 `1..5` / `Ctrl+T` / F1 等键位说明。
+- **bracketed paste**：启用 bracketed paste，多行粘贴以整段文本插入输入框，
+  不再把内嵌换行当作 Enter 提交（曾贴一半就发出）。
+- **状态栏信息补齐**：工作区 cwd / git 分支（`⎇ branch`）+ thinking effort 后缀
+  （`model·high`），窄终端按优先级丢弃。
+- **对话区**：非贴底滚动时右上角显示 `▍N%` 滚动位置；回合结束追加边界行
+  （`─ 第 N 轮完成（Xs）─`）；迟到/启动期错误不再静默丢弃（回显到反馈区）。
+- **`/workspace` 命令**：显示当前工作区（路径 + git 分支）、已保存会话数、
+  可用 git worktree 列表，并给出切换工作区（`cd <path> && deepseeknova-cli
+  chat --tui`）与按项目隔离会话（`deepseeknova-cli worktree new`）的引导。
+- **会话 workspace 元数据**：`StoredTurn` 新增 `workspace` 字段（serde default
+  向后兼容旧会话文件），CLI/REPL/TUI 落盘时记录工作区根；侧边栏会话面板按
+  工作区分组（`⎇ 项目 · 会话数`，未知归「全局」组，组内按夜次分组），
+  `/workspace` 输出每工作区会话数明细，`/sessions` 对非当前工作区的会话标注
+  `[项目名]`。
+- **侧边栏 MCP/Skills 接线真数据**：MCP 面板进入即异步探测（进程 spawn + 短
+  超时，不阻塞事件循环；之后每 30s 冷却刷新），实时显示各 server ✓ 已连接 /
+  ✗ 未连接（原因）；Skills 面板启动一次性扫描技能目录并列出 name — description。
+  两处不再是「运行 /mcp /skills」的空占位。
+
 ## [0.5.0] — 2026-08-08
 
 ### ⚠ Breaking

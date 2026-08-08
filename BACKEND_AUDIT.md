@@ -4,6 +4,10 @@
 每条结论带 file:line 或命令输出；`make check` EXIT=0，workspace 共 638 测试通过（633 单测/集成 + 5 doctest）、
 2 个既有 ignored（graph/provider 集成测试）。`make check` 明确排除 desktop（Makefile:16-18）。
 
+> **2026-08-08 更新**：desktop（Tauri 壳）已整体移除（`crates/deepseeknova-desktop` 删除，
+> 见 BLOCKED.md「观测台前端 UI + TUI 演进轮」节）。下文中所有 desktop/桌面端条目均已过时，
+> 仅保留历史记录。
+
 ## 总览（22 crate）
 
 | crate | 源码行数/文件数 | 测试通过 | 结论 |
@@ -27,12 +31,12 @@
 | serve | 311/1 | 8 | 完整（REST+SSE 三路由） |
 | skills | 381/2 | 15 | 完整 |
 | telemetry | 177/1 | 3 | 完整（轻量 OTLP） |
-| desktop | 2937/25 | 未跑* | 有独立通道（见下） |
+| ~~desktop~~ | ~~2937/25~~ | ~~未跑*~~ | ~~有独立通道（见下）~~ |
 | security | 603/7 | 29 | 完整 |
 | scanner | 633/6 | 14 | 完整 |
 
-*desktop 不在 `make check`（Makefile:16-18 全部 `--exclude deepseeknova-desktop`），走独立
-`make check-desktop` 与 CI desktop.yml；本审计未运行前端 lint/桌面构建。
+*~~desktop 不在 `make check`（Makefile:16-18 全部 `--exclude deepseeknova-desktop`），走独立
+`make check-desktop` 与 CI desktop.yml；本审计未运行前端 lint/桌面构建。~~
 
 ## 逐 crate 核对
 
@@ -74,8 +78,8 @@
 18. **skills**：frontmatter 解析（loader.rs:136）+ 激活工具返回 system_prompt
     （lib.rs:60-101）；15 测试绿。完整。
 19. **telemetry**：OTLP 导出（lib.rs 模块文档）；3 测试绿。完整（轻量）。
-20. **desktop**：61 处 `#[tauri::command]`（commands/ 下 22 个文件，rg 实测）vs README
-    声明「44 个 Tauri 命令」——**数字过时**；Rust 侧测试未跑（独立通道）。
+20. **~~desktop~~（已移除）**：~~61 处 `#[tauri::command]`（commands/ 下 22 个文件，rg 实测）
+    vs README 声明「44 个 Tauri 命令」——数字过时；Rust 侧测试未跑（独立通道）。~~
 21. **security**：audit/capability/context/limits/policy 模块齐全；29 测试绿。完整。
 22. **scanner**：静态规则（rule.rs）+ AI 调查（investigate.rs build_prompt:11）+ 报表
     （report.rs）+ 发现模型（finding.rs）；14 测试绿。完整。
@@ -88,13 +92,13 @@
 
 **建议（写 BLOCKED.md 待裁决）**
 - README tests 徽章 536 落后实际 638（README.md:44）。
-- README「44 个 Tauri 命令」vs 实测 61 个 `#[tauri::command]` 标记。
+- ~~README「44 个 Tauri 命令」vs 实测 61 个 `#[tauri::command]` 标记。~~（desktop 已移除）
 - graph `self_index` 与 provider `deepseek_reasoning_protocol` 集成测试 ignored（既有）。
-- desktop 不在 `make check`，本机完整校验需 `make check-desktop`（需前端产物）。
+- ~~desktop 不在 `make check`，本机完整校验需 `make check-desktop`（需前端产物）。~~（desktop 已移除）
 
 **顺手活（写 BLOCKED.md 待裁决）**
 - verify 目前是确定性命令 + 固定文案（agent.rs:933），可考虑 LLM 化。
-- desktop 设置页 system_prompt 入口未接新默认值（前端已搁置）。
+- ~~desktop 设置页 system_prompt 入口未接新默认值（前端已搁置）。~~（desktop 已移除）
 
 ## 结论
 

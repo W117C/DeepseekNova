@@ -441,6 +441,8 @@ drift-detection = "soft"             # 工具族连续失败 ≥3 → DriftFindi
 | `DEEPSEEKNOVA_MAX_STEPS` | Override max steps |
 | `DEEPSEEKNOVA_EMBED_API_KEY` | Embedder API key（记忆语义检索） |
 | `DEEPSEEKNOVA_THEME` | TUI 主题 |
+| `DEEPSEEKNOVA_LANG` | TUI 界面语言（`zh`/`zh-cn`/`cn`/`chinese`/`中文` → 中文） |
+| `DEEPSEEKNOVA_KEYBINDINGS` | TUI 键位定制文件路径（默认 `~/.deepseeknova/keybindings.json`） |
 
 > 注：CLI 日志固定 INFO 级（`crates/deepseeknova-cli/src/main.rs`），**不读取**
 > `RUST_LOG` 或任何日志环境变量；开启 `[telemetry] enabled=true` 时日志改走
@@ -560,10 +562,10 @@ stage / recency，权重 `rank_lifecycle_weight`，=0 时与纯 bm25 等价）�
 
 ```toml
 [ui]
-lang = "en"   # en（默认）| zh（接受 zh-cn/cn/中文 别名）
+lang = "en"   # en（默认）| zh（接受 zh-cn/cn/chinese/中文 别名）
 ```
 
-`lang` 缺省回退 `DEEPSEEKNOVA_LANG` 环境变量（`zh`/`zh-cn`/`cn`/`中文` →
+`lang` 缺省回退 `DEEPSEEKNOVA_LANG` 环境变量（`zh`/`zh-cn`/`cn`/`chinese`/`中文` →
 中文，其余/缺省 → 英文），两者皆缺省为英文。词表结构见
 `crates/deepseeknova-tui/src/i18n/`。
 
@@ -1090,7 +1092,7 @@ deepseeknova-cli chat --tui
 │ ⏺ src/ 目录包含 ...                                │ │                        │
 │ ⠸ 思考…（3s · Ctrl+C 取消）  ← 等待动画+耗时       │ │                        │
 ├────────────────────────────────────────────────────┤ ├────────────────────────┤
-│ ● deepseek-v4-flash │ ctx [██░░] 19% │ 权限 default │ │ Tab/Ctrl+1..5 切面板    │
+│ ● deepseek-v4-flash·high │ ctx [██░░] 19% │ 权限 default │ ⎇ main │ Tab 切面板 · 1..5 直接切
 ├─ ❯ prompt ─────────────────────────────────────────┤ │ 窄终端(<90列)自动隐藏   │
 │ 第一行输入  @crates/…  ← @ 触发文件补全             │ │                        │
 │ 第二行输入（Shift+Enter 换行）                      │ │                        │
@@ -1113,15 +1115,28 @@ Ctrl+U 清行 · Ctrl+W 删词 · Shift+Enter 换行 · /help · Esc 取消/再�
 
 ### 命令面板
 
-`Ctrl+K` 打开命令面板：模糊搜索全部命令（名称/描述/关键词），有参数的命令进入
-内联参数输入后执行。与斜杠命令共用同一注册表；输入 `/` 时也会弹出命令模糊候选
-（`↑`/`↓`/`j`/`k` 选择、`Enter` 执行、`Tab` 填入命令名），已输入参数
-（如 `/fold `）时切换为枚举候选。候选超过 8 条时列表跟随选中项滚动，
+输入 `/` 打开命令面板：模糊搜索全部命令（名称/描述/关键词），有参数的命令进入
+内联参数输入后执行。与斜杠命令共用同一注册表（无 `Ctrl+K` 绑定——命令面板是
+纯 `/` 触发，见 `crates/deepseeknova-tui/src/app/actions.rs` 的说明）；输入 `/`
+时弹出命令模糊候选（`↑`/`↓`/`j`/`k` 选择、`Enter` 执行、`Tab` 填入命令名），
+已输入参数（如 `/fold `）时切换为枚举候选。候选超过 8 条时列表跟随选中项滚动，
 高亮不会“滚出视野”。
 
 侧边栏“会话”面板列出磁盘保存的会话（最新优先，含“当前”标记）：
 `↑`/`↓`（或 `j`/`k`）选择，`Enter` 恢复选中会话；恢复内容进入对话面板
 （可滚动/折叠），不再是临时回显。`/new` 后列表自动刷新。
+
+每个回合落盘时记录**工作区根路径**（`StoredTurn.workspace`，旧会话文件向后兼容
+读为全局），会话面板按工作区分组显示（`⎇ {项目名} · {会话数}`，未知/旧会话归
+`全局` 组），组内再按夜次分组。`/workspace` 输出每工作区会话数明细；
+`/sessions` 对非当前工作区的会话标注 `[{项目名}]`。跨项目切换后，侧边栏仍能
+一眼找到各项目的历史会话（会话文件本身继续存在 `~/.deepseeknova/sessions`，
+按项目隔离会话仍用 `deepseeknova-cli worktree new`）。
+
+其余面板均为实时数据，不再是占位提示：**MCP** 面板进入即异步探测（每 30s
+冷却刷新），逐 server 显示 `✓ 已连接 / ✗ 未连接（原因）`；**技能**面板启动时
+一次性扫描 `.deepseeknova/skills` 与 `.agents/skills` 并列出 `name — description`；
+**工具活动**聚合统计；**成本**显示会话累计与测光评分卡。
 
 首次启动（尚无对话）显示简洁欢迎区（Claude Code 风格，无边框卡片）：
 logo、命令提示、快捷键说明、最近会话数与当前工作目录；提交第一个问题后
@@ -1163,7 +1178,15 @@ DEEPSEEKNOVA_THEME=light  deepseeknova-cli chat --tui   # 印刷星图浅色档�
 - 多行编辑 + 可见光标（←/→/Home/End、Shift+Enter 换行、Ctrl+U/W）
 - markdown 行级着色（标题/列表/引用/代码围栏，仅影响显示）
 - `@` 触发文件补全（候选清单由 CLI 注入工作区文件；↑↓ 选择、Enter 插入、Esc 关闭）
-- 键位可经 `keybindings.json` 自定义（启动加载、改动热重载）；
+- 键位可经 `keybindings.json` 自定义（启动加载、改动热重载）；文件路径
+  `~/.deepseeknova/keybindings.json`，可用 `DEEPSEEKNOVA_KEYBINDINGS` 环境变量
+  覆盖。格式与 Claude Code 同构：`{"bindings":[{"context":"Input","bindings":
+  {"ctrl+u":"conv:scrollTop","y":null}}]}`，`null` 解绑默认键。action 名见
+  `/help` 与 `crates/deepseeknova-tui/src/app/actions.rs`；`ctrl+c/ctrl+d/ctrl+m/
+  ctrl+z/ctrl+x` 为保留键（app 占用，见该文件 `reserved_reason`）。Input 编辑键
+  （Enter/Shift+Enter/Ctrl+A/E/U/W/Tab/方向键/Home/End 等）、Conversation/
+  Sidebar/Completion 焦点与全局热键（Ctrl+P、Ctrl+\、F1、Ctrl+L）均受 keymap
+  覆盖——改键或解绑即时生效。
   `Ctrl+X Ctrl+E` 用 `$EDITOR` 编辑当前输入（无 `$EDITOR` 时回退 vim）
 
 ### 按键
@@ -1171,20 +1194,28 @@ DEEPSEEKNOVA_THEME=light  deepseeknova-cli chat --tui   # 印刷星图浅色档�
 | Key | Action |
 |---|---|
 | `Enter` | 提交输入 |
-| `Shift+Enter` / `Ctrl+J` | 输入内换行（多行输入） |
-| `Tab` | 焦点循环：输入 → 消息导航 → 侧边栏 |
+| `Shift+Enter` / `Ctrl+Enter` | 输入内换行（多行输入） |
+| `Tab` | 焦点前进：输入 → 消息导航 → 侧边栏 |
 | `Esc` | 生成中取消；空闲时首次提示“再按 Esc 退出”（3 秒内再按退出）/ 关闭模态面板 |
-| `Ctrl+C` | 生成中取消（空闲无操作） |
+| `Ctrl+C` | 生成中取消；空闲时与 Esc 同语义（再按退出） |
+| `Ctrl+D` | 空输入时退出（shell 惯例；raw 模式下由应用桥接） |
+| `Ctrl+Z` | 提示 TUI 下无法挂起进程（raw 模式无任务控制） |
 | `Ctrl+X Ctrl+E` | 用 `$EDITOR` 外部编辑当前输入 |
-| `Ctrl+K` | 命令面板 |
+| `/` | 命令面板（纯 `/` 触发，无 Ctrl+K） |
 | `Ctrl+\` | 侧边栏开合 |
+| `Ctrl+P` | 循环切换权限模式（plan → accept_edits → auto） |
+| `Ctrl+T` | 切换鼠标捕获（滚轮滚动对话 vs 鼠标选中复制） |
+| `F1` | 打开 `/help` 帮助浮层 |
+| `Ctrl+L` | 清屏重绘 |
 | `↑` / `↓` | 输入历史（多行输入时移动光标行） |
 | `←` / `→` | 输入内移动光标 |
 | `Home` / `End` | 空闲=输入光标到行首/行尾；运行中=滚动到顶/跟随 |
 | `Backspace` / `Delete` | 删除光标前/后字符 |
+| `Ctrl+A` / `Ctrl+E` | 输入光标到行首/行尾 |
 | `Ctrl+U` / `Ctrl+W` | 清空输入 / 删前一词 |
 | `PageUp` / `PageDown` | 对话面板滚动回看 |
 | `鼠标滚轮` | 滚动对话历史（滚到最新后自动恢复跟随） |
+| `Ctrl+4` | 与 `Ctrl+\` 等价（终端同一字节，跨平台兜底） |
 | `j` / `k` | 消息导航焦点：上下移动选中消息 |
 | `Enter`（消息焦点） | 切换当前消息折叠 |
 | `y`（消息焦点） | 复制当前消息（剪贴板不可用时降级回显） |
@@ -1209,6 +1240,7 @@ DEEPSEEKNOVA_THEME=light  deepseeknova-cli chat --tui   # 印刷星图浅色档�
 | `/raw` | 切换显示模式 normal / lite / raw（lite 隐藏推理，raw 带类型前缀） |
 | `/fold` | 折叠控制：`/fold all`、`/fold none`、`/fold reset` |
 | `/copy` | 复制当前选中消息 |
+| `/workspace` | 显示当前工作区（路径 + git 分支）、会话数、可用 git worktree 与切换/隔离提示 |
 | `/undo` | 回滚最近一个检查点快照 |
 | `/undo all` | 回滚全部快照 |
 | `/undo list` | 列出快照与 ✓/✗ 状态 |
