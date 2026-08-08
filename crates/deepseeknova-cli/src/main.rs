@@ -526,9 +526,12 @@ async fn main() -> anyhow::Result<()> {
         // ── Chat (with /new loop) ────────────────────────────────────────
         Some(Commands::Chat { model, resume, tui }) => {
             info!("chat: model={model:?}, resume={resume}, tui={tui}");
+            // 首启校验：无 provider / API key 缺失时给出 setup 引导并退出，
+            // 而不是在 TUI/REPL 启动中途裸错（曾 panic 或闪退）。
+            ensure_first_run_configured(&config, model.as_deref());
             // Compute the baseline reasoning effort from config so the
             // REPL knows what to restore when toggling thinking back on.
-            let provider_cfg = resolve_provider_cfg(&config, model.as_deref());
+            let provider_cfg = resolve_provider_cfg(&config, model.as_deref())?;
             let baseline_effort =
                 deepseeknova_provider::factory::resolve_effort(provider_cfg, None);
 
@@ -582,12 +585,16 @@ async fn main() -> anyhow::Result<()> {
                         });
                 let factory_router = Arc::clone(&model_router);
                 let cfg = config.clone();
-                // 生效模型名：--model 显式覆盖，否则回落配置 default_model。
-                // 界面 label 与上下文分母都按它解析（曾因回落缺失显示
-                // "default" 且 token 预算条永远不出现）。
-                let effective_model = model.clone().or_else(|| cfg.default_model.clone());
+                // 生效模型名：--model 显式覆盖，否则回落配置 default_model；
+                // 仍为空时取 provider 自带 model（曾只回落到这里导致界面标签
+                // 显示无意义的 "default"）。
+                let effective_model = model
+                    .clone()
+                    .or_else(|| cfg.default_model.clone())
+                    .or_else(|| cfg.providers.first().and_then(|p| p.model.clone()));
                 let context_window = resolve_provider_cfg(&cfg, effective_model.as_deref())
-                    .context_window
+                    .map(|p| p.context_window)
+                    .unwrap_or(None)
                     .or_else(|| {
                         effective_model
                             .as_deref()
@@ -671,6 +678,22 @@ async fn main() -> anyhow::Result<()> {
                 if let Some(lang) = resolve_ui_lang(&config) {
                     tui = tui.with_lang(lang);
                 }
+                // 配置状态注入 TUI：欢迎块/状态栏据此给 setup 引导（首启校验
+                // 已在入口拦截，此处供库级嵌入等绕过门禁的场景兜底）。
+                let api_key_configured = resolve_provider_cfg(&config, effective_model.as_deref())
+                    .map(|p| {
+                        p.api_key.is_some()
+                            || p.api_key_env
+                                .as_deref()
+                                .map_or(false, |env| std::env::var_os(env).is_some())
+                    })
+                    .unwrap_or(false);
+                tui = tui.with_config_status(!config.providers.is_empty(), api_key_configured);
+                // 工作区上下文：当前路径 + git 分支（状态行展示）。
+                let workspace_cwd = std::env::current_dir()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default();
+                tui = tui.with_workspace_info(workspace_cwd, detect_git_branch());
                 // @ 文件补全候选：工作区文件清单（GUIDE 声称"由 CLI 注入"）。
                 tui = tui.with_at_files(collect_at_files());
                 tui.run().await?;
@@ -1171,8 +1194,10 @@ async fn main() -> anyhow::Result<()> {
 
         None => {
             info!("no command provided — starting interactive chat");
+            // 首启校验：裸命令是最可能的首用入口，无 provider/key 时给引导。
+            ensure_first_run_configured(&config, None);
             // Resolve baseline effort from the default provider config.
-            let provider_cfg = resolve_provider_cfg(&config, None);
+            let provider_cfg = resolve_provider_cfg(&config, None)?;
             let baseline_effort =
                 deepseeknova_provider::factory::resolve_effort(provider_cfg, None);
 
@@ -1271,6 +1296,24 @@ fn resolve_ui_lang(config: &deepseeknova_config::Config) -> Option<deepseeknova_
 ///
 /// 递归扫 cwd，跳过常见噪声目录（.git/target/node_modules/.deepseeknova 等）
 /// 与隐藏条目；上限 `MAX_AT_FILES` 条防止大仓库拖慢启动。返回相对路径。
+/// 探测当前 git 分支（`git branch --show-current`）；非 git 工作区或
+/// detached HEAD 返回 None。快速、失败静默——状态行展示用，不值得报错。
+fn detect_git_branch() -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["branch", "--show-current"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() || s == "HEAD" {
+        None
+    } else {
+        Some(s)
+    }
+}
+
 fn collect_at_files() -> Vec<String> {
     const MAX_AT_FILES: usize = 500;
     const SKIP_DIRS: &[&str] = &[
@@ -1317,16 +1360,55 @@ fn collect_at_files() -> Vec<String> {
 }
 
 /// Resolve a ProviderConfig for a given model name (or the default).
+///
+/// 无任何 `[[providers]]` 时返回错误而不是对空数组取 `[0]`（曾导致 fresh
+/// 安装首次运行直接 panic，见冷启动修复）。`resolve_provider_for_model`
+/// 内部已回落 `providers.first()`，因此非空配置下此函数不会失败。
 fn resolve_provider_cfg<'a>(
     config: &'a deepseeknova_config::Config,
     model: Option<&str>,
-) -> &'a deepseeknova_config::ProviderConfig {
+) -> anyhow::Result<&'a deepseeknova_config::ProviderConfig> {
     if let Some(model_name) = model {
-        config
-            .resolve_provider_for_model(model_name)
-            .unwrap_or_else(|| &config.providers[0])
-    } else {
-        &config.providers[0]
+        if let Some(cfg) = config.resolve_provider_for_model(model_name) {
+            return Ok(cfg);
+        }
+    }
+    config.providers.first().ok_or_else(|| {
+        anyhow::anyhow!(
+            "no AI provider is configured — add a `[[providers]]` section to your config"
+        )
+    })
+}
+
+/// 首启校验（进入需要模型的交互/对话分支前调用）：确认已配置至少一个
+/// provider 且其 API key 可解析（内联 `api_key` 或环境变量）。失败时打印
+/// 可操作的修复引导（指向 `deepseeknova-cli setup`）并以 `CONFIG` 退出码
+/// 退出——避免 fresh 环境「裸错误」甚至 panic 让用户无从下手。
+fn ensure_first_run_configured(config: &deepseeknova_config::Config, model: Option<&str>) {
+    let pcfg = match resolve_provider_cfg(config, model) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("configuration error: {e}");
+            eprintln!();
+            eprintln!("First time? Run `deepseeknova-cli setup` to create a config");
+            eprintln!("interactively, or add a `[[providers]]` section to your config file.");
+            eprintln!("The README quickstart shows a minimal config example.");
+            std::process::exit(exit_code::CONFIG);
+        }
+    };
+    if pcfg.api_key.is_none() {
+        let env_name = pcfg.api_key_env.as_deref().unwrap_or("DEEPSEEK_API_KEY");
+        if std::env::var_os(env_name).is_none() {
+            eprintln!(
+                "configuration error: provider '{}' needs an API key",
+                pcfg.name
+            );
+            eprintln!();
+            eprintln!("Set the key for this provider, e.g. in your shell:");
+            eprintln!("  export {env_name}=sk-...");
+            eprintln!("or run `deepseeknova-cli setup` to configure a provider interactively.");
+            std::process::exit(exit_code::CONFIG);
+        }
     }
 }
 
@@ -1588,6 +1670,10 @@ async fn build_chat_persistence(
     history: Arc<tokio::sync::Mutex<Vec<deepseeknova_core::Message>>>,
     resume: bool,
 ) -> Option<chat::ChatPersistence> {
+    // 工作区根路径：会话聚合/按项目查看用（记录到每回合的 workspace 字段）。
+    let workspace = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .ok();
     // 会话标题独立存储（sessions 根目录 titles.json），在消费 root 前取路径。
     let titles = root
         .as_ref()
@@ -1639,6 +1725,7 @@ async fn build_chat_persistence(
         turn,
         history,
         titles: titles?,
+        workspace,
     })
 }
 
@@ -1687,7 +1774,14 @@ impl deepseeknova_tui::SessionController for TuiSessionController {
         let metas = p.list_sessions_with_titles()?;
         Ok(metas
             .into_iter()
-            .map(|(id, preview, title)| deepseeknova_tui::SessionMeta { id, preview, title })
+            .map(
+                |(id, preview, title, workspace)| deepseeknova_tui::SessionMeta {
+                    id,
+                    preview,
+                    title,
+                    workspace,
+                },
+            )
             .collect())
     }
 
@@ -1766,7 +1860,7 @@ impl deepseeknova_tui::SessionController for TuiSessionController {
             images: Vec::new(),
             model_override: model,
         };
-        let stored_turn = deepseeknova_store::SessionStore::build_turn(
+        let stored_turn = deepseeknova_store::SessionStore::build_turn_with_workspace(
             &stored_input,
             p.turn,
             messages,
@@ -1774,6 +1868,7 @@ impl deepseeknova_tui::SessionController for TuiSessionController {
                 text: output_text.to_string(),
                 tool_calls: Vec::new(),
             }),
+            p.workspace.as_deref(),
         );
         p.store.append(&p.session_id, &stored_turn)?;
         Ok(())

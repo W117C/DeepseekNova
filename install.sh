@@ -174,3 +174,12 @@ if [ "$path_ok" -eq 0 ]; then
 else
   say "DeepseekNova CLI is ready. Run 'deepseeknova-cli --version' to confirm."
 fi
+
+# ---------------------------------------------------------------------------
+# Next-step hint
+# ---------------------------------------------------------------------------
+say ""
+say "Next:"
+say "  1. deepseeknova-cli setup          # interactive provider/model/key config"
+say "  2. export DEEPSEEK_API_KEY=sk-...  # set your API key (or as prompted)"
+say "  3. deepseeknova-cli chat --tui     # launch the interactive terminal UI"

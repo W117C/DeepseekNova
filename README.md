@@ -24,7 +24,7 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 [![Rust](https://img.shields.io/badge/rust-stable%201.97-orange.svg)](https://www.rust-lang.org)
 [![Crates](https://img.shields.io/badge/crates-22-green.svg)](#-22-个-crate)
-[![Tests](https://img.shields.io/badge/tests-1608-brightgreen.svg)](#-技术栈)
+[![Tests](https://img.shields.io/badge/tests-1689-brightgreen.svg)](#-技术栈)
 
 </div>
 
@@ -88,8 +88,7 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 ### 🧩 MCP 协议原生支持
 - stdio + HTTP 双传输
 - 自动发现 MCP 服务器工具
-- `/mcp` 运行时管理命令（列表 + 连接状态探测；add/remove 等管理见
-  [GUIDE.md](GUIDE.md)）
+- `/mcp` 运行时命令（列出已启用 server + 连接状态探测）
 
 ### 📖 项目知识系统
 - **Wiki 生成器** — 自动文档生成
@@ -232,7 +231,14 @@ cargo build --release -p deepseeknova-cli
 
 ### 配置
 
-推荐使用环境变量注入密钥，避免将 API key 写入配置文件：
+**最快上手：运行配置向导**，交互式选择 provider / 模型 / 权限模式并写配置文件：
+
+```bash
+deepseeknova-cli setup          # 向导写入 ~/.deepseeknova/config.toml
+export DEEPSEEK_API_KEY="sk-..." # 再设置 API key（向导会提示变量名）
+```
+
+也可以手写配置（推荐用环境变量注入密钥，避免将 API key 写入配置文件）：
 
 ```bash
 # 推荐方式：通过环境变量
@@ -298,7 +304,7 @@ running 任务自动标记 interrupted，可重新拉起）。
 | 后端 | Rust + SQLite FTS5 + tokio + axum |
 | 前端 | TUI (ratatui) · CLI (clap) · HTTP API (axum + SSE) |
 | 追踪 | OpenTelemetry (OTLP) |
-| 测试 | 1608 tests · cargo-llvm-cov · CI 三平台 |
+| 测试 | 1689 tests · cargo-llvm-cov · CI 三平台 |
 
 ## 📄 License
 

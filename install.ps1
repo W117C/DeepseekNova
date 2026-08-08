@@ -133,6 +133,15 @@ try {
     } else {
         Write-Host "DeepseekNova CLI is ready. Run 'deepseeknova-cli --version' to confirm."
     }
+
+    # -----------------------------------------------------------------------
+    # Next-step hint
+    # -----------------------------------------------------------------------
+    Write-Host ""
+    Write-Host "Next:"
+    Write-Host "  1. deepseeknova-cli setup           # interactive provider/model/key config"
+    Write-Host "  2. `$env:DEEPSEEK_API_KEY = 'sk-...'  # set your API key (or as prompted)"
+    Write-Host "  3. deepseeknova-cli chat --tui      # launch the interactive terminal UI"
 } finally {
     Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }

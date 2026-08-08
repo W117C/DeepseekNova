@@ -146,7 +146,15 @@ cargo build --release -p deepseeknova-cli
 
 ### Configuration
 
-Use environment variables for API keys — never hardcode them:
+**Fastest setup: run the configuration wizard** — it walks you through provider /
+model / permission mode and writes the config file:
+
+```bash
+deepseeknova-cli setup           # writes ~/.deepseeknova/config.toml
+export DEEPSEEK_API_KEY="sk-..." # then set your API key (the wizard prints the var name)
+```
+
+Or configure by hand. Prefer environment variables for API keys — never hardcode them:
 
 ```bash
 export DEEPSEEK_API_KEY="your-api-key"
@@ -192,7 +200,7 @@ model = "deepseek-chat"
 | Backend | Rust + SQLite FTS5 + tokio + axum |
 | Frontend | TUI (ratatui) · CLI (clap) · HTTP API (axum + SSE) |
 | Tracing | OpenTelemetry (OTLP) |
-| Tests | 1608 tests · cargo-llvm-cov · 3-platform CI |
+| Tests | 1689 tests · cargo-llvm-cov · 3-platform CI |
 
 ## 📄 License
 
