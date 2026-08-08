@@ -700,8 +700,8 @@ impl Agent {
     }
 
     /// 注入工具生命周期钩子（任务质量闭环 A 阶段）。可多次调用注册多个
-    /// 钩子，before/after 按注册顺序串行执行；钩子 panic 时按 fail-open
-    /// 处理（放行 + 空 findings，仅记录 warn）。
+    /// 钩子，before/after 按注册顺序串行执行；钩子 panic 时按 fail-closed
+    /// 处理（before panic → Deny 拒绝执行；after panic → 空 findings 不阻断）。
     pub fn with_tool_hook(mut self, hook: Arc<dyn ToolHook>) -> Self {
         self.tool_hooks.push(hook);
         self
@@ -1475,7 +1475,7 @@ fn unique_run_label() -> String {
 /// 触发一组通知型用户 hooks（session_start / session_end / failure）：
 /// 任一命令失败（非 0 退出 / 超时 / 崩溃）仅 warn，不阻断主流程。空列表
 /// 零开销（不 spawn 进程）。
-fn fire_user_notify_hooks(commands: &[UserHookCommand], payload: &HookPayload) {
+pub(crate) fn fire_user_notify_hooks(commands: &[UserHookCommand], payload: &HookPayload) {
     for cmd in commands {
         let run = run_user_hook(cmd, payload);
         if !run.exec.is_allowed() {

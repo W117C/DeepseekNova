@@ -19,9 +19,9 @@
 //! `depth <= max_depth`，超限即拒绝。
 //!
 //! 注入点：SubAgentRunner 的子代理执行循环按实际深度注入；Agent 主循环
-//! （`build_tool_context`）以根深度 1 注入（主循环不嵌套，恒 1）。tools
-//! crate 的 `DelegateTool`（主 agent 的 delegate 工具）同样读本扩展后按
-//! depth+1 派发到 `DelegateEngine::run_at_depth`。
+//! （`build_tool_context`）以根深度 1 注入（主循环不嵌套，恒 1）。本 crate
+//! 的 [`crate::delegate_tool::DelegateTool`]（主 agent 的 delegate 工具）同样
+//! 读本扩展后按 depth+1 派发到 `DelegateEngine::run_at_depth`。
 
 use crate::task_spec::InputValues;
 use async_trait::async_trait;

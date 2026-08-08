@@ -149,9 +149,9 @@ Run the project build command and report any errors.
         println!("  1. Edit AGENTS.md — add your project description, commands, and conventions");
     }
     println!("  2. Add custom commands to .deepseeknova/commands/");
-    println!("  3. Run `deepseeknova-cli setup` to configure your LLM provider (first time)");
-    println!("  4. Run `deepseeknova-cli chat --tui` to start an interactive session");
-    println!("  5. Or run `deepseeknova-cli run \"<your first task>\"` for a one-shot task");
+    println!("  3. Run `deepseeknova setup` to configure your LLM provider (first time)");
+    println!("  4. Run `deepseeknova chat --tui` to start an interactive session");
+    println!("  5. Or run `deepseeknova run \"<your first task>\"` for a one-shot task");
     println!();
     if !legacy {
         println!(

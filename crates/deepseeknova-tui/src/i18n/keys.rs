@@ -533,13 +533,13 @@ impl Key {
             CmdCheckpointDesc => "Save / list / roll back session checkpoints",
 
             // /help 浮层
-            HelpKeyCmdPalette => "  Ctrl+K         Command palette",
+            HelpKeyCmdPalette => "  /              Command palette",
             HelpKeyNav => "  j/k            Conversation: navigate messages",
             HelpKeyEnter => "  Enter          Fold/expand selected message",
             HelpKeyY => "  y              Copy selected message",
             HelpKeyPage => "  PageUp/Down    Scroll back",
             HelpKeyHistory => "  ↑/↓            Input history (move cursor when multiline)",
-            HelpKeyShiftEnter => "  Shift+Enter    Newline (same as Ctrl+J)",
+            HelpKeyShiftEnter => "  Shift+Enter    Newline (same as Ctrl+Enter)",
             HelpKeyCursor => "  ←/→/Home/End  Move cursor in input (when idle)",
             HelpKeyEdit => "  Delete/Backspace  Edit input",
             HelpKeyCtrlUW => "  Ctrl+U/W       Clear input / delete previous word",
@@ -806,13 +806,13 @@ impl Key {
             CmdCheckpointDesc => "会话检查点（保存/列表/回退）",
 
             // /help 浮层
-            HelpKeyCmdPalette => "  Ctrl+K         命令面板",
+            HelpKeyCmdPalette => "  /              命令面板",
             HelpKeyNav => "  j/k            Conversation 焦点下消息导航",
             HelpKeyEnter => "  Enter          折叠/展开选中消息",
             HelpKeyY => "  y              复制选中消息",
             HelpKeyPage => "  PageUp/Down    滚动回看",
             HelpKeyHistory => "  ↑/↓            输入历史（多行时移动光标）",
-            HelpKeyShiftEnter => "  Shift+Enter    换行（Ctrl+J 同）",
+            HelpKeyShiftEnter => "  Shift+Enter    换行（Ctrl+Enter 同）",
             HelpKeyCursor => "  ←/→/Home/End  输入内移动光标（空闲时）",
             HelpKeyEdit => "  Delete/Backspace 编辑输入",
             HelpKeyCtrlUW => "  Ctrl+U/W       清空输入 / 删前一词",

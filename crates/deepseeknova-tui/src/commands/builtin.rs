@@ -1,4 +1,4 @@
-//! 内建命令：斜杠命令与 Ctrl+K 命令面板共用。
+//! 内建命令：斜杠命令与 `/` 命令面板共用。
 //!
 //! 命令逻辑从旧 `TuiRunner::handle_command` / `AppState::execute_command` 迁移，
 //! 注入能力统一经 [`crate::commands::TuiCaps`]（Option）读取，缺失时降级回显提示。
@@ -1200,7 +1200,11 @@ mod tests {
         let overlay = app.help_overlay.as_ref().unwrap();
         assert!(overlay.lines.iter().any(|l| l.contains("/fold")));
         assert!(overlay.lines.iter().any(|l| l.contains("/copy")));
-        assert!(overlay.lines.iter().any(|l| l.contains("Ctrl+K")));
+        // 命令面板走 `/` 触发（无 Ctrl+K 绑定）；help 浮层应含命令面板说明。
+        assert!(overlay
+            .lines
+            .iter()
+            .any(|l| l.contains("命令面板") || l.contains("Command palette")));
     }
 
     #[tokio::test]

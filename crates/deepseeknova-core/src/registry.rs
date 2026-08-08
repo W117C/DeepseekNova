@@ -62,6 +62,12 @@ impl ToolRegistry {
 
     pub fn register(&mut self, tool: Arc<dyn Tool>) {
         let name = tool.schema().name.clone();
+        if self.tools.contains_key(&name) {
+            tracing::warn!(
+                tool = %name,
+                "tool registered with duplicate name; previous registration silently overwritten"
+            );
+        }
         self.tools.insert(name, tool);
     }
 

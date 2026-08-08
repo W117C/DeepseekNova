@@ -7,7 +7,7 @@
 use deepseeknova_core::tool::Tool;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 
 // ---------------------------------------------------------------------------
 // Permission Gate — intercept layer
@@ -1053,78 +1053,14 @@ fn extract_subject(args: &Value) -> Option<String> {
 /// 相对路径按工作区根解释（与工具实际行为对齐：工具在 workspace root 下
 /// 解析相对路径）。先 canonicalize 解析 symlink 与 `..`；目标尚不存在
 /// （新建文件）时对最近存在的父目录 canonicalize；全部失败则词法兜底。
+/// 判断路径是否在工作区内。
+///
+/// C7 修复：路径安全判定委托给 `deepseeknova_security::path::secure_resolve`
+///（单一事实源），消除 permission 与 security 两套并行实现导致的分歧风险。
+/// `secure_resolve` 内部已覆盖词法折叠 + canonicalize + symlink 逃逸检查，
+/// 且经 security crate 的回归测试验证（含 `..` 逃逸、symlink 逃逸等场景）。
 fn is_within_workspace(root: &std::path::Path, path: &str) -> bool {
-    let target = std::path::Path::new(path);
-    // root 词法规范化（不解析 symlink），与 target 用同一坐标系比较：
-    // 若 root 预先 canonicalize，而 target 是原始形式（如 macOS 的
-    // `/var` → `/private/var`），分量会错位导致合法路径误拒。
-    let root_norm = lexical_normalize(root);
-    let target = if target.is_absolute() {
-        target.to_path_buf()
-    } else {
-        root_norm.join(target)
-    };
-
-    // 词法主判定（跨平台一致）：折叠 `.`/`..` 后 target 必须是 root 的延伸。
-    // 任何 `..` 弹出 root 之外即拒绝；纯分量运算、不访问文件系统，不依赖
-    // OS 的 canonicalize 返回形式（Windows 的 `\\?\` 前缀/盘符差异不影响）。
-    if !lexical_normalize(&target).starts_with(&root_norm) {
-        return false;
-    }
-
-    // symlink 补充检查：canonicalize（解析链接）后仍须落在 canonical root 内。
-    // 目标不存在（新建文件）时对最近存在的父目录 canonicalize，再拼接剩余段。
-    let canonical_root = root.canonicalize().unwrap_or_else(|_| root_norm.clone());
-    if let Ok(c) = target.canonicalize() {
-        return lexical_normalize(&c).starts_with(&canonical_root);
-    }
-    let mut ancestor = target.as_path();
-    let mut rest: Vec<std::ffi::OsString> = Vec::new();
-    loop {
-        if let Ok(c) = ancestor.canonicalize() {
-            let mut full = c;
-            for seg in rest.iter().rev() {
-                full.push(seg);
-            }
-            return lexical_normalize(&full).starts_with(&canonical_root);
-        }
-        match ancestor.components().next_back() {
-            Some(Component::ParentDir) => {
-                rest.push(std::ffi::OsString::from(".."));
-            }
-            Some(Component::CurDir) => {}
-            Some(_) => {
-                if let Some(name) = ancestor.file_name() {
-                    rest.push(name.to_os_string());
-                }
-            }
-            None => {}
-        }
-        match ancestor.parent() {
-            Some(p) => {
-                ancestor = p;
-            }
-            None => break,
-        }
-    }
-
-    // 完全无法解析（如根目录都不存在）：词法判定在上方已通过，此处恒真。
-    true
-}
-
-/// 词法路径规范化：折叠 `.` / `..`，不访问文件系统。
-fn lexical_normalize(p: &std::path::Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for comp in p.components() {
-        match comp {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                out.pop();
-            }
-            other => out.push(other.as_os_str()),
-        }
-    }
-    out
+    deepseeknova_security::path::secure_resolve(root, std::path::Path::new(path)).is_ok()
 }
 
 /// Extract a command string from shell tool arguments.

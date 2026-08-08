@@ -200,6 +200,7 @@ mod tests {
             let (mut stream, _) = listener.accept().unwrap();
             let mut buf = Vec::new();
             let mut tmp = [0u8; 4096];
+            // 1) 读至 headers 结束（\r\n\r\n）
             loop {
                 let n = stream.read(&mut tmp).unwrap();
                 if n == 0 {
@@ -209,6 +210,37 @@ mod tests {
                 if buf.windows(4).any(|w| w == b"\r\n\r\n") {
                     break;
                 }
+            }
+            // 2) POST body 在 \r\n\r\n 之后；若未随 headers 同包到达，需按
+            //    Content-Length 继续读取，否则捕获的请求不含 body（model /
+            //    input 断言 flaky 失败）。
+            let header_end = buf
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+                .unwrap_or(buf.len());
+            let header_str = String::from_utf8_lossy(&buf[..header_end]);
+            let content_length: usize = header_str
+                .lines()
+                .find_map(|line| {
+                    line.to_lowercase()
+                        .strip_prefix("content-length:")
+                        .and_then(|v| v.trim().parse().ok())
+                })
+                .unwrap_or(0);
+            let body_start = header_end + 4;
+            let already_have = buf.len().saturating_sub(body_start);
+            let remaining = content_length.saturating_sub(already_have);
+            if remaining > 0 {
+                let mut body_tmp = vec![0u8; remaining];
+                let mut read_total = 0;
+                while read_total < remaining {
+                    let n = stream.read(&mut body_tmp[read_total..]).unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    read_total += n;
+                }
+                buf.extend_from_slice(&body_tmp[..read_total]);
             }
             tx.send(String::from_utf8_lossy(&buf).to_string()).unwrap();
             std::thread::sleep(delay);

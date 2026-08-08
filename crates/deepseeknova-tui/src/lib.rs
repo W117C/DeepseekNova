@@ -12,7 +12,7 @@
 //!   成本/turn/usage 明细经 `/cost` 等命令查看）
 //! - multi-line input editing（←/→/Home/End、Shift+Enter、Ctrl+U/W）、
 //!   input history、markdown 高亮、`@` 文件补全、粘贴路径转引用
-//! - slash commands 与 Ctrl+K 命令面板（同一注册表）：`/help` `/clear`
+//! - slash commands 与 `/` 命令面板（同一注册表）：`/help` `/clear`
 //!   `/new` `/sessions` `/resume` `/model` `/cost` `/skills` `/mcp` `/raw`
 //!   `/fold` `/copy` `/undo` `/quit`
 //! - 可切换侧边栏（会话/工具活动/MCP/成本/技能），窄终端自动隐藏

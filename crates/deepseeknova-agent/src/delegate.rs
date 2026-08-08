@@ -12,7 +12,7 @@
 //! 上限的有界递归"取代。
 //!
 //! 任务书：每个预设持有 [`TaskSpec`]（可参数化 + RULES 约束）。inputs 来源为
-//! delegate 工具调用方显式传值（见 `deepseeknova_tools::delegate`）；渲染结果
+//! delegate 工具调用方显式传值（见 [`crate::delegate_tool`]）；渲染结果
 //! （task + RULES）合并进 `RunInput.prompt` —— 子 Agent 的 system_prompt 在
 //! 构造期注入，无法按次渲染。per-agent 模型覆盖经 `RunInput.model_override`
 //! 透传给子 Agent（自动路由跳过、运行时按 model 指针选 provider）。

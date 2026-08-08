@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "17 built-in agent tools plus web search, LSP diagnostics, and Context7 library docs."
+description = "16 built-in agent tools plus web search, LSP diagnostics, and Context7 library docs."
 readme = "README.md"
 documentation = "https://docs.rs/deepseeknova-tools/0.5.0"
 
@@ -20,7 +20,6 @@ chrono = { workspace = true }
 glob = { workspace = true }
 regex = { workspace = true }
 url = { workspace = true }
-deepseeknova-agent = { workspace = true }
 deepseeknova-config = { workspace = true }
 deepseeknova-core = { workspace = true }
 deepseeknova-sandbox = { workspace = true }

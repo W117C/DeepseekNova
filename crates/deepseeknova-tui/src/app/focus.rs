@@ -20,7 +20,7 @@ pub enum Focus {
     /// 输入编辑器（默认）。
     #[default]
     Input,
-    /// 侧边栏（Tab/Ctrl+1..5 切面板、j/k 列表）。
+    /// 侧边栏（Tab/1..5 切面板、j/k 列表）。
     Sidebar,
     /// @ 文件补全浮层。
     Completion,
@@ -322,7 +322,7 @@ impl AppState {
             Action::SidebarResumeSelected => {
                 if self.sidebar_tab == SidebarTab::Sessions {
                     if let Some(meta) = self.saved_sessions.get(self.saved_session_selected) {
-                        // 事件循环用真实 caps 消费 pending_command，与 Ctrl+K 同路。
+                        // 事件循环用真实 caps 消费 pending_command，与 `/` 同路。
                         self.pending_command = Some(("resume".to_string(), meta.id.clone()));
                         self.focus = Focus::Input;
                     }

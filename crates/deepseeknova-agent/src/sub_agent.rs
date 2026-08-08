@@ -1,15 +1,21 @@
+use crate::agent::fire_user_notify_hooks;
 use crate::agent_manifest::{AgentGateMode, AgentPermission};
 use crate::memory::Memory;
 use crate::mention::resolve_mention;
 use crate::recursion::{DelegateDepth, DelegationSink};
 use crate::task_spec::{InputValues, TaskSpec};
 use deepseeknova_core::chunk::{Chunk, Usage};
+use deepseeknova_core::tool_hook::{
+    run_user_hook, HookEvent, HookPayload, HookVerdict, ToolHook, ToolHookCtx, UserHooks,
+};
+use deepseeknova_core::types::{FunctionCall, ToolCall};
 use deepseeknova_core::{
     Message, Role, RunEvent, RunEventStream, RunInput, RunOutput, Runner, Tool, ToolContext,
 };
 use deepseeknova_provider::Provider;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
@@ -172,6 +178,14 @@ pub struct SubAgentRunner {
     /// 无 gate 时与主 agent 的 `permissions.enabled=false` 语义一致：
     /// 不经过门控直接执行；需要 fail-closed 的调用方应显式挂 gate。
     permission: Option<Arc<deepseeknova_permission::PermissionGate>>,
+    /// 工具生命周期钩子链（任务质量闭环）：before/after 按注册顺序串行执行。
+    /// 与主 agent 路径对称——子代理工具调用同样经过 QualityHook 的
+    /// 禁写路径/secret 检测/写后策略评估。panic 契约：before panic →
+    /// Deny（fail-closed），after panic → 空 findings（fail-open）。
+    tool_hooks: Vec<Arc<dyn ToolHook>>,
+    /// 用户级外部 hooks（`[hooks]` 配置）。tool_before 为 AND 链额外一层
+    /// （fail-closed）；tool_after 失败仅 warn。空 `UserHooks` = 零进程开销。
+    user_hooks: UserHooks,
     /// 工具执行上下文装配：安全上下文（shell/fs/web 工具强制依赖，
     /// 缺失时 `enforce_capability` 直接报错）与工作区根。
     security: Option<deepseeknova_security::context::SecurityContext>,
@@ -194,6 +208,8 @@ impl SubAgentRunner {
             default_sub_agent: None,
             compaction_threshold_tokens: None,
             permission: None,
+            tool_hooks: Vec::new(),
+            user_hooks: UserHooks::default(),
             security: None,
             workspace_root: std::env::current_dir().unwrap_or_default(),
             max_depth: DEFAULT_MAX_DEPTH,
@@ -236,6 +252,25 @@ impl SubAgentRunner {
         gate: Arc<deepseeknova_permission::PermissionGate>,
     ) -> Self {
         self.permission = Some(gate);
+        self
+    }
+
+    /// 注入工具生命周期钩子（任务质量闭环）。可多次调用注册多个钩子，
+    /// before/after 按注册顺序串行执行。子代理工具调用与主 agent 路径
+    /// 对称——同样经过 QualityHook 的禁写路径/secret 检测/写后策略评估。
+    /// panic 契约：before panic → Deny（fail-closed），after panic →
+    /// 空 findings（fail-open，不阻断执行）。
+    pub fn with_tool_hook(mut self, hook: Arc<dyn ToolHook>) -> Self {
+        self.tool_hooks.push(hook);
+        self
+    }
+
+    /// 挂载用户级外部 hooks（`[hooks]` 配置）。`tool_before` 在内部
+    /// tool_hook 链之外额外一层（AND 链：内部链 + 用户 hooks 都过才执行；
+    /// 任一命令非 0 退出 / 超时 / 崩溃 → 阻止执行，fail-closed）；
+    /// `tool_after` 失败仅 warn。空 `UserHooks` = 零进程开销。
+    pub fn with_user_hooks(mut self, hooks: UserHooks) -> Self {
+        self.user_hooks = hooks;
         self
     }
 
@@ -428,11 +463,21 @@ impl SubAgentRunner {
 
         // per-agent gate 模式：
         // - Inherit → 共享 gate
-        // - None → 绕过 gate（工具直接执行）
+        // - None → 绕过 gate（工具直接执行）；记录安全审计 warn，建议改用
+        //   Inherit 或 FailClosed。None 模式下子代理无审批通道兜底，
+        //   仅靠 QualityHook 链（若已注入）做最低安全门。
         // - FailClosed → 共享 gate；无共享 gate 时在循环内拒绝一切工具
         let (permission, fail_closed) = match config.permission.gate {
             AgentGateMode::Inherit => (self.permission.clone(), false),
-            AgentGateMode::None => (None, false),
+            AgentGateMode::None => {
+                warn!(
+                    security_event = "subagent_gate_none",
+                    sub_agent = %config.name,
+                    "sub-agent configured with gate=None: permission gate bypassed; \
+                     QualityHook chain (if any) is the sole safety barrier"
+                );
+                (None, false)
+            }
             AgentGateMode::FailClosed => (self.permission.clone(), true),
         };
 
@@ -458,6 +503,8 @@ impl SubAgentRunner {
         let workspace_root = self.workspace_root.clone();
         let tools = config.tools.clone();
         let max_steps = config.max_steps;
+        let tool_hooks = self.tool_hooks.clone();
+        let user_hooks = self.user_hooks.clone();
         let delegation_sink = self.delegation_sink.lock().unwrap().clone();
         let mut system_prompt = config.system_prompt.clone();
         if !config.frozen_denies.is_empty() {
@@ -496,6 +543,9 @@ impl SubAgentRunner {
             "dispatching sub-agent"
         );
 
+        // 捕获子代理名（config 在 move 后不可用；loop 内日志需要）
+        let sub_agent_name = config.name.clone();
+
         let handle = tokio::spawn(async move {
             if let Err(e) = run_sub_agent_loop(
                 provider,
@@ -512,6 +562,9 @@ impl SubAgentRunner {
                 depth,
                 delegation_sink,
                 fail_closed,
+                tool_hooks,
+                user_hooks,
+                sub_agent_name,
             )
             .await
             {
@@ -609,6 +662,9 @@ async fn run_sub_agent_loop(
     depth: usize,
     delegation_sink: Option<Arc<dyn DelegationSink>>,
     fail_closed: bool,
+    tool_hooks: Vec<Arc<dyn ToolHook>>,
+    user_hooks: UserHooks,
+    sub_agent_name: String,
 ) -> anyhow::Result<()> {
     let cancel = CancellationToken::new();
 
@@ -788,66 +844,256 @@ async fn run_sub_agent_loop(
                 },
             });
 
-            // 2) 逐个执行（gate 检查 → 执行/阻断），回填 Tool 消息
+            // 2) 逐个执行（gate 检查 → ToolHook before → 执行 → ToolHook after），
+            //    回填 Tool 消息。钩子链与主 agent 路径对称：
+            //    - before Deny → 回填阻断结果（不执行）
+            //    - before Ask → 子代理无审批通道，fail-closed 拒绝
+            //    - after → findings 仅记录（fail-open，不阻断）
             for (id, name, arguments) in &tool_calls {
                 let result: String = match tools.iter().find(|t| &t.schema().name == name) {
                     None => format!("Error: unknown tool '{name}'"),
                     Some(tool) => {
-                        let verdict = permission
-                            .as_ref()
-                            .map(|g| g.check(tool.as_ref(), arguments));
-                        match verdict {
-                            // 无共享 gate：默认直接执行；fail_closed 且无 gate →
-                            // 拒绝一切工具（不静默放行）。
-                            None if !fail_closed => {
-                                let ctx = build_ctx(id);
-                                match tool.execute(&ctx, arguments).await {
-                                    Ok(out) => out,
-                                    Err(e) => format!("Error: {e}"),
+                        // ── 阶段 1：权限门检查 ──
+                        let gate_block: Option<String> = {
+                            let verdict = permission
+                                .as_ref()
+                                .map(|g| g.check(tool.as_ref(), arguments));
+                            match verdict {
+                                None if !fail_closed => None,
+                                None => Some(format!(
+                                    "Error: tool '{name}' blocked by permission policy: \
+                                     sub-agent is fail-closed and no permission gate is configured"
+                                )),
+                                Some(v) => match v.decision() {
+                                    deepseeknova_permission::Decision::Allow => None,
+                                    deepseeknova_permission::Decision::Deny => {
+                                        let mut msg = format!(
+                                            "Error: tool '{name}' blocked by permission policy: {}",
+                                            v.reason()
+                                        );
+                                        let sug: Vec<String> = v
+                                            .suggestions()
+                                            .iter()
+                                            .map(|s| match s.rule.subject {
+                                                Some(ref sub) => format!(
+                                                    "behavior={:?} rule={} subject={sub}",
+                                                    s.behavior, s.rule.tool
+                                                ),
+                                                None => format!(
+                                                    "behavior={:?} rule={}",
+                                                    s.behavior, s.rule.tool
+                                                ),
+                                            })
+                                            .collect();
+                                        if !sug.is_empty() {
+                                            msg.push_str(&format!(
+                                                "\n[建议] 添加规则即可自动放行: {}",
+                                                sug.join("; ")
+                                            ));
+                                        }
+                                        Some(msg)
+                                    }
+                                    deepseeknova_permission::Decision::Ask => Some(format!(
+                                        "Error: tool '{name}' requires approval \
+                                         (sub-agent has no approval channel; treat as denied)"
+                                    )),
+                                },
+                            }
+                        };
+
+                        // ── 阶段 2：ToolHook before 链（gate 通过后串行执行）──
+                        // 决策合并：任一 Deny → 拒绝；任一 Ask → fail-closed 拒绝
+                        // （子代理无审批通道）；全 Allow → 放行。
+                        // panic 契约：before panic → Deny（fail-closed）。
+                        let hook_block = if gate_block.is_none() && !tool_hooks.is_empty() {
+                            let hook_call = ToolCall {
+                                id: id.clone(),
+                                ty: "function".to_string(),
+                                function: FunctionCall {
+                                    name: name.clone(),
+                                    arguments: arguments.clone(),
+                                },
+                            };
+                            let ctx = ToolHookCtx {
+                                workspace_root: &workspace_root,
+                            };
+                            let mut denied: Option<String> = None;
+                            for hook in &tool_hooks {
+                                let interested =
+                                    catch_unwind(AssertUnwindSafe(|| hook.interested(&hook_call)))
+                                        .unwrap_or_else(|_| {
+                                            warn!(
+                                                "tool hook '{}' panicked in interested(); \
+                                         treated as not interested",
+                                                hook.name()
+                                            );
+                                            false
+                                        });
+                                if !interested {
+                                    continue;
+                                }
+                                let verdict = catch_unwind(AssertUnwindSafe(|| {
+                                    hook.before(&ctx, &hook_call)
+                                }))
+                                .unwrap_or_else(|_| {
+                                    warn!(
+                                        "tool hook '{}' panicked in before() \
+                                                 → deny (fail-closed)",
+                                        hook.name()
+                                    );
+                                    HookVerdict::Deny(format!(
+                                        "tool hook '{}' panicked during pre-check \
+                                                 (fail-closed deny)",
+                                        hook.name()
+                                    ))
+                                });
+                                match verdict {
+                                    HookVerdict::Allow | HookVerdict::AllowWith(_) => {}
+                                    HookVerdict::Deny(reason) => {
+                                        denied = Some(reason);
+                                        break;
+                                    }
+                                    HookVerdict::Ask(reason) => {
+                                        // 子代理无审批通道，Ask 等同 Deny（fail-closed）。
+                                        denied = Some(format!(
+                                            "tool hook '{}' requested approval \
+                                             (sub-agent has no approval channel): {}",
+                                            hook.name(),
+                                            reason
+                                        ));
+                                        break;
+                                    }
                                 }
                             }
-                            None => format!(
-                                "Error: tool '{name}' blocked by permission policy: sub-agent is fail-closed and no permission gate is configured"
-                            ),
-                            Some(v) => match v.decision() {
-                                deepseeknova_permission::Decision::Allow => {
-                                    let ctx = build_ctx(id);
-                                    match tool.execute(&ctx, arguments).await {
-                                        Ok(out) => out,
-                                        Err(e) => format!("Error: {e}"),
+                            denied
+                        } else {
+                            None
+                        };
+
+                        // ── 阶段 2b：用户级外部 hooks tool_before（AND 链，fail-closed）──
+                        // 内部 tool_hook 链 + 用户 hooks 都过才执行。任一命令非 0
+                        // 退出 / 超时 / 崩溃，或 stdout 裁决 `allowed=false` → 阻止。
+                        // 仅在 gate 与内部 hook 均未阻断时运行（避免冗余进程）。
+                        let user_block = if gate_block.is_none()
+                            && hook_block.is_none()
+                            && !user_hooks.tool_before.is_empty()
+                        {
+                            let payload = HookPayload {
+                                event: HookEvent::ToolBefore.as_str(),
+                                tool: Some(name),
+                                arguments: Some(arguments),
+                                workspace: &workspace_root,
+                                session_id: &sub_agent_name,
+                            };
+                            let mut denied: Option<String> = None;
+                            for cmd in &user_hooks.tool_before {
+                                let run = run_user_hook(cmd, &payload);
+                                if !run.exec.is_allowed() {
+                                    denied = Some(format!(
+                                        "blocked by user hook '{}' (fail-closed: {:?})",
+                                        cmd.command, run.exec
+                                    ));
+                                    break;
+                                }
+                                if let Some(v) = run.verdict {
+                                    if !v.allowed {
+                                        denied = Some(if v.reason.is_empty() {
+                                            format!("denied by user hook '{}'", cmd.command)
+                                        } else {
+                                            v.reason.clone()
+                                        });
+                                        break;
                                     }
                                 }
-                                deepseeknova_permission::Decision::Deny => {
-                                    let mut msg = format!(
-                                        "Error: tool '{name}' blocked by permission policy: {}",
-                                        v.reason()
-                                    );
-                                    let sug: Vec<String> = v
-                                        .suggestions()
-                                        .iter()
-                                        .map(|s| match s.rule.subject {
-                                            Some(ref sub) => format!(
-                                                "behavior={:?} rule={} subject={sub}",
-                                                s.behavior, s.rule.tool
-                                            ),
-                                            None => format!(
-                                                "behavior={:?} rule={}",
-                                                s.behavior, s.rule.tool
-                                            ),
-                                        })
-                                        .collect();
-                                    if !sug.is_empty() {
-                                        msg.push_str(&format!(
-                                            "\n[建议] 添加规则即可自动放行: {}",
-                                            sug.join("; ")
-                                        ));
+                            }
+                            denied
+                        } else {
+                            None
+                        };
+
+                        // gate 或 hook 阻断 → 回填错误，不执行工具
+                        if let Some(reason) = gate_block.or(hook_block).or(user_block) {
+                            reason
+                        } else {
+                            // ── 阶段 3：执行工具 ──
+                            let ctx = build_ctx(id);
+                            let exec_result = tool.execute(&ctx, arguments).await;
+                            let output = match exec_result {
+                                Ok(out) => out,
+                                Err(e) => format!("Error: {e}"),
+                            };
+
+                            // ── 阶段 4：ToolHook after 写后评估（fail-open）──
+                            // findings 仅记录到日志（子代理路径不产事件流）；
+                            // after panic → 空 findings（不阻断执行）。
+                            if !tool_hooks.is_empty() && !output.starts_with("Error:") {
+                                let hook_call = ToolCall {
+                                    id: id.clone(),
+                                    ty: "function".to_string(),
+                                    function: FunctionCall {
+                                        name: name.clone(),
+                                        arguments: arguments.clone(),
+                                    },
+                                };
+                                let ctx = ToolHookCtx {
+                                    workspace_root: &workspace_root,
+                                };
+                                for hook in &tool_hooks {
+                                    let interested = catch_unwind(AssertUnwindSafe(|| {
+                                        hook.interested(&hook_call)
+                                    }))
+                                    .unwrap_or_else(|_| {
+                                        warn!(
+                                            "tool hook '{}' panicked in interested(); \
+                                             treated as not interested",
+                                            hook.name()
+                                        );
+                                        false
+                                    });
+                                    if !interested {
+                                        continue;
                                     }
-                                    msg
+                                    let findings = catch_unwind(AssertUnwindSafe(|| {
+                                        hook.after(&ctx, &hook_call, &output)
+                                    }))
+                                    .unwrap_or_else(|_| {
+                                        warn!(
+                                            "tool hook '{}' panicked in after(); \
+                                             fail-open empty findings",
+                                            hook.name()
+                                        );
+                                        Vec::new()
+                                    });
+                                    for finding in &findings {
+                                        if finding.severity
+                                            == deepseeknova_core::tool_hook::FindingSeverity::Blocking
+                                        {
+                                            warn!(
+                                                security_event = "subagent_quality_blocking",
+                                                sub_agent = %sub_agent_name,
+                                                tool = %name,
+                                                rule = %finding.rule,
+                                                evidence = %finding.evidence,
+                                                "blocking quality finding from sub-agent tool hook"
+                                            );
+                                        }
+                                    }
                                 }
-                                deepseeknova_permission::Decision::Ask => format!(
-                                    "Error: tool '{name}' requires approval (sub-agent has no approval channel; treat as denied)"
-                                ),
-                            },
+                            }
+
+                            // ── 阶段 4b：用户级外部 hooks tool_after（通知型，fail-open）──
+                            // 失败仅 warn，不阻断。空列表零开销。
+                            if !user_hooks.tool_after.is_empty() && !output.starts_with("Error:") {
+                                let payload = HookPayload {
+                                    event: HookEvent::ToolAfter.as_str(),
+                                    tool: Some(name),
+                                    arguments: Some(arguments),
+                                    workspace: &workspace_root,
+                                    session_id: &sub_agent_name,
+                                };
+                                fire_user_notify_hooks(&user_hooks.tool_after, &payload);
+                            }
+                            output
                         }
                     }
                 };

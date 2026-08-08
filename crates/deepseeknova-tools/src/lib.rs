@@ -1,11 +1,10 @@
 //! # Tools — Built-in agent tools
 //!
-//! 17 built-in tools for file I/O, globbing, grep, shell execution,
-//! web fetching, task management, memory operations, code graph, Context7
-//! docs, and delegation. Each tool implements the `Tool` trait with
-//! security-aware execution.
+//! 16 built-in tools for file I/O, globbing, grep, shell execution,
+//! web fetching, task management, memory operations, code graph, and Context7
+//! docs. Each tool implements the `Tool` trait with security-aware execution.
+//! (delegate tool moved to `deepseeknova-agent::DelegateTool`.)
 
-pub mod delegate;
 pub mod docs_tools;
 pub mod fs;
 pub mod glob;
@@ -20,7 +19,6 @@ pub mod todo;
 pub mod web_fetch;
 pub mod web_search;
 
-pub use delegate::*;
 pub use docs_tools::*;
 pub use fs::*;
 pub use glob::*;
@@ -86,7 +84,6 @@ pub fn all_builtin_tools_with_sandbox_and_checkpoint(
         Arc::new(SearchCodeTool),
         Arc::new(TraverseGraphTool),
         Arc::new(RetrieveEntityTool),
-        Arc::new(DelegateTool),
     ]
 }
 
@@ -97,7 +94,8 @@ mod schema_budget {
     /// 全量内置工具 schema 序列化后的总字符数上限。schema 属稳定前缀，
     /// 每次缓存 MISS 全额重付——加此上限防止文案慢性膨胀（支柱③）。
     /// 收紧准则：压缩后取实测值 + ~10% 余量。
-    const MAX_SCHEMA_CHARS: usize = 5000; // AFTER=4613 × 1.1 ≈ 5074，进位到最近千位
+    /// (delegate 工具已移至 agent crate，不再计入本预算)
+    const MAX_SCHEMA_CHARS: usize = 5000;
 
     #[test]
     fn builtin_tool_schemas_stay_within_budget() {

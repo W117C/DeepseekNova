@@ -466,6 +466,11 @@ pub fn build_agent_with_role_providers(
         );
     }
 
+    // delegate 工具（原属 tools crate，移入 agent crate 以消除反向依赖）。
+    // 与内置工具同级注册；引擎句柄经 extension 注入（见上方 delegate 段），
+    // 缺失时工具优雅降级（返回未启用提示）。
+    register(&mut agent, vec![Arc::new(deepseeknova_agent::DelegateTool)]);
+
     // 文档检索工具（context7_docs）：常驻注册，与 web_fetch 同级；执行时由
     // NetworkAccess 能力把关，用户可用 tools.overrides 禁用。
     register(&mut agent, deepseeknova_tools::docs_tools());
@@ -946,7 +951,7 @@ pub fn build_agent_with_role_providers(
             memory_ext.clone(),
             attribution,
         );
-        let handle: deepseeknova_tools::DelegateHandle = engine;
+        let handle: deepseeknova_agent::DelegateHandle = engine;
         agent = agent.with_extension(handle);
     }
 
@@ -1880,6 +1885,14 @@ fn build_delegate_engine(
                 ));
             }
         }
+        if config.quality.enabled {
+            // C1 修复：delegate engine 的子 Agent 也需注入 QualityHook
+            //（与主 agent 路径对称），此前此路径仅挂 gate 未挂 quality hook。
+            let hook = deepseeknova_agent::quality::QualityHook::new(
+                deepseeknova_security::quality::QualityPolicy::builtin(),
+            );
+            sub = sub.with_tool_hook(Arc::new(hook));
+        }
         agents.insert(p.name.clone(), Arc::new(sub));
     }
 
@@ -2006,6 +2019,16 @@ pub fn build_sub_agent_runner(
         // 执行层权限强制：子代理工具调用在 execute 前经 gate 检查
         //（与 Agent 型 delegate engine 的 with_permission_gate 对齐）。
         runner = runner.with_permission_gate(gate);
+    }
+    if config.quality.enabled {
+        // 任务质量闭环：子代理路径与主 agent 对称注入 QualityHook
+        //（禁写路径 / secret 检测 / 写后策略评估）。
+        // C1 修复：此前子代理工具执行段未挂任何钩子链，secret 写入与
+        // 禁写路径策略在子代理路径整体失效。
+        let hook = deepseeknova_agent::quality::QualityHook::new(
+            deepseeknova_security::quality::QualityPolicy::builtin(),
+        );
+        runner = runner.with_tool_hook(Arc::new(hook));
     }
     if let Some(sec) = security {
         // 执行上下文装配：shell/fs/web 工具强依赖 SecurityContext

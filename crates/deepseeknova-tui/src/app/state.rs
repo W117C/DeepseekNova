@@ -268,7 +268,7 @@ pub struct AppState {
     pub saved_session_selected: usize,
     /// @ 补全候选文件清单（由 CLI 注入；为空则不触发补全）。
     pub at_files: Vec<String>,
-    /// Ctrl+K 面板选中命令后待执行请求（事件循环用真实 caps 消费）。
+    /// `/` 面板选中命令后待执行请求（事件循环用真实 caps 消费）。
     pub pending_command: Option<(String, String)>,
     /// ctrl+x 双键序列状态：首键时间戳（3 秒窗），等待第二键。
     pub chord_pending: Option<std::time::Instant>,

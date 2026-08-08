@@ -4,14 +4,19 @@
 //! 的预设生效；simple 预设的多余键被忽略。
 //!
 //! 递归：本工具支持深度受限的再派发。当前深度读 `ToolContext` 注入的
-//! [`DelegateDepth`]（Agent 主循环注入根深度 1），本次派发深度 = current + 1，
-//! 经 [`DelegateEngine::run_at_depth`] 派发；超过引擎深度上限时优雅返回错误
-//! 文本（不硬失败），语义与 agent crate 的 `RecursiveDelegateTool` 对齐。
+//! [`DelegateDepth`]（Agent 主循环注入根深度 1），
+//! 本次派发深度 = current + 1，经 [`DelegateEngine::run_at_depth`] 派发；超过引擎
+//! 深度上限时优雅返回错误文本（不硬失败），语义与本 crate 的 `RecursiveDelegateTool`
+//! 对齐。
+//!
+//! 注：本模块原属 `deepseeknova-tools` crate，因对 `DelegateEngine` /
+//! `DelegateDepth` / `InputValues` 的依赖形成 `tools → agent` 反向依赖，
+//! 于 2026-08-08 移入 agent crate 以消除该依赖 inversion。
 
+use crate::recursion::DelegateDepth;
+use crate::task_spec::InputValues;
+use crate::DelegateEngine;
 use async_trait::async_trait;
-use deepseeknova_agent::recursion::DelegateDepth;
-use deepseeknova_agent::task_spec::InputValues;
-use deepseeknova_agent::DelegateEngine;
 use deepseeknova_core::{Tool, ToolContext, ToolSchema};
 use serde::Deserialize;
 use serde_json::json;
@@ -106,7 +111,8 @@ impl Tool for DelegateTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use deepseeknova_agent::{Agent, DelegateEngine};
+    use crate::test_utils::MockProvider;
+    use crate::{Agent, DelegateEngine};
     use std::collections::HashMap;
 
     fn ctx_with_engine() -> ToolContext {
@@ -115,9 +121,7 @@ mod tests {
             "explorer".into(),
             Arc::new(
                 Agent::new(
-                    Arc::new(deepseeknova_agent::test_utils::MockProvider::text(
-                        "found the config in lib.rs",
-                    )),
+                    Arc::new(MockProvider::text("found the config in lib.rs")),
                     3,
                 )
                 .with_system_prompt("explorer"),
@@ -134,9 +138,7 @@ mod tests {
             "explorer".into(),
             Arc::new(
                 Agent::new(
-                    Arc::new(deepseeknova_agent::test_utils::MockProvider::text(
-                        "found the config in lib.rs",
-                    )),
+                    Arc::new(MockProvider::text("found the config in lib.rs")),
                     3,
                 )
                 .with_system_prompt("explorer"),
@@ -225,20 +227,15 @@ mod tests {
 
     #[tokio::test]
     async fn delegate_inputs_supply_required() {
-        use deepseeknova_agent::task_spec::{InputSpec, InputType, InputValues, TaskSpec};
+        use crate::task_spec::{InputSpec, InputType, InputValues, TaskSpec};
         use std::collections::HashMap;
 
         let mut agents: HashMap<String, Arc<Agent>> = HashMap::new();
         agents.insert(
             "reviewer".into(),
             Arc::new(
-                Agent::new(
-                    Arc::new(deepseeknova_agent::test_utils::MockProvider::text(
-                        "reviewed",
-                    )),
-                    3,
-                )
-                .with_system_prompt("reviewer"),
+                Agent::new(Arc::new(MockProvider::text("reviewed")), 3)
+                    .with_system_prompt("reviewer"),
             ),
         );
         let mut engine = DelegateEngine::new(agents, 2, 2000);
@@ -273,20 +270,15 @@ mod tests {
 
     #[tokio::test]
     async fn delegate_missing_required_is_friendly() {
-        use deepseeknova_agent::task_spec::{InputSpec, InputType, InputValues, TaskSpec};
+        use crate::task_spec::{InputSpec, InputType, InputValues, TaskSpec};
         use std::collections::HashMap;
 
         let mut agents: HashMap<String, Arc<Agent>> = HashMap::new();
         agents.insert(
             "reviewer".into(),
             Arc::new(
-                Agent::new(
-                    Arc::new(deepseeknova_agent::test_utils::MockProvider::text(
-                        "reviewed",
-                    )),
-                    3,
-                )
-                .with_system_prompt("reviewer"),
+                Agent::new(Arc::new(MockProvider::text("reviewed")), 3)
+                    .with_system_prompt("reviewer"),
             ),
         );
         let mut engine = DelegateEngine::new(agents, 2, 2000);

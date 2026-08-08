@@ -1,6 +1,6 @@
 //! 事件循环：输入 reader + 事件合并 + 批量重绘。
 //!
-//! 按键经 [`AppState::handle_key`] 分派；命令（斜杠与 Ctrl+K 面板）经注册表执行，
+//! 按键经 [`AppState::handle_key`] 分派；命令（斜杠与 `/` 面板）经注册表执行，
 //! 注入能力从 [`crate::commands::TuiCaps`] 读取；runner 事件流转发到
 //! [`crate::model::apply::ConversationApply`]。
 
@@ -172,7 +172,7 @@ pub async fn run_loop(
         }
         terminal.draw(|f| app.draw(f))?;
 
-        // 消费 Ctrl+K 面板待执行命令（真实 caps）。
+        // 消费 `/` 面板待执行命令（真实 caps）。
         if let Some((name, args)) = app.pending_command.take() {
             if let Some(cmd) = CommandRegistry::find(&name) {
                 let mut ctx = CommandCtx { app, caps };
@@ -316,7 +316,7 @@ pub async fn run_loop(
                 for event in batch {
                     match event {
                         AppEvent::Input(CEvent::Key(key)) if key.kind == KeyEventKind::Press => {
-                            // 焦点无关热键：Ctrl+K 命令面板 / Ctrl+\ 侧边栏。
+                            // 焦点无关热键：Ctrl+\ 侧边栏（命令面板走纯 `/` 触发）。
                             if app.handle_modal_shortcuts(&key) {
                                 continue;
                             }

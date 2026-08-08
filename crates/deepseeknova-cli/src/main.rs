@@ -9,6 +9,22 @@ mod setup;
 mod tui_undo;
 mod worktree;
 
+/// 进程退出码常量（集中定义，避免各处魔数冲突）。
+///
+/// 退出码分区：
+/// - `0`：成功
+/// - `1`：通用错误（anyhow 传播 / eval 条目级失败）
+/// - `2`：eval CI 门槛失败（仅 eval 子命令使用）
+/// - `3`：eval 条目+CI 双失败（仅 eval 子命令使用）
+/// - `6`：配置/路由构建错误
+/// - `10`：运行被 paused（非交互模式，可恢复）
+mod exit_code {
+    /// 配置/路由构建错误。
+    pub const CONFIG: i32 = 6;
+    /// 运行被 paused（非交互模式可判定，可恢复）。
+    pub const PAUSED: i32 = 10;
+}
+
 use anyhow::Context;
 use async_trait::async_trait;
 use clap::Parser;
@@ -68,7 +84,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .unwrap_or_else(|e| {
             eprintln!("config error: {e}");
-            std::process::exit(2);
+            std::process::exit(exit_code::CONFIG);
         }),
     );
 
@@ -206,6 +222,8 @@ async fn main() -> anyhow::Result<()> {
                         runner.register_tool(tool);
                     }
                 }
+                // delegate 工具（原属 tools crate，移入 agent crate 以消除反向依赖）。
+                runner.register_tool(std::sync::Arc::new(deepseeknova_agent::DelegateTool));
                 // 日常体验工具：web 搜索 / LSP 诊断（coordinator 下同样可用）。
                 for tool in deepseeknova_tools::web_search_tools(&config.tools)
                     .into_iter()
@@ -1138,7 +1156,7 @@ async fn main() -> anyhow::Result<()> {
                     println!();
                     println!("Start an isolated session inside it:");
                     println!("  cd {}", wt.path.display());
-                    println!("  deepseeknova-cli chat --tui       # interactive (or `run \"<task>\"` for one-shot)");
+                    println!("  deepseeknova chat --tui       # interactive (or `run \"<task>\"` for one-shot)");
                 }
                 cli::WorktreeAction::List => println!("{}", worktree::run_list(&cwd)?),
                 cli::WorktreeAction::Switch { name } => {
@@ -1870,8 +1888,8 @@ async fn stream_events(runner: &dyn Runner, input: RunInput) -> anyhow::Result<(
                     }
                     None => eprintln!("resume with: deepseeknova chat --resume"),
                 }
-                // 非交互（CI/脚本）可判定的专用退出码：3 = paused。
-                std::process::exit(3);
+                // 非交互（CI/脚本）可判定的专用退出码：10 = paused。
+                std::process::exit(exit_code::PAUSED);
             }
             _ => {}
         }
@@ -1921,8 +1939,8 @@ async fn stream_coordinator(runner: &dyn Runner, input: RunInput) -> anyhow::Res
                     }
                     None => eprintln!("resume with: deepseeknova chat --resume"),
                 }
-                // 非交互（CI/脚本）可判定的专用退出码：3 = paused。
-                std::process::exit(3);
+                // 非交互（CI/脚本）可判定的专用退出码：10 = paused。
+                std::process::exit(exit_code::PAUSED);
             }
             _ => {}
         }

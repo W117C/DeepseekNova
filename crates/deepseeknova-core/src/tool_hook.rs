@@ -2,7 +2,7 @@
 //!
 //! 钩子在工具调用前后被 agent 主循环调用：`before` 返回放行/询问/拒绝
 //! 决策，`after` 对工具结果文本做写后策略评估并产出 [`QualityFinding`]。
-//! panic 契约（对齐 harness 插件 fail-open 原则，安全判定例外）：
+//! panic 契约（fail-closed 安全判定）：
 //! `before`/`interested` panic 按 [`HookVerdict::Deny`] 处理（安全判定
 //! fail-closed），`after` panic 按空 findings 处理（fail-open，不阻断执行）。
 

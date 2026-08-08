@@ -301,7 +301,7 @@ pub fn run_switch(cwd: &Path, name: &str) -> Result<String> {
         bail!("`{}` exists but is not a git worktree", dest.display());
     }
     Ok(format!(
-        "worktree `{name}` is at:\n  {}\n\ncd into it and start an isolated session:\n  cd {}\n  deepseeknova-cli chat --tui",
+        "worktree `{name}` is at:\n  {}\n\ncd into it and start an isolated session:\n  cd {}\n  deepseeknova chat --tui",
         dest.display(),
         dest.display()
     ))

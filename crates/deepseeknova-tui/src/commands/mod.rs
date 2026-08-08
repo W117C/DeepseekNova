@@ -1,4 +1,4 @@
-//! 命令注册表：斜杠命令与 Ctrl+K 命令面板共用同一 handler。
+//! 命令注册表：斜杠命令与 `/` 命令面板共用同一 handler。
 //!
 //! 消除旧版 `TuiRunner::handle_command`（需外部依赖）与 `AppState::execute_command`
 //! （纯本地）的双路径分叉：命令统一注册，注入能力经 [`TuiCaps`] 读取，命令反馈
@@ -154,7 +154,7 @@ pub struct Command {
     pub name: &'static str,
     /// 描述的词表键（渲染经 `Tr::t` 取当前语言值）。
     pub desc: &'static Key,
-    /// Ctrl+K 模糊搜索的附加关键词。
+    /// `/` 模糊搜索的附加关键词。
     pub keywords: &'static [&'static str],
     pub args_spec: ArgsSpec,
     /// 参数模式候选提示（`/cmd ` 已输入时展示）；None 表示无参数提示。
@@ -183,7 +183,7 @@ impl CommandRegistry {
         Self::builtin().iter().find(|c| c.name == name)
     }
 
-    /// 模糊搜索（name/desc/keywords 子串匹配，用于 Ctrl+K 面板）。
+    /// 模糊搜索（name/desc/keywords 子串匹配，用于 `/` 面板）。
     /// desc 命中按英/中两语言值分别匹配（词表键的 en/zh）。
     pub fn search(query: &str) -> Vec<&'static Command> {
         let q = query.trim().to_lowercase();

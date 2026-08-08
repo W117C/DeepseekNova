@@ -30,7 +30,6 @@
 
 pub mod artifacts;
 pub mod chunk;
-pub mod error;
 pub mod executor;
 pub mod graph;
 pub mod memory;
@@ -44,7 +43,6 @@ pub mod tool_hook;
 pub mod types;
 
 pub use chunk::*;
-pub use error::*;
 pub use graph::*;
 pub use protocol::*;
 pub use registry::*;
