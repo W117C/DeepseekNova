@@ -332,7 +332,7 @@ pub async fn run_loop(
             && (app.mcp_statuses.is_empty()
                 || app
                     .mcp_last_probe
-                    .map_or(true, |t| t.elapsed() >= std::time::Duration::from_secs(30)));
+                    .is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(30)));
         if mcp_due {
             if let Some(probe) = caps.mcp_probe.clone() {
                 app.mcp_last_probe = Some(std::time::Instant::now());

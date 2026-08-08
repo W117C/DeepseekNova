@@ -1206,17 +1206,21 @@ mod tests {
     fn welcome_shows_setup_warning_when_provider_unconfigured() {
         let theme = Theme::default();
         // 未配置 provider：欢迎块出现红色 setup 引导。
-        let mut app = AppState::default();
-        app.provider_configured = false;
-        app.tr = Tr::new(crate::i18n::Lang::Zh);
+        let app = AppState {
+            provider_configured: false,
+            tr: Tr::new(crate::i18n::Lang::Zh),
+            ..Default::default()
+        };
         let blocks = build_conversation_blocks(&app, &theme);
         let texts: String = blocks.iter().flat_map(block_texts).collect();
         assert!(texts.contains("setup"), "未配置提示含 setup: {texts}");
         // 配置了 provider 但 key 缺失：提示 API key。
-        let mut app = AppState::default();
-        app.provider_configured = true;
-        app.api_key_configured = false;
-        app.tr = Tr::new(crate::i18n::Lang::En);
+        let app = AppState {
+            provider_configured: true,
+            api_key_configured: false,
+            tr: Tr::new(crate::i18n::Lang::En),
+            ..Default::default()
+        };
         let blocks = build_conversation_blocks(&app, &theme);
         let texts: String = blocks.iter().flat_map(block_texts).collect();
         assert!(texts.contains("API key"), "缺 key 提示: {texts}");

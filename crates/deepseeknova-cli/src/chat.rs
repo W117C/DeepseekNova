@@ -9,6 +9,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio_stream::StreamExt;
 
+/// 会话列表行：`(id, 首句预览, title, workspace)`。
+type SessionRow = (String, String, Option<String>, Option<String>);
+
 /// Session-persistence context for the chat REPL.
 ///
 /// When present, every completed turn is appended to `store` under
@@ -82,10 +85,8 @@ impl ChatPersistence {
         self.titles.set(id, title)
     }
 
-    /// 会话列表（最新优先），每条为 `(id, 首句预览, title)`。
-    pub fn list_sessions_with_titles(
-        &self,
-    ) -> anyhow::Result<Vec<(String, String, Option<String>, Option<String>)>> {
+    /// 会话列表（最新优先），每条为 `(id, 首句预览, title, workspace)`。
+    pub fn list_sessions_with_titles(&self) -> anyhow::Result<Vec<SessionRow>> {
         Ok(self
             .store
             .list_sessions_with_preview()?

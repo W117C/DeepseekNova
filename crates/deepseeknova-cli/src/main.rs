@@ -685,7 +685,7 @@ async fn main() -> anyhow::Result<()> {
                         p.api_key.is_some()
                             || p.api_key_env
                                 .as_deref()
-                                .map_or(false, |env| std::env::var_os(env).is_some())
+                                .is_some_and(|env| std::env::var_os(env).is_some())
                     })
                     .unwrap_or(false);
                 tui = tui.with_config_status(!config.providers.is_empty(), api_key_configured);

@@ -1260,8 +1260,10 @@ mod tests {
         assert!(app.quit_armed, "空闲 Ctrl+C 置位退出确认");
         assert_eq!(app.handle_editor_key(&ctrl_c), KeyAction::Quit);
         // 运行中：取消而非退出。
-        let mut app = AppState::default();
-        app.running = true;
+        let mut app = AppState {
+            running: true,
+            ..Default::default()
+        };
         assert_eq!(app.handle_editor_key(&ctrl_c), KeyAction::Cancel);
     }
 
