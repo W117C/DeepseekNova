@@ -1,5 +1,20 @@
 # PROGRESS — TUI 设计功能完善（任务书执行）
 
+## 发布 v0.5.0（2026-08-08）
+
+- **发布**：tag v0.5.0 推送触发 release.yml；CI 产 4 平台二进制（linux
+  x86_64/ARM64、macos ARM、windows x86_64），**Intel Mac（x86_64-apple-darwin）
+  因 GitHub macos-13 runner 无限排队，改由本地交叉编译补齐**（`rustup target
+  add x86_64-apple-darwin` + cargo build --release，Mach-O x86_64 验证通过）。
+- **GitHub Release v0.5.0 已公开**：5 平台二进制 + 完整 checksums.txt（资产命名
+  与 install.sh 契约一致）；`install.sh` 无参解析 latest → v0.5.0，端到端实测
+  下载/校验/安装/`--version` 0.5.0 全通过。
+- **一键安装**：`curl -fsSL .../install.sh | sh`（macOS/Linux）、
+  `irm .../install.ps1 | iex`（Windows）。
+- **遗留**：CI 的 macos-13 job 仍排队（资产已齐，不影响用户，可后续取消）；
+  install.ps1 Windows 实机冒烟待 Windows 环境。
+- **状态**：CHANGELOG Unreleased 冻结为 [0.5.0] 节；本次提交仅文档。
+
 ## 并行优化三批（2026-08-07，调研驱动轮）
 
 - **前置**：七子代理并行调研（竞品对标 / 执行引擎 / 安全域 / 接口面 / 代码健康 /

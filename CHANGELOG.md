@@ -4,6 +4,8 @@ All notable changes to DeepseekNova will be documented in this file.
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-08-08
+
 ### ⚠ Breaking
 
 - `agent.on_max_steps` 默认值为 `"pause"`：max_steps 耗尽不再返回错误，而是发出
