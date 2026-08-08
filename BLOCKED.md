@@ -3,12 +3,10 @@
 ## 观测台前端 UI + TUI 演进轮（2026-08-07）
 
 ### 本轮明确不做、留给领导裁决
-- **Tauri 壳（P1）**：`crates/deepseeknova-desktop` 本轮只有纯前端
-  （Vite + SolidJS + Tailwind 4，非 cargo crate）；`src-tauri` 壳 + serve
-  sidecar 托管 + 随机 bearer token 注入留待下轮。
-- **桌面端后续页（P3/P4）**：星座图点星跳条目交互、审批卡、归档/诊断/聚合/
-  设置/onboarding、印刷星图浅色档，均待前端工程进入下轮后按规范分期实现。
-- ~~**界面文案语言**~~（2026-08-07 已拍板：**双语 i18n 框架，英文默认 + 中文可选**，TUI 与桌面共享词表，见 PRODUCT.md 与 roadmap 记忆）。
+- ~~**Tauri 壳（P1）**~~（2026-08-08 已撤销：`crates/deepseeknova-desktop` 已整体
+  移除，桌面端不再是产品方向；历史见 git）。
+- ~~**桌面端后续页（P3/P4）**~~（2026-08-08 已撤销：同 Tauri 壳，桌面端移除）。
+- ~~**界面文案语言**~~（2026-08-07 已拍板：**双语 i18n 框架，英文默认 + 中文可选**，TUI 词表已落地，见 PRODUCT.md 与 roadmap 记忆）。
 - **Logo/应用图标**：无现存资产，实现期先用文字标。
 - **风险标签接线端到端测试**：`responder.request` 收到带 `[风险:…]` 前缀描述
   的 agent 集成断言未补（本轮有纯函数 + 权限分类 + TUI 渲染测试覆盖）。
@@ -33,13 +31,12 @@
 - **Ask 无 responder 默认 fail-closed**：非交互/库级默认 deny，新增配置项允许显式
   改回 allow。~~（P0-6）~~ **已做（2026-08-07 第二批 B3**：`ask_without_responder`
   默认 deny + `with_ask_without_responder_deny` builder + 两条回归测试）。
-- **i18n**：双语框架，英文默认 + 中文可选，TUI 与桌面共享词表；词表结构须在 Tauri
-  壳之前敲定（已在 PRODUCT.md 落记）。**第三批受阻（2026-08-07**：i18n 子代理因 API
-  402 余额不足中断，迁移约 30% 完成（词表 keys.rs 914 行已建、业务文件仍约 500 处
-  中文）。半成品已回退（TUI 恢复 6eb8abf），词表成果备份在
-  `/tmp/deepseeknova-i18n-backup/` 供重启参考。**待余额恢复后重启该任务**。
-- **Tauri 桌面壳降为 P2**：CLI/TUI 先行开源；桌面待前端契约修复（scorecard 解析、
-  done 携带 session_id）后再接真数据（P1-12 → P2-12）。
+- **i18n**：双语框架，英文默认 + 中文可选，TUI 词表已落地。~~（第三批受阻 402）~~
+  **已做（2026-08-08 第四批**：`crates/deepseeknova-tui/src/i18n/` 236 键词表 +
+  Lang/Tr/interpolate + 190 处迁移，162 测试；`[ui] lang` / `DEEPSEEKNOVA_LANG`
+  接线）。~~（2026-08-07 曾因 API 402 中断，重启后复用备份完成）~~
+- ~~**Tauri 桌面壳降为 P2**~~（2026-08-08 已撤销：桌面端整体移除，见本文件"观测台
+  前端 UI + TUI 演进轮"节标注）。
 
 ### 调研核实的 P0 发布阻塞（未裁决，按路线图待做）
 - 版本 bump 重发 crates.io（scanner/graph/metrics 三 crate 缺 description 不可发布）。

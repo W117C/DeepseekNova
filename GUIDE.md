@@ -523,7 +523,8 @@ lang = "en"   # en（默认）| zh（接受 zh-cn/cn/中文 别名）
 ```
 
 `lang` 缺省回退 `DEEPSEEKNOVA_LANG` 环境变量（`zh`/`zh-cn`/`cn`/`中文` →
-中文，其余/缺省 → 英文），两者皆缺省为英文。TUI 与桌面共享同一词表结构。
+中文，其余/缺省 → 英文），两者皆缺省为英文。词表结构见
+`crates/deepseeknova-tui/src/i18n/`。
 
 **记忆用户面（CLI）**：除 agent 的 `remember`/`recall`/`forget` 工具外，可用
 `deepseeknova-cli memory` 直接浏览与管理记忆库：
@@ -1072,7 +1073,7 @@ logo、命令提示、快捷键说明、最近会话数与当前工作目录；�
 ### 配色与主题
 
 配色走「新星观测台」语义表（`crates/deepseeknova-tui/src/theme.rs` 是唯一来源），
-与桌面端同一张 token 表。整体观感对齐 Claude Code：低饱和、dim 为主——
+单一 token 表。整体观感对齐 Claude Code：低饱和、dim 为主——
 
 - 用户 / agent 正文：终端默认前景色（归属靠 `❯` / `⏺` 标记区分，不整行染色）
 - accent / 主动作（`❯` 提示符、`⏺` 标记、模型标签）：品牌蓝 `#4D6BFE`（deepseek 默认档）
