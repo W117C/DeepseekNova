@@ -24,9 +24,12 @@
 //! using the provider, keeping the working set small.
 
 pub mod agent;
+mod agent_diag;
 pub mod agent_manifest;
+mod approval;
 pub mod attribution;
 pub mod budget;
+mod classify;
 mod compaction;
 pub mod coordinator;
 pub mod delegate;
@@ -36,17 +39,20 @@ mod fetch_tool;
 pub mod memory;
 pub mod memory_distill;
 pub mod mention;
+mod path;
 pub mod phase_runner;
 pub mod plan_mode;
 pub mod prompts;
 pub mod quality;
 pub mod recursion;
 pub mod reflection;
+mod render;
 mod review;
 pub mod sub_agent;
 pub mod task_spec;
 pub mod test_utils;
 pub mod tokens;
+mod tools;
 mod verify;
 
 pub use agent::*;

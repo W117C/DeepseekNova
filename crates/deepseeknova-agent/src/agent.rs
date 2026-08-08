@@ -1,7 +1,16 @@
+use crate::approval::{approval_risk_prefix, render_suggestions};
+use crate::classify::{
+    classify_quick_step, group_call_indices, history_last_turn_used_tools, unique_run_label,
+};
 use crate::diagnose::{DiagnoseGuard, DiagnoseHook};
 use crate::memory::Memory;
+use crate::path::{extract_tool_path, extract_touched_paths, tool_cache_key};
 use crate::prompts::DEFAULT_SYSTEM_PROMPT;
 use crate::recursion::DelegateDepth;
+use crate::render::{
+    render_adversarial_evidence, render_compression_prompt, verify_failure_message,
+};
+use crate::tools::inject_recall;
 use deepseeknova_core::chunk::{Chunk, Usage};
 use deepseeknova_core::memory::skill::{TaskObservation, TaskOutcome};
 use deepseeknova_core::protocol::{Phase, PhaseGate, PhaseOutcome, PhaseTransition};
@@ -15,7 +24,7 @@ use deepseeknova_core::{
     Message, Role, RunEvent, RunEventStream, RunInput, RunOutput, Runner, Tool,
 };
 use deepseeknova_metrics::{RunOutcome, SessionSnapshot, SessionTracker};
-use deepseeknova_permission::{CheckVerdict, Decision, PermissionGate, RuleSuggestion};
+use deepseeknova_permission::{CheckVerdict, Decision, PermissionGate};
 use deepseeknova_provider::auto::AutoRouteDecider;
 use deepseeknova_provider::Provider;
 use deepseeknova_security::context::SecurityContext;
@@ -35,6 +44,10 @@ pub use deepseeknova_core::runner::ApprovalResponder;
 
 // P3.1 统一 CJK-aware token 估算（实现见 tokens.rs，本文件仅 re-export）。
 pub use crate::tokens::estimate_tokens;
+
+// M7 拆分：对抗审查触发判定实现已迁至 agent_diag.rs，此处 re-export 保持
+// `deepseeknova_agent::adversarial_review_needed` 既有公开 API 不变。
+pub use crate::agent_diag::adversarial_review_needed;
 
 // ---------------------------------------------------------------------------
 // Agent — the main agent runner
@@ -1174,18 +1187,10 @@ impl Runner for Agent {
 
 /// Accumulated tool call from streaming chunks.
 #[derive(Debug, Clone)]
-struct PendingToolCall {
-    id: String,
-    name: String,
-    arguments: String,
-}
-
-/// Verify 失败回炉文案（契约：标记 + 原因 + 修复后重跑验证的语义）。
-fn verify_failure_message(reason: &str) -> String {
-    format!(
-        "[verification failed]\n{reason}\n\nFix the issues, then finish the task. \
-         The verification commands will run again before completion."
-    )
+pub(crate) struct PendingToolCall {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) arguments: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -1204,100 +1209,8 @@ so explicitly. Do not invent findings; only report what the evidence supports.";
 
 /// 审查输出预算（字符上限；超出截断）。
 const ADVERSARIAL_REVIEW_CAP_CHARS: usize = 4000;
-/// 审查输入证据预算（字符上限；超出截断）。
-const ADVERSARIAL_REVIEW_INPUT_CAP_CHARS: usize = 6000;
 /// 子代理步数预算（防烧 token）。
 const ADVERSARIAL_REVIEW_MAX_STEPS: usize = 3;
-
-/// 触发条件判定（纯函数，供测试）：(a) 会话 QualityFinding 存在 Blocking 级；
-/// (b) 工具调用命中 security/sandbox/permission 相关路径（工具名或参数）。
-pub fn adversarial_review_needed(findings: &[QualityFinding], messages: &[Message]) -> bool {
-    if findings
-        .iter()
-        .any(|f| f.severity == FindingSeverity::Blocking)
-    {
-        return true;
-    }
-    messages
-        .iter()
-        .filter(|m| m.role == Role::Assistant)
-        .filter_map(|m| m.tool_calls.as_ref())
-        .flatten()
-        .any(|tc| tool_call_touches_sensitive_path(&tc.function.name, &tc.function.arguments))
-}
-
-/// 敏感工具/参数启发式（Bugbot #9 收紧）：删除/移动类工具无条件敏感
-/// （本身高风险）；bash/shell 命令执行类必须同时命中命令内容 marker 才敏感；
-/// write/edit 写类必须命中目标路径/内容 marker 才敏感（避免任意 bash 调用、
-/// 任意文件写都烧子代理 token）；其余工具参数命中安全边界关键词仍判敏感
-/// （如 read_file 读 /etc/passwd）。
-fn tool_call_touches_sensitive_path(name: &str, args: &str) -> bool {
-    /// 无条件敏感：删除/移动本身高风险。
-    const UNCONDITIONALLY_SENSITIVE: [&str; 2] = ["delete_file", "move_file"];
-    /// 需叠加 marker 才敏感的工具。
-    const MARKER_GATED_TOOLS: [&str; 4] = ["bash", "shell", "write_file", "edit_file"];
-    // marker 小写匹配（安全审查 S2）：args 与 marker 都 to_lowercase 后匹配，
-    // 防 `Sudo -n`、`Chmod 777`、`/Etc/Passwd` 等大小写变体绕过。
-    // 补充常见敏感路径变体：~/.ssh、authorized_keys、crontab、/private/
-    // （macOS 上 /etc 为符号链接，真实路径是 /private/etc）、passwd/shadow。
-    const SENSITIVE_MARKERS: [&str; 12] = [
-        "security",
-        "sandbox",
-        "permission",
-        "sudo",
-        "chmod",
-        "chown",
-        "/etc/",
-        "/private/",
-        "~/.ssh",
-        "authorized_keys",
-        "crontab",
-        "passwd",
-    ];
-    if UNCONDITIONALLY_SENSITIVE.contains(&name) {
-        return true;
-    }
-    let lowered = args.to_lowercase();
-    let hit = |m: &str| lowered.contains(m);
-    if MARKER_GATED_TOOLS.contains(&name) {
-        return SENSITIVE_MARKERS.iter().any(|m| hit(m));
-    }
-    SENSITIVE_MARKERS.iter().any(|m| hit(m))
-}
-
-/// 渲染审查输入证据（任务 + findings + 工具调用摘要，字符预算截断）。
-fn render_adversarial_evidence(
-    task: &str,
-    findings: &[QualityFinding],
-    messages: &[Message],
-) -> String {
-    let mut out = format!("# Task\n{task}\n");
-    if !findings.is_empty() {
-        out.push_str("\n# Quality findings\n");
-        for f in findings {
-            let sev = match f.severity {
-                FindingSeverity::Info => "info",
-                FindingSeverity::Warning => "warning",
-                FindingSeverity::Blocking => "blocking",
-            };
-            out.push_str(&format!("- [{sev}] {}: {}\n", f.rule, f.evidence));
-        }
-    }
-    out.push_str("\n# Tool calls\n");
-    for m in messages.iter().filter(|m| m.role == Role::Assistant) {
-        if let Some(calls) = &m.tool_calls {
-            for tc in calls {
-                let args: String = tc.function.arguments.chars().take(300).collect();
-                out.push_str(&format!("- {}: {args}\n", tc.function.name));
-            }
-        }
-    }
-    let cap: String = out
-        .chars()
-        .take(ADVERSARIAL_REVIEW_INPUT_CAP_CHARS)
-        .collect();
-    cap
-}
 
 /// 会话收尾对抗审查：条件命中时以只读子代理（独立 [`Agent`] 实例，
 /// max_steps=3 budget）跑一轮审查并返回产出文本（cap 到输出预算）。
@@ -1456,22 +1369,6 @@ async fn attribute_pause_reason(
     }
 }
 
-/// 生成 run 级唯一会话标注（`session-<epoch毫秒>-<进程内序号>`，仅含
-/// `[A-Za-z0-9_-]`，serve 路径白名单安全）。serve 多会话共享同一 Agent
-/// 且未显式标注时，每次 run 必须拿到独立 id，否则 Paused 事件的
-/// `session_id` 与诊断报告文件名会互相覆盖。
-fn unique_run_label() -> String {
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    format!(
-        "session-{ms}-{}",
-        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    )
-}
-
 /// 触发一组通知型用户 hooks（session_start / session_end / failure）：
 /// 任一命令失败（非 0 退出 / 超时 / 崩溃）仅 warn，不阻断主流程。空列表
 /// 零开销（不 spawn 进程）。
@@ -1485,43 +1382,6 @@ pub(crate) fn fire_user_notify_hooks(commands: &[UserHookCommand], payload: &Hoo
             );
         }
     }
-}
-
-/// 将权限裁决的"拒绝即教育"建议渲染为人类可读文本；无建议时返回空串。
-fn render_suggestions(suggestions: &[RuleSuggestion]) -> String {
-    if suggestions.is_empty() {
-        return String::new();
-    }
-    let lines: Vec<String> = suggestions
-        .iter()
-        .map(|s| {
-            let rule = match s.rule.subject {
-                Some(ref sub) => format!("{} subject={}", s.rule.tool, sub),
-                None => s.rule.tool.clone(),
-            };
-            format!(
-                "[建议] 添加规则即可自动放行: behavior={:?} rule={rule}",
-                s.behavior
-            )
-        })
-        .collect();
-    lines.join("\n")
-}
-
-/// Ask 审批描述的风险前缀（观测台规范：只读 / 非只读 / 危险）。
-/// 非 shell 工具或参数不可解析时返回 `None`（保持旧描述不变）。
-fn approval_risk_prefix(
-    gate: Option<&PermissionGate>,
-    tool_name: &str,
-    args: &str,
-) -> Option<String> {
-    let kind = gate?.shell_readonly_kind(tool_name, args)?;
-    let label = match kind {
-        deepseeknova_security::readonly::ReadOnlyKind::ReadOnly => "只读",
-        deepseeknova_security::readonly::ReadOnlyKind::NotReadOnly => "非只读",
-        deepseeknova_security::readonly::ReadOnlyKind::Dangerous => "危险",
-    };
-    Some(format!("[风险:{label}]"))
 }
 
 async fn run_agent_loop(
@@ -3302,31 +3162,6 @@ async fn stream_and_process_turn(
 // P1 tool-call scheduling helpers
 // ---------------------------------------------------------------------------
 
-/// 将允许执行的下标分组：连续只读调用并入并发段；写类调用独占一段，保序。
-/// 未知工具按写（保守）处理，避免并发读写竞争。
-fn group_call_indices(
-    calls: &[PendingToolCall],
-    allowed: &[usize],
-    is_read: impl Fn(&str) -> bool,
-) -> Vec<Vec<usize>> {
-    let mut segments: Vec<Vec<usize>> = Vec::new();
-    let mut reads: Vec<usize> = Vec::new();
-    for &i in allowed {
-        if is_read(&calls[i].name) {
-            reads.push(i);
-        } else {
-            if !reads.is_empty() {
-                segments.push(std::mem::take(&mut reads));
-            }
-            segments.push(vec![i]);
-        }
-    }
-    if !reads.is_empty() {
-        segments.push(reads);
-    }
-    segments
-}
-
 /// 工具结果是否呈错误形态（供 metrics 计数 / 缓存回填 / 观察压缩分流）。
 /// 保守策略：只识别明确错误形态——`Error:` / `error:` 前缀（trim 后）、
 /// 以及工具返回的错误 JSON（`{"error": ...}` / `{"success": false, ...}`
@@ -3424,137 +3259,11 @@ async fn execute_tool_call(
     (idx, result)
 }
 
-/// 结果文本是否含错误指示（宽松 contains 语义，供机械续步分类，与
-/// `is_tool_error_result` 的整体判定互补）：大小写不敏感的 `error:` 片段、
-/// JSON `"error"` 键出现、以及 `{"success": false}` 显式 false 值。
-/// 宁可多判错误（→ high，更强模型），不漏判错误走 quick。
-fn contains_error_signal(text: &str) -> bool {
-    if text.to_ascii_lowercase().contains("error:") {
-        return true;
-    }
-    // JSON `{"error": ...}` 形态：`"error"` 键（后随 `:`）出现即视为错误指示
-    // （宽松判定，null/false 值也判错；与 is_tool_error_result 的首字段
-    // null/false 特判互补）。字符串值位置的 `"error"`（后随 `}`/`,`）不判。
-    let mut rest = text;
-    while let Some(idx) = rest.find("\"error\"") {
-        let after = rest[idx + "\"error\"".len()..].trim_start();
-        if after.starts_with(':') {
-            return true;
-        }
-        rest = after;
-    }
-    // `{"success": false, ...}`：`"success"` 键后紧跟 `: false`。
-    let mut rest = text;
-    while let Some(idx) = rest.find("\"success\"") {
-        let after = &rest[idx + "\"success\"".len()..];
-        let after = after.trim_start();
-        if let Some(after) = after.strip_prefix(':') {
-            return after.trim_start().starts_with("false");
-        }
-        rest = after;
-    }
-    false
-}
-
-/// P2.1 每步分类：上一条消息是工具结果且不含错误信号 → 机械续步（quick）；
-/// 其余（首步、出错、回炉反馈）→ high。错误识别与 `is_tool_error_result`
-/// 语义一致（大小写不敏感 `error:` + 错误 JSON 形态），但保持 contains
-/// 语义（长输出中任何位置出现即算错误信号）。
-/// A1：入参改为消息序列快照（步内复用同一快照，不再各自克隆内存）。
-fn classify_quick_step(messages: &[Message]) -> bool {
-    match messages.last() {
-        Some(m) if m.role == Role::Tool => !contains_error_signal(&m.content),
-        _ => false,
-    }
-}
-
 /// P3.3 中途检索设置。
 #[derive(Clone)]
 pub(crate) struct MidRunRetrieval {
     pub(crate) provider: RecallProvider,
     pub(crate) require_tool_turn: bool,
-}
-
-/// 上一轮是否有工具活动：从历史末尾向前扫，遇到 Tool 消息 → true；
-/// 遇到 User 边界 → false（说明上一轮没有工具调用）。
-fn history_last_turn_used_tools(messages: &[Message]) -> bool {
-    for m in messages.iter().rev() {
-        match m.role {
-            Role::Tool => return true,
-            Role::User => return false,
-            _ => continue,
-        }
-    }
-    false
-}
-
-/// 召回注入：把命中块作为 volatile User 消息插入（不触碰 system 前缀，
-/// 保住 DeepSeek-V4 前缀缓存）。返回是否实际注入。
-fn inject_recall(provider: &RecallProvider, memory: &mut Memory, query: &str) -> bool {
-    let Some(block) = provider(query) else {
-        return false;
-    };
-    if block.is_empty() {
-        return false;
-    }
-    memory.add_message(Message {
-        role: Role::User,
-        content: format!("<recalled-memory>\n{block}\n</recalled-memory>"),
-        name: None,
-        tool_calls: None,
-        tool_call_id: None,
-        reasoning_content: None,
-    });
-    true
-}
-
-/// P2.3 工具缓存 key：(工具名, 参数) 的 SHA-256 前缀 64 位。
-fn tool_cache_key(name: &str, args: &str) -> u64 {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(name.as_bytes());
-    h.update([0u8]);
-    h.update(args.as_bytes());
-    let d = h.finalize();
-    u64::from_le_bytes([d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]])
-}
-
-/// P3.3 从写类工具调用参数提取触碰文件路径（write/edit 用 `path`，
-/// move 用 `source`/`destination`）。解析失败返回空。
-fn extract_touched_paths(name: &str, args: &str) -> Vec<String> {
-    if !matches!(name, "write_file" | "edit_file" | "move_file") {
-        return Vec::new();
-    }
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(args) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    if let Some(p) = v.get("path").and_then(|x| x.as_str()) {
-        out.push(p.to_string());
-    }
-    if let Some(s) = v.get("source").and_then(|x| x.as_str()) {
-        out.push(s.to_string());
-    }
-    if let Some(d) = v.get("destination").and_then(|x| x.as_str()) {
-        out.push(d.to_string());
-    }
-    out
-}
-
-/// 编辑后诊断用：从 write/edit/move 工具参数提取目标文件路径（`path` 字段）。
-fn extract_tool_path(args: &str) -> Option<String> {
-    let v: serde_json::Value = serde_json::from_str(args).ok()?;
-    v.get("path").and_then(|p| p.as_str()).map(str::to_string)
-}
-
-/// Observe 阶段工具输出压缩提示词（契约：保留事实/路径/退出码/数字，纯摘要输出）。
-fn render_compression_prompt(tool: &str, raw: &str) -> String {
-    format!(
-        "You are the Observe stage of the Observe → Plan → Tool → Verify → \
-         Reflect → Next Action loop. Compress the following tool output \
-         (`{tool}`) into a concise structured summary. Preserve every fact, \
-         file path, exit code and number. Output only the summary.\n\n{raw}"
-    )
 }
 
 /// P2.2 观察压缩：用廉价模型把大输出压成结构化摘要；任何失败返回 None（回退截断）。
@@ -3579,7 +3288,9 @@ async fn compress_observation(obs: &ObserveSettings, tool: &str, raw: &str) -> O
 }
 
 // ---------------------------------------------------------------------------
-// Tests
+// Tests — 主循环集成测试（Agent + MockProvider 端到端）+ Agent 结构单元测试。
+// 纯函数类测试（classify / path / tools / approval / render / agent_diag）
+// 已随 M7 拆分迁入各自子模块的 `#[cfg(test)]`。
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -3725,92 +3436,6 @@ mod tests {
         ] {
             assert!(!is_tool_error_result(s), "应判为成功: {s}");
         }
-    }
-
-    #[test]
-    fn classify_quick_step_flags_error_signals_case_insensitive() {
-        // 错误指示（含小写 error、JSON 形态）→ 非 quick（high）。
-        for content in [
-            "Error: boom",
-            "error: boom",
-            "lots of text then Error: boom",
-            r#"{"error": "boom"}"#,
-            r#"{"error":null}"#,
-            r#"{"success": false, "detail": "x"}"#,
-            "prefix\n{\"error\": 1}\nsuffix",
-        ] {
-            let mut mem = Memory::new();
-            mem.add_message(Message {
-                role: Role::Tool,
-                content: content.to_string(),
-                name: None,
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            });
-            assert!(
-                !classify_quick_step(&mem.get_all()),
-                "含错误指示应判 high（非 quick）: {content}"
-            );
-        }
-    }
-
-    #[test]
-    fn classify_quick_step_normal_output_stays_quick() {
-        // 正常工具输出 → quick（机械续步）。
-        for content in [
-            "all good",
-            "42 lines read",
-            r#"{"success": true, "data": 1}"#,
-            r#"{"status": "error"}"#, // 非 error/success 键名不判错
-            "errorless result",
-        ] {
-            let mut mem = Memory::new();
-            mem.add_message(Message {
-                role: Role::Tool,
-                content: content.to_string(),
-                name: None,
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            });
-            assert!(
-                classify_quick_step(&mem.get_all()),
-                "正常输出应判 quick: {content}"
-            );
-        }
-    }
-
-    #[test]
-    fn classify_quick_step_non_tool_last_message_is_not_quick() {
-        let mut mem = Memory::new();
-        mem.add_message(Message {
-            role: Role::User,
-            content: "Error: boom".to_string(),
-            name: None,
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: None,
-        });
-        assert!(!classify_quick_step(&mem.get_all()), "非工具消息不判 quick");
-        assert!(
-            !classify_quick_step(&Memory::new().get_all()),
-            "空记忆不判 quick"
-        );
-    }
-
-    #[test]
-    fn extract_tool_path_reads_write_arguments() {
-        assert_eq!(
-            extract_tool_path(r#"{"path":"src/main.rs"}"#).as_deref(),
-            Some("src/main.rs")
-        );
-        // move_file 用 source/destination，不触发编辑后诊断（避免对改名目标误诊）。
-        assert_eq!(
-            extract_tool_path(r#"{"source":"a.rs","destination":"b.rs"}"#),
-            None
-        );
-        assert_eq!(extract_tool_path("not json"), None);
     }
 
     #[test]
@@ -4324,125 +3949,6 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // 协议阶段3：对抗审查触发条件（纯函数）
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn adversarial_review_needed_blocks_on_blocking_finding() {
-        let findings = vec![QualityFinding {
-            rule: "no-commit-secret".into(),
-            severity: FindingSeverity::Blocking,
-            passed: false,
-            evidence: "AKIA...".into(),
-        }];
-        assert!(adversarial_review_needed(&findings, &[]));
-    }
-
-    #[test]
-    fn adversarial_review_needed_ignores_non_blocking_findings() {
-        let findings = vec![QualityFinding {
-            rule: "oversized-write".into(),
-            severity: FindingSeverity::Warning,
-            passed: false,
-            evidence: "1024 bytes".into(),
-        }];
-        assert!(!adversarial_review_needed(&findings, &[]));
-    }
-
-    #[test]
-    fn adversarial_review_needed_triggers_on_sensitive_tool_call() {
-        let msg = Message {
-            role: Role::Assistant,
-            content: String::new(),
-            name: None,
-            tool_calls: Some(vec![ToolCall {
-                id: "t1".into(),
-                ty: "function".into(),
-                function: FunctionCall {
-                    name: "bash".into(),
-                    arguments: r#"{"command":"chmod 777 /etc/hosts"}"#.into(),
-                },
-            }]),
-            tool_call_id: None,
-            reasoning_content: None,
-        };
-        assert!(adversarial_review_needed(&[], &[msg]));
-    }
-
-    #[test]
-    fn adversarial_review_needed_skips_benign_session() {
-        let msg = Message {
-            role: Role::Assistant,
-            content: String::new(),
-            name: None,
-            tool_calls: Some(vec![ToolCall {
-                id: "t1".into(),
-                ty: "function".into(),
-                function: FunctionCall {
-                    name: "read_file".into(),
-                    arguments: r#"{"path":"src/main.rs"}"#.into(),
-                },
-            }]),
-            tool_call_id: None,
-            reasoning_content: None,
-        };
-        assert!(!adversarial_review_needed(&[], &[msg]));
-    }
-
-    /// Bugbot #9 负例：bash/shell 类无 SENSITIVE_MARKERS 命中 → 不触发
-    /// （任意 bash 调用不得烧子代理 token）；write_file 写普通路径 → 不
-    /// 触发、写安全边界路径（/etc/）→ 触发；delete_file 保持无条件敏感。
-    #[test]
-    fn adversarial_review_needed_marker_gating_on_bash_and_write() {
-        let call = |name: &str, args: &str| Message {
-            role: Role::Assistant,
-            content: String::new(),
-            name: None,
-            tool_calls: Some(vec![ToolCall {
-                id: "t1".into(),
-                ty: "function".into(),
-                function: FunctionCall {
-                    name: name.into(),
-                    arguments: args.into(),
-                },
-            }]),
-            tool_call_id: None,
-            reasoning_content: None,
-        };
-        // bash 无 marker → 不触发。
-        assert!(!adversarial_review_needed(
-            &[],
-            &[call("bash", r#"{"command":"ls -la"}"#)]
-        ));
-        // bash 命中 marker（chmod /etc/）→ 触发。
-        assert!(adversarial_review_needed(
-            &[],
-            &[call("bash", r#"{"command":"chmod 777 /etc/hosts"}"#)]
-        ));
-        // write_file 普通源码路径 → 不触发。
-        assert!(!adversarial_review_needed(
-            &[],
-            &[call(
-                "write_file",
-                r#"{"path":"src/main.rs","content":"fn main() {}"}"#
-            )]
-        ));
-        // write_file 命中路径 marker（/etc/）→ 触发。
-        assert!(adversarial_review_needed(
-            &[],
-            &[call(
-                "write_file",
-                r#"{"path":"/etc/hosts","content":"127.0.0.1 x"}"#
-            )]
-        ));
-        // delete_file 无条件敏感（不依赖 marker）。
-        assert!(adversarial_review_needed(
-            &[],
-            &[call("delete_file", r#"{"path":"src/main.rs"}"#)]
-        ));
-    }
-
     /// Bugbot #10：loop 级「Blocking 违规确实拒绝工具」接线测试——Hard
     /// plan-before-execute 门（无计划文本 → Blocking）在 Execute transition
     /// 拒绝本轮全部工具：工具不执行（调用计数 0）、ToolResult 回填
@@ -4725,24 +4231,6 @@ mod tests {
             .expect("system message must exist");
         assert_eq!(sys.content, "CUSTOM_PROMPT");
         assert!(!sys.content.contains(DEFAULT_SYSTEM_PROMPT));
-    }
-
-    #[test]
-    fn verify_failure_message_keeps_retry_contract() {
-        let m = verify_failure_message("tests failed");
-        assert!(m.contains("[verification failed]"));
-        assert!(m.contains("tests failed"));
-        assert!(m.contains("run again before completion"));
-    }
-
-    #[test]
-    fn compression_prompt_preserves_facts_contract() {
-        let p = render_compression_prompt("bash", "exit 1\nsecret=abc");
-        assert!(p.contains("`bash`"));
-        assert!(p.contains("exit 1\nsecret=abc"));
-        assert!(p.contains("Preserve every fact"));
-        assert!(p.contains("Output only the summary"));
-        assert!(p.contains("Observe stage"));
     }
 
     #[tokio::test]
@@ -5212,43 +4700,6 @@ mod tests {
                 Chunk::Done,
             ],
         ]
-    }
-
-    #[test]
-    fn approval_risk_prefix_maps_readonly_kinds() {
-        use deepseeknova_permission::{Decision, PermissionGate, Policy};
-
-        let gate = PermissionGate::new(Policy {
-            mode: Decision::Ask,
-            allow: vec![],
-            ask: vec![],
-            deny: vec![],
-        });
-        assert_eq!(
-            approval_risk_prefix(Some(&gate), "bash", r#"{"command": "git status"}"#).as_deref(),
-            Some("[风险:只读]")
-        );
-        assert_eq!(
-            approval_risk_prefix(Some(&gate), "Bash", r#"{"command": "rm -rf /tmp/x"}"#).as_deref(),
-            Some("[风险:非只读]")
-        );
-        assert_eq!(
-            approval_risk_prefix(
-                Some(&gate),
-                "shell",
-                r#"{"command": "git -c core.pager='sh -x' status"}"#
-            )
-            .as_deref(),
-            Some("[风险:危险]")
-        );
-        assert_eq!(
-            approval_risk_prefix(Some(&gate), "grep", r#"{"command": "x"}"#),
-            None
-        );
-        assert_eq!(
-            approval_risk_prefix(None, "bash", r#"{"command": "x"}"#),
-            None
-        );
     }
 
     #[tokio::test]
@@ -5966,43 +5417,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn group_call_indices_segments_reads_and_writes_in_order() {
-        let calls = vec![
-            PendingToolCall {
-                id: "a".into(),
-                name: "read_file".into(),
-                arguments: String::new(),
-            },
-            PendingToolCall {
-                id: "b".into(),
-                name: "grep".into(),
-                arguments: String::new(),
-            },
-            PendingToolCall {
-                id: "c".into(),
-                name: "write_file".into(),
-                arguments: String::new(),
-            },
-            PendingToolCall {
-                id: "d".into(),
-                name: "read_file".into(),
-                arguments: String::new(),
-            },
-        ];
-        let allowed: Vec<usize> = (0..calls.len()).collect();
-        let segs = group_call_indices(&calls, &allowed, |n| n != "write_file");
-        assert_eq!(segs, vec![vec![0, 1], vec![2], vec![3]]);
-
-        // 全读（或并发关闭）→ 单段，保持原始顺序。
-        let segs = group_call_indices(&calls, &allowed, |_| true);
-        assert_eq!(segs, vec![vec![0, 1, 2, 3]]);
-
-        // 被权限拦截的下标不参与分段。
-        let segs = group_call_indices(&calls, &[1, 3], |n| n != "write_file");
-        assert_eq!(segs, vec![vec![1, 3]]);
-    }
-
     #[tokio::test]
     async fn agent_parallel_tool_batch_preserves_result_order() {
         let history = Arc::new(tokio::sync::Mutex::new(Vec::<Message>::new()));
@@ -6413,21 +5827,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn inject_recall_adds_volatile_user_message() {
-        let mut memory = Memory::new();
-        let rp: RecallProvider = Arc::new(|_| Some("hit".to_string()));
-        assert!(inject_recall(&rp, &mut memory, "query"));
-        let msgs = memory.get_all();
-        assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].role, Role::User);
-        assert!(msgs[0].content.contains("hit"));
-
-        let empty: RecallProvider = Arc::new(|_| None);
-        assert!(!inject_recall(&empty, &mut memory, "query"));
-        assert_eq!(memory.get_all().len(), 1);
-    }
-
     #[tokio::test]
     async fn mid_run_retrieval_injects_on_seeded_tool_turn() {
         // 续聊历史包含一次工具交换 → 新轮次开头触发中途召回注入。
@@ -6648,22 +6047,6 @@ mod tests {
             "run 2 summary must contain exactly its own finding (no cross-run pollution), got {}",
             summaries[1].findings.len()
         );
-    }
-
-    #[test]
-    fn unique_run_label_is_unique_and_serve_safe() {
-        let a = unique_run_label();
-        let b = unique_run_label();
-        assert_ne!(a, b, "每次 run 必须拿到唯一标注");
-        for label in [&a, &b] {
-            assert!(label.starts_with("session-"), "unexpected label: {label}");
-            assert!(
-                label
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
-                "label must only contain [A-Za-z0-9_-]: {label}"
-            );
-        }
     }
 
     // -----------------------------------------------------------------------
