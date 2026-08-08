@@ -38,15 +38,14 @@ pub struct Theme {
     pub selection: Style,
 }
 
-/// 默认 DeepSeek 色板：靛蓝主色 #4D6BFE（品牌蓝），
-/// 用户/强调同色系、agent 用柔蓝紫，语义色（成功/失败/警示）保留。
+/// 默认 DeepSeek 色板（Claude Code 观感：正文用终端默认前景色，
+/// 归属靠 `❯`/`⏺` 标记区分而非整行染色；品牌蓝 #4D6BFE 只留给
+/// accent——提示符、⏺ 标记、模型标签；语义色（成功/失败/警示）保留）。
 impl Default for Theme {
     fn default() -> Self {
         Self {
-            user: Style::default()
-                .fg(Color::Rgb(77, 107, 254))
-                .add_modifier(Modifier::BOLD),
-            agent: Style::default().fg(Color::Rgb(122, 140, 255)),
+            user: Style::default(),
+            agent: Style::default(),
             reasoning: Style::default()
                 .add_modifier(Modifier::DIM)
                 .add_modifier(Modifier::ITALIC),
@@ -94,7 +93,7 @@ impl Theme {
 
     /// diff 行级高亮：`+` 新增=green、`-` 删除=red、`@@` 块头=accent，
     /// 其余行沿用 `base`；`+++`/`---` 文件头不改色。工具结果行的 UI
-    /// 前缀 `  → ` 不参与行首判定（先剥掉再判断），否则 git diff 输出
+    /// 前缀 `  ⎿  ` 不参与行首判定（先剥掉再判断），否则 git diff 输出
     /// 永远染不上色。
     pub fn diff_spans(&self, text: &str, base: Style) -> Vec<Span<'static>> {
         let mut spans = Vec::new();
@@ -102,7 +101,7 @@ impl Theme {
             if i > 0 {
                 spans.push(Span::styled("\n", base));
             }
-            let content = line.strip_prefix("  → ").unwrap_or(line);
+            let content = line.strip_prefix("  ⎿  ").unwrap_or(line);
             let style = if content.starts_with("+++") || content.starts_with("---") {
                 base
             } else if content.starts_with("@@") {
@@ -155,10 +154,8 @@ fn dark_theme() -> Theme {
 /// §1.1 浅色档逐项对齐。
 fn light_theme() -> Theme {
     Theme {
-        user: Style::default()
-            .fg(Color::Rgb(59, 85, 217))
-            .add_modifier(Modifier::BOLD),
-        agent: Style::default().fg(Color::Rgb(90, 79, 184)),
+        user: Style::default(),
+        agent: Style::default(),
         reasoning: Style::default()
             .fg(Color::Rgb(106, 115, 144))
             .add_modifier(Modifier::ITALIC),
@@ -190,9 +187,11 @@ mod tests {
     #[test]
     fn default_matches_deepseek_semantic_palette() {
         let t = Theme::default();
-        assert_eq!(t.user.fg, Some(Color::Rgb(77, 107, 254)), "DeepSeek 品牌蓝");
-        assert!(t.user.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(t.agent.fg, Some(Color::Rgb(122, 140, 255)), "agent 柔蓝紫");
+        // Claude Code 观感：user/agent 正文不染色（终端默认前景），
+        // 品牌蓝只留给 accent（提示符 ❯、⏺ 标记、模型标签）。
+        assert_eq!(t.user.fg, None, "user 正文用终端默认色");
+        assert!(!t.user.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(t.agent.fg, None, "agent 正文用终端默认色");
         assert_eq!(t.accent, Color::Rgb(77, 107, 254));
         assert_eq!(t.reasoning.fg, None);
         assert!(t.reasoning.add_modifier.contains(Modifier::DIM));
@@ -239,17 +238,20 @@ mod tests {
 
     #[test]
     fn diff_spans_ignores_tool_result_prefix() {
-        // 工具结果行带 `  → ` UI 前缀：剥掉前缀后仍按 diff 行首染色。
+        // 工具结果行带 `  ⎿  ` UI 前缀：剥掉前缀后仍按 diff 行首染色。
         let t = Theme::default();
         let base = Style::default();
-        let spans = t.diff_spans("  → +fn new() {}\n  → -fn old() {}\n  → @@ -1 +1 @@", base);
-        assert_eq!(spans[0].content, "  → +fn new() {}");
+        let spans = t.diff_spans(
+            "  ⎿  +fn new() {}\n  ⎿  -fn old() {}\n  ⎿  @@ -1 +1 @@",
+            base,
+        );
+        assert_eq!(spans[0].content, "  ⎿  +fn new() {}");
         assert_eq!(spans[0].style, t.verification_ok);
-        assert_eq!(spans[2].content, "  → -fn old() {}");
+        assert_eq!(spans[2].content, "  ⎿  -fn old() {}");
         assert_eq!(spans[2].style, t.verification_fail);
         assert_eq!(spans[4].style.fg, Some(t.accent));
         // 非 diff 前缀行保持 base。
-        let plain = t.diff_spans("  → note\n+real", base);
+        let plain = t.diff_spans("  ⎿  note\n+real", base);
         assert_eq!(plain[0].style, base);
         assert_eq!(plain[2].style, t.verification_ok);
     }
@@ -257,9 +259,9 @@ mod tests {
     #[test]
     fn light_theme_uses_dark_foregrounds() {
         let t = light_theme();
-        // 印刷星图浅色档：深化品牌蓝 + 墨色文字 + 纸白选中底。
-        assert_eq!(t.user.fg, Some(Color::Rgb(59, 85, 217)), "user=#3B55D9");
-        assert_eq!(t.agent.fg, Some(Color::Rgb(90, 79, 184)), "agent=#5A4FB8");
+        // 印刷星图浅色档：正文默认前景（终端深色）、accent 深化品牌蓝、纸白选中底。
+        assert_eq!(t.user.fg, None, "user 正文用终端默认色");
+        assert_eq!(t.agent.fg, None, "agent 正文用终端默认色");
         assert_eq!(
             t.verification_ok.fg,
             Some(Color::Rgb(14, 122, 66)),

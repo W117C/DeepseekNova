@@ -416,22 +416,24 @@ impl AppState {
         self.fold.clear();
     }
 
-    /// 折叠判断：显式设置优先，默认按智能策略（推理、工具调用折叠，
-    /// 其余展开）。工具调用默认折叠让 agent 输出保持整洁——参数与结果
-    /// 可能很长，需要时 Enter 展开查看。
+    /// 折叠判断：显式设置优先，默认按智能策略（Claude Code 风格：推理折叠、
+    /// 工具调用展开，其余展开）。工具调用默认展开——参数与截断结果直接可见，
+    /// 需要整洁视图时用 `/fold all` 或 Enter 折叠单个段。
     pub fn is_folded(&self, seg: SegId, kind: crate::model::conversation::LineKind) -> bool {
         match self.fold.get(&seg) {
             Some(f) => *f,
-            None => {
-                kind == crate::model::conversation::LineKind::Reasoning
-                    || kind == crate::model::conversation::LineKind::Tool
-            }
+            None => kind == crate::model::conversation::LineKind::Reasoning,
         }
     }
 
-    /// 切换折叠态；默认值也物化为显式设置（便于重置）。
+    /// 切换折叠态；以**有效**折叠态（含默认策略）为基准取反，
+    /// 默认值也物化为显式设置（便于重置）。
     pub fn toggle_fold(&mut self, seg: SegId) {
-        let folded = self.fold.get(&seg).copied().unwrap_or(false);
+        let folded = self
+            .conversation
+            .segment_kind(seg)
+            .map(|kind| self.is_folded(seg, kind))
+            .unwrap_or(false);
         self.fold.insert(seg, !folded);
     }
 

@@ -221,6 +221,13 @@ impl Conversation {
         })
     }
 
+    /// 按 id 查段的行类型（折叠切换需要有效状态判定）。
+    pub fn segment_kind(&self, seg: SegId) -> Option<LineKind> {
+        self.iter_segments()
+            .find(|(id, _)| *id == seg)
+            .map(|(_, s)| s.line_kind())
+    }
+
     /// 指定回合的用户输入文本（渲染用户回合头用）。
     pub fn user_text_of(&self, turn_id: u64) -> Option<&str> {
         self.turns

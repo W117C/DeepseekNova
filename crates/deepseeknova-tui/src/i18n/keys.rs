@@ -19,8 +19,6 @@ use super::Lang;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Key {
     // ── 会话/角色（app::state）────────────────────────────
-    /// 用户回合角色前缀（对话块头）。
-    RoleYou,
     /// Esc 二次确认退出提示。
     PressEscAgain,
     /// 复制时无选中消息。
@@ -273,18 +271,22 @@ pub enum Key {
     FoldedTool,
     /// 通用折叠摘要。
     FoldedGeneric,
-    /// 等待首批 delta（`{frame}`）。
+    /// 等待首批 delta（`{frame}`、`{verb}`、`{secs}`）。
     ThinkingWait,
-    /// 欢迎卡副标题。
+    /// 运行态随机动词表（`|` 分隔，按 4s 轮转；Claude Code 风格）。
+    ThinkingVerbs,
+    /// 欢迎区副标题。
     WelcomeSubtitle,
-    /// 欢迎卡 /help 提示。
+    /// 欢迎区 /help 提示。
     WelcomeHelp,
-    /// 欢迎卡快捷键提示。
+    /// 欢迎区快捷键提示。
     WelcomeTips,
-    /// 欢迎卡会话计数（`{n}`）。
+    /// 欢迎区会话计数（`{n}`）。
     WelcomeSessionsCount,
-    /// 欢迎卡会话提示（未加载）。
+    /// 欢迎区会话提示（未加载）。
     WelcomeSessionsHint,
+    /// 欢迎区工作目录行（`{path}`）。
+    WelcomeCwd,
     /// /help 浮层标题。
     HelpTitle,
     /// /help 浮层翻页器（`{start}`、`{end}`、`{total}`）。
@@ -295,12 +297,6 @@ pub enum Key {
     // ── 状态行（render::status）───────────────────────────
     /// ctx 占用（`{bar}`、`{pct}`、`{used}`、`{window}`；中英一致）。
     CtxUsage,
-    /// 折叠模式指示（`{state}`）。
-    FoldIndicator,
-    /// usage 明细（`{up}`、`{down}`、`{total}`、`{reasoning}`、`{hit}`）。
-    UsageDetail,
-    /// 行数指示（`{lines}`、`{scroll}`）。
-    LinesIndicator,
     /// 退出警示。
     QuitWarning,
     /// 焦点提示：Conversation（5 个键位 + Esc）。
@@ -495,7 +491,6 @@ impl Key {
         use Key::*;
         match self {
             // 会话/角色
-            RoleYou => "You",
             PressEscAgain => "Press Esc again to exit",
             NoSelectedMessage => "No message selected (use j/k to select)",
             ClipboardUnavailable => "📋 {text} (clipboard unavailable, echoed instead)",
@@ -647,21 +642,20 @@ impl Key {
             FoldedReasoningPreview => "[reasoning ▸ folded {n} chars · \"{preview}\" · Enter to expand]",
             FoldedTool => "[tool ▸ {name} folded · Enter to expand]",
             FoldedGeneric => "[folded · Enter to expand]",
-            ThinkingWait => "{frame} thinking… Ctrl+C to cancel",
+            ThinkingWait => "{frame} {verb}… ({secs}s · Ctrl+C to cancel)",
+            ThinkingVerbs => "Thinking|Pondering|Reasoning|Mulling|Deliberating|Crunching",
             WelcomeSubtitle => "AI Agent terminal · sessions auto-persist",
             WelcomeHelp => "Type /help to see all commands",
             WelcomeTips => "Tab switches focus · Ctrl+\\ sidebar · mouse wheel scrolls history",
             WelcomeSessionsCount => "Saved sessions: {n} (restore in sidebar/Sessions)",
             WelcomeSessionsHint => "Saved sessions: see sidebar/Sessions",
+            WelcomeCwd => "cwd: {path}",
             HelpTitle => "  Help · Keybindings",
             HelpPager => " · {start}-{end}/{total} lines · j/k scroll · Esc close",
             HelpPagerShort => " · Esc close",
 
             // 状态行
             CtxUsage => " │ ctx [{bar}] {pct}% ({used} / {window})",
-            FoldIndicator => " │ fold {state}",
-            UsageDetail => " │ ↑{up} ↓{down} Σ{total} reasoning{reasoning} cache{hit}",
-            LinesIndicator => " │ lines {lines} scroll{scroll}%",
             QuitWarning => " │ ⚠ Press Esc again to exit",
             HintConversation => "{nav} navigate · {fold} fold · {copy} copy · {page} page · {top} top/bottom · Esc back to input",
             HintInput => "/ commands · Ctrl+P perm mode · Ctrl+T mouse · Ctrl+U clear · Ctrl+W delete word · Shift+Enter newline · Esc cancel / Esc Esc exit",
@@ -770,7 +764,6 @@ impl Key {
         use Key::*;
         Some(match self {
             // 会话/角色
-            RoleYou => "你",
             PressEscAgain => "再按 Esc 退出",
             NoSelectedMessage => "没有选中的消息（先 j/k 选中）",
             ClipboardUnavailable => "📋 {text}（剪贴板不可用，已回显文本）",
@@ -917,20 +910,19 @@ impl Key {
             FoldedReasoningPreview => "[推理 ▸ 折叠 {n} 字符 · 「{preview}」· Enter 展开]",
             FoldedTool => "[工具 ▸ {name} 已折叠 · Enter 展开]",
             FoldedGeneric => "[已折叠 · Enter 展开]",
-            ThinkingWait => "{frame} 正在思考… Ctrl+C 取消",
+            ThinkingWait => "{frame} {verb}…（{secs}s · Ctrl+C 取消）",
+            ThinkingVerbs => "思考|推敲|推理|琢磨|酝酿|盘算",
             WelcomeSubtitle => "AI Agent 终端 · 会话自动持久化",
             WelcomeHelp => "输入 /help 查看全部命令",
             WelcomeTips => "Tab 切换焦点 · Ctrl+\\ 侧边栏 · 鼠标滚轮滚动历史",
             WelcomeSessionsCount => "最近保存会话: {n} 个（侧边栏/会话 面板恢复）",
             WelcomeSessionsHint => "最近保存会话: 侧边栏/会话 面板查看",
+            WelcomeCwd => "工作目录: {path}",
             HelpTitle => " 帮助 · 快捷键",
             HelpPager => " · {start}-{end}/{total} 行 · j/k 滚动 · Esc 关闭",
             HelpPagerShort => " · Esc 关闭",
 
             // 状态行
-            FoldIndicator => " │ 折叠 {state}",
-            UsageDetail => " │ ↑{up} ↓{down} Σ{total} 推理{reasoning} 缓存hit{hit}",
-            LinesIndicator => " │ lines {lines} 滚动{scroll}%",
             QuitWarning => " │ ⚠ 再按 Esc 退出",
             HintConversation => "{nav} 导航 · {fold} 折叠 · {copy} 复制 · {page} 翻页 · {top} 首尾 · Esc 回输入",
             HintInput => "/ 命令 · Ctrl+P 权限模式 · Ctrl+T 鼠标 · Ctrl+U 清行 · Ctrl+W 删词 · Shift+Enter 换行 · Esc 取消/再按 Esc 退出",

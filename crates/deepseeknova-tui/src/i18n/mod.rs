@@ -136,8 +136,8 @@ mod tests {
     fn language_switch_changes_value() {
         let tr_en = Tr::new(Lang::En);
         let tr_zh = Tr::new(Lang::Zh);
-        assert_eq!(tr_en.t(Key::RoleYou), "You");
-        assert_eq!(tr_zh.t(Key::RoleYou), "你");
+        assert_eq!(tr_en.t(Key::WelcomeHelp), "Type /help to see all commands");
+        assert_eq!(tr_zh.t(Key::WelcomeHelp), "输入 /help 查看全部命令");
         assert_eq!(tr_zh.t(Key::PressEscAgain), "再按 Esc 退出");
         assert_eq!(tr_en.t(Key::PressEscAgain), "Press Esc again to exit");
         assert_ne!(tr_en.t(Key::FoldedTool), tr_zh.t(Key::FoldedTool));
@@ -181,14 +181,17 @@ mod tests {
         // 与英文表一致（缺键不返回空串/不 panic）。
         assert_eq!(tr_zh.t(Key::CtxUsage), Tr::new(Lang::En).t(Key::CtxUsage));
         // 有中文值的键在英文模式也不受影响。
-        assert_eq!(Tr::new(Lang::En).t(Key::RoleYou), "You");
+        assert_eq!(
+            Tr::new(Lang::En).t(Key::WelcomeHelp),
+            "Type /help to see all commands"
+        );
     }
 
     #[test]
     fn key_en_values_are_nonempty_smoke() {
         // en() 由穷举 match 保证编译期完整性；这里抽查关键域的兜底值非空。
         for k in [
-            Key::RoleYou,
+            Key::ThinkingVerbs,
             Key::CmdHelpDesc,
             Key::PauseMaxSteps,
             Key::UnknownCommand,

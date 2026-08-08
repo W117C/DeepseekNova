@@ -4,10 +4,12 @@
 //! message tree in a split-pane terminal UI:
 //!
 //! - streaming text / reasoning（推理整段提交，默认折叠）
-//! - tool calls with truncated results and live status
+//! - tool calls with truncated results and live status（Claude Code 风格：
+//!   默认展开，`⏺ Tool(args)` + `  ⎿  result` 缩进树形，圆点颜色编码状态）
 //! - deterministic verification（`✓` / `✗`）
 //! - pauses, errors, approval requests
-//! - status bar with model, phase, token usage, cost and scrollback position
+//! - status bar（Claude Code 风格精简：model、ctx 预算条、权限模式；
+//!   成本/turn/usage 明细经 `/cost` 等命令查看）
 //! - multi-line input editing（←/→/Home/End、Shift+Enter、Ctrl+U/W）、
 //!   input history、markdown 高亮、`@` 文件补全、粘贴路径转引用
 //! - slash commands 与 Ctrl+K 命令面板（同一注册表）：`/help` `/clear`

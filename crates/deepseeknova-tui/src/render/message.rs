@@ -9,7 +9,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::app::focus::HelpOverlay;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthChar;
 
 use crate::app::state::{AppState, DisplayMode};
 use crate::i18n::{Key, Tr};
@@ -134,19 +134,11 @@ pub fn segment_plain_text(seg: &Segment, tr: Tr) -> String {
             name,
             arguments,
             result,
-            status,
             ..
-        } => {
-            let status_mark = match status {
-                crate::model::conversation::ToolStatus::Running => "…",
-                crate::model::conversation::ToolStatus::Ok => "✓",
-                crate::model::conversation::ToolStatus::Failed => "✗",
-            };
-            match result {
-                Some(r) => format!("[{status_mark}] {name}({arguments})\n  → {r}"),
-                None => format!("[{status_mark}] {name}({arguments})"),
-            }
-        }
+        } => match result {
+            Some(r) => format!("⏺ {name}({arguments})\n  ⎿  {r}"),
+            None => format!("⏺ {name}({arguments})"),
+        },
         Segment::Verification {
             command,
             passed,
@@ -217,23 +209,50 @@ fn folded_summary(seg: &Segment, tr: Tr) -> String {
     }
 }
 
-/// 一条带边框的消息块（用户回合 / agent 回合 / 系统反馈）。
+/// 一条消息块（用户回合 / agent 回合 / 系统反馈）。
+/// Claude Code 风格：无边框无角色头，归属靠 `❯`（用户）/`⏺`（agent）标记。
 pub struct MessageBlock {
-    /// 角色前缀行（"你" / 模型名）；无前缀的块（echo 反馈）为 None。
-    pub header: Option<String>,
-    /// 前缀行样式（用户=accent、agent=agent 色）。
-    pub header_style: Style,
-    /// 内容行（含折叠摘要、选中高亮）。
+    /// 内容行（含 ⏺/⎿ 前缀、折叠摘要、选中高亮）。
     pub lines: Vec<Line<'static>>,
 }
 
-/// 把会话消息树按「回合」分组成消息块（Claude Code 风格：无边框，
-/// 角色前缀行区分归属，正文安静展开）：
-/// 每回合一个用户块 + 一个 agent 块。
+/// 给行组首行加标记前缀、续行加缩进（对齐到标记后的正文列）。
+fn prefix_lines(
+    lines: &mut [Line<'static>],
+    first: &'static str,
+    cont: &'static str,
+    style: Style,
+) {
+    for (i, line) in lines.iter_mut().enumerate() {
+        let prefix = if i == 0 { first } else { cont };
+        let mut spans = vec![Span::styled(prefix, style)];
+        spans.append(&mut line.spans);
+        *line = Line::from(spans);
+    }
+}
+
+/// agent 正文行组：首行 `⏺ `（accent），续行缩进 2 列（Claude Code 风格）。
+fn agent_marked_lines(text: &str, text_style: Style, theme: &Theme) -> Vec<Line<'static>> {
+    let mut lines = span_lines(vec![Span::styled(text.to_string(), text_style)]);
+    prefix_lines(&mut lines, "⏺ ", "  ", Style::default().fg(theme.accent));
+    lines
+}
+
+/// 运行态随机动词：词表来自 i18n（`|` 分隔），每 4s 轮转——
+/// 同一轮次内稳定（逐帧随机会闪烁），长跑也有变化感（Claude Code 风格）。
+fn thinking_verb(tr: Tr, elapsed: std::time::Duration) -> &'static str {
+    let verbs: Vec<&'static str> = tr.t(Key::ThinkingVerbs).split('|').collect();
+    let idx = (elapsed.as_secs() / 4) as usize % verbs.len().max(1);
+    verbs.get(idx).copied().unwrap_or("Thinking")
+}
+
+/// 把会话消息树按「回合」分组成消息块（Claude Code 风格：无边框无角色头，
+/// `❯` 标用户输入、`⏺` 标 agent 输出、`  ⎿  ` 缩进树形展示工具结果）：
+/// 每回合一个用户块 + 一个 agent 块，回合间空行分隔。
 pub fn build_conversation_blocks(app: &AppState, theme: &Theme) -> Vec<MessageBlock> {
     let mut blocks: Vec<MessageBlock> = Vec::new();
-    // 首次启动（还没有任何回合）显示欢迎卡，替代“空面板 + 加载中噪声”。
-    // /help 浮层打开时不显示欢迎卡：浮层锚定在输入框上方，但欢迎卡仍占
+    // 首次启动（还没有任何回合）显示欢迎区，替代“空面板 + 加载中噪声”。
+    // /help 浮层打开时不显示欢迎区：浮层锚定在输入框上方，但欢迎区仍占
     // 对话区顶部，两者同屏显得拥挤（C1）。
     if app.conversation.turn_count() == 0 && !app.running && app.help_overlay.is_none() {
         blocks.push(welcome_block(app, theme));
@@ -241,34 +260,38 @@ pub fn build_conversation_blocks(app: &AppState, theme: &Theme) -> Vec<MessageBl
     let mut last_turn: Option<u64> = None;
     let mut agent_lines: Vec<Line<'static>> = Vec::new();
 
-    let flush_agent =
-        |blocks: &mut Vec<MessageBlock>, lines: &mut Vec<Line<'static>>, title: &str| {
-            if !lines.is_empty() {
-                blocks.push(MessageBlock {
-                    header: Some(title.to_string()),
-                    header_style: theme.agent,
-                    lines: std::mem::take(lines),
-                });
-            }
-        };
+    let flush_agent = |blocks: &mut Vec<MessageBlock>, lines: &mut Vec<Line<'static>>| {
+        if !lines.is_empty() {
+            blocks.push(MessageBlock {
+                lines: std::mem::take(lines),
+            });
+        }
+    };
 
     for (seg_id, seg) in app.conversation.iter_segments() {
         let (turn_id, _) = seg_id;
         if last_turn != Some(turn_id) {
             // 回合切换：落盘上一个 agent 块，开新用户块。
-            flush_agent(&mut blocks, &mut agent_lines, app.model_label.as_str());
+            flush_agent(&mut blocks, &mut agent_lines);
             last_turn = Some(turn_id);
             if let Some(user_text) = app.conversation.user_text_of(turn_id) {
-                let text = if app.display_mode == DisplayMode::Raw {
-                    format!("[user] {user_text}")
+                let mut lines: Vec<Line<'static>> = Vec::new();
+                // 回合间空行分隔（首个块前不加）。
+                if !blocks.is_empty() {
+                    lines.push(Line::default());
+                }
+                if app.display_mode == DisplayMode::Raw {
+                    lines.extend(span_lines(vec![Span::styled(
+                        format!("[user] {user_text}"),
+                        theme.user,
+                    )]));
                 } else {
-                    user_text.to_string()
-                };
-                blocks.push(MessageBlock {
-                    header: Some(app.tr.t(Key::RoleYou).to_string()),
-                    header_style: Style::default().fg(theme.accent),
-                    lines: span_lines(vec![Span::styled(text, theme.user)]),
-                });
+                    let mut body =
+                        span_lines(vec![Span::styled(user_text.to_string(), theme.user)]);
+                    prefix_lines(&mut body, "❯ ", "  ", theme.system);
+                    lines.extend(body);
+                }
+                blocks.push(MessageBlock { lines });
             }
         }
         let kind = seg.line_kind();
@@ -277,25 +300,16 @@ pub fn build_conversation_blocks(app: &AppState, theme: &Theme) -> Vec<MessageBl
             continue;
         }
         let folded = app.is_folded(seg_id, kind);
-        let base = if folded {
-            theme.system
+        let mut lines = if folded {
+            let summary = folded_summary(seg, app.tr);
+            let mut folded_lines = span_lines(vec![Span::styled(summary, theme.system)]);
+            if kind == LineKind::Tool {
+                prefix_lines(&mut folded_lines, "⏺ ", "  ", theme.system);
+            }
+            folded_lines
         } else {
-            theme.style_for(kind)
+            segment_lines(seg, app.display_mode, app.tr, theme)
         };
-        let text = if folded {
-            folded_summary(seg, app.tr)
-        } else {
-            segment_display_text(seg, app.display_mode, app.tr)
-        };
-        // diff 行级高亮仅限工具调用段（含结果预览）：代码改动信息（git
-        // diff 等）来自工具输出；模型正文不染色——正常聊天的回答里
-        // `+`/`-` 开头行（如 markdown 列表）不应被误判为 diff。
-        let spans = if !folded && kind == LineKind::Tool {
-            theme.diff_spans(&text, base)
-        } else {
-            vec![Span::styled(text, base)]
-        };
-        let mut lines = span_lines(spans);
         if app.selected == Some(seg_id) {
             for line in &mut lines {
                 *line = line.clone().patch_style(theme.selection);
@@ -316,37 +330,43 @@ pub fn build_conversation_blocks(app: &AppState, theme: &Theme) -> Vec<MessageBl
         )]));
     }
     if !app.conversation.pending_text().is_empty() {
-        let text = if app.display_mode == DisplayMode::Raw {
-            format!("[agent] {}", app.conversation.pending_text())
+        if app.display_mode == DisplayMode::Raw {
+            agent_lines.extend(span_lines(vec![Span::styled(
+                format!("[agent] {}", app.conversation.pending_text()),
+                theme.style_for(LineKind::Agent),
+            )]));
         } else {
-            app.conversation.pending_text().to_string()
-        };
-        agent_lines.extend(span_lines(vec![Span::styled(
-            text,
-            theme.style_for(LineKind::Agent),
-        )]));
+            agent_lines.extend(agent_marked_lines(
+                app.conversation.pending_text(),
+                theme.style_for(LineKind::Agent),
+                theme,
+            ));
+        }
     }
-    // 等待 agent 首批 delta：在对话区（agent 位置）显示转圈，
-    // 而不是只有输入框里的“等待响应”。
+    // 等待 agent 首批 delta：在对话区（agent 位置）显示转圈 + 随机动词
+    // + 已耗时间（Claude Code 风格），而不是只有输入框里的“等待响应”。
     if app.running
         && app.conversation.current().is_some()
         && app.conversation.pending_reasoning().is_empty()
         && app.conversation.pending_text().is_empty()
     {
-        let frame = app
-            .run_started_at
-            .map(|t| spinner_frame(t.elapsed()))
-            .unwrap_or_else(|| spinner_frame(std::time::Duration::ZERO));
+        let elapsed = app.run_started_at.map(|t| t.elapsed()).unwrap_or_default();
+        let frame = spinner_frame(elapsed);
+        let verb = thinking_verb(app.tr, elapsed);
         agent_lines.push(Line::from(Span::styled(
-            app.tr
-                .t_args(Key::ThinkingWait, &[("frame", &frame.to_string())]),
+            app.tr.t_args(
+                Key::ThinkingWait,
+                &[
+                    ("frame", &frame.to_string()),
+                    ("verb", verb),
+                    ("secs", &elapsed.as_secs().to_string()),
+                ],
+            ),
             theme.system,
         )));
     }
     if !agent_lines.is_empty() {
         blocks.push(MessageBlock {
-            header: Some(app.model_label.clone()),
-            header_style: theme.agent,
             lines: std::mem::take(&mut agent_lines),
         });
     }
@@ -359,18 +379,15 @@ pub fn build_conversation_blocks(app: &AppState, theme: &Theme) -> Vec<MessageBl
             ui.text.clone()
         };
         blocks.push(MessageBlock {
-            header: None,
-            header_style: Style::default(),
             lines: span_lines(vec![Span::styled(text, theme.style_for(ui.kind))]),
         });
     }
     blocks
 }
 
-/// 首次启动欢迎卡：仿 Hermes 风格的无边框圆角卡片，
-/// 替代“空空如也 + 一堆加载提示”的初始页面。
+/// 首次启动欢迎区：Claude Code 风格的简洁文字块（logo + 副标题 + 关键提示
+/// + 工作目录），无圆角卡片边框，替代“空空如也 + 一堆加载提示”的初始页面。
 fn welcome_block(app: &AppState, theme: &Theme) -> MessageBlock {
-    const W: usize = 50;
     let sessions = if app.sessions_loaded {
         app.tr.t_args(
             Key::WelcomeSessionsCount,
@@ -379,56 +396,46 @@ fn welcome_block(app: &AppState, theme: &Theme) -> MessageBlock {
     } else {
         app.tr.t(Key::WelcomeSessionsHint).to_string()
     };
-    let rule = "─".repeat(W);
-    let body = |s: &str| Span::styled(s.to_string(), theme.system);
-    let title = Span::styled(
-        "⌒ DeepseekNova",
-        Style::default()
-            .fg(theme.accent)
-            .add_modifier(Modifier::BOLD),
-    );
-    let welcome_row = |content: Vec<Span<'static>>| {
-        let text_width: usize = content.iter().map(|s| s.content.width()).sum();
-        let pad = (W + 2).saturating_sub(text_width + 3);
-        let mut spans = vec![Span::styled("│ ".to_string(), theme.border)];
-        spans.extend(content);
-        spans.push(Span::styled(format!("{}│", " ".repeat(pad)), theme.border));
-        Line::from(spans)
-    };
+    let cwd = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    let hint = |s: String| Line::from(Span::styled(s, theme.system));
     let lines = vec![
-        Line::from(Span::styled(format!("╭{rule}╮"), theme.border)),
-        welcome_row(vec![title]),
-        welcome_row(vec![body(app.tr.t(Key::WelcomeSubtitle))]),
-        Line::from(Span::styled(format!("│{}│", " ".repeat(W)), theme.border)),
-        welcome_row(vec![body(app.tr.t(Key::WelcomeHelp))]),
-        welcome_row(vec![body(app.tr.t(Key::WelcomeTips))]),
-        welcome_row(vec![body(&sessions)]),
-        Line::from(Span::styled(format!("╰{rule}╯"), theme.border)),
+        Line::from(vec![
+            Span::styled(
+                "⌒ ",
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "DeepseekNova",
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        hint(app.tr.t(Key::WelcomeSubtitle).to_string()),
+        Line::default(),
+        hint(app.tr.t(Key::WelcomeHelp).to_string()),
+        hint(app.tr.t(Key::WelcomeTips).to_string()),
+        hint(sessions),
+        hint(app.tr.t_args(Key::WelcomeCwd, &[("path", &cwd)])),
     ];
-    MessageBlock {
-        header: None,
-        header_style: Style::default(),
-        lines,
-    }
+    MessageBlock { lines }
 }
 
-/// 消息块在给定面板宽度下的物理高度：角色前缀行 1 行 + 内容 wrap 行数。
-/// 无前缀块（echo）只算内容。
+/// 消息块在给定面板宽度下的物理高度（内容 wrap 行数）。
 ///
 /// 高度估算必须与 [`render_blocks`] 的渲染宽度一致（无边框全宽 Paragraph）：
 /// 若估算按 `width - 2` 折行，内容宽度落在 `(w-2, w]` 区间时估算高 1 行，
 /// 块与块之间会留下实际空白行——视觉上就是「两轮对话间隔过大」。
 pub fn block_height(block: &MessageBlock, width: usize) -> usize {
-    let inner = estimate_wrapped_lines(&block.lines, width.max(1)).max(1);
-    if block.header.is_some() {
-        inner + 1
-    } else {
-        inner
-    }
+    estimate_wrapped_lines(&block.lines, width.max(1)).max(1)
 }
 
 /// 对话区叠放渲染：按 `offset`（物理行）裁剪可见窗口，逐块绘制。
-/// 每块一个独立 Paragraph（无边框，角色前缀行 + 内容），块内用 `scroll`
+/// 每块一个独立 Paragraph（无边框，内容行自带 ❯/⏺ 前缀），块内用 `scroll`
 /// 跳过窗口上方的行，与整区滚动语义一致。
 pub fn render_blocks(f: &mut Frame, area: Rect, blocks: &[MessageBlock], offset: usize) {
     let pane_width = area.width as usize;
@@ -458,41 +465,35 @@ pub fn render_blocks(f: &mut Frame, area: Rect, blocks: &[MessageBlock], offset:
             width: area.width,
             height: height as u16,
         };
-        let mut paragraph = Paragraph::new(block.lines.clone()).wrap(Wrap { trim: false });
-        // 角色前缀行：作为内容首行渲染（无边框），前缀行样式 = header_style。
-        if let Some(header) = &block.header {
-            // 前缀行右侧铺一条细分隔线（Hermes 式卡片头），让会话归属更醒目。
-            let header_w = header.width();
-            let sep_len = area.width.saturating_sub(header_w as u16).saturating_sub(3) as usize;
-            let mut lines = vec![Line::from(vec![
-                Span::styled(format!("{header}:"), block.header_style),
-                Span::styled(
-                    format!(" {}", "─".repeat(sep_len)),
-                    block.header_style.add_modifier(Modifier::DIM),
-                ),
-            ])];
-            lines.extend(block.lines.clone());
-            paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
-        }
-        paragraph = paragraph.scroll((skip_in_block as u16, 0));
+        let paragraph = Paragraph::new(block.lines.clone())
+            .wrap(Wrap { trim: false })
+            .scroll((skip_in_block as u16, 0));
         f.render_widget(paragraph, rect);
         y += bh;
     }
 }
 
-/// 段 → 显示文本（展开态，含 Raw 前缀与工具调用内联）。
-/// 验证行文案按 `tr` 语言取词表。
-fn segment_display_text(seg: &Segment, mode: DisplayMode, tr: Tr) -> String {
-    let raw = |kind: LineKind, text: String| -> String {
-        if mode == DisplayMode::Raw {
+/// 段 → 显示行组（展开态，Claude Code 风格 ⏺/⎿ 标记；Raw 模式退化为
+/// `[kind]` 纯文本前缀，便于复制与解析）。验证行文案按 `tr` 语言取词表。
+fn segment_lines(seg: &Segment, mode: DisplayMode, tr: Tr, theme: &Theme) -> Vec<Line<'static>> {
+    let raw_mode = mode == DisplayMode::Raw;
+    let plain = |kind: LineKind, text: String, style: Style| -> Vec<Line<'static>> {
+        let text = if raw_mode {
             format!("[{}] {text}", kind_tag(kind))
         } else {
             text
-        }
+        };
+        span_lines(vec![Span::styled(text, style)])
     };
     match seg {
-        Segment::Reasoning { text } => raw(LineKind::Reasoning, text.clone()),
-        Segment::Text { text } => raw(LineKind::Agent, text.clone()),
+        Segment::Reasoning { text } => plain(LineKind::Reasoning, text.clone(), theme.reasoning),
+        Segment::Text { text } => {
+            if raw_mode {
+                plain(LineKind::Agent, text.clone(), theme.agent)
+            } else {
+                agent_marked_lines(text, theme.agent, theme)
+            }
+        }
         Segment::ToolCall {
             name,
             arguments,
@@ -500,18 +501,35 @@ fn segment_display_text(seg: &Segment, mode: DisplayMode, tr: Tr) -> String {
             status,
             ..
         } => {
-            let status_mark = match status {
-                crate::model::conversation::ToolStatus::Running => "…",
-                crate::model::conversation::ToolStatus::Ok => "✓",
-                crate::model::conversation::ToolStatus::Failed => "✗",
-            };
-            let head = format!("⚙ {status_mark} {name}({arguments})");
-            let mut text = raw(LineKind::Tool, head);
-            if let Some(r) = result {
-                text.push('\n');
-                text.push_str(&raw(LineKind::ToolResult, format!("  → {r}")));
+            use crate::model::conversation::ToolStatus;
+            if raw_mode {
+                let mut lines = plain(LineKind::Tool, format!("{name}({arguments})"), theme.tool);
+                if let Some(r) = result {
+                    lines.extend(plain(LineKind::ToolResult, r.clone(), theme.tool_result));
+                }
+                return lines;
             }
-            text
+            // ⏺ 颜色编码状态：运行中=dim、成功=accent、失败=红。
+            let dot_style = match status {
+                ToolStatus::Running => theme.system,
+                ToolStatus::Ok => Style::default().fg(theme.accent),
+                ToolStatus::Failed => theme.verification_fail,
+            };
+            let mut lines = vec![Line::from(vec![
+                Span::styled("⏺ ", dot_style),
+                Span::styled(name.clone(), Style::default()),
+                Span::styled(format!("({arguments})"), theme.tool),
+            ])];
+            if let Some(r) = result {
+                // diff 行级高亮作用于干净结果文本（不含 UI 前缀）：代码改动
+                // 信息（git diff 等）来自工具输出；模型正文不染色——正常聊天
+                // 的回答里 `+`/`-` 开头行（如 markdown 列表）不应被误判为 diff。
+                let styled = theme.diff_spans(r, theme.tool_result);
+                let mut body = span_lines(styled);
+                prefix_lines(&mut body, "  ⎿  ", "     ", theme.system);
+                lines.extend(body);
+            }
+            lines
         }
         Segment::Verification {
             command,
@@ -530,7 +548,8 @@ fn segment_display_text(seg: &Segment, mode: DisplayMode, tr: Tr) -> String {
                     &[("mark", mark), ("command", command), ("summary", summary)],
                 )
             };
-            raw(LineKind::Verification { passed: *passed }, text)
+            let kind = LineKind::Verification { passed: *passed };
+            plain(kind, text, theme.style_for(kind))
         }
         Segment::System { kind, text } => {
             let line_kind = match kind {
@@ -539,7 +558,7 @@ fn segment_display_text(seg: &Segment, mode: DisplayMode, tr: Tr) -> String {
                 crate::model::conversation::SystemKind::Approval
                 | crate::model::conversation::SystemKind::Info => LineKind::System,
             };
-            raw(line_kind, text.clone())
+            plain(line_kind, text.clone(), theme.style_for(line_kind))
         }
     }
 }
@@ -656,8 +675,8 @@ impl AppState {
         let input_area = chunks[2];
         let hint_area = chunks[3];
 
-        // 消息块布局：用户/agent 各带边框标题，归属一眼可辨。
-        // 先估算总物理高度（含边框）再钳制滚动。
+        // 消息块布局：无边框无角色头（Claude Code 风格），归属靠 ❯/⏺ 标记。
+        // 先估算总物理高度再钳制滚动。
         let blocks = crate::render::message::build_conversation_blocks(self, &theme);
         let pane_width = conv_area.width as usize;
         self.rendered_lines = blocks
@@ -669,15 +688,9 @@ impl AppState {
         crate::render::message::render_blocks(f, conv_area, &blocks, self.scroll_offset);
 
         // ── 状态行 ────────────────────────────────────────
-        let scroll_pct = if self.render_line_count() == 0 {
-            0
-        } else {
-            self.scroll_offset * 100 / self.render_line_count()
-        };
         let status = Paragraph::new(crate::render::status::fit_status_line(
             self,
             &theme,
-            scroll_pct,
             status_area.width as usize,
         ));
         f.render_widget(status, status_area);
@@ -810,7 +823,7 @@ mod tests {
             result: Some("hit".into()),
             status: ToolStatus::Ok,
         };
-        assert_eq!(segment_plain_text(&tool, tr), "[✓] grep(x)\n  → hit");
+        assert_eq!(segment_plain_text(&tool, tr), "⏺ grep(x)\n  ⎿  hit");
         // 验证行走词表：英文默认 / 中文可选。
         let ver = Segment::Verification {
             command: "cargo check".into(),
@@ -837,9 +850,19 @@ mod tests {
         let theme = Theme::default();
         let blocks = build_conversation_blocks(&app, &theme);
         assert_eq!(blocks.len(), 3, "用户块 + agent 块 + echo 块");
-        assert_eq!(blocks[0].header.as_deref(), Some("你"));
-        assert!(block_texts(&blocks[0]).iter().any(|t| t.contains("问题")));
-        assert!(block_texts(&blocks[1]).iter().any(|t| t.contains("答案")));
+        // Claude Code 风格：用户块 `❯ ` 前缀、agent 块 `⏺ ` 前缀，无角色头。
+        let user_texts = block_texts(&blocks[0]);
+        assert!(
+            user_texts.iter().any(|t| t == "❯ "),
+            "用户块 ❯ 前缀: {user_texts:?}"
+        );
+        assert!(user_texts.iter().any(|t| t.contains("问题")));
+        let agent_texts = block_texts(&blocks[1]);
+        assert!(
+            agent_texts.iter().any(|t| t == "⏺ "),
+            "agent 块 ⏺ 前缀: {agent_texts:?}"
+        );
+        assert!(agent_texts.iter().any(|t| t.contains("答案")));
         assert!(block_texts(&blocks[2]).iter().any(|t| t.contains("已处理")));
     }
 
@@ -1052,9 +1075,9 @@ mod tests {
 
     #[test]
     fn tool_result_keeps_diff_highlight() {
-        // 工具调用默认折叠；显式展开后 diff 染色可见。
+        // 工具调用默认展开（Claude Code 风格），diff 染色直接可见。
         let mut app = AppState::default();
-        let id = app.conversation.begin_turn("q".into());
+        app.conversation.begin_turn("q".into());
         app.apply_run_event(RunEvent::ToolCallStart {
             id: "1".into(),
             name: "git".into(),
@@ -1064,8 +1087,6 @@ mod tests {
             result: "+fn new() {}\n-fn old() {}".into(),
         });
         app.apply_run_event(RunEvent::Done(done_output("")));
-        // 工具段是当前回合第 0 段。
-        app.fold.insert((id, 0), false);
         let theme = Theme::default();
         let blocks = build_conversation_blocks(&app, &theme);
         let tool_block = &blocks[1];
@@ -1078,18 +1099,22 @@ mod tests {
         assert_eq!(
             plus_span.unwrap().style.fg,
             Some(theme.verification_ok.fg.unwrap_or(Color::Green)),
-            "工具结果 + 行按 diff 染色（剥掉 `  → ` 前缀后判定）"
+            "工具结果 + 行按 diff 染色（⎿ 前缀在独立 span，不参与判定）"
         );
+        // 结果树前缀：首行 `  ⎿  `、续行缩进对齐。
+        let texts = block_texts(tool_block);
+        assert!(texts.iter().any(|t| t == "  ⎿  "), "结果 ⎿ 前缀: {texts:?}");
     }
 
     #[test]
-    fn tool_call_folds_by_default() {
-        // 工具调用默认折叠为摘要行，agent 输出保持整洁。
+    fn tool_call_expands_by_default() {
+        // 工具调用默认展开（Claude Code 风格）：⏺ 头 + ⎿ 结果直接可见；
+        // 显式折叠后退化为摘要行。
         let mut app = AppState {
             tr: Tr::new(crate::i18n::Lang::Zh),
             ..Default::default()
         };
-        app.conversation.begin_turn("q".into());
+        let id = app.conversation.begin_turn("q".into());
         app.apply_run_event(RunEvent::ToolCallStart {
             id: "1".into(),
             name: "grep".into(),
@@ -1102,7 +1127,18 @@ mod tests {
         let theme = Theme::default();
         let blocks = build_conversation_blocks(&app, &theme);
         let texts: String = blocks.iter().flat_map(block_texts).collect();
-        assert!(texts.contains("工具 ▸ grep 已折叠"), "工具默认折叠摘要");
+        assert!(texts.contains("⏺ grep("), "工具默认展开为 ⏺ 头: {texts}");
+        assert!(texts.contains("  ⎿  "), "结果带 ⎿ 前缀: {texts}");
+        assert!(texts.contains(&"a".repeat(400)), "展开态显示截断结果");
+
+        // 显式折叠后回退摘要行（⏺ + 折叠摘要）。
+        app.fold.insert((id, 0), true);
+        let blocks = build_conversation_blocks(&app, &theme);
+        let texts: String = blocks.iter().flat_map(block_texts).collect();
+        assert!(
+            texts.contains("工具 ▸ grep 已折叠"),
+            "显式折叠摘要: {texts}"
+        );
         assert!(!texts.contains(&"a".repeat(500)), "折叠态不显示结果");
     }
 
@@ -1113,16 +1149,17 @@ mod tests {
         let blocks = build_conversation_blocks(&app, &theme);
         assert!(!blocks.is_empty());
         let texts: String = blocks.iter().flat_map(block_texts).collect();
-        assert!(texts.contains("DeepseekNova"), "欢迎卡标题: {texts}");
-        assert!(texts.contains('⌒'), "欢迎卡圆顶字形: {texts}");
-        assert!(texts.contains("/help"), "欢迎卡命令提示: {texts}");
-        assert!(texts.contains('╭'), "欢迎卡圆角边框: {texts}");
+        assert!(texts.contains("DeepseekNova"), "欢迎区标题: {texts}");
+        assert!(texts.contains('⌒'), "欢迎区圆顶字形: {texts}");
+        assert!(texts.contains("/help"), "欢迎区命令提示: {texts}");
+        // Claude Code 式简洁欢迎区：无圆角卡片边框。
+        assert!(!texts.contains('╭'), "欢迎区不再带圆角边框: {texts}");
 
         let mut app = AppState::default();
         app.conversation.begin_turn("你好".into());
         let blocks = build_conversation_blocks(&app, &theme);
         let texts: String = blocks.iter().flat_map(block_texts).collect();
-        assert!(!texts.contains("DeepseekNova"), "首轮开始后欢迎卡消失");
+        assert!(!texts.contains("DeepseekNova"), "首轮开始后欢迎区消失");
     }
 
     #[test]
@@ -1137,15 +1174,37 @@ mod tests {
         app.conversation.begin_turn("q".into());
         let blocks = build_conversation_blocks(&app, &theme);
         let texts: String = blocks.iter().flat_map(block_texts).collect();
-        assert!(texts.contains("正在思考"), "对话区等待提示: {texts}");
+        // Claude Code 风格：spinner + 随机动词 + 已耗时间（350ms → 动词表首项「思考」，0s）。
+        assert!(texts.contains("思考…（0s"), "对话区等待提示: {texts}");
         assert!(texts.contains('⠸'), "350ms 推进到第 3 帧: {texts}");
 
         // 首批文本到达后，等待提示消失、正文出现。
         app.apply_run_event(RunEvent::TextDelta("hi".into()));
         let blocks = build_conversation_blocks(&app, &theme);
         let texts: String = blocks.iter().flat_map(block_texts).collect();
-        assert!(!texts.contains("正在思考"), "有内容后不再显示等待");
+        assert!(!texts.contains("思考…"), "有内容后不再显示等待");
         assert!(texts.contains("hi"));
+        assert!(texts.contains("⏺"), "流式正文带 ⏺ 前缀: {texts}");
+    }
+
+    #[test]
+    fn thinking_verb_rotates_every_four_seconds() {
+        let tr = Tr::new(crate::i18n::Lang::En);
+        assert_eq!(thinking_verb(tr, std::time::Duration::ZERO), "Thinking");
+        assert_eq!(
+            thinking_verb(tr, std::time::Duration::from_secs(4)),
+            "Pondering",
+            "4s 轮转到下一个动词"
+        );
+        assert_eq!(
+            thinking_verb(tr, std::time::Duration::from_millis(3999)),
+            "Thinking",
+            "4s 内动词稳定"
+        );
+        let tr_zh = Tr::new(crate::i18n::Lang::Zh);
+        assert_eq!(thinking_verb(tr_zh, std::time::Duration::ZERO), "思考");
+        // 词表长度取模循环，不越界。
+        let _ = thinking_verb(tr, std::time::Duration::from_secs(3600));
     }
 
     #[test]
@@ -1190,20 +1249,16 @@ mod tests {
     }
 
     #[test]
-    fn block_height_counts_borders() {
-        // 带前缀块：前缀 1 行 + 内容行；无前缀块：仅内容行。
+    fn block_height_counts_content_only() {
+        // 无角色头（Claude Code 风格）：块高 = 内容行数。
         let block = MessageBlock {
-            header: Some("你".into()),
-            header_style: Style::default(),
             lines: vec![Line::from(Span::raw("abc"))],
         };
-        assert_eq!(block_height(&block, 10), 2);
-        let echo = MessageBlock {
-            header: None,
-            header_style: Style::default(),
-            lines: vec![Line::from(Span::raw("abc"))],
+        assert_eq!(block_height(&block, 10), 1);
+        let two = MessageBlock {
+            lines: vec![Line::from(Span::raw("abc")), Line::from(Span::raw("def"))],
         };
-        assert_eq!(block_height(&echo, 10), 1);
+        assert_eq!(block_height(&two, 10), 2);
     }
 
     #[test]
@@ -1213,31 +1268,23 @@ mod tests {
         // 块之间留下空白行（两轮对话间隔过大的观感来源）。
         // 宽 10 面板 + 9 列内容：按 10 折行 = 1 行，按 8 折行 = 2 行。
         let block = MessageBlock {
-            header: Some("你".into()),
-            header_style: Style::default(),
             lines: vec![Line::from(Span::raw("123456789"))],
         };
-        assert_eq!(block_height(&block, 10), 2, "前缀 1 + 内容 1，无幽灵行");
-        // 与 render_blocks 的裁剪一致性：两轮对话 4 块的总高应等于逐块和。
+        assert_eq!(block_height(&block, 10), 1, "9 列内容宽 10 面板 1 行");
+        // 与 render_blocks 的裁剪一致性：多块的总高应等于逐块和。
         let blocks = [
             MessageBlock {
-                header: Some("你".into()),
-                header_style: Style::default(),
                 lines: vec![Line::from(Span::raw("123456789"))],
             },
             MessageBlock {
-                header: Some("m".into()),
-                header_style: Style::default(),
                 lines: vec![Line::from(Span::raw("123456789"))],
             },
             MessageBlock {
-                header: Some("你".into()),
-                header_style: Style::default(),
                 lines: vec![Line::from(Span::raw("x"))],
             },
         ];
         let total: usize = blocks.iter().map(|b| block_height(b, 10)).sum();
-        assert_eq!(total, 2 + 2 + 2, "估算总高不得凭空多出行");
+        assert_eq!(total, 1 + 1 + 1, "估算总高不得凭空多出行");
     }
 
     #[test]
@@ -1246,28 +1293,22 @@ mod tests {
         // 否则"看不到新消息"。用 TestBackend 实测 ratatui 渲染结果。
         let blocks = vec![
             MessageBlock {
-                header: Some("你".into()),
-                header_style: Style::default(),
-                lines: vec![Line::from(Span::raw("第一轮问题"))],
+                lines: vec![Line::from(Span::raw("❯ 第一轮问题"))],
             },
             MessageBlock {
-                header: Some("default".into()),
-                header_style: Style::default(),
-                lines: vec![Line::from(Span::raw("第一轮回答".repeat(100)))],
+                lines: vec![Line::from(Span::raw(
+                    "⏺ ".to_string() + &"第一轮回答".repeat(100),
+                ))],
             },
             MessageBlock {
-                header: Some("你".into()),
-                header_style: Style::default(),
-                lines: vec![Line::from(Span::raw("第二轮问题"))],
+                lines: vec![Line::from(Span::raw("❯ 第二轮问题"))],
             },
             MessageBlock {
-                header: Some("default".into()),
-                header_style: Style::default(),
-                lines: vec![Line::from(Span::raw("第二轮回答尾部标记"))],
+                lines: vec![Line::from(Span::raw("⏺ 第二轮回答尾部标记"))],
             },
         ];
         let total: usize = blocks.iter().map(|b| block_height(b, 40)).sum();
-        assert!(total > 30, "构造内容需超过测试视口");
+        assert!(total > 10, "构造内容需超过测试视口");
         let buf = ratatui::backend::TestBackend::new(40, 10);
         let mut terminal = ratatui::Terminal::new(buf).unwrap();
         // 滚到接近底部：最后一个块的尾部标记必须可见。

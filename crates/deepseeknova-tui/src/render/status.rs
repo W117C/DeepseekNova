@@ -11,34 +11,31 @@ use crate::i18n::{Key, Tr};
 use crate::theme::Theme;
 
 /// 状态行分段优先级（数字越大越先保留）。宽度不足时按此顺序丢弃：
-/// 先丢 usage 明细 → lines → turn → 折叠 → 成本 → ctx → 模型/运行态 → 退出警示。
+/// 先丢 ctx → 模型/运行态/权限模式 → 退出警示。
+/// Claude Code 风格精简：只保留运行态 + 模型 + ctx 占用 + 权限模式 +
+/// 退出警示；成本/turn/usage/lines 等明细挪到 `/cost` 等命令查看。
 const PRIO_QUIT: u8 = 10;
 const PRIO_MODEL: u8 = 9;
 const PRIO_MODE: u8 = 9;
 const PRIO_CTX: u8 = 8;
-const PRIO_COST: u8 = 7;
-const PRIO_FOLD: u8 = 6;
-const PRIO_TURN: u8 = 5;
-const PRIO_USAGE: u8 = 4;
-const PRIO_LINES: u8 = 3;
 
-/// 状态行分段（仪表盘式，3 组信息，语义色分层）：
+/// 状态行分段（Claude Code 风格精简，语义色分层）：
 /// 1) 运行态 + 模型（主信息，accent/bold）
-/// 2) token 预算条 + 成本（资源，阈值变色）
-/// 3) 计数（turn/usage/lines，dim 静默）
+/// 2) token 预算条（资源，阈值变色）
+/// 3) 权限模式（安全相关，窄终端优先保留）
 ///
 /// 仅测试使用：生产渲染走 [`fit_status_line`]（宽度感知）。保留裸段构造
 /// 供测试直接断言各段内容与样式。
 #[cfg(test)]
-pub fn status_segments(app: &AppState, theme: &Theme, scroll_pct: usize) -> Vec<Span<'static>> {
-    tagged_segments(app, theme, scroll_pct)
+pub fn status_segments(app: &AppState, theme: &Theme) -> Vec<Span<'static>> {
+    tagged_segments(app, theme)
         .into_iter()
         .map(|(_, s)| s)
         .collect()
 }
 
 /// 带优先级的 segment 构建（fit 与直接展示共用，避免两份逻辑漂移）。
-fn tagged_segments(app: &AppState, theme: &Theme, scroll_pct: usize) -> Vec<(u8, Span<'static>)> {
+fn tagged_segments(app: &AppState, theme: &Theme) -> Vec<(u8, Span<'static>)> {
     let dim = Style::default().add_modifier(Modifier::DIM);
     let mut segments = Vec::new();
     // ── 组 1：运行态 + 模型 ──────────────────────────────
@@ -64,7 +61,7 @@ fn tagged_segments(app: &AppState, theme: &Theme, scroll_pct: usize) -> Vec<(u8,
                 .add_modifier(Modifier::BOLD),
         ),
     ));
-    // ── 组 2：token 预算条 + 成本 ────────────────────────
+    // ── 组 2：token 预算条 ──────────────────────────────
     if let Some((used, window)) = app.context_usage {
         let pct = used.saturating_mul(100).checked_div(window).unwrap_or(0);
         let style = if pct >= 95 {
@@ -96,18 +93,6 @@ fn tagged_segments(app: &AppState, theme: &Theme, scroll_pct: usize) -> Vec<(u8,
             ),
         ));
     }
-    if let Some(cost) = app.total_cost_usd {
-        segments.push((PRIO_COST, Span::styled(format!(" │ ${cost:.4}"), dim)));
-    }
-    // 折叠模式指示：/fold all|none|reset 后用户能一眼看到当前状态。
-    segments.push((
-        PRIO_FOLD,
-        Span::styled(
-            app.tr
-                .t_args(Key::FoldIndicator, &[("state", app.tr.t(app.fold_label()))]),
-            dim,
-        ),
-    ));
     // 权限模式预设指示：高优先级（安全相关，窄终端优先保留）。
     // gate 未注入（permission_mode=None）时不显示。
     if let Some(mode) = app.permission_mode {
@@ -126,42 +111,6 @@ fn tagged_segments(app: &AppState, theme: &Theme, scroll_pct: usize) -> Vec<(u8,
             ),
         ));
     }
-    // ── 组 3：计数（静默） ───────────────────────────────
-    segments.push((
-        PRIO_TURN,
-        Span::styled(format!(" │ turn {}", app.turn), dim),
-    ));
-    if let Some(u) = &app.usage {
-        segments.push((
-            PRIO_USAGE,
-            Span::styled(
-                app.tr.t_args(
-                    Key::UsageDetail,
-                    &[
-                        ("up", &u.prompt_tokens.to_string()),
-                        ("down", &u.completion_tokens.to_string()),
-                        ("total", &u.total_tokens.to_string()),
-                        ("reasoning", &u.reasoning_tokens.to_string()),
-                        ("hit", &u.cache_hit_tokens.to_string()),
-                    ],
-                ),
-                dim,
-            ),
-        ));
-    }
-    segments.push((
-        PRIO_LINES,
-        Span::styled(
-            app.tr.t_args(
-                Key::LinesIndicator,
-                &[
-                    ("lines", &app.render_line_count().to_string()),
-                    ("scroll", &scroll_pct.to_string()),
-                ],
-            ),
-            dim,
-        ),
-    ));
     // 退出确认警示（最高优先级，红色加粗）。
     if app.quit_armed {
         segments.push((
@@ -185,13 +134,8 @@ fn tagged_segments(app: &AppState, theme: &Theme, scroll_pct: usize) -> Vec<(u8,
 ///
 /// 参考 Codex footer 的"回退链"：教学性/次要信息最先牺牲，最后只留
 /// 运行态 + 模型（+ 退出警示），避免窄终端上静默截断丢失关键信息。
-pub fn fit_status_line(
-    app: &AppState,
-    theme: &Theme,
-    scroll_pct: usize,
-    width: usize,
-) -> Line<'static> {
-    let mut segs = tagged_segments(app, theme, scroll_pct);
+pub fn fit_status_line(app: &AppState, theme: &Theme, width: usize) -> Line<'static> {
+    let mut segs = tagged_segments(app, theme);
     let total: usize = segs.iter().map(|(_, s)| s.content.width()).sum();
     if total <= width.max(1) {
         return Line::from(segs.into_iter().map(|(_, s)| s).collect::<Vec<_>>());
@@ -317,7 +261,7 @@ mod tests {
             tr: Tr::new(crate::i18n::Lang::Zh),
             ..Default::default()
         };
-        let segments = status_segments(&app, &theme, 0);
+        let segments = status_segments(&app, &theme);
         // 组 1：运行态圆点 + 模型名（accent bold）。
         assert_eq!(segments[0].content, "○");
         assert!(segments[0].style.add_modifier.contains(Modifier::DIM));
@@ -326,14 +270,13 @@ mod tests {
             .find(|s| s.style.fg == Some(theme.accent))
             .expect("模型 span（accent）存在");
         assert!(model.style.add_modifier.contains(Modifier::BOLD));
-        // 计数段 dim。
-        let turn = segments
-            .iter()
-            .find(|s| s.content.contains("turn"))
-            .unwrap();
-        assert!(turn.style.add_modifier.contains(Modifier::DIM));
-        // 折叠模式指示：默认态也要显示。
-        assert!(segments.iter().any(|s| s.content.contains("折叠 默认")));
+        // Claude Code 风格精简：成本/折叠/turn/usage/lines 不再进状态行。
+        for removed in ["turn", "折叠", "$", "lines"] {
+            assert!(
+                !segments.iter().any(|s| s.content.contains(removed)),
+                "状态行不再含 {removed} 段"
+            );
+        }
     }
 
     #[test]
@@ -361,7 +304,7 @@ mod tests {
             context_usage: Some((30_000, 100_000)),
             ..Default::default()
         };
-        let segments = status_segments(&app, &theme, 0);
+        let segments = status_segments(&app, &theme);
         let ctx = segments
             .iter()
             .find(|s| s.content.contains("30%"))
@@ -378,7 +321,7 @@ mod tests {
             context_usage: Some((85_000, 100_000)),
             ..Default::default()
         };
-        let segments = status_segments(&app, &theme, 0);
+        let segments = status_segments(&app, &theme);
         let ctx = segments.iter().find(|s| s.content.contains("85%")).unwrap();
         assert_eq!(ctx.style.fg, Some(ratatui::style::Color::Yellow));
 
@@ -387,13 +330,13 @@ mod tests {
             context_usage: Some((97_000, 100_000)),
             ..Default::default()
         };
-        let segments = status_segments(&app, &theme, 0);
+        let segments = status_segments(&app, &theme);
         let ctx = segments.iter().find(|s| s.content.contains("97%")).unwrap();
         assert_eq!(ctx.style.fg, theme.verification_fail.fg);
 
         // 无 context_usage：不渲染 ctx 段。
         let app = AppState::default();
-        let segments = status_segments(&app, &theme, 0);
+        let segments = status_segments(&app, &theme);
         assert!(!segments.iter().any(|s| s.content.contains('█')));
     }
 
@@ -402,7 +345,7 @@ mod tests {
         let theme = Theme::default();
         // 未注入 gate（None）→ 不显示权限段。
         let app = AppState::default();
-        let segments = status_segments(&app, &theme, 0);
+        let segments = status_segments(&app, &theme);
         assert!(!segments.iter().any(|s| s.content.contains("perm")));
         // accept_edits → 显示。
         let app = AppState {
@@ -410,7 +353,7 @@ mod tests {
             tr: Tr::new(crate::i18n::Lang::En),
             ..Default::default()
         };
-        let segments = status_segments(&app, &theme, 0);
+        let segments = status_segments(&app, &theme);
         let mode = segments
             .iter()
             .find(|s| s.content.contains("perm"))
@@ -422,7 +365,7 @@ mod tests {
             tr: Tr::new(crate::i18n::Lang::Zh),
             ..Default::default()
         };
-        let segments = status_segments(&app, &theme, 0);
+        let segments = status_segments(&app, &theme);
         let mode = segments
             .iter()
             .find(|s| s.content.contains("权限"))
@@ -456,7 +399,7 @@ mod tests {
             context_usage: Some((46_000, 100_000)),
             ..Default::default()
         };
-        let segments = status_segments(&app, &theme, 0);
+        let segments = status_segments(&app, &theme);
         let ctx = segments.iter().find(|s| s.content.contains("46%")).unwrap();
         assert!(ctx.content.contains('█'), "预算条渲染: {}", ctx.content);
         assert!(ctx.content.contains("46%"));
@@ -483,34 +426,34 @@ mod tests {
             ..Default::default()
         };
 
-        // 宽裕：全量可见。
-        let wide = fit_status_line(&app, &theme, 0, 400);
+        // 宽裕：核心段全量可见（精简后成本/turn/usage/lines 不进状态行）。
+        let wide = fit_status_line(&app, &theme, 400);
         let wide_text = wide.to_string();
-        assert!(wide_text.contains("lines 30"), "宽行含 lines: {wide_text}");
-        assert!(wide_text.contains("缓存hit"));
+        assert!(wide_text.contains("deepseek-v4-flash-0731"));
+        assert!(wide_text.contains("ctx"), "宽行含 ctx: {wide_text}");
+        assert!(
+            !wide_text.contains("lines 30"),
+            "宽行也不含 lines: {wide_text}"
+        );
+        assert!(
+            !wide_text.contains("缓存hit"),
+            "宽行也不含 usage: {wide_text}"
+        );
 
-        // 收窄到 ~70 列：丢 usage 明细、lines、cost、turn，保留 model/ctx。
-        let narrow = fit_status_line(&app, &theme, 0, 70);
+        // 收窄：先丢 ctx，保留运行态 + 模型。
+        let narrow = fit_status_line(&app, &theme, 30);
         let narrow_text = narrow.to_string();
-        assert!(
-            !narrow_text.contains("缓存hit"),
-            "窄行应已丢 usage 明细: {narrow_text}"
-        );
-        assert!(
-            !narrow_text.contains("lines 30"),
-            "窄行应已丢 lines: {narrow_text}"
-        );
         assert!(
             narrow_text.contains("deepseek-v4-flash-0731"),
             "模型必须保留: {narrow_text}"
         );
         assert!(
-            narrow_text.contains("ctx"),
-            "ctx 预算段优先保留: {narrow_text}"
+            !narrow_text.contains("ctx"),
+            "窄行应已丢 ctx 预算段: {narrow_text}"
         );
 
         // 极窄：只留运行态 + 模型（+ 省略号），不出现截断空白。
-        let tiny = fit_status_line(&app, &theme, 0, 12);
+        let tiny = fit_status_line(&app, &theme, 12);
         let tiny_text = tiny.to_string();
         assert!(
             tiny_text.contains("deepseek-v4-flash-0731") || tiny_text.contains("…"),
