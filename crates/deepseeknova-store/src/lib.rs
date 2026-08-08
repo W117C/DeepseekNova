@@ -26,6 +26,10 @@ pub struct StoredTurn {
     pub output: Option<StoredOutput>,
     /// All messages exchanged during this turn.
     pub messages: Vec<StoredMessage>,
+    /// 工作区根路径（会话所在项目；`None` = 全局/未知）。serde default
+    /// 保持旧会话文件可读（v0.5.x 前的 JSONL 无此字段）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -203,6 +207,7 @@ impl SessionStore {
                 turns: turns.len(),
                 updated_at_ms,
                 title,
+                workspace: turns.first().and_then(|t| t.workspace.clone()),
             });
         }
         summaries.sort_by_key(|s| std::cmp::Reverse(s.updated_at_ms));
@@ -227,6 +232,19 @@ impl SessionStore {
         };
         let prompt = turn.input.prompt.replace(['\n', '\r'], "");
         prompt.chars().take(max_chars).collect()
+    }
+
+    /// 会话的工作区根路径：读**首行**回合的 `workspace` 字段。轻量替代
+    /// [`Self::list_summaries`]（TUI 侧边栏按工作区分组用）。空/损坏/不存在
+    /// 返回 `None`（旧格式会话无 workspace 字段）。
+    pub fn session_workspace(&self, session_id: &str) -> Option<String> {
+        let path = self.session_path(session_id);
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            return None;
+        };
+        let first = content.lines().find(|l| !l.trim().is_empty())?;
+        let turn: StoredTurn = serde_json::from_str(first).ok()?;
+        turn.workspace
     }
 
     /// 会话 id + 首句预览（TUI 侧边栏用），最新优先。
@@ -258,6 +276,18 @@ impl SessionStore {
         messages: Vec<Message>,
         output: Option<StoredOutput>,
     ) -> StoredTurn {
+        Self::build_turn_with_workspace(input, turn_number, messages, output, None)
+    }
+
+    /// [`Self::build_turn`] + 记录工作区根路径（会话聚合/按项目查看用）。
+    /// `None` 表示未知/全局会话。
+    pub fn build_turn_with_workspace(
+        input: &RunInput,
+        turn_number: u64,
+        messages: Vec<Message>,
+        output: Option<StoredOutput>,
+        workspace: Option<&str>,
+    ) -> StoredTurn {
         StoredTurn {
             turn: turn_number,
             timestamp: chrono::Utc::now().to_rfc3339(),
@@ -278,6 +308,7 @@ impl SessionStore {
                     reasoning_content: m.reasoning_content,
                 })
                 .collect(),
+            workspace: workspace.map(str::to_string),
         }
     }
 }
@@ -294,6 +325,9 @@ pub struct SessionSummary {
     /// First turn's prompt truncated to 80 chars; `None` for empty sessions.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// 工作区根路径（首回合记录；`None` = 旧会话/未知）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
 }
 
 /// Generate a fresh chat session id of the form `chat-YYYYMMDD-HHMMSS` (UTC).
@@ -533,6 +567,39 @@ mod tests {
 
         let _ = store.delete("pv");
         let _ = store.delete("pv-old");
+    }
+
+    #[test]
+    fn workspace_round_trips_and_defaults_to_none() {
+        let root = test_root();
+        let store = SessionStore::new(root.clone()).unwrap();
+        let input = RunInput {
+            prompt: "hi".into(),
+            images: vec![],
+            model_override: None,
+        };
+        // 记录工作区 → 落盘、读回、summary 均可见。
+        let turn =
+            SessionStore::build_turn_with_workspace(&input, 1, vec![], None, Some("/proj/a"));
+        store.append("ws-a", &turn).unwrap();
+        assert_eq!(
+            store.session_workspace("ws-a").as_deref(),
+            Some("/proj/a"),
+            "session_workspace 读回工作区"
+        );
+        let summaries = store.list_summaries().unwrap();
+        let sa = summaries.iter().find(|s| s.id == "ws-a").unwrap();
+        assert_eq!(sa.workspace.as_deref(), Some("/proj/a"), "summary 带工作区");
+        // 旧格式（build_turn 无 workspace）→ None，向后兼容。
+        let old = SessionStore::build_turn(&input, 1, vec![], None);
+        store.append("ws-old", &old).unwrap();
+        assert_eq!(
+            store.session_workspace("ws-old"),
+            None,
+            "旧会话 workspace=None"
+        );
+        let _ = store.delete("ws-a");
+        let _ = store.delete("ws-old");
     }
 
     #[test]

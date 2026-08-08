@@ -27,6 +27,8 @@ pub struct ChatPersistence {
     pub history: Arc<tokio::sync::Mutex<Vec<Message>>>,
     /// 会话标题存储（`/rename` 命名，落盘到 sessions 根目录 titles.json）。
     pub titles: SessionTitles,
+    /// 工作区根路径（记录到每回合，会话按项目聚合用）。
+    pub workspace: Option<String>,
 }
 
 /// 会话标题的磁盘存储：sessions 根目录下的 `titles.json`（id → title）。
@@ -83,14 +85,15 @@ impl ChatPersistence {
     /// 会话列表（最新优先），每条为 `(id, 首句预览, title)`。
     pub fn list_sessions_with_titles(
         &self,
-    ) -> anyhow::Result<Vec<(String, String, Option<String>)>> {
+    ) -> anyhow::Result<Vec<(String, String, Option<String>, Option<String>)>> {
         Ok(self
             .store
             .list_sessions_with_preview()?
             .into_iter()
             .map(|(id, preview)| {
                 let title = self.titles.get(&id).map(str::to_string);
-                (id, preview, title)
+                let workspace = self.store.session_workspace(&id);
+                (id, preview, title, workspace)
             })
             .collect())
     }
@@ -463,8 +466,13 @@ where
                             images: Vec::new(),
                             model_override: current_model.clone(),
                         };
-                        let stored_turn =
-                            SessionStore::build_turn(&stored_input, p.turn, messages, Some(out));
+                        let stored_turn = SessionStore::build_turn_with_workspace(
+                            &stored_input,
+                            p.turn,
+                            messages,
+                            Some(out),
+                            p.workspace.as_deref(),
+                        );
                         if let Err(e) = p.store.append(&p.session_id, &stored_turn) {
                             tracing::warn!("failed to persist chat turn: {e}");
                         }
@@ -742,7 +750,7 @@ async fn handle_slash_command(
             Some(p) => match p.list_sessions_with_titles() {
                 Ok(ids) if !ids.is_empty() => {
                     println!("Saved sessions (newest first):");
-                    for (id, preview, title) in &ids {
+                    for (id, preview, title, workspace) in &ids {
                         let marker = if *id == p.session_id {
                             "  (current)"
                         } else {
@@ -754,7 +762,13 @@ async fn handle_slash_command(
                             (None, false) => format!("{id} — {preview}"),
                             (None, true) => id.clone(),
                         };
-                        println!("  {label}{marker}");
+                        // 工作区标注（非当前工作区才显示，避免噪声）。
+                        let ws = workspace
+                            .as_ref()
+                            .filter(|w| **w != p.workspace.as_deref().unwrap_or(""))
+                            .map(|w| format!("  [{}]", short_ws(w)))
+                            .unwrap_or_default();
+                        println!("  {label}{ws}{marker}");
                     }
                 }
                 Ok(_) => println!("(no saved sessions yet)"),
@@ -930,6 +944,16 @@ fn truncate(s: &str, max: usize) -> String {
         let end = s.floor_char_boundary(max);
         format!("{}…", &s[..end])
     }
+}
+
+/// 工作区路径的短标签：取最后一段（basename），空/根路径回退原样。
+fn short_ws(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    normalized
+        .rsplit('/')
+        .find(|s| !s.is_empty())
+        .unwrap_or(path)
+        .to_string()
 }
 
 /// 返回 `bytes` 中最长合法 UTF-8 前缀的长度。
@@ -1262,6 +1286,7 @@ mod tests {
             turn: 1,
             history: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             titles: SessionTitles::load(dir.path().join("titles.json")),
+            workspace: Some("/tmp/proj".into()),
         };
         assert_eq!(p.session_title("chat-a"), None);
         p.rename("chat-a", "核心重构").unwrap();
@@ -1270,12 +1295,12 @@ mod tests {
         let metas = p.list_sessions_with_titles().unwrap();
         let a = metas
             .iter()
-            .find(|(id, _, _)| id == "chat-a")
+            .find(|(id, _, _, _)| id == "chat-a")
             .expect("chat-a 在列表中");
         assert_eq!(a.2.as_deref(), Some("核心重构"), "改名生效并出现在列表");
         let b = metas
             .iter()
-            .find(|(id, _, _)| id == "chat-b")
+            .find(|(id, _, _, _)| id == "chat-b")
             .expect("chat-b 在列表中");
         assert_eq!(b.2, None, "未命名会话 title 为 None");
     }
