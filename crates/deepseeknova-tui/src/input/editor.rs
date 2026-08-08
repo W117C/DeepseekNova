@@ -34,6 +34,12 @@ impl InputState {
         self.cursor += c.len_utf8();
     }
 
+    /// 在光标处插入一段文本（bracketed paste 用，UTF-8 安全，不触发提交）。
+    pub fn insert_str(&mut self, s: &str) {
+        self.text.insert_str(self.cursor, s);
+        self.cursor += s.len();
+    }
+
     /// 删除光标前一个字符（UTF-8 安全）。
     pub fn backspace(&mut self) {
         if self.cursor == 0 {
@@ -353,6 +359,26 @@ mod tests {
         assert_eq!(input.text, "!");
         input.delete();
         assert_eq!(input.text, "");
+    }
+
+    #[test]
+    fn insert_str_inserts_multiline_at_cursor_without_commit() {
+        let mut input = InputState {
+            text: "abc".into(),
+            cursor: 1,
+        };
+        // bracketed paste：多行文本在光标处插入，换行是字面字符，光标后移。
+        input.insert_str("line1\nline2");
+        assert_eq!(input.text, "aline1\nline2bc");
+        assert_eq!(input.cursor, "aline1\nline2".len());
+        // UTF-8 安全：中文后插入。
+        let mut input = InputState {
+            text: "你好".into(),
+            cursor: "你好".len(),
+        };
+        input.insert_str("x");
+        assert_eq!(input.text, "你好x");
+        assert_eq!(input.cursor, "你好x".len());
     }
 
     #[test]

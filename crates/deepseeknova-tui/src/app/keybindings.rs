@@ -165,8 +165,11 @@ impl Keymap {
     }
 }
 
-/// 保留键保护（把 OS/终端约束写进产品，Claude Code 同款，带原因）。
-/// 返回词表键（原因文案按语言取）。
+/// 保留键保护（把 app 硬编码占用/OS 约束写进产品，带原因）。
+/// 注意：这些是「app 真实占用」的键——Ctrl+C/D/Z 在 raw 模式下由 app 消费
+/// （取消/退出/提示），Ctrl+M 在终端等价 Enter，Ctrl+X 是 Ctrl+X Ctrl+E
+/// 外部编辑器和弦前缀。Ctrl+\（侧边栏开合）是可重绑的默认绑定，不属于
+/// 保留清单（曾与「不可重绑」自相矛盾，见 actions.rs 的双绑定）。
 fn reserved_reason(spec: &str) -> Option<Key> {
     let norm = spec.to_ascii_lowercase().replace(' ', "");
     match norm.as_str() {
@@ -174,7 +177,7 @@ fn reserved_reason(spec: &str) -> Option<Key> {
         "ctrl+d" => Some(Key::ReservedCtrlD),
         "ctrl+m" => Some(Key::ReservedCtrlM),
         "ctrl+z" => Some(Key::ReservedCtrlZ),
-        "ctrl+\\" | "ctrl+4" => Some(Key::ReservedCtrlBackslash),
+        "ctrl+x" => Some(Key::ReservedCtrlX),
         _ => None,
     }
 }
@@ -249,13 +252,48 @@ mod tests {
             ]}"#,
             Tr::new(crate::i18n::Lang::Zh),
         );
+        // 诊断以 `reserved` 前缀标记，且带非空的原因（"— 应用用于…"）。
         assert!(
             km.diagnostics
                 .iter()
-                .any(|d| d.starts_with("reserved") && d.contains("保留")),
+                .any(|d| d.starts_with("reserved") && d.contains("— ") && d.contains("应用")),
             "保留键诊断带原因"
         );
         assert!(km.overrides.is_empty(), "保留键不写入覆盖层");
+    }
+
+    #[test]
+    fn ctrl_backslash_is_rebindable_not_reserved() {
+        // ctrl+\ 是 app 的默认侧边栏开合键，允许用户重绑/解绑；
+        // ctrl+x 作为 Ctrl+X Ctrl+E 和弦前缀才是保留键。
+        let km = Keymap::parse(
+            r#"{"bindings":[
+                {"context":"Input","bindings":{"ctrl+\\":null,"ctrl+x":"app:quit"}}
+            ]}"#,
+            Tr::new(crate::i18n::Lang::En),
+        );
+        assert!(
+            km.diagnostics
+                .iter()
+                .any(|d| d.starts_with("reserved") && d.contains("ctrl+x")),
+            "ctrl+x 保留: {:?}",
+            km.diagnostics
+        );
+        assert!(
+            !km.diagnostics.iter().any(|d| d.contains("ctrl+\\")),
+            "ctrl+\\ 不再保留: {:?}",
+            km.diagnostics
+        );
+        assert!(
+            km.overrides
+                .contains_key(&(ActionContext::Input, Binding::parse("ctrl+\\").unwrap())),
+            "ctrl+\\ 解绑条目已写入覆盖层"
+        );
+        assert!(
+            !km.overrides
+                .contains_key(&(ActionContext::Input, Binding::parse("ctrl+x").unwrap())),
+            "ctrl+x 保留键不写入覆盖层"
+        );
     }
 
     #[test]

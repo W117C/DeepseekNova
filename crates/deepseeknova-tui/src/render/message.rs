@@ -400,7 +400,18 @@ fn welcome_block(app: &AppState, theme: &Theme) -> MessageBlock {
         .map(|p| p.display().to_string())
         .unwrap_or_default();
     let hint = |s: String| Line::from(Span::styled(s, theme.system));
-    let lines = vec![
+    let warn = |s: String| {
+        Line::from(Span::styled(
+            s,
+            Style::default()
+                .fg(theme
+                    .verification_fail
+                    .fg
+                    .unwrap_or(ratatui::style::Color::Red))
+                .add_modifier(Modifier::BOLD),
+        ))
+    };
+    let mut lines = vec![
         Line::from(vec![
             Span::styled(
                 "⌒ ",
@@ -422,6 +433,13 @@ fn welcome_block(app: &AppState, theme: &Theme) -> MessageBlock {
         hint(sessions),
         hint(app.tr.t_args(Key::WelcomeCwd, &[("path", &cwd)])),
     ];
+    // 配置状态警示：CLI 入口已拦截未配置场景，这里作为库级嵌入/边界兜底，
+    // 让「打开就能看到缺什么、怎么补」成为欢迎块的默认行为。
+    if !app.provider_configured {
+        lines.push(warn(app.tr.t(Key::WelcomeNoProvider).to_string()));
+    } else if !app.api_key_configured {
+        lines.push(warn(app.tr.t(Key::WelcomeNoApiKey).to_string()));
+    }
     MessageBlock { lines }
 }
 
@@ -686,6 +704,28 @@ impl AppState {
         let viewport = conv_area.height as usize;
         self.clamp_scroll(viewport.max(1));
         crate::render::message::render_blocks(f, conv_area, &blocks, self.scroll_offset);
+
+        // 滚动位置指示：用户上滚（非贴底）时在对话区右上角画 ▍N%
+        //（Claude Code 同款），比例 = scroll_offset / 总物理行数。
+        if !self.auto_scroll && self.rendered_lines > viewport {
+            let pct = self
+                .scroll_offset
+                .saturating_mul(100)
+                .checked_div(self.rendered_lines)
+                .unwrap_or(0)
+                .min(100);
+            let marker = format!("▍{pct}%");
+            let marker_w = marker.chars().count() as u16 + 1;
+            f.render_widget(
+                Paragraph::new(Span::styled(marker, theme.system)),
+                Rect {
+                    x: conv_area.right().saturating_sub(marker_w),
+                    y: conv_area.y,
+                    width: marker_w,
+                    height: 1,
+                },
+            );
+        }
 
         // ── 状态行 ────────────────────────────────────────
         let status = Paragraph::new(crate::render::status::fit_status_line(
@@ -1160,6 +1200,36 @@ mod tests {
         let blocks = build_conversation_blocks(&app, &theme);
         let texts: String = blocks.iter().flat_map(block_texts).collect();
         assert!(!texts.contains("DeepseekNova"), "首轮开始后欢迎区消失");
+    }
+
+    #[test]
+    fn welcome_shows_setup_warning_when_provider_unconfigured() {
+        let theme = Theme::default();
+        // 未配置 provider：欢迎块出现红色 setup 引导。
+        let mut app = AppState::default();
+        app.provider_configured = false;
+        app.tr = Tr::new(crate::i18n::Lang::Zh);
+        let blocks = build_conversation_blocks(&app, &theme);
+        let texts: String = blocks.iter().flat_map(block_texts).collect();
+        assert!(texts.contains("setup"), "未配置提示含 setup: {texts}");
+        // 配置了 provider 但 key 缺失：提示 API key。
+        let mut app = AppState::default();
+        app.provider_configured = true;
+        app.api_key_configured = false;
+        app.tr = Tr::new(crate::i18n::Lang::En);
+        let blocks = build_conversation_blocks(&app, &theme);
+        let texts: String = blocks.iter().flat_map(block_texts).collect();
+        assert!(texts.contains("API key"), "缺 key 提示: {texts}");
+        // 全部就绪：不出现任何警示行。
+        let app = AppState {
+            provider_configured: true,
+            api_key_configured: true,
+            tr: Tr::new(crate::i18n::Lang::En),
+            ..Default::default()
+        };
+        let blocks = build_conversation_blocks(&app, &theme);
+        let texts: String = blocks.iter().flat_map(block_texts).collect();
+        assert!(!texts.contains('⚠'), "配置就绪时无警示: {texts}");
     }
 
     #[test]

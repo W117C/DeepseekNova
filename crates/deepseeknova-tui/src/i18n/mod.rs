@@ -26,7 +26,7 @@
 
 mod keys;
 
-pub use keys::Key;
+pub use keys::{Key, ALL_KEYS};
 
 /// 支持的语言。默认英文。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
@@ -201,6 +201,29 @@ mod tests {
             Key::ScorecardDimComposite,
         ] {
             assert!(!k.en().is_empty(), "en 值不可空: {k:?}");
+        }
+    }
+
+    #[test]
+    fn all_keys_bilingual_values_nonempty() {
+        // 穷举：每个键的英文值非空；中文值（显式返回 None 的技术性键除外）
+        // 非空。新增词条既要在 en()/zh() 的 match 补齐（编译器强制），
+        // 也要加入 ALL_KEYS 表，否则此测试漏检。
+        assert_eq!(ALL_KEYS.len(), 257, "ALL_KEYS 与枚举变体数一致");
+        let tr_en = Tr::new(Lang::En);
+        let tr_zh = Tr::new(Lang::Zh);
+        for k in ALL_KEYS {
+            let en = tr_en.t(*k);
+            assert!(!en.is_empty(), "en 值不可空: {k:?}");
+            let zh = tr_zh.t(*k);
+            assert!(
+                !zh.is_empty(),
+                "中文回退后不可为空串（应回退英文或给出中文值）: {k:?}"
+            );
+            // 显式 None 的技术性键：中文与英文一致（回退）。
+            if k.zh().is_none() {
+                assert_eq!(zh, en, "zh()=None 的键中文模式应回退英文: {k:?}");
+            }
         }
     }
 }

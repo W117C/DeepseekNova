@@ -18,6 +18,8 @@ const PRIO_QUIT: u8 = 10;
 const PRIO_MODEL: u8 = 9;
 const PRIO_MODE: u8 = 9;
 const PRIO_CTX: u8 = 8;
+/// 工作区/git 分支：信息性最低优先级，窄终端最先丢弃。
+const PRIO_WORKSPACE: u8 = 2;
 
 /// 状态行分段（Claude Code 风格精简，语义色分层）：
 /// 1) 运行态 + 模型（主信息，accent/bold）
@@ -52,15 +54,33 @@ fn tagged_segments(app: &AppState, theme: &Theme) -> Vec<(u8, Span<'static>)> {
     };
     segments.push((PRIO_MODEL, state));
     segments.push((PRIO_MODEL, Span::styled(" ", dim)));
+    // 模型 + effort 后缀（thinking off 时无后缀）。
+    let model_text = if app.effort_label.is_empty() {
+        app.model_label.clone()
+    } else {
+        format!("{}·{}", app.model_label, app.effort_label)
+    };
     segments.push((
         PRIO_MODEL,
         Span::styled(
-            app.model_label.clone(),
+            model_text,
             Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         ),
     ));
+    // ── 组 0：工作区 + git 分支（信息性，最优先丢弃）──
+    if let Some(branch) = &app.git_branch {
+        segments.push((PRIO_WORKSPACE, Span::styled(format!(" ⎇ {branch}"), dim)));
+    } else if !app.workspace_cwd.is_empty() {
+        // 非 git 工作区：显示目录 basename（兼容 / 与 \ 分隔符）。
+        let normalized = app.workspace_cwd.replace('\\', "/");
+        let name = normalized
+            .rsplit('/')
+            .find(|s| !s.is_empty())
+            .unwrap_or(&normalized);
+        segments.push((PRIO_WORKSPACE, Span::styled(format!(" {name}"), dim)));
+    }
     // ── 组 2：token 预算条 ──────────────────────────────
     if let Some((used, window)) = app.context_usage {
         let pct = used.saturating_mul(100).checked_div(window).unwrap_or(0);
@@ -108,6 +128,31 @@ fn tagged_segments(app: &AppState, theme: &Theme) -> Vec<(u8, Span<'static>)> {
                     )],
                 ),
                 dim,
+            ),
+        ));
+    }
+    // 配置状态警示（高优先级，红色/黄色）：CLI 入口通常已拦截，此处为
+    // 库级嵌入等绕过门禁的场景兜底，让未配置一眼可见。
+    let warn_style = |c: ratatui::style::Color| Style::default().fg(c).add_modifier(Modifier::BOLD);
+    if !app.provider_configured {
+        segments.push((
+            PRIO_MODE,
+            Span::styled(
+                format!(" ⚠ {}", app.tr.t(Key::StatusNoProvider)),
+                warn_style(
+                    theme
+                        .verification_fail
+                        .fg
+                        .unwrap_or(ratatui::style::Color::Red),
+                ),
+            ),
+        ));
+    } else if !app.api_key_configured {
+        segments.push((
+            PRIO_MODE,
+            Span::styled(
+                format!(" ⚠ {}", app.tr.t(Key::StatusNoApiKey)),
+                warn_style(ratatui::style::Color::Yellow),
             ),
         ));
     }
@@ -371,6 +416,95 @@ mod tests {
             .find(|s| s.content.contains("权限"))
             .expect("中文权限段存在");
         assert!(mode.content.contains("plan"), "{}", mode.content);
+    }
+
+    #[test]
+    fn status_segments_warn_when_config_incomplete() {
+        let theme = Theme::default();
+        // 未配置 provider → 红色 no-provider tag。
+        let app = AppState::default();
+        let segments = status_segments(&app, &theme);
+        let no_provider = segments
+            .iter()
+            .find(|s| s.content.contains("no-provider"))
+            .expect("未配置 provider tag 存在");
+        assert_eq!(no_provider.style.fg, theme.verification_fail.fg);
+        // provider 就绪但 key 缺失 → 黄色 tag。
+        let app = AppState {
+            provider_configured: true,
+            api_key_configured: false,
+            ..Default::default()
+        };
+        let segments = status_segments(&app, &theme);
+        assert!(
+            segments.iter().any(|s| s.content.contains("no-api-key")),
+            "缺 key tag: {:?}",
+            segments
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<Vec<_>>()
+        );
+        // 全部就绪 → 无警示。
+        let app = AppState {
+            provider_configured: true,
+            api_key_configured: true,
+            ..Default::default()
+        };
+        let segments = status_segments(&app, &theme);
+        assert!(!segments.iter().any(|s| s.content.contains("no-provider")));
+        assert!(!segments.iter().any(|s| s.content.contains("no-api-key")));
+    }
+
+    #[test]
+    fn status_shows_effort_suffix_and_workspace() {
+        let theme = Theme::default();
+        // effort 后缀：high → 模型名带 ·high。
+        let app = AppState {
+            model_label: "deepseek-v4-flash".into(),
+            effort_label: "high".into(),
+            git_branch: Some("feat/tui".into()),
+            workspace_cwd: "/Users/ze/proj".into(),
+            ..Default::default()
+        };
+        let segments = status_segments(&app, &theme);
+        let model = segments
+            .iter()
+            .find(|s| s.content.contains("deepseek-v4-flash"))
+            .expect("模型段存在");
+        assert!(
+            model.content.contains("·high"),
+            "effort 后缀: {}",
+            model.content
+        );
+        assert!(
+            segments.iter().any(|s| s.content.contains("⎇ feat/tui")),
+            "git 分支段: {:?}",
+            segments
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<Vec<_>>()
+        );
+        // 无分支：显示 cwd basename。
+        let app = AppState {
+            model_label: "m".into(),
+            workspace_cwd: "/Users/ze/proj".into(),
+            git_branch: None,
+            ..Default::default()
+        };
+        let segments = status_segments(&app, &theme);
+        assert!(segments.iter().any(|s| s.content.contains(" proj")));
+        // effort 为空（Disabled）：无后缀。
+        let app = AppState {
+            model_label: "m".into(),
+            effort_label: String::new(),
+            ..Default::default()
+        };
+        let segments = status_segments(&app, &theme);
+        let model = segments
+            .iter()
+            .find(|s| s.content.contains('m') && s.style.fg == Some(theme.accent))
+            .expect("模型段");
+        assert!(!model.content.contains('·'), "无后缀: {}", model.content);
     }
 
     #[test]

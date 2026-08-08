@@ -112,6 +112,15 @@ pub struct TuiRunner {
     workspace_root: Option<PathBuf>,
     /// 项目层权限规则条数（信任确认浮层展示）。
     project_rule_count: usize,
+    /// 已配置至少一个 provider（CLI 首启校验后注入；欢迎块/状态行据此
+    /// 给出 setup 引导，库级嵌入无 CLI 门禁时兜底）。
+    provider_configured: bool,
+    /// 当前 provider 的 API key 可解析（内联或环境变量）。
+    api_key_configured: bool,
+    /// 工作区路径（状态行展示）。
+    workspace_cwd: String,
+    /// 当前 git 分支（非 git 工作区为 None）。
+    git_branch: Option<String>,
     /// 界面语言（`DEEPSEEKNOVA_LANG` 解析，缺省英文；`with_lang` 可覆盖）。
     lang: Lang,
 }
@@ -145,6 +154,10 @@ impl TuiRunner {
             trust: None,
             workspace_root: None,
             project_rule_count: 0,
+            provider_configured: false,
+            api_key_configured: false,
+            workspace_cwd: String::new(),
+            git_branch: None,
             lang: Lang::from_env(),
         }
     }
@@ -191,6 +204,26 @@ impl TuiRunner {
     /// 项目层权限规则条数（信任确认浮层展示；0 = 无需确认）。
     pub fn with_project_rule_count(mut self, n: usize) -> Self {
         self.project_rule_count = n;
+        self
+    }
+
+    /// 注入 provider 配置状态（CLI 首启校验后计算）。未配置 provider 或
+    /// API key 缺失时，欢迎块与状态行给出 `deepseeknova-cli setup` 引导
+    /// （库级嵌入绕过 CLI 门禁时的兜底提示）。
+    pub fn with_config_status(
+        mut self,
+        provider_configured: bool,
+        api_key_configured: bool,
+    ) -> Self {
+        self.provider_configured = provider_configured;
+        self.api_key_configured = api_key_configured;
+        self
+    }
+
+    /// 注入工作区上下文（状态行展示）：当前路径与 git 分支（CLI 探测）。
+    pub fn with_workspace_info(mut self, cwd: String, git_branch: Option<String>) -> Self {
+        self.workspace_cwd = cwd;
+        self.git_branch = git_branch;
         self
     }
 
@@ -302,7 +335,11 @@ impl TuiRunner {
         // 启用鼠标上报：滚轮事件由应用消费并滚动对话历史，
         // 否则滚轮只会滚动终端自身滚动区（表现为“滚动到了输入框”）。
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture);
+        // 启用 bracketed paste：多行粘贴以整段文本到达（Event::Paste），
+        // 而不是把内嵌换行当作 Enter 提交（曾导致贴一半就发出）。
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste);
         let result = self.run_inner(&mut terminal).await;
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
         ratatui::restore();
         result
@@ -348,6 +385,15 @@ impl TuiRunner {
             theme,
             at_files: self.at_files.clone(),
             tr,
+            provider_configured: self.provider_configured,
+            api_key_configured: self.api_key_configured,
+            effort_label: self
+                .current_effort
+                .effort_str()
+                .unwrap_or_default()
+                .to_string(),
+            workspace_cwd: self.workspace_cwd.clone(),
+            git_branch: self.git_branch.clone(),
             ..Default::default()
         };
         // 权限模式显示态：从 gate 首读（Ctrl+P 前即正确）。
@@ -367,6 +413,8 @@ impl TuiRunner {
         }
         // 与上方 EnableMouseCapture 保持一致：鼠标捕获默认开启。
         app.mouse_capture = true;
+        // 侧边栏 MCP 面板数据源：从 caps 复制已启用 server 清单。
+        app.mcp_servers = caps.mcp_servers.clone();
         // 用户键位定制（keybindings.json）：启动时加载，事件循环轮询热重载。
         app.keymap_path = crate::app::keybindings::Keymap::default_path();
         app.keymap = crate::app::keybindings::Keymap::load(&app.keymap_path, tr);

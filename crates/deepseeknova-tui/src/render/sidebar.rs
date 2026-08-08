@@ -58,15 +58,9 @@ pub fn render_sidebar(app: &AppState, theme: &Theme, f: &mut Frame, area: Rect) 
     let lines: Vec<Line> = match app.sidebar_tab {
         SidebarTab::Sessions => render_sessions(app, theme),
         SidebarTab::Tools => render_tools(app, theme),
-        SidebarTab::Mcp => vec![Line::from(Span::styled(
-            app.tr.t(Key::SidebarMcpHint),
-            theme.system,
-        ))],
+        SidebarTab::Mcp => render_mcp(app, theme),
         SidebarTab::Cost => render_cost(app, theme),
-        SidebarTab::Skills => vec![Line::from(Span::styled(
-            app.tr.t(Key::SidebarSkillsHint),
-            theme.system,
-        ))],
+        SidebarTab::Skills => render_skills(app, theme),
     };
     f.render_widget(Paragraph::new(lines), body_area);
 }
@@ -87,64 +81,82 @@ fn render_sessions(app: &AppState, theme: &Theme) -> Vec<Line<'static>> {
         }
         // 首次加载（一两帧内）保持安静：不显示“加载中”噪声。
     } else {
-        let groups = group_by_night(&app.saved_sessions);
+        // 主分组 = 工作区（None → 全局组，排最前），组内按夜次分组。
+        let ws_groups = group_by_workspace(&app.saved_sessions);
         let mut shown = 0usize;
-        'outer: for (gi, (night, ids)) in groups.iter().enumerate() {
+        'ws: for (ws, metas) in ws_groups {
             if shown >= MAX_SAVED_ROWS {
                 break;
             }
+            let ws_label = ws
+                .as_deref()
+                .map(short_ws_label)
+                .unwrap_or_else(|| app.tr.t(Key::SidebarGlobalSessions).to_string());
             lines.push(Line::from(Span::styled(
                 app.tr.t_args(
-                    Key::NightGroupHeader,
-                    &[("night", night), ("n", &ids.len().to_string())],
+                    Key::WorkspaceGroupHeader,
+                    &[("ws", &ws_label), ("n", &metas.len().to_string())],
                 ),
                 theme.title,
             )));
-            for id in ids {
+            let groups = group_by_night(&metas);
+            for (gi, (night, ids)) in groups.iter().enumerate() {
                 if shown >= MAX_SAVED_ROWS {
-                    break 'outer;
+                    break;
                 }
-                let i = app
-                    .saved_sessions
-                    .iter()
-                    .position(|m| &m.id == id)
-                    .unwrap_or(usize::MAX);
-                let selected = i == app.saved_session_selected;
-                let current = app.current_session.as_deref() == Some(id.as_str());
-                let star = magnitude_char(current, gi);
-                let marker = if selected { "▸" } else { " " };
-                // 有首句预览就显示预览（会话标题），否则回退不透明 id。
-                let preview = app
-                    .saved_sessions
-                    .get(i)
-                    .map(|m| m.preview.trim().to_string())
-                    .filter(|p| !p.is_empty());
-                let label = match preview {
-                    Some(p) => {
-                        let cut: String = p.chars().take(16).collect();
-                        if p.chars().count() > 16 {
-                            format!("{cut}…")
-                        } else {
-                            cut
-                        }
-                    }
-                    None => short_session_id(id, 16),
-                };
-                let suffix = if current {
-                    app.tr.t(Key::SessionCurrentSuffix)
-                } else {
-                    ""
-                };
-                let style = if selected {
-                    theme.selection
-                } else {
-                    theme.system
-                };
                 lines.push(Line::from(Span::styled(
-                    format!("{marker}{star} {label}{suffix}"),
-                    style,
+                    app.tr.t_args(
+                        Key::NightGroupHeader,
+                        &[("night", night), ("n", &ids.len().to_string())],
+                    ),
+                    theme.title,
                 )));
-                shown += 1;
+                for id in ids {
+                    if shown >= MAX_SAVED_ROWS {
+                        break 'ws;
+                    }
+                    let i = app
+                        .saved_sessions
+                        .iter()
+                        .position(|m| &m.id == id)
+                        .unwrap_or(usize::MAX);
+                    let selected = i == app.saved_session_selected;
+                    let current = app.current_session.as_deref() == Some(id.as_str());
+                    let star = magnitude_char(current, gi);
+                    let marker = if selected { "▸" } else { " " };
+                    // 有首句预览就显示预览（会话标题），否则回退不透明 id。
+                    let preview = app
+                        .saved_sessions
+                        .get(i)
+                        .map(|m| m.preview.trim().to_string())
+                        .filter(|p| !p.is_empty());
+                    let label = match preview {
+                        Some(p) => {
+                            let cut: String = p.chars().take(16).collect();
+                            if p.chars().count() > 16 {
+                                format!("{cut}…")
+                            } else {
+                                cut
+                            }
+                        }
+                        None => short_session_id(id, 16),
+                    };
+                    let suffix = if current {
+                        app.tr.t(Key::SessionCurrentSuffix)
+                    } else {
+                        ""
+                    };
+                    let style = if selected {
+                        theme.selection
+                    } else {
+                        theme.system
+                    };
+                    lines.push(Line::from(Span::styled(
+                        format!("{marker}{star} {label}{suffix}"),
+                        style,
+                    )));
+                    shown += 1;
+                }
             }
         }
         if app.saved_sessions.len() > shown {
@@ -183,6 +195,40 @@ fn render_sessions(app: &AppState, theme: &Theme) -> Vec<Line<'static>> {
         }
     }
     lines
+}
+
+/// 按工作区分组（`None` 全局组排最前，其余按出现顺序）。返回
+/// `Vec<(Option<String>, Vec<SessionMeta>)>`。
+fn group_by_workspace(
+    metas: &[crate::app::state::SessionMeta],
+) -> Vec<(Option<String>, Vec<crate::app::state::SessionMeta>)> {
+    let mut groups: Vec<(Option<String>, Vec<crate::app::state::SessionMeta>)> = Vec::new();
+    for m in metas {
+        if let Some(g) = groups.iter_mut().find(|(ws, _)| *ws == m.workspace) {
+            g.1.push(m.clone());
+        } else {
+            groups.push((m.workspace.clone(), vec![m.clone()]));
+        }
+    }
+    // 全局组（None）移到最前（稳定排序，其余组保持出现顺序）。
+    groups.sort_by(
+        |(ws_a, _), (ws_b, _)| match (ws_a.is_none(), ws_b.is_none()) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => std::cmp::Ordering::Equal,
+        },
+    );
+    groups
+}
+
+/// 工作区路径的短标签：取最后一段（basename），空/根路径回退原样。
+fn short_ws_label(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    normalized
+        .rsplit('/')
+        .find(|s| !s.is_empty())
+        .unwrap_or(path)
+        .to_string()
 }
 
 /// `chat-20260807-164211` → `08-07`；无法解析时回退 `----`。
@@ -289,6 +335,65 @@ fn render_tools(app: &AppState, theme: &Theme) -> Vec<Line<'static>> {
                 ],
             ),
             style,
+        )));
+    }
+    lines
+}
+
+fn render_mcp(app: &AppState, theme: &Theme) -> Vec<Line<'static>> {
+    use crate::app::state::McpStatus;
+    if app.mcp_servers.is_empty() {
+        return vec![Line::from(Span::styled(
+            app.tr.t(Key::McpNotConfigured),
+            theme.system,
+        ))];
+    }
+    // 首次进入/缓存为空：异步探测中，给轻提示而非空面板。
+    if app.mcp_statuses.is_empty() {
+        return vec![Line::from(Span::styled(
+            app.tr.t(Key::SidebarMcpProbing),
+            theme.system,
+        ))];
+    }
+    let mut lines = vec![Line::from(Span::styled(
+        app.tr.t(Key::McpHeader),
+        theme.title,
+    ))];
+    for (i, server) in app.mcp_servers.iter().enumerate() {
+        let (text, style) = match app.mcp_statuses.get(i) {
+            Some(McpStatus::Connected) => (
+                app.tr.t_args(Key::McpConnected, &[("name", &server.name)]),
+                theme.verification_ok,
+            ),
+            Some(McpStatus::Disconnected(reason)) => (
+                app.tr.t_args(
+                    Key::McpDisconnected,
+                    &[("name", &server.name), ("reason", reason)],
+                ),
+                theme.verification_fail,
+            ),
+            None => (format!("  • {}", server.name), theme.system),
+        };
+        lines.push(Line::from(Span::styled(text, style)));
+    }
+    lines
+}
+
+fn render_skills(app: &AppState, theme: &Theme) -> Vec<Line<'static>> {
+    if app.skills.is_empty() {
+        return vec![Line::from(Span::styled(
+            app.tr.t(Key::NoSkillsFound),
+            theme.system,
+        ))];
+    }
+    let mut lines = vec![Line::from(Span::styled(
+        app.tr.t(Key::SkillsHeader),
+        theme.title,
+    ))];
+    for s in &app.skills {
+        lines.push(Line::from(Span::styled(
+            format!("  • {} — {}", s.name, s.description),
+            theme.system,
         )));
     }
     lines
@@ -434,11 +539,13 @@ mod tests {
                     id: "chat-20260806-112831".to_string(),
                     preview: "查看一下这个仓库".to_string(),
                     title: None,
+                    workspace: None,
                 },
                 crate::app::state::SessionMeta {
                     id: "chat-20260805-180304".to_string(),
                     preview: String::new(),
                     title: None,
+                    workspace: None,
                 },
             ],
             current_session: Some("chat-20260806-112831".to_string()),
@@ -471,21 +578,25 @@ mod tests {
                 id: "chat-20260807-160000".to_string(),
                 preview: String::new(),
                 title: None,
+                workspace: None,
             },
             crate::app::state::SessionMeta {
                 id: "chat-20260807-130000".to_string(),
                 preview: String::new(),
                 title: None,
+                workspace: None,
             },
             crate::app::state::SessionMeta {
                 id: "chat-20260806-220000".to_string(),
                 preview: String::new(),
                 title: None,
+                workspace: None,
             },
             crate::app::state::SessionMeta {
                 id: "plain".to_string(),
                 preview: String::new(),
                 title: None,
+                workspace: None,
             },
         ];
         let groups = group_by_night(&metas);
@@ -500,6 +611,53 @@ mod tests {
     }
 
     #[test]
+    fn sessions_group_by_workspace_headers() {
+        let app = AppState {
+            sessions_loaded: true,
+            saved_sessions: vec![
+                crate::app::state::SessionMeta {
+                    id: "chat-20260807-100000".to_string(),
+                    preview: "在 /a 的会话".to_string(),
+                    title: None,
+                    workspace: Some("/Users/ze/proj-a".into()),
+                },
+                crate::app::state::SessionMeta {
+                    id: "chat-20260807-090000".to_string(),
+                    preview: String::new(),
+                    title: None,
+                    workspace: Some("/Users/ze/proj-a".into()),
+                },
+                crate::app::state::SessionMeta {
+                    id: "chat-20260806-080000".to_string(),
+                    preview: String::new(),
+                    title: None,
+                    workspace: Some("/Users/ze/proj-b".into()),
+                },
+                crate::app::state::SessionMeta {
+                    id: "chat-20260806-070000".to_string(),
+                    preview: "旧会话".to_string(),
+                    title: None,
+                    workspace: None,
+                },
+            ],
+            tr: crate::i18n::Tr::new(crate::i18n::Lang::Zh),
+            ..Default::default()
+        };
+        let theme = Theme::default();
+        let lines = render_sessions(&app, &theme);
+        let texts: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        // 工作区分组头：全局在前，然后是各项目 basename + 会话数。
+        assert!(texts.contains("⎇ 全局 · 1"), "全局组头: {texts}");
+        assert!(texts.contains("⎇ proj-a · 2"), "proj-a 组头: {texts}");
+        assert!(texts.contains("⎇ proj-b · 1"), "proj-b 组头: {texts}");
+        // 夜次分组仍保留。
+        assert!(texts.contains("▾ 08-07 夜"), "夜次头仍在: {texts}");
+    }
+
+    #[test]
     fn short_session_id_strips_prefix_and_truncates() {
         assert_eq!(
             short_session_id("chat-20260805-180304", 18),
@@ -507,6 +665,107 @@ mod tests {
         );
         assert_eq!(short_session_id("chat-20260805-180304", 10), "20260805-…");
         assert_eq!(short_session_id("plain-id", 18), "plain-id");
+    }
+
+    #[test]
+    fn mcp_panel_renders_status_and_unconfigured() {
+        use crate::app::state::{McpServerInfo, McpStatus};
+        // 未配置：提示。
+        let theme = Theme::default();
+        let app = AppState {
+            tr: crate::i18n::Tr::new(crate::i18n::Lang::Zh),
+            ..Default::default()
+        };
+        let lines = render_mcp(&app, &theme);
+        let texts: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(texts.contains("未配置 MCP"), "未配置提示: {texts}");
+        // 已配置 + 探测结果：✓/✗ 语义色。
+        let app = AppState {
+            mcp_servers: vec![
+                McpServerInfo {
+                    name: "files".into(),
+                    command: "npx".into(),
+                    args: vec![],
+                },
+                McpServerInfo {
+                    name: "github".into(),
+                    command: "gh".into(),
+                    args: vec![],
+                },
+            ],
+            mcp_statuses: vec![
+                McpStatus::Connected,
+                McpStatus::Disconnected("timeout".into()),
+            ],
+            tr: crate::i18n::Tr::new(crate::i18n::Lang::En),
+            ..Default::default()
+        };
+        let lines = render_mcp(&app, &theme);
+        let texts: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(texts.contains("files — ✓ connected"), "已连接: {texts}");
+        assert!(texts.contains("github — ✗ disconnected"), "未连接: {texts}");
+        assert_eq!(lines[1].spans[0].style.fg, theme.verification_ok.fg);
+        assert_eq!(lines[2].spans[0].style.fg, theme.verification_fail.fg);
+        // 探测中（缓存空）：轻提示。
+        let app = AppState {
+            mcp_servers: vec![McpServerInfo {
+                name: "files".into(),
+                command: "npx".into(),
+                args: vec![],
+            }],
+            tr: crate::i18n::Tr::new(crate::i18n::Lang::En),
+            ..Default::default()
+        };
+        let lines = render_mcp(&app, &theme);
+        let texts: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(texts.contains("probing"), "探测中提示: {texts}");
+    }
+
+    #[test]
+    fn skills_panel_renders_names_and_empty_state() {
+        let theme = Theme::default();
+        // 空：提示。
+        let app = AppState {
+            tr: crate::i18n::Tr::new(crate::i18n::Lang::En),
+            ..Default::default()
+        };
+        let lines = render_skills(&app, &theme);
+        let texts: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(texts.contains("no skills found"), "空提示: {texts}");
+        // 有技能：列出 name — description。
+        let app = AppState {
+            skills: vec![
+                crate::app::state::SkillEntry {
+                    name: "reviewer".into(),
+                    description: "Review code".into(),
+                },
+                crate::app::state::SkillEntry {
+                    name: "planner".into(),
+                    description: "Plan tasks".into(),
+                },
+            ],
+            tr: crate::i18n::Tr::new(crate::i18n::Lang::En),
+            ..Default::default()
+        };
+        let lines = render_skills(&app, &theme);
+        let texts: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(texts.contains("reviewer — Review code"), "技能行: {texts}");
+        assert!(texts.contains("planner — Plan tasks"), "技能行: {texts}");
     }
 
     #[test]

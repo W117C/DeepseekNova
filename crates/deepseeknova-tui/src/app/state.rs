@@ -109,6 +109,8 @@ pub struct SessionMeta {
     pub preview: String,
     /// 用户命名（`/rename`）；`None` 表示未命名，回退显示 id。
     pub title: Option<String>,
+    /// 工作区根路径（会话所在项目；`None` = 旧会话/未知）。
+    pub workspace: Option<String>,
 }
 
 /// 恢复会话中的一条消息。
@@ -202,6 +204,13 @@ pub trait McpProbe: Send + Sync {
     async fn probe(&self, servers: &[McpServerInfo]) -> Vec<McpStatus>;
 }
 
+/// 侧边栏 Skills 面板的一条技能（轻量视图，避免渲染依赖 core 类型）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillEntry {
+    pub name: String,
+    pub description: String,
+}
+
 /// 会话与显示状态。
 #[derive(Default)]
 pub struct AppState {
@@ -224,6 +233,10 @@ pub struct AppState {
     pub usage: Option<Usage>,
     /// 会话累计成本（美元），由 router ledger 每帧刷新。
     pub total_cost_usd: Option<f64>,
+    /// 已配置至少一个 provider（CLI 注入；欢迎块/状态行 setup 引导依据）。
+    pub provider_configured: bool,
+    /// 当前 provider 的 API key 可解析（内联或环境变量）。
+    pub api_key_configured: bool,
     /// 最近一次 `/scorecard` 加载的测光评分卡（侧边栏 Cost 面板展示）。
     pub scorecard: Option<crate::model::scorecard::Scorecard>,
     /// 最近一次请求的实际上下文占用 `(used_tokens, window_tokens)`，
@@ -238,6 +251,13 @@ pub struct AppState {
     pub rendered_lines: usize,
     pub auto_scroll: bool,
     pub model_label: String,
+    /// 当前 thinking effort 显示名（"high"/"max"，Disabled 为空串）；
+    /// 事件循环每帧从 runtime 刷新（/model 热切换后立即反映）。
+    pub effort_label: String,
+    /// 工作区路径（CLI 注入；状态行展示，窄终端优先丢弃）。
+    pub workspace_cwd: String,
+    /// 当前 git 分支（CLI 探测；非 git 工作区为 None）。
+    pub git_branch: Option<String>,
     pub display_mode: DisplayMode,
     /// 最近一次提交的 prompt（回合落盘用）。
     pub last_prompt: Option<String>,
@@ -253,6 +273,16 @@ pub struct AppState {
     /// EnableMouseCapture 状态一致）。
     pub mouse_capture: bool,
     pub sidebar_tab: SidebarTab,
+    /// 侧边栏 MCP 面板数据：已启用 server 清单（CLI 注入）。
+    pub mcp_servers: Vec<McpServerInfo>,
+    /// MCP 实时连接状态缓存（事件循环异步探测，Mcp 面板展示）。
+    pub mcp_statuses: Vec<McpStatus>,
+    /// 上次 MCP 探测时刻（冷却；进入 Mcp 面板首次即探，之后每 30s）。
+    pub mcp_last_probe: Option<std::time::Instant>,
+    /// 侧边栏 Skills 面板数据：扫描到的技能（name + description）。
+    pub skills: Vec<SkillEntry>,
+    /// 技能是否已扫描过（首次进 Skills 面板或启动时一次性扫描）。
+    pub skills_scanned: bool,
     pub completion: Option<CompletionState>,
     /// 斜杠命令行内候选（输入 `/` 开头时触发，Claude Code 风格）。
     pub command_hint: Option<crate::commands::CommandHintState>,
@@ -285,6 +315,8 @@ pub struct AppState {
     pub permission_mode: Option<deepseeknova_permission::PermissionMode>,
     /// Ctrl+P 循环切换权限模式的待消费标记（事件循环用真实 gate 消费）。
     pub perm_mode_cycle: bool,
+    /// Ctrl+L 清屏重绘的待消费标记（事件循环调 terminal.clear() 后复位）。
+    pub redraw_requested: bool,
     /// 信任确认浮层（首进带权限规则的项目时展示；None = 无需确认）。
     pub trust_prompt: Option<TrustPrompt>,
     /// 信任确认结果（y=true / n|Esc=false；事件循环用 TrustController 消费）。
@@ -768,10 +800,31 @@ impl AppState {
     }
 
     /// 编辑器按键（Input 焦点）：保留旧版全部编辑语义。
+    /// 编辑器按键（Input 焦点）：keymap 定制层优先，回落编译期绑定表，
+    /// 均未命中再走保留键/自由插入的硬编码语义。
     pub fn handle_editor_key(&mut self, key: &KeyEvent) -> KeyAction {
+        // 斜杠候选优先（浮层打开时 Enter/↑↓/Tab/Esc 由它消费）。
         if let Some(action) = self.handle_command_hint_key(key) {
             return action;
         }
+        // 1) 用户 keybindings.json 覆盖（含解绑 null → 完全无操作）。
+        let binding = crate::app::actions::Binding::from_key_event(key);
+        if let Some(overridden) = self
+            .keymap
+            .lookup(crate::app::actions::ActionContext::Input, binding)
+        {
+            return match overridden {
+                Some(action) => self.handle_input_action(action),
+                None => KeyAction::None,
+            };
+        }
+        // 2) 编译期默认绑定表。
+        if let Some(action) =
+            crate::app::actions::lookup(crate::app::actions::ActionContext::Input, key)
+        {
+            return self.handle_input_action(action);
+        }
+        // 3) 保留键 + 自由插入（不可重绑，见 keybindings.rs reserved_reason）。
         match key.code {
             KeyCode::Esc => {
                 if self.running {
@@ -786,56 +839,22 @@ impl AppState {
                 if self.running {
                     KeyAction::Cancel
                 } else {
+                    // 空闲 Ctrl+C：与 Esc 同语义的二次确认退出。
+                    self.confirm_quit()
+                }
+            }
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if !self.running && self.input.text.is_empty() {
+                    // shell 惯例：空行 Ctrl+D 退出。
+                    self.confirm_quit()
+                } else {
                     KeyAction::None
                 }
             }
-            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if !self.running {
-                    self.input.clear();
-                    self.refresh_command_hint();
-                }
+            KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                // raw 模式无任务控制：给明确反馈而不是静默吞掉。
+                self.show_notice(self.tr.t(Key::CtrlZUnavailable));
                 KeyAction::None
-            }
-            KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if !self.running {
-                    self.input.delete_word_before();
-                    self.refresh_command_hint();
-                }
-                KeyAction::None
-            }
-            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if !self.running {
-                    self.input.home();
-                }
-                KeyAction::None
-            }
-            KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if !self.running {
-                    self.input.end();
-                }
-                KeyAction::None
-            }
-            KeyCode::Enter => {
-                if self.running {
-                    return KeyAction::None;
-                }
-                if key.modifiers.contains(KeyModifiers::SHIFT)
-                    || key.modifiers.contains(KeyModifiers::CONTROL)
-                {
-                    self.input.insert_char('\n');
-                    return KeyAction::None;
-                }
-                let prompt = std::mem::take(&mut self.input);
-                let prompt = prompt.text.trim().to_string();
-                if prompt.is_empty() {
-                    return KeyAction::None;
-                }
-                if prompt.starts_with('/') {
-                    return KeyAction::Submit(prompt);
-                }
-                self.history.push(prompt.clone());
-                self.history_idx = None;
-                KeyAction::Submit(prompt)
             }
             KeyCode::Char(c) => {
                 if !self.running
@@ -854,48 +873,10 @@ impl AppState {
                 }
                 KeyAction::None
             }
-            KeyCode::Left => {
-                if !self.running {
-                    self.input.move_left();
-                }
-                KeyAction::None
-            }
-            KeyCode::Right => {
-                if !self.running {
-                    self.input.move_right();
-                }
-                KeyAction::None
-            }
             KeyCode::Delete => {
                 if !self.running {
                     self.input.delete();
                     self.refresh_command_hint();
-                }
-                KeyAction::None
-            }
-            KeyCode::Up => {
-                if !self.running {
-                    if self.command_hint.is_some() {
-                        // 候选选择在上面已处理；这里兜底。
-                    } else if self.input.text.contains('\n') {
-                        self.input.move_line_up();
-                    } else {
-                        self.history_prev();
-                        self.refresh_command_hint();
-                    }
-                }
-                KeyAction::None
-            }
-            KeyCode::Down => {
-                if !self.running {
-                    if self.command_hint.is_some() {
-                        // 候选选择在上面已处理；这里兜底。
-                    } else if self.input.text.contains('\n') {
-                        self.input.move_line_down();
-                    } else {
-                        self.history_next();
-                        self.refresh_command_hint();
-                    }
                 }
                 KeyAction::None
             }
@@ -909,30 +890,139 @@ impl AppState {
                 self.scroll_offset = self.scroll_offset.saturating_add(20);
                 KeyAction::None
             }
-            KeyCode::Home => {
+            _ => KeyAction::None,
+        }
+    }
+
+    /// 按 action 执行 Input 编辑语义（keymap 定制层与默认绑定表共用，
+    /// 保证改键后行为一致）。
+    fn handle_input_action(&mut self, action: crate::app::actions::Action) -> KeyAction {
+        use crate::app::actions::Action::*;
+        match action {
+            ChatSubmit => {
+                if self.running {
+                    return KeyAction::None;
+                }
+                let prompt = std::mem::take(&mut self.input);
+                let prompt = prompt.text.trim().to_string();
+                if prompt.is_empty() {
+                    return KeyAction::None;
+                }
+                if prompt.starts_with('/') {
+                    return KeyAction::Submit(prompt);
+                }
+                self.history.push(prompt.clone());
+                self.history_idx = None;
+                KeyAction::Submit(prompt)
+            }
+            ChatNewline => {
+                if !self.running {
+                    self.input.insert_char('\n');
+                }
+                KeyAction::None
+            }
+            ChatClearInput => {
+                if !self.running {
+                    self.input.clear();
+                    self.refresh_command_hint();
+                }
+                KeyAction::None
+            }
+            ChatDeleteWord => {
+                if !self.running {
+                    self.input.delete_word_before();
+                    self.refresh_command_hint();
+                }
+                KeyAction::None
+            }
+            ChatHistoryPrev => {
+                if !self.running {
+                    if self.command_hint.is_some() {
+                        // 候选选择已由 handle_command_hint_key 处理；兜底无操作。
+                    } else if self.input.text.contains('\n') {
+                        self.input.move_line_up();
+                    } else {
+                        self.history_prev();
+                        self.refresh_command_hint();
+                    }
+                }
+                KeyAction::None
+            }
+            ChatHistoryNext => {
+                if !self.running {
+                    if self.command_hint.is_some() {
+                        // 同上。
+                    } else if self.input.text.contains('\n') {
+                        self.input.move_line_down();
+                    } else {
+                        self.history_next();
+                        self.refresh_command_hint();
+                    }
+                }
+                KeyAction::None
+            }
+            ChatMoveLeft => {
+                if !self.running {
+                    self.input.move_left();
+                }
+                KeyAction::None
+            }
+            ChatMoveRight => {
+                if !self.running {
+                    self.input.move_right();
+                }
+                KeyAction::None
+            }
+            ChatMoveLineUp => {
+                if !self.running {
+                    self.input.move_line_up();
+                }
+                KeyAction::None
+            }
+            ChatMoveLineDown => {
+                if !self.running {
+                    self.input.move_line_down();
+                }
+                KeyAction::None
+            }
+            ChatHome => {
                 if self.running {
                     self.scroll_offset = 0;
                     self.auto_scroll = false;
                 } else {
+                    self.input.home();
+                }
+                KeyAction::None
+            }
+            ChatEnd => {
+                if self.running {
+                    self.auto_scroll = true;
+                } else {
+                    self.input.end();
+                }
+                KeyAction::None
+            }
+            ChatHomeLine => {
+                if !self.running {
                     self.input.home_line();
                 }
                 KeyAction::None
             }
-            KeyCode::End => {
-                if self.running {
-                    self.auto_scroll = true;
-                } else {
+            ChatEndLine => {
+                if !self.running {
                     self.input.end_line();
                 }
                 KeyAction::None
             }
-            KeyCode::Tab => {
+            ChatFocusConversation => {
                 // 焦点循环入口：Input（空闲）→ Conversation（消息导航）。
                 if !self.running {
                     self.focus = Focus::Conversation;
                 }
                 KeyAction::None
             }
+            // 全局热键（F1/Ctrl+L/Ctrl+P/Ctrl+\）经 handle_modal_shortcuts
+            // 先消费，不落到编辑分派；防御性忽略。
             _ => KeyAction::None,
         }
     }
@@ -1154,6 +1244,125 @@ mod tests {
             KeyAction::Submit(p) => assert_eq!(p, "/wat", "无候选原样提交"),
             _ => panic!("should submit"),
         }
+    }
+
+    #[test]
+    fn ctrl_c_arms_quit_when_idle_and_cancels_when_running() {
+        let ctrl_c = KeyEvent {
+            code: KeyCode::Char('c'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        };
+        let mut app = AppState::default();
+        // 空闲：首按置位（二次确认），再按退出。
+        assert_eq!(app.handle_editor_key(&ctrl_c), KeyAction::None);
+        assert!(app.quit_armed, "空闲 Ctrl+C 置位退出确认");
+        assert_eq!(app.handle_editor_key(&ctrl_c), KeyAction::Quit);
+        // 运行中：取消而非退出。
+        let mut app = AppState::default();
+        app.running = true;
+        assert_eq!(app.handle_editor_key(&ctrl_c), KeyAction::Cancel);
+    }
+
+    #[test]
+    fn ctrl_d_exits_on_empty_input_only() {
+        let ctrl_d = KeyEvent {
+            code: KeyCode::Char('d'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        };
+        // 空输入：首按置位，再按退出（shell 心智）。
+        let mut app = AppState::default();
+        assert_eq!(app.handle_editor_key(&ctrl_d), KeyAction::None);
+        assert!(app.quit_armed, "空输入 Ctrl+D 置位退出");
+        assert_eq!(app.handle_editor_key(&ctrl_d), KeyAction::Quit);
+        // 非空输入：不退出、不置位。
+        let mut app = AppState::default();
+        app.handle_editor_key(&KeyEvent {
+            code: KeyCode::Char('h'),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        });
+        assert_eq!(app.handle_editor_key(&ctrl_d), KeyAction::None);
+        assert!(!app.quit_armed, "非空输入 Ctrl+D 不退出");
+    }
+
+    #[test]
+    fn ctrl_z_shows_unavailable_notice() {
+        let ctrl_z = KeyEvent {
+            code: KeyCode::Char('z'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        };
+        let mut app = AppState::default();
+        app.handle_editor_key(&ctrl_z);
+        assert!(app.notice.is_some(), "Ctrl+Z 给出不可用提示");
+    }
+
+    #[test]
+    fn input_keys_respect_keymap_overrides_and_unbind() {
+        use crate::app::keybindings::Keymap;
+        use crate::i18n::Tr;
+        let key = |code: KeyCode| KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        };
+        let ctrl_u = KeyEvent {
+            code: KeyCode::Char('u'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        };
+        // 解绑 Ctrl+U（原清空输入）→ 按键无操作。
+        let keymap = Keymap::parse(
+            r#"{"bindings":[{"context":"Input","bindings":{"ctrl+u":null}}]}"#,
+            Tr::new(crate::i18n::Lang::En),
+        );
+        let mut app = AppState {
+            keymap,
+            ..Default::default()
+        };
+        app.handle_editor_key(&key(KeyCode::Char('a')));
+        app.handle_editor_key(&key(KeyCode::Char('b')));
+        app.handle_editor_key(&ctrl_u);
+        assert_eq!(app.input.text, "ab", "解绑 Ctrl+U 后不清空输入");
+        // 重绑 Ctrl+U → 删前一词（原 Ctrl+W 语义）。
+        let keymap = Keymap::parse(
+            r#"{"bindings":[{"context":"Input","bindings":{"ctrl+u":"chat:deleteWord"}}]}"#,
+            Tr::new(crate::i18n::Lang::En),
+        );
+        let mut app = AppState {
+            keymap,
+            ..Default::default()
+        };
+        // "ab cd" → 删前一词 → "ab "。
+        for c in ['a', 'b', ' ', 'c', 'd'] {
+            app.handle_editor_key(&key(KeyCode::Char(c)));
+        }
+        app.handle_editor_key(&ctrl_u);
+        assert_eq!(app.input.text, "ab ", "重绑 Ctrl+U 为删前一词");
+        // 解绑 Enter → 不再提交。
+        let keymap = Keymap::parse(
+            r#"{"bindings":[{"context":"Input","bindings":{"enter":null}}]}"#,
+            Tr::new(crate::i18n::Lang::En),
+        );
+        let mut app = AppState {
+            keymap,
+            ..Default::default()
+        };
+        app.handle_editor_key(&key(KeyCode::Char('x')));
+        assert_eq!(
+            app.handle_editor_key(&key(KeyCode::Enter)),
+            KeyAction::None,
+            "解绑 Enter 不提交"
+        );
+        assert_eq!(app.input.text, "x", "输入保留");
     }
 
     #[test]

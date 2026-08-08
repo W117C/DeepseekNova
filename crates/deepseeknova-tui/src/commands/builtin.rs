@@ -41,6 +41,10 @@ impl CommandHandler for HelpCmd {
             Key::HelpKeyEdit,
             Key::HelpKeyCtrlUW,
             Key::HelpKeyCtrlC,
+            Key::HelpKeyFocus,
+            Key::HelpKeyGlobal,
+            Key::HelpKeyEsc,
+            Key::HelpKeyShortcuts,
             Key::HelpFooter,
         ] {
             lines.push(tr.t(key).to_string());
@@ -115,8 +119,17 @@ impl CommandHandler for SessionsCmd {
                             (None, false) => format!("{} — {}", m.id, m.preview),
                             (None, true) => m.id.clone(),
                         };
+                        // 非当前工作区的会话给 basename 标注（当前工作区不加噪声）。
+                        let ws_tag = m
+                            .workspace
+                            .as_ref()
+                            .filter(|w| **w != ctx.app.workspace_cwd)
+                            .map(|w| {
+                                tr.t_args(Key::SessionWorkspaceTag, &[("ws", &short_ws_label(w))])
+                            })
+                            .unwrap_or_default();
                         ctx.app
-                            .echo_line(LineKind::System, &format!("  {label}{marker}"));
+                            .echo_line(LineKind::System, &format!("  {label}{ws_tag}{marker}"));
                     }
                 }
                 Ok(_) => ctx.app.show_notice(tr.t(Key::NoSavedSessions)),
@@ -327,6 +340,10 @@ impl CommandHandler for ModelCmd {
             "" | "help" => {
                 ctx.app
                     .echo_line(LineKind::System, tr.t(Key::ModelCommandsHeader));
+                if !ctx.app.provider_configured {
+                    ctx.app
+                        .echo_line(LineKind::Error, tr.t(Key::WelcomeNoProvider));
+                }
                 for key in [
                     Key::ModelHelpDisplay,
                     Key::ModelHelpEffort,
@@ -774,6 +791,137 @@ impl CommandHandler for CopyCmd {
     }
 }
 
+/// 工作区路径的短标签：取最后一段（basename），空/根路径回退原样。
+fn short_ws_label(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    normalized
+        .rsplit('/')
+        .find(|s| !s.is_empty())
+        .unwrap_or(path)
+        .to_string()
+}
+
+// ── workspace（当前工作区 + 可用 worktree）────────────────
+
+struct WorkspaceCmd;
+
+#[async_trait]
+impl CommandHandler for WorkspaceCmd {
+    async fn run(&self, ctx: &mut CommandCtx<'_>, _args: &str) -> CommandOutcome {
+        let tr = ctx.app.tr;
+        let cwd = if ctx.app.workspace_cwd.is_empty() {
+            std::env::current_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default()
+        } else {
+            ctx.app.workspace_cwd.clone()
+        };
+        match &ctx.app.git_branch {
+            Some(b) => ctx.app.echo_line(
+                LineKind::System,
+                &tr.t_args(Key::WorkspaceHeader, &[("path", &cwd), ("branch", b)]),
+            ),
+            None => ctx.app.echo_line(
+                LineKind::System,
+                &tr.t_args(Key::WorkspaceNoBranch, &[("path", &cwd)]),
+            ),
+        }
+        ctx.app.echo_line(
+            LineKind::System,
+            &tr.t_args(
+                Key::WorkspaceSessions,
+                &[("n", &ctx.app.saved_sessions.len().to_string())],
+            ),
+        );
+        // 每工作区会话数明细（非当前工作区 + 全局），一眼看出会话分布。
+        let mut counts: Vec<(String, usize)> = Vec::new();
+        let mut global = 0usize;
+        for m in &ctx.app.saved_sessions {
+            match &m.workspace {
+                Some(ws) => {
+                    if let Some((_, c)) = counts.iter_mut().find(|(w, _)| w == ws) {
+                        *c += 1;
+                    } else {
+                        counts.push((ws.clone(), 1));
+                    }
+                }
+                None => global += 1,
+            }
+        }
+        for (ws, c) in counts {
+            ctx.app.echo_line(
+                LineKind::System,
+                &tr.t_args(
+                    Key::WorkspaceCountRow,
+                    &[("ws", &short_ws_label(&ws)), ("n", &c.to_string())],
+                ),
+            );
+        }
+        if global > 0 {
+            ctx.app.echo_line(
+                LineKind::System,
+                &tr.t_args(
+                    Key::WorkspaceCountRow,
+                    &[
+                        ("ws", tr.t(Key::SidebarGlobalSessions)),
+                        ("n", &global.to_string()),
+                    ],
+                ),
+            );
+        }
+        ctx.app
+            .echo_line(LineKind::System, tr.t(Key::WorkspaceGlobalSessions));
+        // worktree 列表（best-effort；非 git 工作区/无 worktree 时显示占位）。
+        ctx.app
+            .echo_line(LineKind::System, tr.t(Key::WorktreesHeader));
+        let mut any = false;
+        if let Ok(out) = std::process::Command::new("git")
+            .args(["worktree", "list"])
+            .output()
+        {
+            if out.status.success() {
+                for line in String::from_utf8_lossy(&out.stdout).lines() {
+                    let line = line.trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    any = true;
+                    let cols: Vec<&str> = line.split_whitespace().collect();
+                    let path = cols.first().copied().unwrap_or("").to_string();
+                    let branch = cols
+                        .iter()
+                        .find(|p| p.starts_with('[') && p.ends_with(']'))
+                        .map(|b| b.trim_matches(|c| c == '[' || c == ']').to_string())
+                        .unwrap_or_else(|| tr.t(Key::WorkspaceNoBranch).to_string());
+                    ctx.app.echo_line(
+                        LineKind::System,
+                        &tr.t_args(Key::WorktreeRow, &[("path", &path), ("branch", &branch)]),
+                    );
+                }
+            }
+        }
+        if !any {
+            ctx.app
+                .echo_line(LineKind::System, tr.t(Key::WorktreesNone));
+        }
+        ctx.app.echo_line(
+            LineKind::System,
+            &tr.t_args(
+                Key::WorkspaceSwitchHint,
+                &[("cmd", "cd <path> && deepseeknova-cli chat --tui")],
+            ),
+        );
+        ctx.app.echo_line(
+            LineKind::System,
+            &tr.t_args(
+                Key::WorkspaceIsolationHint,
+                &[("cmd", "deepseeknova-cli worktree new")],
+            ),
+        );
+        CommandOutcome::Handled
+    }
+}
+
 // ── mode（权限模式预设）─────────────────────────────────────────
 
 /// 权限模式标签（经 i18n 词表取当前语言值）。
@@ -870,6 +1018,7 @@ static FOLD: FoldCmd = FoldCmd;
 static COPY: CopyCmd = CopyCmd;
 static MODE: ModeCmd = ModeCmd;
 static QUIT: QuitCmd = QuitCmd;
+static WORKSPACE: WorkspaceCmd = WorkspaceCmd;
 
 /// 内建命令表（顺序即 /help 与命令面板展示顺序）。
 pub const BUILTIN: &[Command] = &[
@@ -1005,6 +1154,14 @@ pub const BUILTIN: &[Command] = &[
         args_spec: ArgsSpec::None,
         args_hint: None,
         handler: &COPY,
+    },
+    Command {
+        name: "workspace",
+        desc: &Key::CmdWorkspaceDesc,
+        keywords: &["工作区", "workspace", "worktree"],
+        args_spec: ArgsSpec::None,
+        args_hint: None,
+        handler: &WORKSPACE,
     },
     Command {
         name: "mode",
@@ -1211,6 +1368,29 @@ mod tests {
     async fn unknown_command_echoes_error() {
         // 未知命令由事件循环回显错误；注册表层面验证找不到。
         assert!(CommandRegistry::find("wat").is_none());
+    }
+
+    #[tokio::test]
+    async fn workspace_command_registered_and_echoes_header() {
+        assert!(
+            CommandRegistry::find("workspace").is_some(),
+            "/workspace 已注册"
+        );
+        let caps = empty_caps();
+        let mut app = AppState {
+            tr: Tr::new(crate::i18n::Lang::Zh),
+            workspace_cwd: "/tmp/demo".into(),
+            git_branch: Some("main".into()),
+            ..Default::default()
+        };
+        run_cmd("workspace", "", &mut app, &caps).await;
+        assert!(
+            app.echo
+                .iter()
+                .any(|l| l.text.contains("工作区: /tmp/demo（main）")),
+            "工作区头回显: {:?}",
+            app.echo.iter().map(|l| l.text.clone()).collect::<Vec<_>>()
+        );
     }
 
     #[tokio::test]
@@ -1448,6 +1628,7 @@ mod tests {
             id: "chat-20260807-000001".into(),
             preview: "旧预览".into(),
             title: Some("项目重构".into()),
+            workspace: None,
         }];
         let ctrl = Arc::new(MockSessionController::new(Some("chat-x".into()), metas));
         let caps = TuiCaps {
@@ -1533,16 +1714,19 @@ mod tests {
                 id: "chat-20260807-000001".into(),
                 preview: "旧预览".into(),
                 title: Some("项目重构".into()),
+                workspace: None,
             },
             crate::app::state::SessionMeta {
                 id: "chat-20260806-000001".into(),
                 preview: String::new(),
                 title: None,
+                workspace: None,
             },
             crate::app::state::SessionMeta {
                 id: "chat-20260805-000001".into(),
                 preview: "有预览无标题".into(),
                 title: None,
+                workspace: None,
             },
         ];
         let ctrl = Arc::new(MockSessionController::new(

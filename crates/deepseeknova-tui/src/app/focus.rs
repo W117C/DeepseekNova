@@ -379,6 +379,16 @@ impl AppState {
                 self.perm_mode_cycle = true;
                 true
             }
+            Action::AppHelp => {
+                // F1：复用 /help 命令（pending_command 由事件循环用真实 caps 执行）。
+                self.pending_command = Some(("help".to_string(), String::new()));
+                true
+            }
+            Action::AppRedraw => {
+                // Ctrl+L：请求清屏重绘（事件循环消费）。
+                self.redraw_requested = true;
+                true
+            }
             _ => false,
         }
     }
@@ -459,11 +469,13 @@ mod tests {
                     id: "chat-a".into(),
                     preview: "第一个".into(),
                     title: None,
+                    workspace: None,
                 },
                 crate::app::state::SessionMeta {
                     id: "chat-b".into(),
                     preview: "第二个".into(),
                     title: None,
+                    workspace: None,
                 },
             ],
             ..Default::default()
@@ -540,6 +552,20 @@ mod tests {
         // 兼容显式 `\` 形态。
         assert!(app.handle_modal_shortcuts(&key(KeyCode::Char('\\'), KeyModifiers::CONTROL)));
         assert!(app.sidebar_visible);
+    }
+
+    #[test]
+    fn f1_opens_help_and_ctrl_l_requests_redraw() {
+        let mut app = AppState::default();
+        // F1 → 经 pending_command 复用 /help 命令路径。
+        assert!(app.handle_modal_shortcuts(&key(KeyCode::F(1), KeyModifiers::NONE)));
+        assert_eq!(
+            app.pending_command,
+            Some(("help".to_string(), String::new()))
+        );
+        // Ctrl+L → 请求清屏重绘（事件循环消费）。
+        assert!(app.handle_modal_shortcuts(&key(KeyCode::Char('l'), KeyModifiers::CONTROL)));
+        assert!(app.redraw_requested);
     }
 
     #[test]

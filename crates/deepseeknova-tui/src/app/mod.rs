@@ -79,6 +79,8 @@ enum AppEvent {
     },
     /// 会话列表拉取失败/完成：只复位刷新中标记，不清空旧列表。
     SessionsRefreshDone,
+    /// 侧边栏 MCP 探测结果（异步探测完成，缓存进 AppState 供 Mcp 面板展示）。
+    McpProbe(Vec<state::McpStatus>),
 }
 
 /// 主事件循环：阻塞直到退出。返回 `true` 表示正常退出（命令 `/quit` 或 Esc）。
@@ -170,6 +172,15 @@ pub async fn run_loop(
         {
             app.permission_mode = gate.mode();
         }
+        // 当前 thinking effort：每帧从 runtime 刷新（/model 热切换后立即反映）。
+        app.effort_label = caps
+            .runtime
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .current_effort
+            .effort_str()
+            .unwrap_or_default()
+            .to_string();
         terminal.draw(|f| app.draw(f))?;
 
         // 消费 `/` 面板待执行命令（真实 caps）。
@@ -180,6 +191,12 @@ pub async fn run_loop(
                     return Ok(true);
                 }
             }
+        }
+
+        // 消费 Ctrl+L 清屏重绘请求（terminal.clear 后下一帧重画）。
+        if app.redraw_requested {
+            app.redraw_requested = false;
+            let _ = terminal.clear();
         }
 
         // 消费 Ctrl+P 权限模式循环（真实 gate：set_mode + 反馈）。
@@ -292,6 +309,40 @@ pub async fn run_loop(
                     }
                 }
             });
+        }
+
+        // 侧边栏 Skills 面板：首次一次性扫描技能目录（dir 读取，轻量）。
+        if !app.skills_scanned && !caps.skills_paths.is_empty() {
+            app.skills_scanned = true;
+            for path in &caps.skills_paths {
+                let loader = deepseeknova_skills::SkillLoader::new(path);
+                if let Ok(skills) = loader.load_all() {
+                    app.skills
+                        .extend(skills.into_iter().map(|s| state::SkillEntry {
+                            name: s.name,
+                            description: s.description,
+                        }));
+                }
+            }
+        }
+        // 侧边栏 MCP 面板：进入即探测（首次/空缓存），之后每 30s 冷却刷新。
+        // 探测异步 spawn，不阻塞事件循环（进程 spawn + 短超时）。
+        let mcp_due = app.sidebar_tab == crate::app::focus::SidebarTab::Mcp
+            && !app.mcp_servers.is_empty()
+            && (app.mcp_statuses.is_empty()
+                || app
+                    .mcp_last_probe
+                    .map_or(true, |t| t.elapsed() >= std::time::Duration::from_secs(30)));
+        if mcp_due {
+            if let Some(probe) = caps.mcp_probe.clone() {
+                app.mcp_last_probe = Some(std::time::Instant::now());
+                let servers = app.mcp_servers.clone();
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let statuses = probe.probe(&servers).await;
+                    let _ = tx.send(AppEvent::McpProbe(statuses)).await;
+                });
+            }
         }
 
         tokio::select! {
@@ -426,6 +477,15 @@ pub async fn run_loop(
                                 KeyAction::None => {}
                             }
                         }
+                        AppEvent::Input(CEvent::Paste(text)) => {
+                            // bracketed paste：整段文本原样插入输入框（换行是
+                            // 字面换行，不触发提交）。运行中忽略，与键入一致。
+                            if !app.running && !text.is_empty() {
+                                let normalized = text.replace("\r\n", "\n");
+                                app.input.insert_str(&normalized);
+                                app.refresh_command_hint();
+                            }
+                        }
                         AppEvent::Input(CEvent::Mouse(m)) => {
                             // 鼠标滚轮 = 对话历史滚动（任何焦点都生效）：
                             // 滚轮向上 → 看更早的记录（offset 减小）；
@@ -454,6 +514,9 @@ pub async fn run_loop(
                         }
                         AppEvent::SessionsRefreshDone => {
                             sessions_refreshing = false;
+                        }
+                        AppEvent::McpProbe(statuses) => {
+                            app.mcp_statuses = statuses;
                         }
                         AppEvent::Runner { gen, ev } => {
                             if !session.accepts(gen) {
@@ -488,19 +551,42 @@ pub async fn run_loop(
                             app.apply_run_event(ev);
                         }
                         AppEvent::Error { gen, text } => {
-                            if !session.accepts(gen) {
-                                continue;
+                            if session.accepts(gen) {
+                                app.conversation
+                                    .push_system(crate::model::conversation::SystemKind::Error, text);
+                            } else {
+                                // 非当前 run 的错误（已取消/已结束回合的迟到错误、
+                                // 启动期探测失败）不再静默丢弃——回显到命令反馈区，
+                                // 让"出错了"始终可见（曾因无当前回合被 push_system 丢掉）。
+                                app.echo_line(LineKind::Error, &text);
                             }
-                            app.conversation
-                                .push_system(crate::model::conversation::SystemKind::Error, text);
                         }
                         AppEvent::Done { gen } => {
                             if !session.finish(gen) {
                                 continue;
                             }
+                            // 回合结束边界行：轮次 + 耗时，画在回合尾部（System
+                            // 段），让"本轮结束"与等待/失败状态有明确分界。
+                            let elapsed = app
+                                .run_started_at
+                                .map(|t| t.elapsed().as_secs_f32())
+                                .unwrap_or(0.0);
+                            let round = app.turn;
                             app.running = false;
                             app.run_started_at = None;
                             current_run = None;
+                            if round > 0 {
+                                app.conversation.push_system(
+                                    crate::model::conversation::SystemKind::Info,
+                                    app.tr.t_args(
+                                        Key::TurnBoundary,
+                                        &[
+                                            ("n", &round.to_string()),
+                                            ("secs", &format!("{elapsed:.1}")),
+                                        ],
+                                    ),
+                                );
+                            }
                         }
                     }
                 }

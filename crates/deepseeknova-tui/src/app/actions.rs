@@ -24,6 +24,10 @@ pub enum Action {
     AppToggleSidebar,
     /// 循环切换权限模式预设（plan → accept_edits → auto）。
     PermModeCycle,
+    /// 打开 /help 帮助浮层（F1）。
+    AppHelp,
+    /// 清屏重绘（Ctrl+L）。
+    AppRedraw,
     // ── 输入（Chat context）──────────────────────────────
     /// 提交输入。
     ChatSubmit,
@@ -43,6 +47,10 @@ pub enum Action {
     ChatMoveLineDown,
     ChatHome,
     ChatEnd,
+    /// Home 键：光标到当前行首（Ctrl+A 是缓冲区开头）。
+    ChatHomeLine,
+    /// End 键：光标到当前行尾（Ctrl+E 是缓冲区末尾）。
+    ChatEndLine,
     /// 焦点循环：输入 → 对话导航。
     ChatFocusConversation,
     // ── 对话导航（Conversation context，vim 血统）────────
@@ -96,6 +104,8 @@ impl Action {
             AppCancel => "app:cancel",
             AppToggleSidebar => "app:toggleSidebar",
             PermModeCycle => "perm:cycleMode",
+            AppHelp => "app:help",
+            AppRedraw => "app:redraw",
             ChatSubmit => "chat:submit",
             ChatNewline => "chat:newline",
             ChatClearInput => "chat:clearInput",
@@ -108,6 +118,8 @@ impl Action {
             ChatMoveLineDown => "chat:moveLineDown",
             ChatHome => "chat:home",
             ChatEnd => "chat:end",
+            ChatHomeLine => "chat:homeLine",
+            ChatEndLine => "chat:endLine",
             ChatFocusConversation => "chat:focusConversation",
             ConvSelectPrev => "conv:selectPrev",
             ConvSelectNext => "conv:selectNext",
@@ -147,6 +159,8 @@ pub const ALL_ACTIONS: &[Action] = &[
     Action::AppCancel,
     Action::AppToggleSidebar,
     Action::PermModeCycle,
+    Action::AppHelp,
+    Action::AppRedraw,
     Action::ChatSubmit,
     Action::ChatNewline,
     Action::ChatClearInput,
@@ -159,6 +173,8 @@ pub const ALL_ACTIONS: &[Action] = &[
     Action::ChatMoveLineDown,
     Action::ChatHome,
     Action::ChatEnd,
+    Action::ChatHomeLine,
+    Action::ChatEndLine,
     Action::ChatFocusConversation,
     Action::ConvSelectPrev,
     Action::ConvSelectNext,
@@ -333,6 +349,16 @@ pub const BINDINGS: &[(ActionContext, Binding, Action)] = &[
         Binding::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
         Action::PermModeCycle,
     ),
+    (
+        ActionContext::Input,
+        Binding::new(KeyCode::F(1), KeyModifiers::NONE),
+        Action::AppHelp,
+    ),
+    (
+        ActionContext::Input,
+        Binding::new(KeyCode::Char('l'), KeyModifiers::CONTROL),
+        Action::AppRedraw,
+    ),
     // ── Chat（输入聚焦）──────────────────────────────────
     (
         ActionContext::Input,
@@ -343,6 +369,21 @@ pub const BINDINGS: &[(ActionContext, Binding, Action)] = &[
         ActionContext::Input,
         Binding::new(KeyCode::Enter, KeyModifiers::SHIFT),
         Action::ChatNewline,
+    ),
+    (
+        ActionContext::Input,
+        Binding::new(KeyCode::Enter, KeyModifiers::CONTROL),
+        Action::ChatNewline,
+    ),
+    (
+        ActionContext::Input,
+        Binding::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+        Action::ChatHome,
+    ),
+    (
+        ActionContext::Input,
+        Binding::new(KeyCode::Char('e'), KeyModifiers::CONTROL),
+        Action::ChatEnd,
     ),
     (
         ActionContext::Input,
@@ -377,12 +418,12 @@ pub const BINDINGS: &[(ActionContext, Binding, Action)] = &[
     (
         ActionContext::Input,
         Binding::new(KeyCode::Home, KeyModifiers::NONE),
-        Action::ChatHome,
+        Action::ChatHomeLine,
     ),
     (
         ActionContext::Input,
         Binding::new(KeyCode::End, KeyModifiers::NONE),
-        Action::ChatEnd,
+        Action::ChatEndLine,
     ),
     (
         ActionContext::Input,
