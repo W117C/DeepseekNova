@@ -58,15 +58,6 @@ git config diff.renames true  # diff/log 统计启用重命名检测
   需预装 `cargo-deny`（`cargo install cargo-deny --locked`）；目标会先检查
   `cargo-deny`，再直接执行 `cargo deny --all-features check`。
 
-## 桌面端前端（非 cargo 脚手架）
-
-`crates/deepseeknova-desktop/frontend` 是 Vite + SolidJS + TypeScript +
-Tailwind CSS 4 的纯前端工程，不在 cargo workspace 内，需 Node.js 22+：
-
-```bash
-cd crates/deepseeknova-desktop/frontend
-npm install
-npm test          # vitest 纯函数测试
-npm run build     # tsc + vite build → dist/
-npm run preview   # 本地预览（截图/人工核对用）
-```
+> 桌面端前端（`crates/deepseeknova-desktop`）已于 2026-08-08 整体移除，
+> 历史可经 git 追溯（先例 `3ab55d7`）。当前无 Node 工程，本仓库为纯
+> Rust workspace。
