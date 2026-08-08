@@ -131,30 +131,3 @@ opt-level = "s"
 lto = true
 strip = true
 codegen-units = 1
-
-# cargo-dist configuration (v0.27+)
-# Install: cargo install cargo-dist
-# Generate CI: cargo dist generate-ci
-[workspace.metadata.dist]
-# Binary crate(s) to produce
-cargo-dist-version = "0.28.0"
-rust-toolchain-version = "stable"
-ci = "github"
-targets = [
-    "aarch64-apple-darwin",
-    "x86_64-apple-darwin",
-    "x86_64-unknown-linux-gnu",
-    "x86_64-pc-windows-msvc",
-]
-# The primary binary
-app-name = "deepseeknova-cli"
-# Installer configurations
-installer = ["shell", "powershell", "npm"]
-# MSI not needed; npm covers the widest audience
-preferred-installer = "npm"
-# Dispatch releases on version tags
-publish-jobs = ["tag"]
-# Host the artifacts on GitHub Releases
-host = "github"
-# Don't build for PRs — only tags and manual dispatch
-pr-run-mode = "skip"

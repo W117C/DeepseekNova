@@ -126,6 +126,6 @@ previous line receives backports for critical vulnerabilities only.
 
 | Version | Security Fixes |
 |---|---|
-| 0.4.x | ✅ Current |
-| 0.3.x | ⚠️ Backports for critical vulnerabilities |
-| ≤ 0.2.x | ❌ Not supported — upgrade recommended |
+| 0.5.x | ✅ Current |
+| 0.4.x | ⚠️ Backports for critical vulnerabilities |
+| ≤ 0.3.x | ❌ Not supported — upgrade recommended |

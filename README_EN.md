@@ -53,7 +53,7 @@ A Rust-from-scratch AI agent framework — not a wrapper. Built specifically for
   through the permission gate (ask/allow rules can approve it); tool-level
   injection surfaces (`git -c`/`--config-env`, format-string injection,
   UNC/URL/SMB path forms) are hard-denied and cannot be overridden by rules
-- **Multi-agent delegation** — delegate-based sub-agents (explorer / coder / tester / reviewer) with constrained tool sets, semaphore concurrency, and capped result summaries; isolated context, no recursion. Historical GOAP/Swarm/Federation experiments were removed in B0 (see DESIGN.md).
+- **Multi-agent delegation** — delegate-based sub-agents (explorer / coder / tester / reviewer) with constrained tool sets, semaphore concurrency, and capped result summaries; isolated context, bounded recursion (`[delegate] allow_recursion = true`, depth capped by `max_depth`, default 3). Historical GOAP/Swarm/Federation experiments were removed in B0 (see DESIGN.md).
 - **MCP protocol** — stdio + HTTP dual transport, auto-discovery
 - **Project knowledge** — Wiki generation, knowledge cards, 4-layer memory distillation, file checkpoints
 - **Protocol execution engine (`[protocol]`)** — DNA five-phase gating (Understand→Plan→Execute→Verify→Distill) with built-in gates (plan-before-execute / verify-evidence / distill-on-complex / drift-detection), `hard|soft|off` levels, off by default with zero overhead; evidence-anchored verification (blocking on configured-but-unverified, `unverified` diagnose outcome); adversarial review sub-agent on trigger conditions
@@ -126,7 +126,7 @@ irm https://raw.githubusercontent.com/W117C/DeepseekNova/main/install.ps1 | iex
 - Automatically downloads and verifies SHA256 checksums
 - If no binary is published for your platform yet, the script will tell you
 
-> 💡 The latest release is **v0.4.0**, whose assets cover only 3 platforms (macOS ARM / Linux x86_64 / Windows x86_64). **v0.5.0** will cover all 5 platforms.
+> 💡 The latest release is **v0.5.0**, whose assets cover all 5 platforms (macOS Intel / macOS ARM / Linux x86_64 / Linux ARM64 / Windows x86_64).
 
 Already have the Rust toolchain? You can also use [cargo-binstall](https://github.com/cargo-bins/cargo-binstall) to pull a prebuilt binary straight from GitHub Releases:
 
@@ -189,7 +189,7 @@ model = "deepseek-chat"
 | Backend | Rust + SQLite FTS5 + tokio + axum |
 | Frontend | TUI (ratatui) · CLI (clap) · HTTP API (axum + SSE) |
 | Tracing | OpenTelemetry (OTLP) |
-| Tests | 1571 tests · cargo-llvm-cov · 3-platform CI |
+| Tests | 1608 tests · cargo-llvm-cov · 3-platform CI |
 
 ## 📄 License
 

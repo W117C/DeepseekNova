@@ -28,8 +28,9 @@ env:
 jobs:
   # ── CLI Release Build (5 platforms) ──────────────────────────────
   # NOTE on runner choice:
-  #   - macos-13 is the last Intel (x86_64) macOS runner; macos-latest is
-  #     already arm64. Use a native Intel runner for x86_64-apple-darwin.
+  #   - macos-15-intel is GitHub's current Intel (x86_64) macOS runner;
+  #     macos-latest is already arm64. Use a native Intel runner for
+  #     x86_64-apple-darwin (macos-13 was retired).
   #   - ubuntu-24.04-arm is GitHub's native ARM64 Linux runner. The CLI's
   #     dependency tree compiles C code (tree-sitter grammars, rusqlite
   #     bundled SQLite), so cross-compiling aarch64 from x86_64 would need
@@ -49,7 +50,7 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             binary: deepseeknova-cli
-          - os: macos-13
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             binary: deepseeknova-cli
           - os: windows-latest
@@ -112,9 +113,12 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          name: Release ${{ github.ref_name }}
+          # tag push → inputs.version 未定义，用 github.ref_name（v0.5.0）；
+          # workflow_dispatch → 用用户填的 version，避免建「Release main」。
+          name: Release ${{ inputs.version || github.ref_name }}
+          tag_name: ${{ inputs.version || github.ref_name }}
           body: |
-            ## DeepseekNova ${{ github.ref_name }}
+            ## DeepseekNova ${{ inputs.version || github.ref_name }}
 
             ### Downloads
             See artifacts attached to this release.

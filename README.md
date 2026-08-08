@@ -24,7 +24,7 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 [![Rust](https://img.shields.io/badge/rust-stable%201.97-orange.svg)](https://www.rust-lang.org)
 [![Crates](https://img.shields.io/badge/crates-22-green.svg)](#-22-个-crate)
-[![Tests](https://img.shields.io/badge/tests-1571-brightgreen.svg)](#-技术栈)
+[![Tests](https://img.shields.io/badge/tests-1608-brightgreen.svg)](#-技术栈)
 
 </div>
 
@@ -81,7 +81,7 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 
 ### 🎪 多 Agent 委派
 - **delegate 子代理** — explorer / coder / tester / reviewer 四类预设，受限工具集 + 信号量并发控制 + 结果封顶回传
-- 独立上下文隔离，禁递归（子代理不能再委派）
+- 独立上下文隔离；支持受限递归（`[delegate] allow_recursion = true` 开启，深度上限 `max_depth` 默认 3，超深优雅降级）
 
 > 🔬 历史 GOAP / Swarm / Federation 实验已于 B0 裁撤（见 DESIGN.md）；多智能体能力现由 delegate 路径提供。
 
@@ -197,7 +197,7 @@ irm https://raw.githubusercontent.com/W117C/DeepseekNova/main/install.ps1 | iex
 - 自动下载并校验 SHA256 checksums
 - 若当前版本尚未发布对应平台的二进制，脚本会给出提示
 
-> 💡 当前最新发布为 **v0.4.0**，其 assets 仅覆盖 3 个平台（macOS ARM / Linux x86_64 / Windows x86_64）；**v0.5.0** 发布后将覆盖全部 5 个平台。
+> 💡 当前最新发布为 **v0.5.0**，assets 覆盖全部 5 个平台（macOS Intel / macOS ARM / Linux x86_64 / Linux ARM64 / Windows x86_64）。
 
 已安装 Rust 工具链？也可用 [cargo-binstall](https://github.com/cargo-bins/cargo-binstall) 直接从 GitHub Releases 拉取预编译二进制：
 
@@ -280,7 +280,7 @@ running 任务自动标记 interrupted，可重新拉起）。
 | 后端 | Rust + SQLite FTS5 + tokio + axum |
 | 前端 | TUI (ratatui) · CLI (clap) · HTTP API (axum + SSE) |
 | 追踪 | OpenTelemetry (OTLP) |
-| 测试 | 1571 tests · cargo-llvm-cov · CI 三平台 |
+| 测试 | 1608 tests · cargo-llvm-cov · CI 三平台 |
 
 ## 📄 License
 

@@ -1335,6 +1335,15 @@ pub struct UiConfig {
     pub lang: Option<String>,
 }
 
+impl UiConfig {
+    /// 非默认值覆盖（Option 级）：仅 `other.lang` 非 None 时覆盖。
+    fn merge(&mut self, other: UiConfig) {
+        if other.lang.is_some() {
+            self.lang = other.lang;
+        }
+    }
+}
+
 /// Session persistence configuration (long-task resume).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionConfig {
@@ -1812,6 +1821,7 @@ impl Config {
         self.quality.merge(other.quality);
         self.protocol.merge(other.protocol);
         self.hooks.merge(other.hooks);
+        self.ui.merge(other.ui);
     }
 
     /// Apply DEEPSEEKNOVA_* environment variable overrides.
@@ -2430,6 +2440,30 @@ mod tests {
 
         assert_eq!(base.default_model.as_deref(), Some("gpt-5"));
         assert_eq!(base.agent.max_steps, 20);
+    }
+
+    #[test]
+    fn ui_lang_merge_preserves_user_layer_and_project_override() {
+        // 用户层设 lang，项目层缺省 → 保留用户层（非默认值覆盖语义）。
+        let mut base = Config {
+            ui: UiConfig {
+                lang: Some("zh".into()),
+            },
+            ..Default::default()
+        };
+        let project_without = Config::default();
+        base.merge(project_without);
+        assert_eq!(base.ui.lang.as_deref(), Some("zh"));
+
+        // 项目层显式设 lang → 覆盖用户层。
+        let project_with = Config {
+            ui: UiConfig {
+                lang: Some("en".into()),
+            },
+            ..Default::default()
+        };
+        base.merge(project_with);
+        assert_eq!(base.ui.lang.as_deref(), Some("en"));
     }
 
     #[test]

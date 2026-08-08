@@ -40,7 +40,8 @@ All notable changes to DeepseekNova will be documented in this file.
   - 桌面端纯前端脚手架（`crates/deepseeknova-desktop/frontend`）：Vite 6 +
     SolidJS + TypeScript + Tailwind CSS 4，首屏按「新星观测台 A×B 合并构图」
     实现双顶带 / 夜次分组观测日志栏 / 划线对话流 / 时间轴星座图 / 六维测光
-    评分卡；含 14 条 vitest 纯函数测试。
+    评分卡；含 14 条 vitest 纯函数测试。~~（已于 v0.5.0 发布前整体移除，
+    desktop crate 从仓库删除，见 c10fec3）~~
   - TUI 观测台演进：浅色档对齐「印刷星图」token（`#3B55D9` 深化品牌蓝、
     `#D8DDEC` 墨线、`#DDE4FB` 选中底）；侧边栏会话按夜次分组并显示
     `◉/●/·` 星等三档；审批浮层展示风险标签（只读/非只读/危险）与完整

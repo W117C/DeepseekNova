@@ -1,8 +1,8 @@
-//! 语义配色主题：`DEEPSEEKNOVA_THEME` 环境变量三档（codex/dark/light）。
+//! 语义配色主题：`DEEPSEEKNOVA_THEME` 环境变量三档（codex/deepseek/dark/light）。
 //!
-//! 默认 `codex` 完全等价于旧版硬编码的 Codex 语义色（user/status=cyan、
-//! agent=magenta、次要=dim、成功=green、失败=red），零配置行为不变。
-//! 不使用自定义颜色名，深浅终端均通读。
+//! 默认档（`codex`/`deepseek` 均映射）为 Claude Code 观感（190ac01）：消息正文
+//! 用终端默认前景色、归属靠 `❯`/`⏺` 标记，品牌蓝 `#4D6BFE` 只留给 accent；
+//! 次要=dim、成功=green、失败=red。不使用自定义颜色名，深浅终端均通读。
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;

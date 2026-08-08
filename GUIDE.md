@@ -183,7 +183,7 @@ writable_paths = []                # 额外可写根（工作区默认可写）
 allow_network = false              # 默认禁网（ReadOnly/WorkspaceWrite 档强制）
 
 [permissions]
-enabled = true                     # false（默认）时工具不经过 allow/ask/deny 门控
+enabled = true                     # true（默认，默认安全姿态）：工具经 allow/ask/deny 门控
 default_mode = "ask"               # 无规则命中时写工具的默认行为：ask | allow | deny
 # rate_limit_per_minute = 30       # 可选：滚动 60s 窗口内的门控调用上限
 
@@ -1354,7 +1354,7 @@ pinned_messages = 4            # Keep the N most recent messages unsummarized
 
 ```toml
 [permissions]
-enabled = true                  # 总开关：false（默认）时工具不经过 allow/ask/deny 门控
+enabled = true                  # 总开关：true（默认，默认安全姿态）时工具经 allow/ask/deny 门控
 default_mode = "ask"            # 无规则命中时写工具的默认行为：ask | allow | deny
 # rate_limit_per_minute = 30    # 可选：滚动 60s 窗口内的门控调用上限
 
