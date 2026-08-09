@@ -267,7 +267,7 @@ pub fn platform_sandbox_tiered(
             #[cfg(not(any(target_os = "macos", target_os = "linux")))]
             {
                 // Windows/其他平台：无隔离。方案见 crate 根文档「Windows 沙箱现状与方案」。
-                let _ = (tier, writable_paths, allow_network, net);
+                let _ = (tier, writable_paths, allow_network);
                 Box::new(NoOpSandbox)
             }
         }
@@ -292,7 +292,7 @@ pub fn platform_sandbox_tiered(
             #[cfg(not(any(target_os = "macos", target_os = "linux")))]
             {
                 // Windows/其他平台：无隔离。方案见 crate 根文档「Windows 沙箱现状与方案」。
-                let _ = (tier, writable_paths, allow_network);
+                let _ = (tier, writable_paths, allow_network, net);
                 Box::new(NoOpSandbox)
             }
         }
