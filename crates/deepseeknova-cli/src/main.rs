@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 mod audit;
 mod chat;
 mod cli;
@@ -13,7 +15,7 @@ mod worktree;
 ///
 /// 退出码分区：
 /// - `0`：成功
-/// - `1`：通用错误（anyhow 传播 / eval 条目级失败）
+/// - `1`：通用错误（DeepseeknovaError 传播 / eval 条目级失败）
 /// - `2`：eval CI 门槛失败（仅 eval 子命令使用）
 /// - `3`：eval 条目+CI 双失败（仅 eval 子命令使用）
 /// - `6`：配置/路由构建错误
@@ -25,14 +27,13 @@ mod exit_code {
     pub const PAUSED: i32 = 10;
 }
 
-use anyhow::Context;
 use async_trait::async_trait;
 use clap::Parser;
 use cli::{Cli, Commands};
 use deepseeknova_agent::{CoordinatorRunner, PlanModeRunner};
 use deepseeknova_core::planner::SimplePlanner;
 use deepseeknova_core::runner::{RunEventStream, RunInput, Runner};
-use deepseeknova_core::RunEvent;
+use deepseeknova_core::{DeepseeknovaError, RunEvent};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio_stream::StreamExt;
@@ -41,7 +42,7 @@ use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::FmtSubscriber;
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> Result<(), DeepseeknovaError> {
     let cli = Cli::parse();
 
     // TUI 全屏模式（alternate screen）下 stdout 被 ratatui 独占，任何
@@ -114,8 +115,8 @@ async fn main() -> anyhow::Result<()> {
             .with_max_level(max_level)
             .with_writer(std::io::stderr)
             .finish();
-        tracing::subscriber::set_global_default(subscriber)
-            .expect("setting default subscriber failed");
+        // set_global_default 仅在已设置时返回 Err；首次调用不会失败。
+        let _ = tracing::subscriber::set_global_default(subscriber);
         None
     };
 
@@ -364,7 +365,9 @@ async fn main() -> anyhow::Result<()> {
                 let mcp_tools = deepseeknova_runtime::discover_mcp_tools(&config).await;
                 let provider = model_router
                     .provider_for(ModelRole::Task, None)
-                    .map_err(|e| anyhow::anyhow!("{e}（可用 --no-ai 跳过 AI 调查）"))?;
+                    .map_err(|e| {
+                        DeepseeknovaError::provider(format!("{e}（可用 --no-ai 跳过 AI 调查）"))
+                    })?;
                 // agent 一次性构建，跨 findings 复用（Agent::run_stream 每次调用克隆状态）。
                 let agent = build_agent(
                     Arc::clone(&provider),
@@ -615,8 +618,9 @@ async fn main() -> anyhow::Result<()> {
                     deepseeknova_tui::approval::approval_channel();
                 let factory = move |effort: Option<ReasoningEffort>,
                                     model: Option<String>|
-                      -> anyhow::Result<
+                      -> Result<
                     Arc<dyn deepseeknova_core::runner::Runner>,
+                    DeepseeknovaError,
                 > {
                     let provider = factory_router.provider_for_maybe_model(
                         ModelRole::Main,
@@ -725,7 +729,7 @@ async fn main() -> anyhow::Result<()> {
                 let agent_factory =
                     move |effort: Option<deepseeknova_provider::factory::ReasoningEffort>,
                           model_name: Option<String>|
-                          -> anyhow::Result<Box<dyn Runner + Send>> {
+                          -> Result<Box<dyn Runner + Send>, DeepseeknovaError> {
                         use deepseeknova_provider::cost::ModelRole;
                         // `/model switch <name>` 显式覆盖，仍按 Main 角色计量。
                         let provider = router.provider_for_maybe_model(
@@ -1170,7 +1174,11 @@ async fn main() -> anyhow::Result<()> {
 
         // ── Worktree（git worktree 隔离的并行会话，P2-7）────────────────
         Some(Commands::Worktree { action }) => {
-            let cwd = std::env::current_dir().context("cannot determine current directory")?;
+            let cwd = std::env::current_dir().map_err(|e| {
+                DeepseeknovaError::Io(std::io::Error::other(format!(
+                    "cannot determine current directory: {e}"
+                )))
+            })?;
             match action {
                 cli::WorktreeAction::New { name, base } => {
                     let wt = worktree::run_new(&cwd, name.as_deref(), base.as_deref())?;
@@ -1220,7 +1228,7 @@ async fn main() -> anyhow::Result<()> {
                 let agent_factory =
                     move |effort: Option<deepseeknova_provider::factory::ReasoningEffort>,
                           model_name: Option<String>|
-                          -> anyhow::Result<Box<dyn Runner + Send>> {
+                          -> Result<Box<dyn Runner + Send>, DeepseeknovaError> {
                         use deepseeknova_provider::cost::ModelRole;
                         // `/model switch <name>` 显式覆盖，仍按 Main 角色计量。
                         let provider = router.provider_for_maybe_model(
@@ -1367,15 +1375,15 @@ fn collect_at_files() -> Vec<String> {
 fn resolve_provider_cfg<'a>(
     config: &'a deepseeknova_config::Config,
     model: Option<&str>,
-) -> anyhow::Result<&'a deepseeknova_config::ProviderConfig> {
+) -> Result<&'a deepseeknova_config::ProviderConfig, DeepseeknovaError> {
     if let Some(model_name) = model {
         if let Some(cfg) = config.resolve_provider_for_model(model_name) {
             return Ok(cfg);
         }
     }
     config.providers.first().ok_or_else(|| {
-        anyhow::anyhow!(
-            "no AI provider is configured — add a `[[providers]]` section to your config"
+        DeepseeknovaError::Config(
+            "no AI provider is configured — add a `[[providers]]` section to your config".into(),
         )
     })
 }
@@ -1427,7 +1435,7 @@ fn compact_override_model(config: &deepseeknova_config::Config) -> Option<&str> 
 fn compact_provider_for(
     router: &deepseeknova_provider::router::ModelRouter,
     config: &deepseeknova_config::Config,
-) -> anyhow::Result<Arc<dyn deepseeknova_provider::Provider>> {
+) -> Result<Arc<dyn deepseeknova_provider::Provider>, deepseeknova_core::DeepseeknovaError> {
     router.provider_for_maybe_model(
         deepseeknova_provider::cost::ModelRole::Compact,
         compact_override_model(config),
@@ -1445,7 +1453,7 @@ fn step_effort_providers(
     router: &deepseeknova_provider::router::ModelRouter,
     config: &deepseeknova_config::Config,
     model: Option<&str>,
-) -> anyhow::Result<EffortProviderPair> {
+) -> Result<EffortProviderPair, DeepseeknovaError> {
     use deepseeknova_provider::cost::ModelRole;
     use deepseeknova_provider::factory::ReasoningEffort;
     if !config.agent.step_effort_routing {
@@ -1465,7 +1473,7 @@ fn step_effort_providers(
 fn review_provider_for(
     router: &deepseeknova_provider::router::ModelRouter,
     config: &deepseeknova_config::Config,
-) -> anyhow::Result<Option<Arc<dyn deepseeknova_provider::Provider>>> {
+) -> Result<Option<Arc<dyn deepseeknova_provider::Provider>>, DeepseeknovaError> {
     if !config.review.enabled {
         return Ok(None);
     }
@@ -1483,7 +1491,7 @@ fn review_provider_for(
 
 /// Run one eval case and return the agent's final text (streaming deltas are
 /// accumulated; the `Done` output wins if present).
-async fn run_eval_case(runner: &dyn Runner, prompt: String) -> anyhow::Result<String> {
+async fn run_eval_case(runner: &dyn Runner, prompt: String) -> Result<String, DeepseeknovaError> {
     let input = RunInput {
         prompt,
         images: Vec::new(),
@@ -1535,7 +1543,7 @@ fn build_agent(
     extra_tools: Vec<Arc<dyn deepseeknova_core::Tool>>,
     router: &deepseeknova_provider::router::ModelRouter,
     session_label: Option<String>,
-) -> anyhow::Result<deepseeknova_agent::Agent> {
+) -> Result<deepseeknova_agent::Agent, DeepseeknovaError> {
     build_agent_in(
         std::env::current_dir().unwrap_or_default(),
         provider,
@@ -1562,7 +1570,7 @@ fn build_agent_in(
     extra_tools: Vec<Arc<dyn deepseeknova_core::Tool>>,
     router: &deepseeknova_provider::router::ModelRouter,
     session_label: Option<String>,
-) -> anyhow::Result<deepseeknova_agent::Agent> {
+) -> Result<deepseeknova_agent::Agent, DeepseeknovaError> {
     let metrics_dir = workspace_root.join(".deepseeknova").join("metrics");
     // 会话技能名收集器（P 任务 2，spec §13 #9）：builder 注入侧把实际注入
     // prompt 的技能名写入，会话结束由 attach_metrics_hook_with_fitness 消费
@@ -1746,13 +1754,13 @@ impl deepseeknova_tui::TrustController for CliTrustController {
         self.0.is_trusted(root)
     }
 
-    fn trust(&self, root: &std::path::Path) -> anyhow::Result<()> {
+    fn trust(&self, root: &std::path::Path) -> Result<(), DeepseeknovaError> {
         let mut store = self.0.clone();
         store.trust(root);
         store.save()
     }
 
-    fn untrust(&self, root: &std::path::Path) -> anyhow::Result<()> {
+    fn untrust(&self, root: &std::path::Path) -> Result<(), DeepseeknovaError> {
         let mut store = self.0.clone();
         store.untrust(root);
         store.save()
@@ -1761,7 +1769,7 @@ impl deepseeknova_tui::TrustController for CliTrustController {
 
 #[async_trait::async_trait]
 impl deepseeknova_tui::SessionController for TuiSessionController {
-    async fn new_session(&self) -> anyhow::Result<()> {
+    async fn new_session(&self) -> Result<(), DeepseeknovaError> {
         let mut p = self.persist.lock().await;
         p.history.lock().await.clear();
         p.session_id = deepseeknova_store::new_session_id();
@@ -1769,7 +1777,7 @@ impl deepseeknova_tui::SessionController for TuiSessionController {
         Ok(())
     }
 
-    async fn list_sessions(&self) -> anyhow::Result<Vec<deepseeknova_tui::SessionMeta>> {
+    async fn list_sessions(&self) -> Result<Vec<deepseeknova_tui::SessionMeta>, DeepseeknovaError> {
         let p = self.persist.lock().await;
         let metas = p.list_sessions_with_titles()?;
         Ok(metas
@@ -1785,7 +1793,7 @@ impl deepseeknova_tui::SessionController for TuiSessionController {
             .collect())
     }
 
-    async fn rename(&self, id: &str, title: &str) -> anyhow::Result<()> {
+    async fn rename(&self, id: &str, title: &str) -> Result<(), DeepseeknovaError> {
         let mut p = self.persist.lock().await;
         p.rename(id, title)
     }
@@ -1795,11 +1803,16 @@ impl deepseeknova_tui::SessionController for TuiSessionController {
         Some(p.session_id.clone())
     }
 
-    async fn resume(&self, id: &str) -> anyhow::Result<Vec<deepseeknova_tui::ResumedLine>> {
+    async fn resume(
+        &self,
+        id: &str,
+    ) -> Result<Vec<deepseeknova_tui::ResumedLine>, DeepseeknovaError> {
         let mut p = self.persist.lock().await;
         let turns = p.store.load(id)?;
         if turns.is_empty() {
-            anyhow::bail!("session '{id}' is empty or does not exist");
+            return Err(DeepseeknovaError::Storage(format!(
+                "session '{id}' is empty or does not exist"
+            )));
         }
         let mut hist = p.history.lock().await;
         hist.clear();
@@ -1834,7 +1847,7 @@ impl deepseeknova_tui::SessionController for TuiSessionController {
         prompt: &str,
         output_text: &str,
         model: Option<String>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), DeepseeknovaError> {
         let mut p = self.persist.lock().await;
         p.turn += 1;
         let messages = vec![
@@ -1891,12 +1904,12 @@ impl deepseeknova_tui::SessionCheckpointController for TuiCheckpointController {
         &self,
         label: Option<String>,
         conversation: Vec<deepseeknova_checkpoint::ConversationLine>,
-    ) -> anyhow::Result<String> {
+    ) -> Result<String, DeepseeknovaError> {
         let mut ck = deepseeknova_checkpoint::SessionCheckpointManager::load_from(&self.path)?;
-        ck.save(conversation, label).await
+        Ok(ck.save(conversation, label).await?)
     }
 
-    async fn list(&self) -> anyhow::Result<Vec<String>> {
+    async fn list(&self) -> Result<Vec<String>, DeepseeknovaError> {
         let ck = deepseeknova_checkpoint::SessionCheckpointManager::load_from(&self.path)?;
         Ok(ck
             .list()
@@ -1911,7 +1924,7 @@ impl deepseeknova_tui::SessionCheckpointController for TuiCheckpointController {
     async fn rollback(
         &self,
         id: Option<&str>,
-    ) -> anyhow::Result<Option<deepseeknova_checkpoint::SessionCheckpoint>> {
+    ) -> Result<Option<deepseeknova_checkpoint::SessionCheckpoint>, DeepseeknovaError> {
         let mut ck = deepseeknova_checkpoint::SessionCheckpointManager::load_from(&self.path)?;
         match ck.rollback(id).await? {
             Some(ckp) => {
@@ -1948,7 +1961,7 @@ impl deepseeknova_tui::SessionCheckpointController for TuiCheckpointController {
 }
 
 /// Stream events from any [`Runner`] to stdout in a consistent format.
-async fn stream_events(runner: &dyn Runner, input: RunInput) -> anyhow::Result<()> {
+async fn stream_events(runner: &dyn Runner, input: RunInput) -> Result<(), DeepseeknovaError> {
     let mut stream = runner.run_stream(input).await?;
     while let Some(event) = stream.next().await {
         match event? {
@@ -1993,7 +2006,7 @@ async fn stream_events(runner: &dyn Runner, input: RunInput) -> anyhow::Result<(
 }
 
 /// Stream from a [`CoordinatorRunner`] — uses plan-aware display labels.
-async fn stream_coordinator(runner: &dyn Runner, input: RunInput) -> anyhow::Result<()> {
+async fn stream_coordinator(runner: &dyn Runner, input: RunInput) -> Result<(), DeepseeknovaError> {
     let mut stream = runner.run_stream(input).await?;
     while let Some(event) = stream.next().await {
         match event? {
@@ -2083,7 +2096,10 @@ impl MetricsRunner {
 
 #[async_trait]
 impl Runner for MetricsRunner {
-    async fn run_stream(&self, input: RunInput) -> anyhow::Result<RunEventStream> {
+    async fn run_stream(
+        &self,
+        input: RunInput,
+    ) -> Result<RunEventStream, deepseeknova_core::DeepseeknovaError> {
         let inner_stream = self.inner.run_stream(input).await?;
         let ledger = Arc::clone(&self.ledger);
         let prices = self.prices.clone();
@@ -2127,7 +2143,7 @@ impl Runner for MetricsRunner {
 fn resolve_scan_root(
     workspace: &std::path::Path,
     raw: &std::path::Path,
-) -> anyhow::Result<std::path::PathBuf> {
+) -> Result<std::path::PathBuf, DeepseeknovaError> {
     let abs = if raw.is_absolute() {
         raw.to_path_buf()
     } else {
@@ -2135,16 +2151,19 @@ fn resolve_scan_root(
     };
     let norm = normalize_path(&abs);
     if !norm.starts_with(workspace) {
-        anyhow::bail!("scan path escapes the workspace root: {}", raw.display());
+        return Err(DeepseeknovaError::Config(format!(
+            "scan path escapes the workspace root: {}",
+            raw.display()
+        )));
     }
     // symlink 逃逸：canonicalize 解析符号链接后复核包含性。
     if let Ok(canon) = std::fs::canonicalize(&norm) {
         let ws_canon = std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
         if !canon.starts_with(&ws_canon) {
-            anyhow::bail!(
+            return Err(DeepseeknovaError::Config(format!(
                 "scan path escapes the workspace root via symlink: {}",
                 raw.display()
-            );
+            )));
         }
     }
     Ok(norm)

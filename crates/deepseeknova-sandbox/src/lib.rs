@@ -50,6 +50,8 @@
 //! 是推荐档位：工作区可写 + 网络按配置（默认禁网），兼顾隔离与日常使用。
 //! 本 crate 不修改任何默认值。
 
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 #[cfg(target_os = "linux")]
 pub mod bubblewrap;
 #[cfg(target_os = "macos")]

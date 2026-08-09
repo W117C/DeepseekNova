@@ -1,3 +1,6 @@
+#![warn(missing_docs)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 //! # deepseeknova-metrics
 //!
 //! 会话级效能度量：每个 `run_stream` 内用 [`SessionTracker`] 局部累加
@@ -33,13 +36,21 @@ pub struct SessionStats {
     pub started_at_ms: u64,
     /// snapshot() 时计算（now - started_at）。
     pub duration_ms: u64,
+    /// 执行步数（agent loop 迭代次数）。
     pub steps: u64,
+    /// 工具调用总次数（含成功与失败）。
     pub tool_calls: u64,
+    /// 工具调用失败次数。
     pub tool_failures: u64,
+    /// 按工具名分组的失败次数。
     pub tool_failures_by_name: HashMap<String, u64>,
+    /// 按工具名分组的调用次数。
     pub tool_calls_by_name: HashMap<String, u64>,
+    /// 重试次数。
     pub retries: u64,
+    /// 验证执行次数。
     pub verifications: u64,
+    /// 验证通过次数。
     pub verifications_passed: u64,
     /// run 结束前为 None。
     pub outcome: Option<RunOutcome>,
@@ -51,7 +62,9 @@ pub type SessionSnapshot = SessionStats;
 /// 落盘报告：执行面 + 成本面。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionReport {
+    /// 会话标识。
     pub session_id: String,
+    /// 执行面快照。
     pub stats: SessionStats,
     /// 成本为累计语义（CostLedger 为 Agent 级共享、跨 run 累计）。
     pub cost: CostReport,
@@ -75,6 +88,7 @@ pub struct SessionTracker {
 }
 
 impl SessionTracker {
+    /// 创建一个 tracker，记录开始时间为当前时刻。各计数器从 0 起。
     pub fn new() -> Self {
         Self {
             started_at: Some(Instant::now()),
@@ -83,6 +97,7 @@ impl SessionTracker {
         }
     }
 
+    /// 记录一次 agent loop 步进（步数 +1）。
     pub fn observe_step(&mut self) {
         self.steps += 1;
     }
@@ -100,10 +115,12 @@ impl SessionTracker {
         }
     }
 
+    /// 记录一次重试。
     pub fn observe_retry(&mut self) {
         self.retries += 1;
     }
 
+    /// 记录一次验证及其结果。`passed=true` 时同时累加通过计数。
     pub fn observe_verify(&mut self, passed: bool) {
         self.verifications += 1;
         if passed {
@@ -111,10 +128,12 @@ impl SessionTracker {
         }
     }
 
+    /// 标记本次 run 的结束态。run 结束前 `outcome` 为 `None`。
     pub fn mark_outcome(&mut self, outcome: RunOutcome) {
         self.outcome = Some(outcome);
     }
 
+    /// 将当前累加值快照为 [`SessionStats`]（计算 `duration_ms` 为 now - started_at）。
     pub fn snapshot(&self) -> SessionStats {
         SessionStats {
             started_at_ms: self.started_at_ms,
@@ -284,8 +303,11 @@ pub fn composite_index(dims: &ScoreDimensions) -> f32 {
 /// [`Scorecard::fill_task_rate`] 写入；serde default 保证旧评分卡文件兼容。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Scorecard {
+    /// 会话标识。
     pub session_id: String,
+    /// 会话开始时间戳（毫秒）。
     pub started_at_ms: u64,
+    /// 各维度分数。
     pub dimensions: ScoreDimensions,
     /// task_rate 指标：本会话是否一次通过（DiagnoseReport.failures 为空）。
     /// serde default false（旧评分卡缺字段按 false = 保守口径：无数据不宣称首过）。
@@ -392,8 +414,11 @@ impl Scorecard {
 /// 跨会话聚合结果。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScorecardAggregate {
+    /// 聚合的评分卡数量。
     pub count: usize,
+    /// 各维度的平均值。
     pub avg: ScoreDimensions,
+    /// 四维 overall 的平均值。
     pub avg_overall: f32,
     /// 平均分最低的维度名（governance/verification/reflection/review）；
     /// 空输入为 `""`。

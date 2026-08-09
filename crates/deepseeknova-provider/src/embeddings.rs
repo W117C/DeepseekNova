@@ -12,12 +12,13 @@
 //! - **异步** [`EmbeddingProvider::embed_async`]（async 调用链推荐）：直接 await
 //!   reqwest，无 runtime、不占用 tokio worker 线程。
 //!
-//! 任何失败都以 [`anyhow::Error`] 返回，由调用方 fail-open（回落纯 FTS）。
+//! 任何失败都以 [`deepseeknova_core::DeepseeknovaError`] 返回，由调用方 fail-open（回落纯 FTS）。
 //! 超时由构造时 `timeout_secs` 配置的 HTTP client 兜底。
 
-use anyhow::{anyhow, Context, Result};
+use crate::ProviderError;
 use deepseeknova_config::MemoryConfig;
 use deepseeknova_core::memory::embedding::{EmbedAsyncFuture, EmbeddingProvider};
+use deepseeknova_core::DeepseeknovaError;
 use reqwest::Client;
 use serde::Deserialize;
 use std::env;
@@ -32,15 +33,18 @@ pub const FALLBACK_API_KEY_ENV: &str = "OPENAI_API_KEY";
 /// runtime。不持有在 [`RemoteEmbedder`] 内，避免在 async 上下文中 drop 一个
 /// tokio runtime 触发 `Cannot drop a runtime in a context where blocking is not
 /// allowed`（async 调用方持有/释放 embedder 均安全）。
-fn shared_sync_runtime() -> Result<&'static tokio::runtime::Runtime> {
+fn shared_sync_runtime() -> Result<&'static tokio::runtime::Runtime, DeepseeknovaError> {
     static RT: std::sync::LazyLock<Result<tokio::runtime::Runtime, std::io::Error>> =
         std::sync::LazyLock::new(|| {
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
         });
-    RT.as_ref()
-        .map_err(|e| anyhow!("failed to build shared embedding sync runtime: {e}"))
+    RT.as_ref().map_err(|e| {
+        DeepseeknovaError::Runner(format!(
+            "failed to build shared embedding sync runtime: {e}"
+        ))
+    })
 }
 
 /// OpenAI 兼容远程嵌入提供器（`[memory] embedder = "remote"`）。
@@ -50,39 +54,53 @@ pub struct RemoteEmbedder {
     base_url: String,
     api_key: String,
     model: String,
+    /// 客户端超时时长（用于超时错误归类到 ProviderError::Timeout）。
+    timeout_secs: u64,
 }
 
 impl RemoteEmbedder {
     /// 直接装配（测试/自定义调用方用）。
-    pub fn new(base_url: &str, api_key: &str, model: &str, timeout_secs: u64) -> Result<Self> {
+    pub fn new(
+        base_url: &str,
+        api_key: &str,
+        model: &str,
+        timeout_secs: u64,
+    ) -> Result<Self, DeepseeknovaError> {
         let client = Client::builder()
             .timeout(Duration::from_secs(timeout_secs))
             .build()
-            .context("failed to build embedding HTTP client")?;
+            .map_err(|e| {
+                DeepseeknovaError::provider(format!("failed to build embedding HTTP client: {e}"))
+            })?;
         Ok(Self {
             client,
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key: api_key.to_string(),
             model: model.to_string(),
+            timeout_secs,
         })
     }
 
     /// 从 `[memory]` 配置装配：要求 `embedder == "remote"`、`embed_model` 非空、
     /// 环境变量有 key（DEEPSEEKNOVA_EMBED_API_KEY，回落 OPENAI_API_KEY）。
-    pub fn from_memory_config(config: &MemoryConfig) -> Result<Self> {
+    pub fn from_memory_config(config: &MemoryConfig) -> Result<Self, DeepseeknovaError> {
         if config.embedder != "remote" {
-            anyhow::bail!(
+            return Err(DeepseeknovaError::Config(format!(
                 "[memory] embedder must be \"remote\" (current: {:?})",
                 config.embedder
-            );
+            )));
         }
         if config.embed_model.trim().is_empty() {
-            anyhow::bail!("[memory] embed_model is required when embedder=remote");
+            return Err(DeepseeknovaError::Config(
+                "[memory] embed_model is required when embedder=remote".into(),
+            ));
         }
         let api_key = env::var(EMBED_API_KEY_ENV)
             .or_else(|_| env::var(FALLBACK_API_KEY_ENV))
-            .with_context(|| {
-                format!("embed API key missing: set {EMBED_API_KEY_ENV} or {FALLBACK_API_KEY_ENV}")
+            .map_err(|_| {
+                DeepseeknovaError::Config(format!(
+                    "embed API key missing: set {EMBED_API_KEY_ENV} or {FALLBACK_API_KEY_ENV}"
+                ))
             })?;
         Self::new(
             &config.embed_base_url,
@@ -95,7 +113,7 @@ impl RemoteEmbedder {
     /// 单条文本的真实 HTTP 请求：POST `/embeddings`、解析首个向量。
     /// 仅做网络往返，不含 runtime 管理——同步路径在共享 runtime 上 `block_on`，
     /// 异步路径由调用方直接 await。
-    async fn request_embedding(&self, text: &str) -> Result<Vec<f32>> {
+    async fn request_embedding(&self, text: &str) -> Result<Vec<f32>, DeepseeknovaError> {
         let url = format!("{}/embeddings", self.base_url);
         let resp = self
             .client
@@ -104,31 +122,44 @@ impl RemoteEmbedder {
             .json(&serde_json::json!({"model": self.model, "input": text}))
             .send()
             .await
-            .context("embedding request failed")?;
+            .map_err(|e| {
+                // reqwest 超时错误的 Display 不含 "timed out" 字样，需按
+                // is_timeout() 归类到 ProviderError::Timeout 以保留重试语义。
+                if e.is_timeout() {
+                    ProviderError::Timeout(std::time::Duration::from_secs(self.timeout_secs))
+                } else {
+                    ProviderError::from(e)
+                }
+            })?;
         let status = resp.status();
-        let body = resp
-            .text()
-            .await
-            .context("embedding response read failed")?;
+        let body = resp.text().await.map_err(ProviderError::from)?;
         if !status.is_success() {
-            anyhow::bail!("embedding HTTP {status}: {body}");
+            // 走 ProviderError::Http 让 429/5xx 按状态码获得可重试分类，
+            // 与其他 provider 路径口径一致。
+            return Err(ProviderError::Http {
+                status: status.as_u16(),
+                body,
+            }
+            .into());
         }
         let parsed: EmbeddingResponse =
-            serde_json::from_str(&body).context("embedding response parse failed")?;
+            serde_json::from_str(&body).map_err(DeepseeknovaError::Serde)?;
         let first = parsed
             .data
             .into_iter()
             .next()
-            .ok_or_else(|| anyhow!("embedding response has no data"))?;
+            .ok_or_else(|| DeepseeknovaError::provider("embedding response has no data"))?;
         if first.embedding.is_empty() {
-            anyhow::bail!("embedding response has empty vector");
+            return Err(DeepseeknovaError::provider(
+                "embedding response has empty vector",
+            ));
         }
         Ok(first.embedding)
     }
 }
 
 impl EmbeddingProvider for RemoteEmbedder {
-    fn embed(&self, text: &str) -> Result<Vec<f32>> {
+    fn embed(&self, text: &str) -> Result<Vec<f32>, DeepseeknovaError> {
         // 同步兼容路径：共享进程级 runtime block_on（见 [`shared_sync_runtime`]）。
         // async 调用链请使用 embed_async（直接 await reqwest，不占用 worker）。
         shared_sync_runtime()?.block_on(self.request_embedding(text))
@@ -174,10 +205,11 @@ pub fn try_memory_embedder(config: &MemoryConfig) -> Option<Arc<dyn EmbeddingPro
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::{clear_proxy_env, ENV_LOCK};
     use std::io::{Read, Write};
 
-    /// env 相关测试串行化，避免并行测试互相污染环境变量。
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // env 串行化锁与代理清除函数见 crate::test_util（跨 openai/embeddings
+    // 共享，避免 std::env 并发修改 UB）。
 
     /// 起一个一次性 std HTTP 服务：捕获请求原文，回指定状态与 body（零延迟）。
     fn serve_once(
@@ -259,6 +291,8 @@ mod tests {
 
     #[test]
     fn embed_posts_correct_request_and_parses_response() {
+        let _guard = ENV_LOCK.blocking_lock();
+        clear_proxy_env();
         let body = r#"{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.1,0.2,0.3]}]}"#;
         let (base, rx) = serve_once("200 OK", body);
         let e = RemoteEmbedder::new(&base, "sk-test", "text-embedding-3-small", 10).unwrap();
@@ -277,6 +311,8 @@ mod tests {
 
     #[test]
     fn embed_http_error_is_err() {
+        let _guard = ENV_LOCK.blocking_lock();
+        clear_proxy_env();
         let (base, _rx) = serve_once("500 Internal Server Error", "boom");
         let e = RemoteEmbedder::new(&base, "sk-test", "m", 10).unwrap();
         let err = e.embed("hello").unwrap_err();
@@ -288,6 +324,8 @@ mod tests {
 
     #[test]
     fn embed_bad_json_is_err() {
+        let _guard = ENV_LOCK.blocking_lock();
+        clear_proxy_env();
         let (base, _rx) = serve_once("200 OK", "not json");
         let e = RemoteEmbedder::new(&base, "sk-test", "m", 10).unwrap();
         assert!(e.embed("hello").is_err());
@@ -297,6 +335,8 @@ mod tests {
 
     #[tokio::test]
     async fn embed_async_posts_request_and_parses_response() {
+        let _guard = ENV_LOCK.lock().await;
+        clear_proxy_env();
         let body = r#"{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.1,0.2,0.3]}]}"#;
         let (base, rx) = serve_once("200 OK", body);
         let e =
@@ -316,6 +356,8 @@ mod tests {
 
     #[tokio::test]
     async fn embed_async_http_error_is_err() {
+        let _guard = ENV_LOCK.lock().await;
+        clear_proxy_env();
         let (base, _rx) = serve_once("500 Internal Server Error", "boom");
         let e = Arc::new(RemoteEmbedder::new(&base, "sk-test", "m", 10).unwrap());
         let err = e.embed_async("hello".to_string()).await.unwrap_err();
@@ -327,6 +369,8 @@ mod tests {
 
     #[tokio::test]
     async fn embed_async_bad_json_is_err() {
+        let _guard = ENV_LOCK.lock().await;
+        clear_proxy_env();
         let (base, _rx) = serve_once("200 OK", "not json");
         let e = Arc::new(RemoteEmbedder::new(&base, "sk-test", "m", 10).unwrap());
         assert!(e.embed_async("hello".to_string()).await.is_err());
@@ -336,6 +380,8 @@ mod tests {
     /// 而非等满服务端延迟（3s）。
     #[tokio::test]
     async fn embed_async_times_out_with_client_timeout() {
+        let _guard = ENV_LOCK.lock().await;
+        clear_proxy_env();
         let (base, _rx) = serve_with_delay("200 OK", "{}", Duration::from_secs(3));
         let e = Arc::new(RemoteEmbedder::new(&base, "sk-test", "m", 1).unwrap());
         let start = std::time::Instant::now();
@@ -345,7 +391,7 @@ mod tests {
             "超时兜底必须按客户端超时触发（配置 1s），而非等满服务端 3s 延迟"
         );
         assert!(
-            format!("{err:#}").contains("timed out"),
+            format!("{err:#}").contains("timeout"),
             "必须报超时错误: {err:#}"
         );
     }
@@ -358,7 +404,8 @@ mod tests {
 
     #[test]
     fn from_memory_config_validates_embedder_model_and_env() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.blocking_lock();
+        clear_proxy_env();
         let prev_embed = env::var(EMBED_API_KEY_ENV).ok();
         let prev_openai = env::var(FALLBACK_API_KEY_ENV).ok();
         env::remove_var(EMBED_API_KEY_ENV);
@@ -404,7 +451,8 @@ mod tests {
 
     #[test]
     fn try_memory_embedder_returns_none_when_disabled_or_missing_key() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.blocking_lock();
+        clear_proxy_env();
         let prev_embed = env::var(EMBED_API_KEY_ENV).ok();
         let prev_openai = env::var(FALLBACK_API_KEY_ENV).ok();
         env::remove_var(EMBED_API_KEY_ENV);

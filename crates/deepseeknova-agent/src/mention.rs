@@ -109,6 +109,16 @@ pub enum MentionError {
     Ambiguous(Vec<String>),
 }
 
+/// 把 [`MentionError`] 转换为 [`deepseeknova_core::DeepseeknovaError`]。
+///
+/// orphan rule：impl 放在拥有 `MentionError` 的本 crate。`?` 可直接把
+/// `Result<_, MentionError>` 用于返回 `Result<_, DeepseeknovaError>` 的函数。
+impl From<MentionError> for deepseeknova_core::DeepseeknovaError {
+    fn from(err: MentionError) -> Self {
+        deepseeknova_core::DeepseeknovaError::Agent(err.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

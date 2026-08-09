@@ -9,7 +9,7 @@ readme = "README.md"
 documentation = "https://docs.rs/deepseeknova-core"
 
 [dependencies]
-anyhow = { workspace = true }
+thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 indexmap = { workspace = true }
@@ -25,8 +25,8 @@ tracing = { workspace = true }
 async-trait = { workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }
-rusqlite = { version = "0.40", features = ["bundled"] }
-serde_yaml = "0.9"
+rusqlite = { workspace = true }
+serde_yml = { workspace = true }
 tempfile = { workspace = true }
 
 [dev-dependencies]
@@ -40,3 +40,6 @@ harness = false
 [[bench]]
 name = "events"
 harness = false
+
+[lints]
+workspace = true

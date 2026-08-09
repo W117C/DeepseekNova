@@ -3,6 +3,8 @@
 //! Capability-based tool authorization, path confinement,
 //! command/domain allow-lists, resource limits, and structured audit trails.
 
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 pub mod audit;
 pub mod capability;
 pub mod context;

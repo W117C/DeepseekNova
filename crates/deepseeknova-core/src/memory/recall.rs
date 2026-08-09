@@ -8,9 +8,12 @@
 use crate::memory::profile::UserProfile;
 use crate::memory::skill::SkillManager;
 use crate::memory::store::{MemoryCategory, MemoryStore};
-use anyhow::Result;
+use crate::DeepseeknovaError;
 use std::sync::Arc;
 use tracing::debug;
+
+/// 模块内 Result 简写：默认错误类型为 [`DeepseeknovaError`]。
+type Result<T> = std::result::Result<T, DeepseeknovaError>;
 
 /// Configuration for the recall engine.
 #[derive(Debug, Clone)]
@@ -43,6 +46,7 @@ pub struct RecallEngine {
 }
 
 impl RecallEngine {
+    /// 创建召回引擎：装配记忆库、技能管理器、用户画像与配置。
     pub fn new(
         store: Arc<MemoryStore>,
         skills: SkillManager,
@@ -163,6 +167,7 @@ pub struct RecallResult {
 }
 
 impl RecallResult {
+    /// 返回上下文块是否为空（无任何可注入内容）。
     pub fn is_empty(&self) -> bool {
         self.context.is_empty()
     }

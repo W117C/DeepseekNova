@@ -49,9 +49,15 @@ default-members = [
     "crates/deepseeknova-metrics",
 ]
 
-[workspace.lints.rust]
-rustdoc_broken_intra_doc_links = "deny"
-rustdoc_invalid_codeblock_attributes = "deny"
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"
+invalid_codeblock_attributes = "deny"
+
+[workspace.lints.clippy]
+# lint 门控：生产代码禁止 unwrap/expect（deny），测试代码允许（各 crate
+# 的 `#![cfg_attr(test, allow(...))]` 豁免）。基线已清理至零警告。
+unwrap_used = "deny"
+expect_used = "deny"
 
 [workspace.package]
 version = "0.5.0"
@@ -60,7 +66,6 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/W117C/DeepseekNova"
 
 [workspace.dependencies]
-anyhow = "1.0"
 thiserror = "2.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
@@ -94,6 +99,13 @@ serde_yml = "0.0"
 walkdir = "2.5"
 glob = "0.3"
 regex = "1.11"
+rusqlite = { version = "0.40", features = ["bundled"] }
+tree-sitter = "0.25"
+tree-sitter-rust = "0.24"
+tree-sitter-python = "0.25"
+tree-sitter-javascript = "0.23"
+tree-sitter-typescript = "0.23"
+tree-sitter-go = "0.25"
 opentelemetry = { version = "0.32", default-features = false, features = ["trace"] }
 opentelemetry-sdk = { package = "opentelemetry_sdk", version = "0.32", default-features = false, features = ["trace", "rt-tokio"] }
 opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "grpc-tonic"] }

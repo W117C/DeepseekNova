@@ -10,12 +10,15 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use anyhow::{Context, Result};
+use deepseeknova_core::DeepseeknovaError;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use crate::quality::redact_secrets;
+
+/// 模块内 Result 简写：默认错误类型为 [`DeepseeknovaError`]。
+type Result<T> = std::result::Result<T, DeepseeknovaError>;
 
 /// Maximum number of characters of the raw error used for clustering.
 const NORMALIZE_MAX_CHARS: usize = 64;
@@ -247,15 +250,18 @@ impl FailurePatternStore {
     /// 先例：报告内容可能含命令与错误细节）。
     pub fn save(&self) -> Result<()> {
         if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?;
+            std::fs::create_dir_all(parent).map_err(|e| {
+                std::io::Error::new(
+                    e.kind(),
+                    format!("failed to create {}: {e}", parent.display()),
+                )
+            })?;
         }
         let file = FailurePatternFile {
             patterns: self.patterns.clone(),
             summaries: self.summaries.clone(),
         };
-        let json = serde_json::to_string_pretty(&file)
-            .context("failed to serialize failure pattern store")?;
+        let json = serde_json::to_string_pretty(&file)?;
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
@@ -276,30 +282,41 @@ impl FailurePatternStore {
             use std::os::unix::fs::OpenOptionsExt;
             let mut opts = std::fs::OpenOptions::new();
             opts.write(true).create_new(true).mode(0o600);
-            let mut f = opts
-                .open(&tmp)
-                .with_context(|| format!("failed to create {}", tmp.display()))?;
-            f.write_all(json.as_bytes())
-                .with_context(|| format!("failed to write {}", tmp.display()))?;
+            let mut f = opts.open(&tmp).map_err(|e| {
+                std::io::Error::new(e.kind(), format!("failed to create {}: {e}", tmp.display()))
+            })?;
+            f.write_all(json.as_bytes()).map_err(|e| {
+                std::io::Error::new(e.kind(), format!("failed to write {}: {e}", tmp.display()))
+            })?;
         }
         #[cfg(not(unix))]
         {
-            std::fs::write(&tmp, &json)
-                .with_context(|| format!("failed to write {}", tmp.display()))?;
+            std::fs::write(&tmp, &json).map_err(|e| {
+                std::io::Error::new(e.kind(), format!("failed to write {}: {e}", tmp.display()))
+            })?;
         }
-        std::fs::rename(&tmp, &self.path).with_context(|| {
-            format!(
-                "failed to rename {} to {}",
-                tmp.display(),
-                self.path.display()
+        std::fs::rename(&tmp, &self.path).map_err(|e| {
+            std::io::Error::new(
+                e.kind(),
+                format!(
+                    "failed to rename {} to {}: {e}",
+                    tmp.display(),
+                    self.path.display()
+                ),
             )
         })?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             // rename 后显式收敛（create_new 已 0600，此处为对既有文件覆盖后的兜底）。
-            std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600))
-                .with_context(|| format!("failed to chmod 0600 {}", self.path.display()))?;
+            std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600)).map_err(
+                |e| {
+                    std::io::Error::new(
+                        e.kind(),
+                        format!("failed to chmod 0600 {}: {e}", self.path.display()),
+                    )
+                },
+            )?;
         }
         Ok(())
     }
@@ -355,18 +372,21 @@ fn normalize_error(err: &str) -> String {
 }
 
 /// Compiled regex: ISO-8601 timestamps (`2026-08-05T10:00:00.123Z`).
+#[allow(clippy::expect_used)] // 硬编码正则常量，编译期已验证
 fn timestamp_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"\d{4}-\d{2}-\d{2}T[\d:.]+Z?").expect("valid timestamp regex"))
 }
 
 /// Compiled regex: trailing `:digits` or `line digits` markers.
+#[allow(clippy::expect_used)] // 硬编码正则常量，编译期已验证
 fn line_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r":\d+$|line\d+").expect("valid line regex"))
 }
 
 /// Compiled regex: bare digit runs.
+#[allow(clippy::expect_used)] // 硬编码正则常量，编译期已验证
 fn digits_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"\d+").expect("valid digits regex"))

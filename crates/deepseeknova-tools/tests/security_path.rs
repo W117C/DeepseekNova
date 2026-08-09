@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use deepseeknova_core::{Tool, ToolContext};
 use deepseeknova_security::capability::Capability;
 use deepseeknova_security::context::SecurityContext;

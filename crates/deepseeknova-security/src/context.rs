@@ -3,6 +3,7 @@ use crate::capability::Capability;
 use crate::limits::ResourceLimits;
 use crate::policy::SecurityPolicy;
 use deepseeknova_core::tool::ToolContext;
+use deepseeknova_core::DeepseeknovaError;
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
@@ -57,7 +58,7 @@ impl SecurityContext {
         ctx: &ToolContext,
         tool_name: &str,
         cap: Capability,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), DeepseeknovaError> {
         if !self.capabilities.contains(&cap) {
             let event = SecurityEvent {
                 event_type: "capability_violation".to_string(),
@@ -69,7 +70,10 @@ impl SecurityContext {
                 reason: format!("Capability {:?} is not granted in the current context", cap),
             };
             self.audit.record(&event);
-            anyhow::bail!("Security violation: capability {:?} is not granted", cap);
+            return Err(DeepseeknovaError::Permission(format!(
+                "Security violation: capability {:?} is not granted",
+                cap
+            )));
         }
         Ok(())
     }
@@ -81,11 +85,10 @@ pub fn enforce_capability(
     ctx: &ToolContext,
     tool_name: &str,
     cap: Capability,
-) -> anyhow::Result<()> {
-    let security = ctx
-        .extensions
-        .get::<SecurityContext>()
-        .ok_or_else(|| anyhow::anyhow!("SecurityContext extension not found in ToolContext"))?;
+) -> Result<(), DeepseeknovaError> {
+    let security = ctx.extensions.get::<SecurityContext>().ok_or_else(|| {
+        DeepseeknovaError::Permission("SecurityContext extension not found in ToolContext".into())
+    })?;
     security.require(ctx, tool_name, cap)
 }
 

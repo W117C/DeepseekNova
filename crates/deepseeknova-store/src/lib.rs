@@ -4,7 +4,9 @@
 //! for replay, debugging, and analytics.
 //! Supports rotation and compaction.
 
-use deepseeknova_core::{Message, Role, RunInput};
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
+use deepseeknova_core::{DeepseeknovaError, Message, Role, RunInput};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -83,7 +85,7 @@ pub struct SessionStore {
 
 impl SessionStore {
     /// Create a new store rooted at `root`. Creates the directory if needed.
-    pub fn new(root: PathBuf) -> anyhow::Result<Self> {
+    pub fn new(root: PathBuf) -> Result<Self, DeepseeknovaError> {
         std::fs::create_dir_all(&root)?;
         Ok(Self { root })
     }
@@ -95,7 +97,7 @@ impl SessionStore {
 
     /// Load all turns from a session. Returns an empty Vec if the file
     /// doesn't exist.
-    pub fn load(&self, session_id: &str) -> anyhow::Result<Vec<StoredTurn>> {
+    pub fn load(&self, session_id: &str) -> Result<Vec<StoredTurn>, DeepseeknovaError> {
         let path = self.session_path(session_id);
         if !path.exists() {
             return Ok(Vec::new());
@@ -115,7 +117,7 @@ impl SessionStore {
     }
 
     /// Append a single turn to the session file. Creates the file if needed.
-    pub fn append(&self, session_id: &str, turn: &StoredTurn) -> anyhow::Result<()> {
+    pub fn append(&self, session_id: &str, turn: &StoredTurn) -> Result<(), DeepseeknovaError> {
         let path = self.session_path(session_id);
         let mut file = std::fs::OpenOptions::new()
             .create(true)
@@ -129,7 +131,11 @@ impl SessionStore {
     }
 
     /// Append multiple turns at once.
-    pub fn append_all(&self, session_id: &str, turns: &[StoredTurn]) -> anyhow::Result<()> {
+    pub fn append_all(
+        &self,
+        session_id: &str,
+        turns: &[StoredTurn],
+    ) -> Result<(), DeepseeknovaError> {
         for turn in turns {
             self.append(session_id, turn)?;
         }
@@ -137,12 +143,12 @@ impl SessionStore {
     }
 
     /// Count the number of turns stored for a session.
-    pub fn len(&self, session_id: &str) -> anyhow::Result<usize> {
+    pub fn len(&self, session_id: &str) -> Result<usize, DeepseeknovaError> {
         Ok(self.load(session_id)?.len())
     }
 
     /// Whether the session file is empty or missing.
-    pub fn is_empty(&self, session_id: &str) -> anyhow::Result<bool> {
+    pub fn is_empty(&self, session_id: &str) -> Result<bool, DeepseeknovaError> {
         Ok(self.len(session_id)? == 0)
     }
 
@@ -152,7 +158,7 @@ impl SessionStore {
     ///
     /// 注意：`session_id` 由调用方保证可信（本 crate 不做白名单校验）；暴露给
     /// 外部输入的调用点（如 HTTP 端点）必须先做 id 白名单过滤再传入。
-    pub fn touch(&self, session_id: &str) -> anyhow::Result<()> {
+    pub fn touch(&self, session_id: &str) -> Result<(), DeepseeknovaError> {
         std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -161,7 +167,7 @@ impl SessionStore {
     }
 
     /// Delete a session file.
-    pub fn delete(&self, session_id: &str) -> anyhow::Result<()> {
+    pub fn delete(&self, session_id: &str) -> Result<(), DeepseeknovaError> {
         let path = self.session_path(session_id);
         if path.exists() {
             std::fs::remove_file(&path)?;
@@ -170,7 +176,7 @@ impl SessionStore {
     }
 
     /// List all session IDs (filenames without extension).
-    pub fn list_sessions(&self) -> anyhow::Result<Vec<String>> {
+    pub fn list_sessions(&self) -> Result<Vec<String>, DeepseeknovaError> {
         let mut sessions = Vec::new();
         for entry in std::fs::read_dir(&self.root)? {
             let entry = entry?;
@@ -187,7 +193,7 @@ impl SessionStore {
     /// List sessions with display metadata (turn count, first prompt as
     /// title, file mtime), newest first. Reads every session file in full;
     /// intended for local stores with a modest number of sessions.
-    pub fn list_summaries(&self) -> anyhow::Result<Vec<SessionSummary>> {
+    pub fn list_summaries(&self) -> Result<Vec<SessionSummary>, DeepseeknovaError> {
         let mut summaries = Vec::new();
         for id in self.list_sessions()? {
             let path = self.session_path(&id);
@@ -249,7 +255,7 @@ impl SessionStore {
 
     /// 会话 id + 首句预览（TUI 侧边栏用），最新优先。
     /// 预览截断 24 字符；空/无首句的会话预览为空串（渲染回退 id）。
-    pub fn list_sessions_with_preview(&self) -> anyhow::Result<Vec<(String, String)>> {
+    pub fn list_sessions_with_preview(&self) -> Result<Vec<(String, String)>, DeepseeknovaError> {
         let mut ids = self.list_sessions()?;
         ids.sort();
         ids.reverse(); // id 按时间字典序，最新优先
@@ -263,7 +269,7 @@ impl SessionStore {
     }
 
     /// Get the last N turns from a session.
-    pub fn last_n(&self, session_id: &str, n: usize) -> anyhow::Result<Vec<StoredTurn>> {
+    pub fn last_n(&self, session_id: &str, n: usize) -> Result<Vec<StoredTurn>, DeepseeknovaError> {
         let mut turns = self.load(session_id)?;
         let start = turns.len().saturating_sub(n);
         Ok(turns.split_off(start))

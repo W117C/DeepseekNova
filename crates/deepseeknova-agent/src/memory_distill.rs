@@ -6,7 +6,7 @@
 
 use crate::review::extract_json;
 use deepseeknova_core::memory::skill::{SkillManager, TaskObservation};
-use deepseeknova_core::{Message, Role};
+use deepseeknova_core::{DeepseeknovaError, Message, Role};
 use deepseeknova_provider::{Provider, ValidatedRequest};
 use tracing::warn;
 
@@ -81,7 +81,7 @@ pub fn persist_distilled_skill(
     skills: &mut SkillManager,
     obs: &TaskObservation,
     k: &DistilledKnowledge,
-) -> anyhow::Result<bool> {
+) -> Result<bool, DeepseeknovaError> {
     if k.kind != "skill" {
         return Ok(false);
     }
@@ -285,10 +285,13 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Provider for FixedProvider {
-        async fn generate(&self, validated: ValidatedRequest<'_>) -> anyhow::Result<Message> {
+        async fn generate(
+            &self,
+            validated: ValidatedRequest<'_>,
+        ) -> Result<Message, DeepseeknovaError> {
             *self.captured.lock().unwrap() = Some(validated.messages[0].content.clone());
             if self.fail {
-                anyhow::bail!("provider down");
+                return Err(DeepseeknovaError::provider("provider down"));
             }
             Ok(Message {
                 role: Role::Assistant,

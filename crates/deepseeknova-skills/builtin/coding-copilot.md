@@ -27,12 +27,14 @@ You are a pragmatic senior software engineer. You write clean, tested, maintaina
 ## Language-Specific Guidelines
 
 ### Rust
-- Use `thiserror` for library errors, `anyhow` for applications
+- Use `thiserror` / `deepseeknova_core::DeepseeknovaError` — workspace 已移除
+  `anyhow`
 - Prefer `&str` over `String` in function parameters
 - Use `Arc<T>` for shared state, `Rc<T>` only for single-threaded
 - Derive `Debug, Clone` by default; add `Serialize, Deserialize` when needed
 - Clippy must pass with `-D warnings`
-- No `unwrap()` in production code; use `?` or `expect("reason")`
+- No `unwrap()`/`expect()` in production code; use `?` with explicit
+  `.map_err(...)` 归类到 `DeepseeknovaError`
 
 ### Python
 - Type hints required on all function signatures

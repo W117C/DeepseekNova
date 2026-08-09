@@ -74,9 +74,13 @@ impl Tool for DelegateTool {
         }
     }
 
-    async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
+    async fn execute(
+        &self,
+        ctx: &ToolContext,
+        args: &str,
+    ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
         if ctx.cancellation.is_cancelled() {
-            anyhow::bail!("cancelled");
+            return Err(deepseeknova_core::DeepseeknovaError::Cancelled);
         }
         // 能力门禁（L4）：裸装配 DelegateEngine（SecurityContext 缺失或未授予
         // CommandExecute）时拒绝，防库级装配绕过能力系统。生产 CLI 路径继承

@@ -5,6 +5,8 @@
 //! docs. Each tool implements the `Tool` trait with security-aware execution.
 //! (delegate tool moved to `deepseeknova-agent::DelegateTool`.)
 
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 pub mod docs_tools;
 pub mod fs;
 pub mod glob;

@@ -12,7 +12,6 @@ documentation = "https://docs.rs/deepseeknova-agent"
 tempfile = { workspace = true }
 
 [dependencies]
-anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -29,3 +28,6 @@ deepseeknova-provider = { workspace = true }
 deepseeknova-security = { workspace = true }
 deepseeknova-context = { workspace = true }
 deepseeknova-metrics = { workspace = true }
+
+[lints]
+workspace = true

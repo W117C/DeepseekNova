@@ -1492,23 +1492,34 @@ mod tests {
 
     #[async_trait]
     impl crate::app::state::SessionController for MockSessionController {
-        async fn new_session(&self) -> anyhow::Result<()> {
+        async fn new_session(&self) -> Result<(), deepseeknova_core::DeepseeknovaError> {
             Ok(())
         }
-        async fn list_sessions(&self) -> anyhow::Result<Vec<crate::app::state::SessionMeta>> {
+        async fn list_sessions(
+            &self,
+        ) -> Result<Vec<crate::app::state::SessionMeta>, deepseeknova_core::DeepseeknovaError>
+        {
             Ok(self.metas.lock().unwrap().clone())
         }
         async fn current_session(&self) -> Option<String> {
             self.current.lock().unwrap().clone()
         }
-        async fn rename(&self, id: &str, title: &str) -> anyhow::Result<()> {
+        async fn rename(
+            &self,
+            id: &str,
+            title: &str,
+        ) -> Result<(), deepseeknova_core::DeepseeknovaError> {
             self.renamed
                 .lock()
                 .unwrap()
                 .push((id.to_string(), title.to_string()));
             Ok(())
         }
-        async fn resume(&self, _id: &str) -> anyhow::Result<Vec<crate::app::state::ResumedLine>> {
+        async fn resume(
+            &self,
+            _id: &str,
+        ) -> Result<Vec<crate::app::state::ResumedLine>, deepseeknova_core::DeepseeknovaError>
+        {
             Ok(Vec::new())
         }
         async fn record_turn(
@@ -1516,7 +1527,7 @@ mod tests {
             _prompt: &str,
             _output_text: &str,
             _model: Option<String>,
-        ) -> anyhow::Result<()> {
+        ) -> Result<(), deepseeknova_core::DeepseeknovaError> {
             Ok(())
         }
     }
@@ -1533,7 +1544,7 @@ mod tests {
             &self,
             label: Option<String>,
             conversation: Vec<deepseeknova_checkpoint::ConversationLine>,
-        ) -> anyhow::Result<String> {
+        ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
             let mut cks = self.checkpoints.lock().unwrap();
             let id = format!("ck-{}", cks.len());
             cks.push(deepseeknova_checkpoint::SessionCheckpoint {
@@ -1545,7 +1556,7 @@ mod tests {
             });
             Ok(id)
         }
-        async fn list(&self) -> anyhow::Result<Vec<String>> {
+        async fn list(&self) -> Result<Vec<String>, deepseeknova_core::DeepseeknovaError> {
             Ok(self
                 .checkpoints
                 .lock()
@@ -1557,7 +1568,10 @@ mod tests {
         async fn rollback(
             &self,
             id: Option<&str>,
-        ) -> anyhow::Result<Option<deepseeknova_checkpoint::SessionCheckpoint>> {
+        ) -> Result<
+            Option<deepseeknova_checkpoint::SessionCheckpoint>,
+            deepseeknova_core::DeepseeknovaError,
+        > {
             let mut cks = self.checkpoints.lock().unwrap();
             let idx = match id {
                 Some(id) => cks.iter().position(|c| c.id == id),

@@ -52,7 +52,9 @@ DeepseekNova 是 Rust 编写的 AI Agent 框架（22 个 crate），计划开源
 
 - 真实可演示的能力：SSE 流式对话、工具调用与审批流、评分卡 JSON（六维）、诊断报告 JSON——TUI 与 CLI 可视化有真数据可用，无需编造。
 - 缺失且不得虚构：logo/图标资产、用户证言、性能基准数字、下载量等商业性声明。
-- 文档：GUIDE.md（用户指南，其配色章节已落后于 `theme.rs` 代码，交付时需同步）、DESIGN.md（**架构设计记录，非视觉设计文档**，视觉决策不得写入该文件）。
+- 文档：GUIDE.md（用户指南，配色章节以 `crates/deepseeknova-tui/src/theme.rs`
+  为唯一来源，已对齐）、DESIGN.md（**架构设计记录，非视觉设计文档**，视觉决策
+  不得写入该文件）。
 
 ## Product Principles
 

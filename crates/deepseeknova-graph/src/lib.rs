@@ -3,6 +3,8 @@
 //! 代码图引擎：tree-sitter 解析 → SQLite 异构图（FTS5 BM25）→
 //! 个性化 PageRank 排序 → 图检索 API 与 token 预算 repo map。
 
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 pub mod model;
 pub mod parser;
 pub mod rank;
@@ -304,6 +306,7 @@ impl GraphIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use deepseeknova_core::DeepseeknovaError;
     use tempfile::tempdir;
 
     #[test]
@@ -654,7 +657,7 @@ mod tests {
     struct FakeEmbed;
 
     impl EmbeddingProvider for FakeEmbed {
-        fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+        fn embed(&self, text: &str) -> Result<Vec<f32>, DeepseeknovaError> {
             if text.contains("ferris") {
                 Ok(vec![0.9, 0.1])
             } else if text.contains("needle") {

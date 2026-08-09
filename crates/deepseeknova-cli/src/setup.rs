@@ -1,10 +1,9 @@
-use anyhow::Context;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
 /// Run the interactive configuration wizard.
 /// Asks a few questions and writes a deepseeknova.toml to the current directory.
-pub async fn run_setup_wizard(local: bool) -> anyhow::Result<()> {
+pub async fn run_setup_wizard(local: bool) -> Result<(), deepseeknova_core::DeepseeknovaError> {
     let stdin = std::io::stdin();
     let mut reader = std::io::BufReader::new(stdin.lock());
 
@@ -107,7 +106,9 @@ pub async fn run_setup_wizard(local: bool) -> anyhow::Result<()> {
     let config_path = if local {
         PathBuf::from("deepseeknova.toml")
     } else {
-        let home = dirs::home_dir().context("cannot determine home directory")?;
+        let home = dirs::home_dir().ok_or_else(|| {
+            deepseeknova_core::DeepseeknovaError::Config("cannot determine home directory".into())
+        })?;
         std::fs::create_dir_all(home.join(".deepseeknova"))?;
         home.join(".deepseeknova").join("config.toml")
     };
@@ -169,8 +170,12 @@ default_mode = "{perm_mode}"
         return Ok(());
     }
 
-    std::fs::write(&config_path, toml_content)
-        .with_context(|| format!("failed to write {}", config_path.display()))?;
+    std::fs::write(&config_path, toml_content).map_err(|e| {
+        deepseeknova_core::DeepseeknovaError::Io(std::io::Error::other(format!(
+            "failed to write {}: {e}",
+            config_path.display()
+        )))
+    })?;
 
     println!("✓ Config written to {}", config_path.display());
     println!();

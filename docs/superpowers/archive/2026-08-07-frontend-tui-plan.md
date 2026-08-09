@@ -1,5 +1,9 @@
 # 任务书：观测台前端 UI + TUI 演进（2026-08-07 dev-loop 轮）
 
+> **已归档（2026-08-09）**：桌面端计划于 2026-08-08 整体撤销（
+> `crates/deepseeknova-desktop` 已移除，先例提交 `3ab55d7`），本任务书不再实施；
+> TUI 演进部分（浅色档/夜次分组/风险标签/评分卡/欢迎卡）已按实现完成。
+
 ## 1. 意图
 把已定稿的「新星观测台」设计规范（2026-08-07-observatory-frontend-design.md）落地为可运行、可验收的前端：
 - 桌面端：重建 `crates/deepseeknova-desktop` 纯前端工程（Vite + SolidJS + TypeScript + Tailwind CSS 4），首屏实现 A×B 合并拓扑——双顶带（圆顶状态带 + 观测之夜 runs 条带）、左观测日志栏（夜次分组 + 星点）、中央划线对话流 + composer、右「本次观测」星座图 + 「测光·评分卡」六维表；本轮不接 Tauri Rust 壳。

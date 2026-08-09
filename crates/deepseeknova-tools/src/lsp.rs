@@ -14,7 +14,7 @@
 
 use async_trait::async_trait;
 use deepseeknova_config::LspConfig;
-use deepseeknova_core::{Tool, ToolContext, ToolSchema};
+use deepseeknova_core::{DeepseeknovaError, Tool, ToolContext, ToolSchema};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -86,10 +86,14 @@ impl Tool for LspDiagnosticsTool {
         true
     }
 
-    async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
+    async fn execute(
+        &self,
+        ctx: &ToolContext,
+        args: &str,
+    ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
         let parsed: LspArgs = serde_json::from_str(args)?;
         if ctx.cancellation.is_cancelled() {
-            anyhow::bail!("cancelled");
+            return Err(deepseeknova_core::DeepseeknovaError::Cancelled);
         }
         deepseeknova_security::context::enforce_capability(
             ctx,
@@ -102,17 +106,20 @@ impl Tool for LspDiagnosticsTool {
 
         let path = resolve_path(&ctx.workspace_root, &parsed.path)?;
         if !path.is_file() {
-            anyhow::bail!("lsp_diagnostics: path is not a file: {}", path.display());
+            return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
+                "lsp_diagnostics: path is not a file: {}",
+                path.display()
+            )));
         }
         let language = match parsed.language.as_deref() {
             Some(l) => l.to_string(),
             None => language_for(&path)
                 .ok_or_else(|| {
-                    anyhow::anyhow!(
+                    DeepseeknovaError::Tool(format!(
                         "lsp_diagnostics: unsupported file extension for {}; \
                          pass language=rust|python|go|typescript|c|cpp",
                         path.display()
-                    )
+                    ))
                 })?
                 .to_string(),
         };
@@ -139,7 +146,11 @@ impl Tool for LspDiagnosticsTool {
                      to enable diagnostics."
                 ));
             }
-            Err(e) => anyhow::bail!("lsp_diagnostics: failed to spawn '{server_bin}': {e}"),
+            Err(e) => {
+                return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
+                    "lsp_diagnostics: failed to spawn '{server_bin}': {e}"
+                )));
+            }
         };
 
         let result = session
@@ -158,7 +169,7 @@ impl Tool for LspDiagnosticsTool {
     }
 }
 
-fn resolve_path(workspace_root: &Path, raw: &str) -> anyhow::Result<PathBuf> {
+fn resolve_path(workspace_root: &Path, raw: &str) -> Result<PathBuf, DeepseeknovaError> {
     let p = PathBuf::from(raw);
     let p = if p.is_absolute() {
         p
@@ -170,9 +181,10 @@ fn resolve_path(workspace_root: &Path, raw: &str) -> anyhow::Result<PathBuf> {
     Ok(p)
 }
 
-fn uri_from_path(path: &Path) -> anyhow::Result<String> {
-    let url = url::Url::from_file_path(path)
-        .map_err(|_| anyhow::anyhow!("cannot build file URI for {}", path.display()))?;
+fn uri_from_path(path: &Path) -> Result<String, DeepseeknovaError> {
+    let url = url::Url::from_file_path(path).map_err(|_| {
+        DeepseeknovaError::Tool(format!("cannot build file URI for {}", path.display()))
+    })?;
     Ok(url.to_string())
 }
 
@@ -242,7 +254,7 @@ impl LspSession {
         })
     }
 
-    async fn send(&mut self, msg: &Value) -> anyhow::Result<()> {
+    async fn send(&mut self, msg: &Value) -> Result<(), DeepseeknovaError> {
         let body = serde_json::to_string(msg)?;
         let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
         self.stdin.write_all(frame.as_bytes()).await?;
@@ -250,7 +262,7 @@ impl LspSession {
         Ok(())
     }
 
-    async fn next_message(&mut self) -> anyhow::Result<Option<Value>> {
+    async fn next_message(&mut self) -> Result<Option<Value>, DeepseeknovaError> {
         let mut content_length: Option<usize> = None;
         loop {
             let mut line = String::new();
@@ -266,8 +278,9 @@ impl LspSession {
                 content_length = rest.trim().parse::<usize>().ok();
             }
         }
-        let len = content_length
-            .ok_or_else(|| anyhow::anyhow!("LSP message missing Content-Length header"))?;
+        let len = content_length.ok_or_else(|| {
+            DeepseeknovaError::Tool("LSP message missing Content-Length header".to_string())
+        })?;
         let mut body = vec![0u8; len];
         self.stdout.read_exact(&mut body).await?;
         let value = serde_json::from_slice(&body)?;
@@ -284,7 +297,7 @@ impl LspSession {
         language: &str,
         text: &str,
         total: Duration,
-    ) -> anyhow::Result<Vec<LspDiagnostic>> {
+    ) -> Result<Vec<LspDiagnostic>, DeepseeknovaError> {
         let init = json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -298,12 +311,14 @@ impl LspSession {
             }
         });
         self.send(&init).await?;
-        let init_result = self
-            .respond_until_id(1, total)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("LSP server exited before initialize response"))?;
+        let init_result = self.respond_until_id(1, total).await?.ok_or_else(|| {
+            DeepseeknovaError::Tool("LSP server exited before initialize response".to_string())
+        })?;
         if init_result.get("error").is_some() {
-            anyhow::bail!("LSP initialize failed: {}", init_result["error"]);
+            return Err(DeepseeknovaError::Tool(format!(
+                "LSP initialize failed: {}",
+                init_result["error"]
+            )));
         }
 
         self.send(&json!({"jsonrpc":"2.0","method":"initialized","params":{}}))
@@ -381,18 +396,24 @@ impl LspSession {
         &mut self,
         target_id: i64,
         total: Duration,
-    ) -> anyhow::Result<Option<Value>> {
+    ) -> Result<Option<Value>, DeepseeknovaError> {
         let deadline = Instant::now() + total;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                anyhow::bail!("LSP initialize timed out after {total:?}");
+                return Err(DeepseeknovaError::Tool(format!(
+                    "LSP initialize timed out after {total:?}"
+                )));
             }
             let msg = match timeout(remaining, self.next_message()).await {
                 Ok(Ok(Some(m))) => m,
                 Ok(Ok(None)) => return Ok(None),
                 Ok(Err(e)) => return Err(e),
-                Err(_) => anyhow::bail!("LSP initialize timed out after {total:?}"),
+                Err(_) => {
+                    return Err(DeepseeknovaError::Tool(format!(
+                        "LSP initialize timed out after {total:?}"
+                    )))
+                }
             };
             if msg.get("id").and_then(|v| v.as_i64()) == Some(target_id) {
                 return Ok(Some(msg));
@@ -472,7 +493,7 @@ mod tests {
 
     async fn read_lsp_frame<R: tokio::io::AsyncBufRead + Unpin>(
         reader: &mut R,
-    ) -> anyhow::Result<Option<serde_json::Value>> {
+    ) -> Result<Option<serde_json::Value>, DeepseeknovaError> {
         let mut content_length: Option<usize> = None;
         loop {
             let mut line = String::new();
@@ -487,7 +508,8 @@ mod tests {
                 content_length = rest.trim().parse::<usize>().ok();
             }
         }
-        let len = content_length.ok_or_else(|| anyhow::anyhow!("missing Content-Length"))?;
+        let len = content_length
+            .ok_or_else(|| DeepseeknovaError::Tool("missing Content-Length header".to_string()))?;
         let mut body = vec![0u8; len];
         reader.read_exact(&mut body).await?;
         Ok(Some(serde_json::from_slice(&body)?))
@@ -496,7 +518,7 @@ mod tests {
     async fn write_lsp_frame<W: tokio::io::AsyncWrite + Unpin>(
         writer: &mut W,
         value: &serde_json::Value,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), DeepseeknovaError> {
         let body = serde_json::to_string(value)?;
         writer
             .write_all(format!("Content-Length: {}\r\n\r\n{}", body.len(), body).as_bytes())

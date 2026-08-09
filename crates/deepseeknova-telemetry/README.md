@@ -7,7 +7,7 @@ to any OTLP-compatible backend (Jaeger, Honeycomb, Grafana Tempo, etc.).
 ## Quick start
 
 ```rust,no_run
-fn main() -> anyhow::Result<()> {
+fn main() -> Result<(), deepseeknova_core::DeepseeknovaError> {
     // Export to an OTLP collector (e.g. local Jaeger, Grafana Agent)
     let _guard = deepseeknova_telemetry::TelemetryGuard::init(
         "deepseeknova",

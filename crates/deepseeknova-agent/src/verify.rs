@@ -50,7 +50,7 @@ pub(crate) async fn run_verify_pass(
     security: &deepseeknova_security::context::SecurityContext,
     extensions: &[Arc<crate::agent::ExtensionApplier>],
     cancel: &CancellationToken,
-    tx: &mpsc::Sender<anyhow::Result<RunEvent>>,
+    tx: &mpsc::Sender<Result<RunEvent, deepseeknova_core::DeepseeknovaError>>,
 ) -> VerifyOutcome {
     let Some(bash) = tool_map.get("bash") else {
         warn!("verify skipped: bash tool not registered");
@@ -190,11 +190,17 @@ mod tests {
                 parameters: serde_json::json!({"type": "object"}),
             }
         }
-        async fn execute(&self, _ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
+        async fn execute(
+            &self,
+            _ctx: &ToolContext,
+            args: &str,
+        ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
             let v: serde_json::Value = serde_json::from_str(args)?;
             let cmd = v["command"].as_str().unwrap_or_default();
             if self.fail_on.as_deref() == Some(cmd) {
-                anyhow::bail!("command exited with code 1");
+                return Err(deepseeknova_core::DeepseeknovaError::Tool(
+                    "command exited with code 1".to_string(),
+                ));
             }
             Ok("ok".to_string())
         }
@@ -209,7 +215,7 @@ mod tests {
         }
     }
 
-    fn channel() -> mpsc::Sender<anyhow::Result<RunEvent>> {
+    fn channel() -> mpsc::Sender<Result<RunEvent, deepseeknova_core::DeepseeknovaError>> {
         let (tx, _rx) = mpsc::channel(8);
         tx
     }
@@ -327,9 +333,14 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Provider for FixedProvider {
-        async fn generate(&self, _validated: ValidatedRequest<'_>) -> anyhow::Result<Message> {
+        async fn generate(
+            &self,
+            _validated: ValidatedRequest<'_>,
+        ) -> Result<Message, deepseeknova_core::DeepseeknovaError> {
             if self.fail {
-                anyhow::bail!("provider down");
+                return Err(deepseeknova_core::DeepseeknovaError::provider(
+                    "provider down",
+                ));
             }
             Ok(Message {
                 role: Role::Assistant,

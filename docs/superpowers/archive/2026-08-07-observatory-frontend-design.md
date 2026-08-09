@@ -1,5 +1,9 @@
 # 新星观测台（Nova Observatory）— TUI 与桌面端设计规范
 
+> **已归档（2026-08-09）**：桌面端已随 `crates/deepseeknova-desktop` 整体移除
+> （2026-08-08，先例提交 `3ab55d7`），本规范中桌面端部分不再实施；
+> TUI 部分的语义色/布局已由 `crates/deepseeknova-tui` 与 `theme.rs` 落实。
+
 > 状态：设计已定稿（2026-08-07），实现待启动。
 > 决策链：PRODUCT.md（产品事实）→ 方向轮（掷签分配「新星观测台」，seed key `57f4f686`；用户第一轮选品类标准，第二轮改选观测台，用户决定为准）→ 构图轮（三稿，用户批准两稿：B「观测工作台」为桌面端主窗口北极星，见 `.impeccable/mocks/obs-comp-b-workbench.png`（sidecar `approved: true`）；A「观测日志」选定为观测日志视图（归档/日志页），见 `.impeccable/mocks/obs-comp-a-log.png`（sidecar `approved: true`）；C「红光联锁焦点版」落选）。
 > Surface brief：`.impeccable/surfaces/crates-deepseeknova-desktop.md`、`.impeccable/surfaces/crates-deepseeknova-tui.md`（含保真度清单，build 时对照）。

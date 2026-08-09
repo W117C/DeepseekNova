@@ -7,10 +7,11 @@
 //!   2. 安全策略检查（路径/命令/域名权限）
 //!   3. 资源限额配置
 //!   4. MCP 工具适配器命名约定
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::Path;
 
-fn main() -> anyhow::Result<()> {
+fn main() -> Result<(), deepseeknova_core::DeepseeknovaError> {
     println!("═══ DeepseekNova Quickstart ═══\n");
 
     // ── 1. 安全路径解析 ──────────────────────────────────────────

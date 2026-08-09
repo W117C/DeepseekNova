@@ -22,8 +22,14 @@ use tokio_stream::StreamExt;
 /// `workspace_root` is the session's `cwd` from `session/new` and becomes the
 /// filesystem confinement root. `history` is the shared multi-turn conversation
 /// store the CLI wires into the agent before wrapping it as a [`Runner`].
-pub type AcpRunnerFactory =
-    Arc<dyn Fn(PathBuf, Arc<Mutex<Vec<Message>>>) -> anyhow::Result<Arc<dyn Runner>> + Send + Sync>;
+pub type AcpRunnerFactory = Arc<
+    dyn Fn(
+            PathBuf,
+            Arc<Mutex<Vec<Message>>>,
+        ) -> Result<Arc<dyn Runner>, deepseeknova_core::DeepseeknovaError>
+        + Send
+        + Sync,
+>;
 
 struct AcpSession {
     runner: Arc<dyn Runner>,
@@ -48,13 +54,19 @@ struct AcpServer {
 }
 
 /// Run the ACP server over this process's stdin/stdout.
-pub async fn serve_acp(factory: AcpRunnerFactory) -> anyhow::Result<()> {
+pub async fn serve_acp(
+    factory: AcpRunnerFactory,
+) -> Result<(), deepseeknova_core::DeepseeknovaError> {
     run_acp_io(factory, tokio::io::stdin(), tokio::io::stdout()).await
 }
 
 /// Run the ACP server over arbitrary async reader/writer (used by tests with
 /// in-memory duplex sockets).
-pub async fn run_acp_io<R, W>(factory: AcpRunnerFactory, input: R, output: W) -> anyhow::Result<()>
+pub async fn run_acp_io<R, W>(
+    factory: AcpRunnerFactory,
+    input: R,
+    output: W,
+) -> Result<(), deepseeknova_core::DeepseeknovaError>
 where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
@@ -501,9 +513,12 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Runner for FakeRunner {
-        async fn run_stream(&self, input: RunInput) -> anyhow::Result<RunEventStream> {
+        async fn run_stream(
+            &self,
+            input: RunInput,
+        ) -> Result<RunEventStream, deepseeknova_core::DeepseeknovaError> {
             let prompt = input.prompt.clone();
-            let events: Vec<anyhow::Result<RunEvent>> = vec![
+            let events: Vec<Result<RunEvent, deepseeknova_core::DeepseeknovaError>> = vec![
                 Ok(RunEvent::ReasoningDelta {
                     text: "thinking...".to_string(),
                     signature: None,
@@ -529,7 +544,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn initialize_new_session_prompt_roundtrip() -> anyhow::Result<()> {
+    async fn initialize_new_session_prompt_roundtrip(
+    ) -> Result<(), deepseeknova_core::DeepseeknovaError> {
         let (client, server) = tokio::io::duplex(16 * 1024);
         let (client_read_half, mut client_write_half) = tokio::io::split(client);
         let (server_read_half, server_write_half) = tokio::io::split(server);
@@ -613,11 +629,15 @@ mod tests {
 
         drop(client_write_half);
         drop(client_reader);
-        server_task.await??;
+        server_task
+            .await
+            .map_err(|e| deepseeknova_core::DeepseeknovaError::Runner(e.to_string()))??;
         Ok(())
     }
 
-    async fn read_rpc_line<R: AsyncBufRead + Unpin>(reader: &mut R) -> anyhow::Result<Value> {
+    async fn read_rpc_line<R: AsyncBufRead + Unpin>(
+        reader: &mut R,
+    ) -> Result<Value, deepseeknova_core::DeepseeknovaError> {
         let mut line = String::new();
         reader.read_line(&mut line).await?;
         Ok(serde_json::from_str(&line)?)

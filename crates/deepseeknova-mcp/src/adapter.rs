@@ -1,7 +1,7 @@
 use crate::client::McpClient;
 use crate::types::ToolDef;
 use async_trait::async_trait;
-use deepseeknova_core::{Tool, ToolContext, ToolSchema};
+use deepseeknova_core::{DeepseeknovaError, Tool, ToolContext, ToolSchema};
 use std::sync::Arc;
 
 /// McpToolAdapter wraps an MCP tool as a deepseeknova_core::Tool.
@@ -58,7 +58,11 @@ impl Tool for McpToolAdapter {
         self.schema.clone()
     }
 
-    async fn execute(&self, _ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
+    async fn execute(
+        &self,
+        _ctx: &ToolContext,
+        args: &str,
+    ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
         let arguments: serde_json::Value = if args.trim().is_empty() {
             serde_json::Value::Null
         } else {
@@ -79,7 +83,9 @@ impl Tool for McpToolAdapter {
             .join("\n");
 
         if result.is_error {
-            anyhow::bail!("MCP tool error: {text}");
+            return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
+                "MCP tool error: {text}"
+            )));
         }
 
         Ok(text)
@@ -95,7 +101,7 @@ impl Tool for McpToolAdapter {
 pub async fn discover_mcp_tools(
     server_name: &str,
     client: Arc<McpClient>,
-) -> anyhow::Result<Vec<Arc<dyn Tool>>> {
+) -> Result<Vec<Arc<dyn Tool>>, DeepseeknovaError> {
     let tools = client.list_tools().await?;
     let adapters: Vec<Arc<dyn Tool>> = tools
         .iter()

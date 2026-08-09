@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use deepseeknova_core::DeepseeknovaError;
 use std::path::{Path, PathBuf};
 
 /// Normalize path components by resolving `.` and `..` without hitting the disk.
@@ -20,7 +20,7 @@ pub fn normalize_path(path: &Path) -> PathBuf {
 
 /// Resolve and validate a user-supplied path against a root workspace directory,
 /// preventing path traversal and symlink escape attacks.
-pub fn secure_resolve(root: &Path, input: &Path) -> Result<PathBuf> {
+pub fn secure_resolve(root: &Path, input: &Path) -> Result<PathBuf, DeepseeknovaError> {
     // Resolve absolute path or join with root if relative
     let joined = if input.is_absolute() {
         input.to_path_buf()
@@ -39,10 +39,10 @@ pub fn secure_resolve(root: &Path, input: &Path) -> Result<PathBuf> {
             workspace = ?root.display(),
             reason = "escapes workspace root via raw memory check"
         );
-        bail!(
+        return Err(DeepseeknovaError::Permission(format!(
             "path escapes workspace root (normalization check): {:?}",
             input
-        );
+        )));
     }
 
     // 2. Canonicalize the closest existing ancestor (or symlink) to prevent symlink escape
@@ -65,7 +65,7 @@ pub fn secure_resolve(root: &Path, input: &Path) -> Result<PathBuf> {
                     error = %e,
                     reason = "canonicalize failed"
                 );
-                return Err(e.into());
+                return Err(DeepseeknovaError::Io(e));
             }
         };
         // On Windows, canonicalize returns a UNC path (\\?\C:\...).
@@ -79,7 +79,10 @@ pub fn secure_resolve(root: &Path, input: &Path) -> Result<PathBuf> {
                 workspace = ?canonical_root.display(),
                 reason = "escapes workspace root via symlink"
             );
-            bail!("path escapes workspace root via symlink: {:?}", input);
+            return Err(DeepseeknovaError::Permission(format!(
+                "path escapes workspace root via symlink: {:?}",
+                input
+            )));
         }
     }
 
@@ -88,12 +91,14 @@ pub fn secure_resolve(root: &Path, input: &Path) -> Result<PathBuf> {
 
 /// Basic path sanitization: reject obviously malicious paths
 /// and ensure the path stays within the workspace root.
-pub fn sanitize_path(workspace: &Path, raw: &str) -> anyhow::Result<PathBuf> {
+pub fn sanitize_path(workspace: &Path, raw: &str) -> Result<PathBuf, DeepseeknovaError> {
     if raw.is_empty() {
-        bail!("empty path");
+        return Err(DeepseeknovaError::Permission("empty path".to_string()));
     }
     if raw.contains('\0') {
-        bail!("path contains null byte");
+        return Err(DeepseeknovaError::Permission(
+            "path contains null byte".to_string(),
+        ));
     }
     secure_resolve(workspace, Path::new(raw))
 }

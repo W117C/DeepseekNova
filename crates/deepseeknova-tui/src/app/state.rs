@@ -86,19 +86,27 @@ pub enum KeyAction {
 /// 会话管理控制器（由 CLI 用 ChatPersistence 实现，TUI 不依赖 CLI 类型）。
 #[async_trait]
 pub trait SessionController: Send + Sync {
-    async fn new_session(&self) -> anyhow::Result<()>;
+    async fn new_session(&self) -> Result<(), deepseeknova_core::DeepseeknovaError>;
     /// 已保存会话（含首句预览，供侧边栏区分会话），最新优先。
-    async fn list_sessions(&self) -> anyhow::Result<Vec<SessionMeta>>;
+    async fn list_sessions(&self)
+        -> Result<Vec<SessionMeta>, deepseeknova_core::DeepseeknovaError>;
     async fn current_session(&self) -> Option<String>;
     /// 重命名会话 title（`/rename <title>` 作用于当前会话）。
-    async fn rename(&self, id: &str, title: &str) -> anyhow::Result<()>;
-    async fn resume(&self, id: &str) -> anyhow::Result<Vec<ResumedLine>>;
+    async fn rename(
+        &self,
+        id: &str,
+        title: &str,
+    ) -> Result<(), deepseeknova_core::DeepseeknovaError>;
+    async fn resume(
+        &self,
+        id: &str,
+    ) -> Result<Vec<ResumedLine>, deepseeknova_core::DeepseeknovaError>;
     async fn record_turn(
         &self,
         prompt: &str,
         output_text: &str,
         model: Option<String>,
-    ) -> anyhow::Result<()>;
+    ) -> Result<(), deepseeknova_core::DeepseeknovaError>;
 }
 
 /// 侧边栏会话列表的一条：id + 首句预览 + 用户命名 title。
@@ -130,9 +138,9 @@ pub enum ResumedRole {
 /// 撤销控制器（由 CLI 用 CheckpointManager 实现）。
 #[async_trait]
 pub trait UndoController: Send + Sync {
-    async fn list(&self) -> anyhow::Result<Vec<String>>;
-    async fn rollback_one(&self) -> anyhow::Result<Option<String>>;
-    async fn rollback_all(&self) -> anyhow::Result<usize>;
+    async fn list(&self) -> Result<Vec<String>, deepseeknova_core::DeepseeknovaError>;
+    async fn rollback_one(&self) -> Result<Option<String>, deepseeknova_core::DeepseeknovaError>;
+    async fn rollback_all(&self) -> Result<usize, deepseeknova_core::DeepseeknovaError>;
 }
 
 /// 会话级检查点控制器（`/checkpoint save|list|rollback`）。
@@ -149,15 +157,18 @@ pub trait SessionCheckpointController: Send + Sync {
         &self,
         label: Option<String>,
         conversation: Vec<deepseeknova_checkpoint::ConversationLine>,
-    ) -> anyhow::Result<String>;
+    ) -> Result<String, deepseeknova_core::DeepseeknovaError>;
     /// 检查点列表（最新优先），每行含 id/时间/消息数（渲染展示用）。
-    async fn list(&self) -> anyhow::Result<Vec<String>>;
+    async fn list(&self) -> Result<Vec<String>, deepseeknova_core::DeepseeknovaError>;
     /// 按 id（或最新，`None`）回退：恢复文件快照并返回检查点内容；
     /// 未知 id / 无检查点返回 `Ok(None)`。
     async fn rollback(
         &self,
         id: Option<&str>,
-    ) -> anyhow::Result<Option<deepseeknova_checkpoint::SessionCheckpoint>>;
+    ) -> Result<
+        Option<deepseeknova_checkpoint::SessionCheckpoint>,
+        deepseeknova_core::DeepseeknovaError,
+    >;
 }
 
 /// 工作区信任控制器（由 CLI 用 config 的 `TrustStore` 实现）。
@@ -169,9 +180,9 @@ pub trait TrustController: Send + Sync {
     /// 工作区根是否已信任。
     fn is_trusted(&self, root: &std::path::Path) -> bool;
     /// 标记为信任并落盘。
-    fn trust(&self, root: &std::path::Path) -> anyhow::Result<()>;
+    fn trust(&self, root: &std::path::Path) -> Result<(), deepseeknova_core::DeepseeknovaError>;
     /// 撤销信任并落盘。
-    fn untrust(&self, root: &std::path::Path) -> anyhow::Result<()>;
+    fn untrust(&self, root: &std::path::Path) -> Result<(), deepseeknova_core::DeepseeknovaError>;
 }
 
 /// 信任确认浮层内容（首次进入带权限规则的项目时展示）。
@@ -547,7 +558,7 @@ impl AppState {
                     .unwrap_or(0);
                 segs[idx]
             }
-            None => *segs.last().unwrap(),
+            None => segs[segs.len() - 1],
         };
         self.selected = Some(prev);
     }

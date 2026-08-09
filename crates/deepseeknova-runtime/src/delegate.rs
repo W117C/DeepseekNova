@@ -343,7 +343,7 @@ mod tests {
         async fn generate(
             &self,
             _validated: deepseeknova_provider::ValidatedRequest<'_>,
-        ) -> anyhow::Result<deepseeknova_core::Message> {
+        ) -> Result<deepseeknova_core::Message, deepseeknova_core::DeepseeknovaError> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(deepseeknova_core::Message {
                 role: deepseeknova_core::Role::Assistant,
@@ -529,7 +529,7 @@ mod tests {
             async fn generate(
                 &self,
                 v: deepseeknova_provider::ValidatedRequest<'_>,
-            ) -> anyhow::Result<Message> {
+            ) -> Result<Message, deepseeknova_core::DeepseeknovaError> {
                 let mut texts: Vec<String> = v.messages.iter().map(|m| m.content.clone()).collect();
                 self.seen.lock().unwrap().append(&mut texts);
                 Ok(Message {
@@ -634,7 +634,7 @@ mod tests {
         async fn generate(
             &self,
             v: deepseeknova_provider::ValidatedRequest<'_>,
-        ) -> anyhow::Result<deepseeknova_core::Message> {
+        ) -> Result<deepseeknova_core::Message, deepseeknova_core::DeepseeknovaError> {
             let mut texts: Vec<String> = v
                 .messages
                 .iter()

@@ -34,18 +34,28 @@ use tracing::info;
 /// A knowledge card.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KnowledgeCard {
+    /// 卡片唯一标识。
     pub id: String,
+    /// 卡片标题。
     pub title: String,
+    /// 标签列表，用于检索与分类。
     pub tags: Vec<String>,
+    /// 创建日期（字符串形式）。
     pub created: String,
+    /// 来源项目或会话名称。
     pub source: String,
+    /// 决策或经验的背景上下文。
     pub context: String,
+    /// 核心洞见/关键结论。
     pub key_insight: String,
+    /// 可选的代码示例。
     pub code_example: Option<String>,
+    /// 关联卡片 ID 列表。
     pub related: Vec<String>,
 }
 
 impl KnowledgeCard {
+    /// 将卡片序列化为 Markdown 文本（含 frontmatter 与各小节）。
     pub fn to_markdown(&self) -> String {
         let mut md = format!(
             "---\nid: {}\ntitle: \"{}\"\ntags: {:?}\ncreated: {}\nsource: {}\n---\n\n",
@@ -72,6 +82,7 @@ impl KnowledgeCard {
         md
     }
 
+    /// 从 Markdown 文本解析出卡片；缺少 frontmatter 时返回 `None`。
     pub fn from_markdown(content: &str) -> Option<Self> {
         let content = content.trim();
         if !content.starts_with("---") {
@@ -81,7 +92,7 @@ impl KnowledgeCard {
         let yaml = &content[3..3 + end];
         let body = content[3 + end + 3..].trim();
 
-        let frontmatter: KnowledgeCardFrontmatter = serde_yaml::from_str(yaml).ok()?;
+        let frontmatter: KnowledgeCardFrontmatter = serde_yml::from_str(yaml).ok()?;
 
         // Parse body sections
         let context = extract_section(body, "Context").unwrap_or_default();
@@ -139,6 +150,7 @@ pub struct CardGenerator {
 }
 
 impl CardGenerator {
+    /// 创建一个指向指定输出目录的卡片生成器。
     pub fn new(output_dir: impl Into<PathBuf>) -> Self {
         Self {
             cards: Vec::new(),
@@ -146,11 +158,13 @@ impl CardGenerator {
         }
     }
 
+    /// 向生成器追加一张卡片。
     pub fn add_card(&mut self, card: KnowledgeCard) {
         self.cards.push(card);
     }
 
-    pub fn generate(&self) -> anyhow::Result<Vec<PathBuf>> {
+    /// 将所有卡片写入输出目录，返回已写入文件路径列表。
+    pub fn generate(&self) -> Result<Vec<PathBuf>, crate::DeepseeknovaError> {
         std::fs::create_dir_all(&self.output_dir)?;
         let mut written = Vec::new();
         for card in &self.cards {
@@ -162,6 +176,7 @@ impl CardGenerator {
         Ok(written)
     }
 
+    /// 返回当前已加入的卡片数量。
     pub fn card_count(&self) -> usize {
         self.cards.len()
     }

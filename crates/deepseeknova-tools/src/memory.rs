@@ -4,7 +4,7 @@
 
 use async_trait::async_trait;
 use deepseeknova_core::memory::engine::MemoryEngine;
-use deepseeknova_core::{Tool, ToolContext, ToolSchema};
+use deepseeknova_core::{DeepseeknovaError, Tool, ToolContext, ToolSchema};
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
@@ -56,14 +56,18 @@ impl Tool for RememberTool {
         }
     }
 
-    async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
+    async fn execute(
+        &self,
+        ctx: &ToolContext,
+        args: &str,
+    ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
         deepseeknova_security::context::enforce_capability(
             ctx,
             &self.schema().name,
             deepseeknova_security::capability::Capability::MemoryWrite,
         )?;
         if ctx.cancellation.is_cancelled() {
-            anyhow::bail!("cancelled");
+            return Err(deepseeknova_core::DeepseeknovaError::Cancelled);
         }
         let parsed: RememberArgs = serde_json::from_str(args)?;
         let h = match handle(ctx) {
@@ -82,7 +86,9 @@ impl Tool for RememberTool {
         let value = sanitized.clone();
         let existed = tokio::task::spawn_blocking(move || h.remember(&key, &value, parsed.tags))
             .await
-            .map_err(|e| anyhow::anyhow!("memory remember blocking task failed: {e}"))??;
+            .map_err(|e| {
+                DeepseeknovaError::Tool(format!("memory remember blocking task failed: {e}"))
+            })??;
         Ok(if existed {
             format!("updated memory '{}'", sanitized_key)
         } else {
@@ -116,14 +122,18 @@ impl Tool for ForgetTool {
         }
     }
 
-    async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
+    async fn execute(
+        &self,
+        ctx: &ToolContext,
+        args: &str,
+    ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
         deepseeknova_security::context::enforce_capability(
             ctx,
             &self.schema().name,
             deepseeknova_security::capability::Capability::MemoryWrite,
         )?;
         if ctx.cancellation.is_cancelled() {
-            anyhow::bail!("cancelled");
+            return Err(deepseeknova_core::DeepseeknovaError::Cancelled);
         }
         let parsed: ForgetArgs = serde_json::from_str(args)?;
         let h = match handle(ctx) {
@@ -176,14 +186,18 @@ impl Tool for RecallTool {
         true
     }
 
-    async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
+    async fn execute(
+        &self,
+        ctx: &ToolContext,
+        args: &str,
+    ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
         deepseeknova_security::context::enforce_capability(
             ctx,
             &self.schema().name,
             deepseeknova_security::capability::Capability::MemoryRead,
         )?;
         if ctx.cancellation.is_cancelled() {
-            anyhow::bail!("cancelled");
+            return Err(deepseeknova_core::DeepseeknovaError::Cancelled);
         }
         let parsed: RecallArgs = serde_json::from_str(args)?;
         let h = match handle(ctx) {
@@ -202,7 +216,9 @@ impl Tool for RecallTool {
             None => h.recall(&query_arg, top_k),
         })
         .await
-        .map_err(|e| anyhow::anyhow!("memory recall blocking task failed: {e}"))??;
+        .map_err(|e| {
+            DeepseeknovaError::Tool(format!("memory recall blocking task failed: {e}"))
+        })??;
         if results.is_empty() {
             return Ok(format!("no matches for '{}'", query));
         }
@@ -299,7 +315,7 @@ mod tests {
         /// 确定性测试替身：语义命中不需 FTS 共词。
         struct FakeEmbed;
         impl EmbeddingProvider for FakeEmbed {
-            fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+            fn embed(&self, text: &str) -> Result<Vec<f32>, DeepseeknovaError> {
                 if text.contains("ferris") {
                     Ok(vec![0.9, 0.1])
                 } else if text.contains("rust") {
@@ -344,7 +360,7 @@ mod tests {
             embed_thread: Mutex<Option<ThreadId>>,
         }
         impl EmbeddingProvider for ThreadRecording {
-            fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+            fn embed(&self, _text: &str) -> Result<Vec<f32>, DeepseeknovaError> {
                 *self.embed_thread.lock().unwrap() = Some(std::thread::current().id());
                 Ok(vec![0.5, 0.5])
             }

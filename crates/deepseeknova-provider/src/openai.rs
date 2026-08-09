@@ -2,10 +2,9 @@ use crate::retry::{retry_with_backoff, HttpAttempt};
 use crate::tool_cache::ToolSchemaCache;
 use crate::types::{ChatCompletionResponse, OpenAIFunction, OpenAIRequestTool, StreamResponse};
 use crate::{Provider, ProviderError, ValidatedRequest};
-use anyhow::Context;
 use async_trait::async_trait;
 use deepseeknova_core::chunk::{Chunk, ChunkStream};
-use deepseeknova_core::{Message, Tool};
+use deepseeknova_core::{DeepseeknovaError, Message, Tool};
 use reqwest::Client;
 use std::env;
 use std::time::Duration;
@@ -41,14 +40,17 @@ impl OpenAIProvider {
         api_key_env: &str,
         timeout_secs: u64,
         max_retries: u32,
-    ) -> anyhow::Result<Self> {
-        let api_key = env::var(api_key_env)
-            .with_context(|| format!("environment variable {api_key_env} is not set"))?;
+    ) -> Result<Self, DeepseeknovaError> {
+        let api_key = env::var(api_key_env).map_err(|_| {
+            DeepseeknovaError::Config(format!("environment variable {api_key_env} is not set"))
+        })?;
 
         let client = Client::builder()
             .timeout(Duration::from_secs(timeout_secs))
             .build()
-            .context("failed to build HTTP client")?;
+            .map_err(|e| {
+                DeepseeknovaError::provider(format!("failed to build HTTP client: {e}"))
+            })?;
 
         Ok(Self {
             client,
@@ -163,7 +165,10 @@ impl OpenAIProvider {
         req
     }
 
-    async fn send_request(&self, body: &serde_json::Value) -> anyhow::Result<reqwest::Response> {
+    async fn send_request(
+        &self,
+        body: &serde_json::Value,
+    ) -> Result<reqwest::Response, DeepseeknovaError> {
         send_chat_request(
             &self.client,
             &self.api_key,
@@ -185,7 +190,7 @@ async fn send_chat_request(
     base_url: &str,
     max_retries: u32,
     body: &serde_json::Value,
-) -> anyhow::Result<reqwest::Response> {
+) -> Result<reqwest::Response, DeepseeknovaError> {
     let url = format!("{base_url}/chat/completions");
 
     let stream = body
@@ -234,23 +239,27 @@ async fn send_chat_request(
 
     match result {
         HttpAttempt::Success(response) => Ok(response),
-        HttpAttempt::Retryable(msg) => Err(anyhow::anyhow!("request failed after retries: {msg}")),
-        HttpAttempt::Fatal(msg) => Err(anyhow::anyhow!("{msg}")),
+        HttpAttempt::Retryable(msg) => Err(DeepseeknovaError::provider_retryable(format!(
+            "request failed after retries: {msg}"
+        ))),
+        HttpAttempt::Fatal(msg) => Err(DeepseeknovaError::provider(msg)),
     }
 }
 
 #[async_trait]
 impl Provider for OpenAIProvider {
-    async fn generate(&self, validated: ValidatedRequest<'_>) -> anyhow::Result<Message> {
+    async fn generate(
+        &self,
+        validated: ValidatedRequest<'_>,
+    ) -> Result<Message, DeepseeknovaError> {
         let messages = validated.messages;
         let tools = validated.tools;
         let body = self.build_request(messages, tools, false);
         let response = self.send_request(&body).await?;
 
-        let resp_body: ChatCompletionResponse = response
-            .json()
-            .await
-            .context("failed to parse provider response")?;
+        let resp_body: ChatCompletionResponse = response.json().await.map_err(|e| {
+            DeepseeknovaError::provider(format!("failed to parse provider response: {e}"))
+        })?;
 
         // Surface DeepSeek token accounting for auxiliary (non-streaming) calls
         // so context-cache efficiency and billed reasoning tokens stay visible
@@ -276,7 +285,10 @@ impl Provider for OpenAIProvider {
         Ok(choice.message)
     }
 
-    async fn stream(&self, validated: ValidatedRequest<'_>) -> anyhow::Result<ChunkStream> {
+    async fn stream(
+        &self,
+        validated: ValidatedRequest<'_>,
+    ) -> Result<ChunkStream, DeepseeknovaError> {
         let messages = validated.messages;
         let tools = validated.tools;
         let body = self.build_request(messages, tools, true);
@@ -322,7 +334,9 @@ impl Provider for OpenAIProvider {
                     return Ok(Box::pin(chained));
                 }
                 None => {
-                    return Err(anyhow::anyhow!("stream ended before producing any event"));
+                    return Err(DeepseeknovaError::provider(
+                        "stream ended before producing any event",
+                    ));
                 }
             }
         }
@@ -346,9 +360,9 @@ struct AccToolCall {
 
 async fn stream_sse_response(
     response: reqwest::Response,
-    tx: &mpsc::Sender<anyhow::Result<Chunk>>,
+    tx: &mpsc::Sender<Result<Chunk, DeepseeknovaError>>,
     sent_any: &mut bool,
-) -> anyhow::Result<()> {
+) -> Result<(), DeepseeknovaError> {
     // Accumulate raw bytes per line to avoid UTF-8 corruption across TCP chunks
     let mut line_bytes: Vec<u8> = Vec::new();
     let mut tool_acc: Vec<AccToolCall> = Vec::new();
@@ -356,7 +370,9 @@ async fn stream_sse_response(
     let mut byte_stream = response.bytes_stream();
 
     while let Some(chunk_result) = byte_stream.next().await {
-        let bytes = chunk_result.context("failed to read chunk from stream")?;
+        let bytes = chunk_result.map_err(|e| {
+            DeepseeknovaError::provider(format!("failed to read chunk from stream: {e}"))
+        })?;
 
         for &b in bytes.iter() {
             match b {
@@ -364,8 +380,9 @@ async fn stream_sse_response(
                     if line_bytes.is_empty() {
                         continue;
                     }
-                    let line_str = String::from_utf8(line_bytes.clone())
-                        .map_err(|e| anyhow::anyhow!("invalid UTF-8 in SSE stream: {e}"))?;
+                    let line_str = String::from_utf8(line_bytes.clone()).map_err(|e| {
+                        DeepseeknovaError::provider(format!("invalid UTF-8 in SSE stream: {e}"))
+                    })?;
                     line_bytes.clear();
                     let trimmed = line_str.trim().to_string();
                     if trimmed.is_empty() {
@@ -381,8 +398,9 @@ async fn stream_sse_response(
 
     // Process any remaining buffered data
     if !line_bytes.is_empty() {
-        let tail_str = String::from_utf8(line_bytes)
-            .map_err(|e| anyhow::anyhow!("invalid UTF-8 in SSE stream tail: {e}"))?;
+        let tail_str = String::from_utf8(line_bytes).map_err(|e| {
+            DeepseeknovaError::provider(format!("invalid UTF-8 in SSE stream tail: {e}"))
+        })?;
         let trimmed = tail_str.trim().to_string();
         if !trimmed.is_empty() {
             process_sse_line(&trimmed, tx, &mut tool_acc, sent_any).await?;
@@ -398,10 +416,10 @@ async fn stream_sse_response(
 /// Process a single SSE line (without the trailing \n).
 async fn process_sse_line(
     line: &str,
-    tx: &mpsc::Sender<anyhow::Result<Chunk>>,
+    tx: &mpsc::Sender<Result<Chunk, DeepseeknovaError>>,
     tool_acc: &mut Vec<AccToolCall>,
     sent_any: &mut bool,
-) -> anyhow::Result<()> {
+) -> Result<(), DeepseeknovaError> {
     // End-of-stream marker
     if line == "data: [DONE]" {
         flush_pending_tool_calls(tx, tool_acc, sent_any).await?;
@@ -515,10 +533,10 @@ async fn process_sse_line(
 
 /// Emit ToolCallEnd for any pending (accumulated but not flushed) tool calls.
 async fn flush_pending_tool_calls(
-    tx: &mpsc::Sender<anyhow::Result<Chunk>>,
+    tx: &mpsc::Sender<Result<Chunk, DeepseeknovaError>>,
     tool_acc: &mut Vec<AccToolCall>,
     sent_any: &mut bool,
-) -> anyhow::Result<()> {
+) -> Result<(), DeepseeknovaError> {
     for acc in tool_acc.drain(..) {
         if let (Some(id), Some(name)) = (acc.id, acc.name) {
             *sent_any = true;
@@ -541,6 +559,7 @@ async fn flush_pending_tool_calls(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::{clear_proxy_env, ENV_LOCK};
     use deepseeknova_core::tool::ToolContext;
     use deepseeknova_core::types::ToolSchema;
 
@@ -557,7 +576,11 @@ mod tests {
             }
         }
 
-        async fn execute(&self, _ctx: &ToolContext, _args: &str) -> anyhow::Result<String> {
+        async fn execute(
+            &self,
+            _ctx: &ToolContext,
+            _args: &str,
+        ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
             Ok("ok".into())
         }
     }
@@ -873,8 +896,8 @@ data: [DONE]
         assert_eq!(mapped.total_tokens, 15);
     }
 
-    /// env 相关测试串行化（异步锁：guard 需跨 await 持有）。
-    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    // env 串行化锁与代理清除函数见 crate::test_util（跨 openai/embeddings
+    // 共享，避免 std::env 并发修改 UB）。
 
     /// Mock SSE 服务器：第 1 次请求返回 200 但 body 中途断开（模拟网关
     /// 断流），第 2 次返回完整 SSE。返回 base_url 与请求记录。
@@ -924,6 +947,7 @@ data: [DONE]
     #[tokio::test]
     async fn stream_retries_zero_output_disconnect() {
         let _guard = ENV_LOCK.lock().await;
+        clear_proxy_env();
         std::env::set_var("DEEPSEEK_API_KEY", "sk-test");
 
         let (base, rx) = serve_stream_retry();
@@ -969,26 +993,58 @@ data: [DONE]
             let (mut stream, _) = listener.accept().unwrap();
             let mut buf = Vec::new();
             let mut tmp = [0u8; 4096];
+            // 读取请求头直到 \r\n\r\n
             loop {
                 let n = stream.read(&mut tmp).unwrap();
                 if n == 0 {
-                    break;
+                    return;
                 }
                 buf.extend_from_slice(&tmp[..n]);
                 if buf.windows(4).any(|w| w == b"\r\n\r\n") {
                     break;
                 }
             }
-            // 先发一个完整 data 帧（已产出内容），再中途断开
-            let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 1024\r\n\r\n";
+            // 读完请求 body：reqwest 的 send() 会发送完整 POST body，若 mock
+            // 在 body 未读完时就 drop 连接，reqwest 写 body 遇 RST 会导致
+            // send_request 失败（而非仅 stream 阶段失败），污染重试判定。
+            let header_end = buf
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+                .map(|i| i + 4)
+                .unwrap_or(buf.len());
+            let content_length = String::from_utf8_lossy(&buf[..header_end])
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length: ")
+                        .and_then(|v| v.trim().parse::<usize>().ok())
+                })
+                .unwrap_or(0);
+            let mut remaining = content_length.saturating_sub(buf.len() - header_end);
+            while remaining > 0 {
+                let n = stream.read(&mut tmp).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                remaining = remaining.saturating_sub(n);
+            }
+            // 用 chunked 编码：先发一个完整 chunk（partial 帧），再不带终止的
+            // `0\r\n\r\n` 直接断开 → reqwest 先交付已解析的 chunk，再在期待
+            // 下一个 chunk 时遇 EOF 报错。这样稳定触发"已产出内容后断开"，
+            // 避免 Content-Length 未满时 reqwest 首块行为不确定导致的竞态。
+            let body =
+                b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}\n\n";
+            let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n";
+            let chunk_header = format!("{:x}\r\n", body.len());
             let _ = stream.write_all(head.as_bytes());
-            let _ = stream.write_all(
-                b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}\n\n",
-            );
+            let _ = stream.write_all(chunk_header.as_bytes());
+            let _ = stream.write_all(body);
+            let _ = stream.write_all(b"\r\n");
             drop(stream);
         });
 
         let _guard = ENV_LOCK.lock().await;
+        clear_proxy_env();
         std::env::set_var("DEEPSEEK_API_KEY", "sk-test");
         let base = format!("http://{addr}/v1");
         let provider =

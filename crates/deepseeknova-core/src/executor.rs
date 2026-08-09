@@ -23,24 +23,38 @@ type SharedOutputs = Option<Arc<RwLock<HashMap<NodeId, NodeOutput>>>>;
 /// ThinkCallback is called for Think actions. Returns the model's text response.
 #[async_trait::async_trait]
 pub trait ThinkCallback: Send + Sync {
-    async fn think(&self, prompt: &str) -> anyhow::Result<String>;
+    /// 用给定 prompt 调用模型，返回模型生成的文本。
+    async fn think(&self, prompt: &str) -> Result<String, crate::DeepseeknovaError>;
 }
 
 /// ToolCallback is called for CallTool actions. Returns the tool output.
 #[async_trait::async_trait]
 pub trait ToolCallback: Send + Sync {
-    async fn call_tool(&self, tool: &str, args: &serde_json::Value) -> anyhow::Result<String>;
+    /// 调用名为 `tool` 的工具，传入 JSON `args`，返回工具输出文本。
+    async fn call_tool(
+        &self,
+        tool: &str,
+        args: &serde_json::Value,
+    ) -> Result<String, crate::DeepseeknovaError>;
 }
 
 /// ReflectCallback evaluates criteria against completed work.
 #[async_trait::async_trait]
 pub trait ReflectCallback: Send + Sync {
-    async fn reflect(&self, criteria: &[String], context: &str) -> anyhow::Result<ReflectResult>;
+    /// 依据 `criteria` 对 `context` 描述的已完成工作进行评估，返回评估结果。
+    async fn reflect(
+        &self,
+        criteria: &[String],
+        context: &str,
+    ) -> Result<ReflectResult, crate::DeepseeknovaError>;
 }
 
+/// 反思评估的结果。
 #[derive(Debug, Clone)]
 pub struct ReflectResult {
+    /// 是否通过评估。
     pub passed: bool,
+    /// 评估反馈文本。
     pub feedback: String,
 }
 
@@ -48,7 +62,12 @@ pub struct ReflectResult {
 /// to a named sub-agent and returns the collected text output.
 #[async_trait::async_trait]
 pub trait DelegateCallback: Send + Sync {
-    async fn delegate(&self, sub_agent: &str, goal: &str) -> anyhow::Result<String>;
+    /// 将 `goal` 委派给名为 `sub_agent` 的子代理，返回其收集到的文本输出。
+    async fn delegate(
+        &self,
+        sub_agent: &str,
+        goal: &str,
+    ) -> Result<String, crate::DeepseeknovaError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -103,6 +122,8 @@ impl<T: 'static> Drop for JoinSetAbortGuard<T> {
     }
 }
 
+/// 执行图执行器：按拓扑序（分波并发）执行 `ExecutionGraph` 中的节点，
+/// 依据边条件跳过或推进下游节点，并对失败节点应用重试与归因。
 pub struct GraphExecutor {
     think: Arc<dyn ThinkCallback>,
     tool: Arc<dyn ToolCallback>,
@@ -112,6 +133,7 @@ pub struct GraphExecutor {
 }
 
 impl GraphExecutor {
+    /// 创建执行器，注入 Think/Tool/Reflect 三类回调。
     pub fn new(
         think: Arc<dyn ThinkCallback>,
         tool: Arc<dyn ToolCallback>,
@@ -143,7 +165,7 @@ impl GraphExecutor {
     pub async fn execute(
         self: Arc<Self>,
         graph: &ExecutionGraph,
-    ) -> anyhow::Result<ExecutionResult> {
+    ) -> Result<ExecutionResult, crate::DeepseeknovaError> {
         let sorted = topological_sort(graph)?;
         let mut outputs: HashMap<NodeId, NodeOutput> = HashMap::new();
         let mut completed = true;
@@ -161,7 +183,7 @@ impl GraphExecutor {
                 let node = graph
                     .nodes
                     .get(node_id)
-                    .ok_or_else(|| anyhow::anyhow!("node must exist"))?;
+                    .ok_or_else(|| crate::DeepseeknovaError::Runner("node must exist".into()))?;
 
                 if should_skip_node(node, graph, &outputs) {
                     debug!("node {node_id} skipped: no incoming edge condition satisfied");
@@ -186,7 +208,7 @@ impl GraphExecutor {
                     let node = graph
                         .nodes
                         .get(node_id)
-                        .ok_or_else(|| anyhow::anyhow!("node must exist"))?
+                        .ok_or_else(|| crate::DeepseeknovaError::Runner("node must exist".into()))?
                         .clone();
                     let outputs_snapshot = outputs.clone();
                     let this = Arc::clone(&self);
@@ -241,7 +263,7 @@ impl GraphExecutor {
         node: &ExecutionNode,
         outputs: &HashMap<NodeId, NodeOutput>,
         shared: &SharedOutputs,
-    ) -> anyhow::Result<NodeOutput> {
+    ) -> Result<NodeOutput, crate::DeepseeknovaError> {
         let mut attempt = 0u32;
         loop {
             attempt += 1;
@@ -256,7 +278,10 @@ impl GraphExecutor {
                     {
                         Ok(Ok(output)) => Ok(output),
                         Ok(Err(e)) => Err(e),
-                        Err(_) => Err(anyhow::anyhow!("node {} timed out after {d:?}", node.id)),
+                        Err(_) => Err(crate::DeepseeknovaError::Runner(format!(
+                            "node {} timed out after {d:?}",
+                            node.id
+                        ))),
                     }
                 }
                 None => {
@@ -304,8 +329,13 @@ impl GraphExecutor {
         action: &'a Action,
         outputs: &'a HashMap<NodeId, NodeOutput>,
         shared: &'a SharedOutputs,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<NodeOutput>> + Send + 'a>>
-    {
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<NodeOutput, crate::DeepseeknovaError>>
+                + Send
+                + 'a,
+        >,
+    > {
         Box::pin(async move {
             match action {
                 Action::Think { prompt } => {
@@ -364,10 +394,10 @@ impl GraphExecutor {
                         let text = d.delegate(sub_agent, goal).await?;
                         Ok(NodeOutput::Text(text))
                     } else {
-                        anyhow::bail!(
+                        Err(crate::DeepseeknovaError::Runner(format!(
                             "Delegate action (sub_agent='{sub_agent}') requires a \
                              DelegateCallback, but none was configured on GraphExecutor"
-                        )
+                        )))
                     }
                 }
                 Action::Parallel(nodes) => {
@@ -404,12 +434,16 @@ impl GraphExecutor {
                             (idx, result)
                         });
                     }
-                    let mut results: Vec<Option<anyhow::Result<NodeOutput>>> =
+                    let mut results: Vec<Option<Result<NodeOutput, crate::DeepseeknovaError>>> =
                         (0..nodes.len()).map(|_| None).collect();
                     while let Some(joined) = set.join_next().await {
                         match joined {
                             Ok((idx, result)) => results[idx] = Some(result),
-                            Err(e) => anyhow::bail!("parallel node join error: {e}"),
+                            Err(e) => {
+                                return Err(crate::DeepseeknovaError::Runner(format!(
+                                    "parallel node join error: {e}"
+                                )))
+                            }
                         }
                     }
                     let mut combined = String::new();
@@ -417,10 +451,10 @@ impl GraphExecutor {
                     for (i, result) in results.into_iter().enumerate() {
                         let child = &nodes[i];
                         let output = result.unwrap_or_else(|| {
-                            Err(anyhow::anyhow!(
+                            Err(crate::DeepseeknovaError::Runner(format!(
                                 "parallel node '{}' produced no result",
                                 child.id
-                            ))
+                            )))
                         });
                         match output {
                             Ok(output) => {
@@ -436,7 +470,10 @@ impl GraphExecutor {
                     // 下游 Failure/Retry 条件边可观测（Bugbot 审查 MEDIUM 修复；
                     // 部分失败仍以文本合并返回，保留中间产物）。
                     if all_failed {
-                        anyhow::bail!("all {} parallel children failed:\n{combined}", nodes.len());
+                        return Err(crate::DeepseeknovaError::Runner(format!(
+                            "all {} parallel children failed:\n{combined}",
+                            nodes.len()
+                        )));
                     }
                     Ok(NodeOutput::Text(combined))
                 }
@@ -454,7 +491,7 @@ impl GraphExecutor {
 // Topological sort (Kahn's algorithm)
 // ---------------------------------------------------------------------------
 
-fn topological_sort(graph: &ExecutionGraph) -> anyhow::Result<Vec<NodeId>> {
+fn topological_sort(graph: &ExecutionGraph) -> Result<Vec<NodeId>, crate::DeepseeknovaError> {
     let mut in_degree: HashMap<&NodeId, usize> = HashMap::new();
     let mut adjacency: HashMap<&NodeId, Vec<&NodeId>> = HashMap::new();
 
@@ -490,7 +527,9 @@ fn topological_sort(graph: &ExecutionGraph) -> anyhow::Result<Vec<NodeId>> {
     }
 
     if sorted.len() != graph.nodes.len() {
-        anyhow::bail!("graph contains a cycle");
+        return Err(crate::DeepseeknovaError::Runner(
+            "graph contains a cycle".into(),
+        ));
     }
 
     Ok(sorted)
@@ -772,7 +811,7 @@ mod tests {
     struct MockThink;
     #[async_trait::async_trait]
     impl ThinkCallback for MockThink {
-        async fn think(&self, prompt: &str) -> anyhow::Result<String> {
+        async fn think(&self, prompt: &str) -> Result<String, crate::DeepseeknovaError> {
             Ok(format!("thought: {prompt}"))
         }
     }
@@ -780,7 +819,11 @@ mod tests {
     struct MockTool;
     #[async_trait::async_trait]
     impl ToolCallback for MockTool {
-        async fn call_tool(&self, tool: &str, _args: &serde_json::Value) -> anyhow::Result<String> {
+        async fn call_tool(
+            &self,
+            tool: &str,
+            _args: &serde_json::Value,
+        ) -> Result<String, crate::DeepseeknovaError> {
             Ok(format!("tool {tool} done"))
         }
     }
@@ -792,7 +835,7 @@ mod tests {
             &self,
             criteria: &[String],
             _context: &str,
-        ) -> anyhow::Result<ReflectResult> {
+        ) -> Result<ReflectResult, crate::DeepseeknovaError> {
             Ok(ReflectResult {
                 passed: true,
                 feedback: format!("criteria met: {criteria:?}"),
@@ -803,7 +846,11 @@ mod tests {
     struct MockDelegate;
     #[async_trait::async_trait]
     impl DelegateCallback for MockDelegate {
-        async fn delegate(&self, sub_agent: &str, goal: &str) -> anyhow::Result<String> {
+        async fn delegate(
+            &self,
+            sub_agent: &str,
+            goal: &str,
+        ) -> Result<String, crate::DeepseeknovaError> {
             Ok(format!("[{sub_agent}] executed: {goal}"))
         }
     }
@@ -1054,7 +1101,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ThinkCallback for MockSlowThink {
-        async fn think(&self, prompt: &str) -> anyhow::Result<String> {
+        async fn think(&self, prompt: &str) -> Result<String, crate::DeepseeknovaError> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             sleep(self.delay).await;
             Ok(format!("slow: {prompt}"))
@@ -1247,7 +1294,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ThinkCallback for MockHeartbeatThink {
-        async fn think(&self, _prompt: &str) -> anyhow::Result<String> {
+        async fn think(&self, _prompt: &str) -> Result<String, crate::DeepseeknovaError> {
             // Infinite heartbeat loop: keeps bumping the counter as long as
             // the task is polled. Cancellation (abort) freezes the counter.
             loop {

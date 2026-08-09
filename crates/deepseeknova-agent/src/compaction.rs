@@ -8,7 +8,7 @@
 
 use crate::memory::Memory;
 use deepseeknova_context::history::group_into_units;
-use deepseeknova_core::{Message, Role};
+use deepseeknova_core::{DeepseeknovaError, Message, Role};
 use deepseeknova_provider::{Provider, ValidatedRequest};
 use tracing::{info, warn};
 
@@ -179,7 +179,7 @@ pub(crate) fn last_user_message(messages: &[Message]) -> Option<Message> {
 }
 
 /// 单次 LLM 摘要调用：走 Provider 非流式生成，取文本。
-async fn summarize(provider: &dyn Provider, prompt: &str) -> anyhow::Result<String> {
+async fn summarize(provider: &dyn Provider, prompt: &str) -> Result<String, DeepseeknovaError> {
     let msgs = vec![Message {
         role: Role::User,
         content: prompt.to_string(),
@@ -189,11 +189,16 @@ async fn summarize(provider: &dyn Provider, prompt: &str) -> anyhow::Result<Stri
         reasoning_content: None,
     }];
     let validated = ValidatedRequest::new(&msgs, &[]).map_err(|violations| {
-        anyhow::anyhow!("invalid compact request: {}", violations.join("; "))
+        DeepseeknovaError::Runner(format!(
+            "invalid compact request: {}",
+            violations.join("; ")
+        ))
     })?;
     let out = provider.generate(validated).await?;
     if out.content.trim().is_empty() {
-        anyhow::bail!("empty digest from compact model");
+        return Err(DeepseeknovaError::Runner(
+            "empty digest from compact model".to_string(),
+        ));
     }
     Ok(out.content)
 }

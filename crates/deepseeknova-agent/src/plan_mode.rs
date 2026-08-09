@@ -1,6 +1,7 @@
 use deepseeknova_core::registry::Planner;
 use deepseeknova_core::{
-    graph::ExecutionGraph, Message, Role, RunEvent, RunEventStream, RunInput, RunOutput, Runner,
+    graph::ExecutionGraph, DeepseeknovaError, Message, Role, RunEvent, RunEventStream, RunInput,
+    RunOutput, Runner,
 };
 use deepseeknova_provider::Provider;
 use std::sync::Arc;
@@ -49,7 +50,10 @@ impl PlanModeRunner {
 
 #[async_trait::async_trait]
 impl Runner for PlanModeRunner {
-    async fn run_stream(&self, input: RunInput) -> anyhow::Result<RunEventStream> {
+    async fn run_stream(
+        &self,
+        input: RunInput,
+    ) -> Result<RunEventStream, deepseeknova_core::DeepseeknovaError> {
         let (tx, rx) = mpsc::channel(64);
 
         let provider = Arc::clone(&self.provider);
@@ -92,8 +96,8 @@ async fn run_plan_mode(
     planner: Option<Arc<dyn Planner>>,
     goal: String,
     system_prompt: Option<String>,
-    tx: &mpsc::Sender<anyhow::Result<RunEvent>>,
-) -> anyhow::Result<()> {
+    tx: &mpsc::Sender<Result<RunEvent, DeepseeknovaError>>,
+) -> Result<(), DeepseeknovaError> {
     let planning_system =
         system_prompt.unwrap_or_else(|| DEFAULT_PLANNING_SYSTEM_PROMPT.to_string());
 
@@ -120,7 +124,11 @@ async fn run_plan_mode(
     let validated = deepseeknova_provider::ValidatedRequest::new(&messages, &[]);
     let validated = match validated {
         Ok(v) => v,
-        Err(e) => return Err(anyhow::anyhow!("validation failed: {e:?}")),
+        Err(e) => {
+            return Err(DeepseeknovaError::Runner(format!(
+                "validation failed: {e:?}"
+            )))
+        }
     };
     let mut stream = provider.stream(validated).await?;
     use tokio_stream::StreamExt;
@@ -271,7 +279,7 @@ mod tests {
         async fn generate(
             &self,
             _validated: deepseeknova_provider::ValidatedRequest<'_>,
-        ) -> anyhow::Result<Message> {
+        ) -> Result<Message, DeepseeknovaError> {
             Ok(Message {
                 role: Role::Assistant,
                 content: "mock plan".to_string(),
@@ -285,8 +293,8 @@ mod tests {
         async fn stream(
             &self,
             _validated: deepseeknova_provider::ValidatedRequest<'_>,
-        ) -> anyhow::Result<deepseeknova_core::chunk::ChunkStream> {
-            let chunks: Vec<anyhow::Result<Chunk>> =
+        ) -> Result<deepseeknova_core::chunk::ChunkStream, DeepseeknovaError> {
+            let chunks: Vec<Result<Chunk, DeepseeknovaError>> =
                 self.chunks.clone().into_iter().map(Ok).collect();
             Ok(Box::pin(tokio_stream::iter(chunks)))
         }
@@ -316,7 +324,10 @@ mod tests {
             &self.name
         }
 
-        async fn plan(&self, _goal: &str) -> anyhow::Result<ExecutionGraph> {
+        async fn plan(
+            &self,
+            _goal: &str,
+        ) -> Result<ExecutionGraph, deepseeknova_core::DeepseeknovaError> {
             Ok(self.graph.clone())
         }
     }

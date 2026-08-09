@@ -9,7 +9,6 @@ readme = "README.md"
 documentation = "https://docs.rs/deepseeknova-tools"
 
 [dependencies]
-anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
@@ -32,3 +31,6 @@ hex = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
+
+[lints]
+workspace = true

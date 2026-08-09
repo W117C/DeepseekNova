@@ -69,7 +69,10 @@ pub enum CommandOutcome {
 
 /// agent 重建工厂类型：`(effort, model)` → 新 runner。
 pub type RunnerFactory = Arc<
-    dyn Fn(Option<ReasoningEffort>, Option<String>) -> anyhow::Result<Arc<dyn Runner>>
+    dyn Fn(
+            Option<ReasoningEffort>,
+            Option<String>,
+        ) -> Result<Arc<dyn Runner>, deepseeknova_core::DeepseeknovaError>
         + Send
         + Sync,
 >;

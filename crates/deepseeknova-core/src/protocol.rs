@@ -113,10 +113,12 @@ pub struct PhaseGateCtx {
 pub struct NoopPhaseGate;
 
 impl PhaseGate for NoopPhaseGate {
+    /// 返回固定名 `"noop"`。
     fn name(&self) -> &'static str {
         "noop"
     }
 
+    /// 无门控：恒返回空违规列表。
     fn check(&self, _ctx: &PhaseGateCtx) -> Vec<GateViolation> {
         Vec::new()
     }

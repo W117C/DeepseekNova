@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use deepseeknova_core::{Tool, ToolContext, ToolSchema};
+use deepseeknova_core::{DeepseeknovaError, Tool, ToolContext, ToolSchema};
 use deepseeknova_sandbox::{NoOpSandbox, Sandbox};
 use serde::Deserialize;
 use serde_json::json;
@@ -57,7 +57,11 @@ impl Tool for ShellTool {
         }
     }
 
-    async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
+    async fn execute(
+        &self,
+        ctx: &ToolContext,
+        args: &str,
+    ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
         deepseeknova_security::context::enforce_capability(
             ctx,
             &self.schema().name,
@@ -71,10 +75,10 @@ impl Tool for ShellTool {
         if deepseeknova_security::readonly::classify_readonly(&parsed.command)
             == deepseeknova_security::readonly::ReadOnlyKind::Dangerous
         {
-            anyhow::bail!(
+            return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
                 "Security violation: command rejected by read-only classifier: {}",
                 parsed.command
-            );
+            )));
         }
 
         let sec = ctx
@@ -83,10 +87,10 @@ impl Tool for ShellTool {
 
         if let Some(sec) = sec {
             if !sec.policy.is_command_allowed(&parsed.command) {
-                anyhow::bail!(
+                return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
                     "Security violation: command '{}' is blocked by security policy",
                     parsed.command
-                );
+                )));
             }
         }
 
@@ -97,7 +101,7 @@ impl Tool for ShellTool {
         let max_output = sec.map(|s| s.limits.max_output_bytes as usize);
 
         if ctx.cancellation.is_cancelled() {
-            anyhow::bail!("cancelled");
+            return Err(deepseeknova_core::DeepseeknovaError::Cancelled);
         }
 
         let shell = platform_shell();
@@ -105,12 +109,12 @@ impl Tool for ShellTool {
 
         // Fail-closed：必须隔离的平台沙箱后端缺失时拒绝执行，绝不静默降级。
         if self.sandbox.requires_isolation() && !self.sandbox.backend_available() {
-            anyhow::bail!(
+            return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
                 "sandbox backend '{}' unavailable (sandbox-exec/bwrap not found); \
                  refusing to run command without isolation. Install the backend or \
                  set [sandbox] enabled=false.",
                 self.sandbox.name()
-            );
+            )));
         }
 
         let (sandbox_bin, sandbox_args) = self.sandbox.sandbox(shell.0, &cmd_args);
@@ -145,14 +149,14 @@ impl Tool for ShellTool {
                     if !stderr.is_empty() {
                         msg.push_str(&format!("\nSTDERR:\n{stderr}"));
                     }
-                    Err(anyhow::anyhow!("{}", cap_output(msg, max_output)))
+                    Err(DeepseeknovaError::Tool(cap_output(msg, max_output)))
                 }
             }
-            Ok(Err(e)) => Err(anyhow::anyhow!("command failed: {e}")),
-            Err(_elapsed) => Err(anyhow::anyhow!(
+            Ok(Err(e)) => Err(DeepseeknovaError::Tool(format!("command failed: {e}"))),
+            Err(_elapsed) => Err(DeepseeknovaError::Tool(format!(
                 "command timed out after {:?}",
                 exec_timeout
-            )),
+            ))),
         }
     }
 }

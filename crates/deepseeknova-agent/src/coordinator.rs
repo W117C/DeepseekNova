@@ -10,7 +10,7 @@ use deepseeknova_core::executor::{
 use deepseeknova_core::graph::{Action, EdgeCondition, ExecutionGraph, ExecutionNode};
 use deepseeknova_core::tool::ToolContext;
 use deepseeknova_core::{
-    Message, Role, RunEvent, RunEventStream, RunInput, RunOutput, Runner, Tool,
+    DeepseeknovaError, Message, Role, RunEvent, RunEventStream, RunInput, RunOutput, Runner, Tool,
 };
 use deepseeknova_permission::{Decision, PermissionGate};
 use deepseeknova_provider::Provider;
@@ -302,7 +302,10 @@ impl CoordinatorRunner {
 
 #[async_trait::async_trait]
 impl Runner for CoordinatorRunner {
-    async fn run_stream(&self, input: RunInput) -> anyhow::Result<RunEventStream> {
+    async fn run_stream(
+        &self,
+        input: RunInput,
+    ) -> Result<RunEventStream, deepseeknova_core::DeepseeknovaError> {
         let (tx, rx) = mpsc::channel(128);
 
         let planner = Arc::clone(&self.planner_provider);
@@ -362,8 +365,8 @@ async fn run_coordinator(
     permission: Option<Arc<PermissionGate>>,
     extensions: Vec<Arc<ExtensionApplier>>,
     input: RunInput,
-    tx: &mpsc::Sender<anyhow::Result<RunEvent>>,
-) -> anyhow::Result<()> {
+    tx: &mpsc::Sender<Result<RunEvent, DeepseeknovaError>>,
+) -> Result<(), DeepseeknovaError> {
     // ---- Phase 1: Planning ----
     info!("coordinator: planning phase");
 
@@ -374,10 +377,10 @@ async fn run_coordinator(
 
     let validated = deepseeknova_provider::ValidatedRequest::new(&plan_messages, &[]).map_err(
         |violations| {
-            anyhow::anyhow!(
+            DeepseeknovaError::Runner(format!(
                 "planning prompt replay invariant violated: {} violation(s) detected",
                 violations.len()
-            )
+            ))
         },
     )?;
     let plan_response = planner.generate(validated).await?;
@@ -674,7 +677,7 @@ impl CoordinatorCallbacks {
 
 #[async_trait::async_trait]
 impl ThinkCallback for CoordinatorCallbacks {
-    async fn think(&self, prompt: &str) -> anyhow::Result<String> {
+    async fn think(&self, prompt: &str) -> Result<String, deepseeknova_core::DeepseeknovaError> {
         let mut messages = Vec::new();
         // Pass planner's reasoning as context so executor benefits from DeepSeek thinking
         if let Some(ref reasoning) = self.planner_reasoning {
@@ -711,10 +714,10 @@ impl ThinkCallback for CoordinatorCallbacks {
                 for v in &violations {
                     tracing::error!(?v, "replay invariant violation in coordinator generate");
                 }
-                anyhow::anyhow!(
+                DeepseeknovaError::Runner(format!(
                     "history replay invariant violated: {} violation(s)",
                     violations.len()
-                )
+                ))
             })?;
         let result = self.provider.generate(validated).await?;
         Ok(result.content)
@@ -723,11 +726,15 @@ impl ThinkCallback for CoordinatorCallbacks {
 
 #[async_trait::async_trait]
 impl ToolCallback for CoordinatorCallbacks {
-    async fn call_tool(&self, tool_name: &str, args: &serde_json::Value) -> anyhow::Result<String> {
+    async fn call_tool(
+        &self,
+        tool_name: &str,
+        args: &serde_json::Value,
+    ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
         let tool = self
             .tools
             .get(tool_name)
-            .ok_or_else(|| anyhow::anyhow!("unknown tool: {tool_name}"))?;
+            .ok_or_else(|| DeepseeknovaError::Runner(format!("unknown tool: {tool_name}")))?;
 
         let args_str = serde_json::to_string(args)?;
 
@@ -767,7 +774,11 @@ impl ToolCallback for CoordinatorCallbacks {
 
 #[async_trait::async_trait]
 impl ReflectCallback for CoordinatorCallbacks {
-    async fn reflect(&self, criteria: &[String], context: &str) -> anyhow::Result<ReflectResult> {
+    async fn reflect(
+        &self,
+        criteria: &[String],
+        context: &str,
+    ) -> Result<ReflectResult, deepseeknova_core::DeepseeknovaError> {
         let prompt = format!(
             "Evaluate the following work output against these criteria.\n\
              Criteria:\n  {}\n\n\
@@ -791,10 +802,10 @@ impl ReflectCallback for CoordinatorCallbacks {
                 for v in &violations {
                     tracing::error!(?v, "replay invariant violation in coordinator reflect");
                 }
-                anyhow::anyhow!(
+                DeepseeknovaError::Runner(format!(
                     "history replay invariant violated: {} violation(s)",
                     violations.len()
-                )
+                ))
             })?;
 
         let result = self.provider.generate(validated).await?;
@@ -823,12 +834,16 @@ impl ReflectCallback for CoordinatorCallbacks {
 
 #[async_trait::async_trait]
 impl DelegateCallback for CoordinatorCallbacks {
-    async fn delegate(&self, sub_agent: &str, goal: &str) -> anyhow::Result<String> {
+    async fn delegate(
+        &self,
+        sub_agent: &str,
+        goal: &str,
+    ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
         let runner = self.sub_agent_runner.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
+            DeepseeknovaError::Runner(format!(
                 "Delegate action targets sub-agent '{sub_agent}' but no \
                  SubAgentRunner is configured on the coordinator"
-            )
+            ))
         })?;
 
         let input = RunInput {
@@ -856,7 +871,9 @@ impl DelegateCallback for CoordinatorCallbacks {
         }
 
         if text.is_empty() {
-            anyhow::bail!("sub-agent '{sub_agent}' produced no output");
+            return Err(deepseeknova_core::DeepseeknovaError::Runner(format!(
+                "sub-agent '{sub_agent}' produced no output"
+            )));
         }
 
         self.push_history(format!("[delegate:{sub_agent}] {text}"));

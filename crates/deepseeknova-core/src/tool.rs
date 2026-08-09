@@ -2,10 +2,14 @@ use crate::types::ToolSchema;
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
+/// 工具并行执行的安全级别（供调度器决定能否与其他工具并行执行）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParallelSafety {
+    /// 安全：可与其他任意工具并行执行。
     Safe,
+    /// 独占：必须单独执行，不与任何工具并行。
     Exclusive,
+    /// 共享资源：持有同名资源的工具互斥执行。
     RequiresResource(String),
 }
 
@@ -14,22 +18,27 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// 类型键控的扩展注册表：按 `TypeId` 存放任意 `Send + Sync` 值，
+/// 供 `ToolContext` 携带运行时扩展状态。
 #[derive(Clone, Default)]
 pub struct ExtensionRegistry {
     map: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
 }
 
 impl ExtensionRegistry {
+    /// 创建空注册表。
     pub fn new() -> Self {
         Self {
             map: HashMap::new(),
         }
     }
 
+    /// 按 `T` 的 `TypeId` 插入一个扩展值（同类型后插入者覆盖前者）。
     pub fn insert<T: Any + Send + Sync>(&mut self, value: T) {
         self.map.insert(TypeId::of::<T>(), Arc::new(value));
     }
 
+    /// 按 `T` 的 `TypeId` 取回扩展值的引用。
     pub fn get<T: Any + Send + Sync>(&self) -> Option<&T> {
         self.map
             .get(&TypeId::of::<T>())
@@ -38,6 +47,7 @@ impl ExtensionRegistry {
 }
 
 impl std::fmt::Debug for ExtensionRegistry {
+    /// 仅输出已注册扩展键数量（避免打印任意扩展值内容）。
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let keys: Vec<TypeId> = self.map.keys().cloned().collect();
         f.debug_struct("ExtensionRegistry")
@@ -49,14 +59,20 @@ impl std::fmt::Debug for ExtensionRegistry {
 /// ToolContext carries runtime state into every tool execution.
 #[derive(Clone)]
 pub struct ToolContext {
+    /// 取消令牌：工具可据此中止长任务。
     pub cancellation: CancellationToken,
+    /// 本次工具调用的 id。
     pub call_id: String,
+    /// 是否处于计划模式（plan mode，仅规划不执行写操作）。
     pub plan_mode: bool,
+    /// 工作区根目录。
     pub workspace_root: PathBuf,
+    /// 扩展注册表（携带额外运行时状态）。
     pub extensions: ExtensionRegistry,
 }
 
 impl std::fmt::Debug for ToolContext {
+    /// 逐字段输出（扩展注册表按其自定义 Debug 输出键数量）。
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ToolContext")
             .field("cancellation", &self.cancellation)
@@ -69,6 +85,8 @@ impl std::fmt::Debug for ToolContext {
 }
 
 impl ToolContext {
+    /// 创建一个带新取消令牌的 `ToolContext`（默认非 plan 模式、
+    /// 工作区根取当前目录、空扩展）。
     pub fn new(call_id: impl Into<String>) -> Self {
         Self {
             cancellation: CancellationToken::new(),
@@ -124,5 +142,14 @@ pub trait Tool: Send + Sync {
     }
 
     /// Execute the tool with the given JSON arguments string.
-    async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String>;
+    ///
+    /// 返回 [`crate::DeepseeknovaError`] 而非 `anyhow::Error`，让调用方可按
+    /// 错误类别（如 [`crate::DeepseeknovaError::is_retryable`]）做细粒度处理。
+    /// 实现体内部应直接构造具体类别变体（如 [`crate::DeepseeknovaError::Tool`]）；
+    /// 未注册的外部错误类型需在调用点显式 `.map_err(...)?` 归类到合适变体。
+    async fn execute(
+        &self,
+        ctx: &ToolContext,
+        args: &str,
+    ) -> Result<String, crate::DeepseeknovaError>;
 }

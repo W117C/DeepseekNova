@@ -15,7 +15,7 @@
 
 use crate::protocol;
 use crate::types::*;
-use anyhow::Context;
+use deepseeknova_core::DeepseeknovaError;
 use futures::StreamExt;
 use reqwest::StatusCode;
 use serde_json::Value;
@@ -34,13 +34,13 @@ enum SendError {
     /// `Mcp-Session-Id` header, or an empty `Mcp-Session-Id` value.
     SessionExpired,
     /// Any other transport or protocol failure.
-    Other(anyhow::Error),
+    Other(DeepseeknovaError),
 }
 
-impl From<SendError> for anyhow::Error {
+impl From<SendError> for DeepseeknovaError {
     fn from(e: SendError) -> Self {
         match e {
-            SendError::SessionExpired => anyhow::anyhow!("MCP session expired"),
+            SendError::SessionExpired => DeepseeknovaError::Runner("MCP session expired".into()),
             SendError::Other(err) => err,
         }
     }
@@ -90,11 +90,14 @@ impl McpHttpConnection {
     /// The `initialize` handshake runs as part of connecting: the protocol
     /// version is negotiated and the server's `Mcp-Session-Id` (if any) is
     /// captured for subsequent requests.
-    pub async fn connect(url: &str, request_timeout: Duration) -> anyhow::Result<Arc<Self>> {
+    pub async fn connect(
+        url: &str,
+        request_timeout: Duration,
+    ) -> Result<Arc<Self>, DeepseeknovaError> {
         let client = reqwest::Client::builder()
             .timeout(request_timeout)
             .build()
-            .context("failed to build HTTP client")?;
+            .map_err(|e| DeepseeknovaError::Runner(format!("failed to build HTTP client: {e}")))?;
 
         // Try to discover a legacy SSE POST endpoint first. Servers without
         // one are streamable HTTP endpoints served at the URL itself.
@@ -148,13 +151,14 @@ impl McpHttpConnection {
 
     /// Perform the MCP `initialize` handshake: negotiate the protocol version,
     /// store server info/capabilities, and capture the session id.
-    async fn handshake(&self, request_timeout: Duration) -> anyhow::Result<()> {
+    async fn handshake(&self, request_timeout: Duration) -> Result<(), DeepseeknovaError> {
         let init_result = self
             .negotiate_initialize(request_timeout)
             .await
-            .context("MCP initialize failed")?;
-        let init: InitializeResult =
-            serde_json::from_value(init_result).context("failed to parse MCP initialize result")?;
+            .map_err(|e| DeepseeknovaError::Runner(format!("MCP initialize failed: {e}")))?;
+        let init: InitializeResult = serde_json::from_value(init_result).map_err(|e| {
+            DeepseeknovaError::Runner(format!("failed to parse MCP initialize result: {e}"))
+        })?;
         *self.server_info.write().await = init.server_info;
         *self.server_capabilities.write().await = init.capabilities;
         *self.protocol_version.write().await = Some(init.protocol_version.clone());
@@ -174,7 +178,10 @@ impl McpHttpConnection {
 
     /// Send `initialize`, retrying with a lower protocol version if the server
     /// reports a version mismatch. Returns the `initialize` `result` value.
-    async fn negotiate_initialize(&self, request_timeout: Duration) -> anyhow::Result<Value> {
+    async fn negotiate_initialize(
+        &self,
+        request_timeout: Duration,
+    ) -> Result<Value, DeepseeknovaError> {
         let mut candidate = protocol::preferred_protocol_version().to_string();
 
         loop {
@@ -205,16 +212,16 @@ impl McpHttpConnection {
                             continue;
                         }
                     }
-                    anyhow::bail!(
+                    return Err(DeepseeknovaError::Runner(format!(
                         "MCP: no mutually supported protocol version (client {:?}, server {supported:?})",
                         protocol::SUPPORTED_PROTOCOL_VERSIONS
-                    );
+                    )));
                 }
                 let msg = err
                     .get("message")
                     .and_then(|m| m.as_str())
                     .unwrap_or("unknown error");
-                anyhow::bail!("MCP error: {msg}");
+                return Err(DeepseeknovaError::Runner(format!("MCP error: {msg}")));
             }
 
             return Ok(resp.get("result").cloned().unwrap_or(Value::Null));
@@ -234,7 +241,7 @@ impl McpHttpConnection {
         method: &str,
         params: Option<Value>,
         timeout_dur: Duration,
-    ) -> anyhow::Result<Value> {
+    ) -> Result<Value, DeepseeknovaError> {
         // Capture the reconnect generation before the first attempt: after
         // waiting on the reconnect lock we can tell whether a *different*
         // concurrent request already re-established the session.
@@ -249,8 +256,8 @@ impl McpHttpConnection {
                 self.send_full(method, params, timeout_dur)
                     .await
                     .map_err(|e| match e {
-                        SendError::SessionExpired => anyhow::anyhow!(
-                            "MCP session expired: reconnect did not restore the session"
+                        SendError::SessionExpired => DeepseeknovaError::Runner(
+                            "MCP session expired: reconnect did not restore the session".into(),
                         ),
                         SendError::Other(err) => err,
                     })?
@@ -263,7 +270,7 @@ impl McpHttpConnection {
                 .get("message")
                 .and_then(|m| m.as_str())
                 .unwrap_or("unknown error");
-            anyhow::bail!("MCP error: {msg}");
+            return Err(DeepseeknovaError::Runner(format!("MCP error: {msg}")));
         }
         Ok(resp.get("result").cloned().unwrap_or(Value::Null))
     }
@@ -276,7 +283,7 @@ impl McpHttpConnection {
     /// [`Self::reconnect_lock`]: only the first runs the handshake, and the
     /// rest observe the bumped [`Self::reconnect_generation`] and skip a
     /// redundant `initialize`.
-    async fn reconnect(&self, generation_at_request: u64) -> anyhow::Result<()> {
+    async fn reconnect(&self, generation_at_request: u64) -> Result<(), DeepseeknovaError> {
         let _guard = self.reconnect_lock.lock().await;
 
         // Another concurrent request already re-established the session while
@@ -288,7 +295,7 @@ impl McpHttpConnection {
         info!("MCP session expired; re-running initialize");
         self.handshake(self.request_timeout)
             .await
-            .context("MCP session reconnect failed")?;
+            .map_err(|e| DeepseeknovaError::Runner(format!("MCP session reconnect failed: {e}")))?;
         self.reconnect_generation.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -326,11 +333,11 @@ impl McpHttpConnection {
             builder = builder.header("Mcp-Session-Id", session);
         }
 
-        let resp = builder
-            .send()
-            .await
-            .context("MCP HTTP POST failed")
-            .map_err(SendError::Other)?;
+        let resp = builder.send().await.map_err(|e| {
+            SendError::Other(DeepseeknovaError::Runner(format!(
+                "MCP HTTP POST failed: {e}"
+            )))
+        })?;
 
         let status = resp.status();
         let session_header = resp
@@ -365,8 +372,8 @@ impl McpHttpConnection {
             if session_header.is_some() {
                 expired = true;
             } else {
-                return Err(SendError::Other(anyhow::anyhow!(
-                    "MCP HTTP error 404: not found"
+                return Err(SendError::Other(DeepseeknovaError::Runner(
+                    "MCP HTTP error 404: not found".into(),
                 )));
             }
         }
@@ -382,21 +389,23 @@ impl McpHttpConnection {
             } else {
                 body.clone()
             };
-            return Err(SendError::Other(anyhow::anyhow!(
+            return Err(SendError::Other(DeepseeknovaError::Runner(format!(
                 "MCP HTTP error {status}: {short_body}"
-            )));
+            ))));
         }
 
         let val: Value = if content_type.contains("text/event-stream") {
             parse_sse_response(&body, id).ok_or_else(|| {
-                SendError::Other(anyhow::anyhow!(
+                SendError::Other(DeepseeknovaError::Runner(format!(
                     "MCP SSE response: no event matched request id {id}"
-                ))
+                )))
             })?
         } else {
-            serde_json::from_str(&body)
-                .context("failed to parse MCP HTTP response")
-                .map_err(SendError::Other)?
+            serde_json::from_str(&body).map_err(|e| {
+                SendError::Other(DeepseeknovaError::Runner(format!(
+                    "failed to parse MCP HTTP response: {e}"
+                )))
+            })?
         };
 
         Ok(val)
@@ -409,7 +418,7 @@ impl McpHttpConnection {
         method: &str,
         params: Option<Value>,
         timeout_dur: Duration,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), DeepseeknovaError> {
         let notif = JsonRpcNotification {
             jsonrpc: "2.0".into(),
             method: method.into(),
@@ -426,10 +435,9 @@ impl McpHttpConnection {
             builder = builder.header("Mcp-Session-Id", session);
         }
 
-        let resp = builder
-            .send()
-            .await
-            .context("MCP HTTP notification POST failed")?;
+        let resp = builder.send().await.map_err(|e| {
+            DeepseeknovaError::Runner(format!("MCP HTTP notification POST failed: {e}"))
+        })?;
         let status = resp.status();
         if status != StatusCode::OK
             && status != StatusCode::ACCEPTED
@@ -444,36 +452,49 @@ impl McpHttpConnection {
 /// Try to discover the legacy SSE POST endpoint by streaming the SSE endpoint
 /// until the `endpoint` event arrives. Legacy servers keep the stream open
 /// after the event, so waiting for EOF would hang — hence incremental reads.
-async fn discover_post_url(client: &reqwest::Client, sse_url: &str) -> anyhow::Result<String> {
+async fn discover_post_url(
+    client: &reqwest::Client,
+    sse_url: &str,
+) -> Result<String, DeepseeknovaError> {
     let response = client
         .get(sse_url)
         .header("Accept", "text/event-stream")
         .send()
         .await
-        .context("failed to connect to MCP SSE endpoint")?;
+        .map_err(|e| {
+            DeepseeknovaError::Runner(format!("failed to connect to MCP SSE endpoint: {e}"))
+        })?;
 
     if !response.status().is_success() {
         let status = response.status();
-        anyhow::bail!("MCP SSE connection failed: HTTP {status}");
+        return Err(DeepseeknovaError::Runner(format!(
+            "MCP SSE connection failed: HTTP {status}"
+        )));
     }
 
     tokio::time::timeout(Duration::from_secs(10), async {
         let mut stream = response.bytes_stream();
         let mut buffer = String::new();
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.context("failed to read MCP SSE stream")?;
+            let chunk = chunk.map_err(|e| {
+                DeepseeknovaError::Runner(format!("failed to read MCP SSE stream: {e}"))
+            })?;
             buffer.push_str(&String::from_utf8_lossy(&chunk));
             if buffer.len() > 1 << 20 {
-                anyhow::bail!("MCP SSE: endpoint event too large");
+                return Err(DeepseeknovaError::Runner(
+                    "MCP SSE: endpoint event too large".into(),
+                ));
             }
             if let Some(url) = parse_sse_endpoint(&buffer) {
                 return Ok(url);
             }
         }
-        anyhow::bail!("MCP SSE: no 'endpoint' event found in response")
+        Err(DeepseeknovaError::Runner(
+            "MCP SSE: no 'endpoint' event found in response".into(),
+        ))
     })
     .await
-    .context("MCP SSE discovery timed out")?
+    .map_err(|_| DeepseeknovaError::Runner("MCP SSE discovery timed out".into()))?
 }
 
 /// Parse the legacy SSE `endpoint` event (an HTTP URL) from a stream chunk.
@@ -545,6 +566,28 @@ mod tests {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     use tokio::net::TcpListener;
     use tokio::task::JoinHandle;
+
+    /// 串行化 env 相关测试：`clear_proxy_env` 修改进程级环境变量，
+    /// 与 reqwest::Client 构建存在 data race（std::env 文档明确不线程安全）。
+    /// guard 需跨 await 持有，故用 tokio::sync::Mutex。
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// 清除代理环境变量：HTTP 测试连本地 mock（127.0.0.1:随机端口），
+    /// reqwest 默认尊重 HTTP_PROXY/HTTPS_PROXY 会把请求转发到代理，
+    /// 代理无法连本地随机端口导致 Connect 失败（os error 61）。
+    /// 在 ENV_LOCK 内调用保证串行，移除后不影响其他测试。
+    fn clear_proxy_env() {
+        for v in &[
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+        ] {
+            std::env::remove_var(v);
+        }
+    }
 
     // ── SSE parsing (pure) ─────────────────────────────────────────
 
@@ -729,6 +772,8 @@ data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"second\":true}}
 
     #[tokio::test]
     async fn sse_discovery_routes_posts_to_discovered_endpoint() {
+        let _guard = ENV_LOCK.lock().await;
+        clear_proxy_env();
         let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let seen_capture = Arc::clone(&seen);
         // The discovered POST endpoint must point back at the mock server.
@@ -796,6 +841,8 @@ data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"second\":true}}
 
     #[tokio::test]
     async fn connect_falls_back_to_sse_url_when_discovery_fails() {
+        let _guard = ENV_LOCK.lock().await;
+        clear_proxy_env();
         // No legacy SSE endpoint: the URL itself becomes the streamable HTTP
         // POST endpoint.
         let (url, server) = spawn_http_mock(
@@ -831,6 +878,8 @@ data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"second\":true}}
 
     #[tokio::test]
     async fn http_error_status_surfaces_body() {
+        let _guard = ENV_LOCK.lock().await;
+        clear_proxy_env();
         let (url, server) = spawn_http_mock(
             || (404, "no sse".to_string()),
             |req_text| {
@@ -863,6 +912,8 @@ data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"second\":true}}
 
     #[tokio::test]
     async fn http_json_rpc_error_object_fails() {
+        let _guard = ENV_LOCK.lock().await;
+        clear_proxy_env();
         let (url, server) = spawn_http_mock(
             || (404, "no sse".to_string()),
             |req_text| {
@@ -897,6 +948,8 @@ data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"second\":true}}
 
     #[tokio::test]
     async fn http_invalid_json_body_fails_cleanly() {
+        let _guard = ENV_LOCK.lock().await;
+        clear_proxy_env();
         let (url, server) = spawn_http_mock(
             || (404, "no sse".to_string()),
             |req_text| {
@@ -928,6 +981,8 @@ data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"second\":true}}
 
     #[tokio::test]
     async fn streamable_http_parses_sse_framed_response() {
+        let _guard = ENV_LOCK.lock().await;
+        clear_proxy_env();
         // A streamable HTTP server answers requests with an SSE event stream
         // rather than a single JSON body.
         let (url, server) = spawn_http_mock(
@@ -967,6 +1022,8 @@ data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"second\":true}}
 
     #[tokio::test]
     async fn streamable_http_fails_when_sse_has_no_matching_id() {
+        let _guard = ENV_LOCK.lock().await;
+        clear_proxy_env();
         // A streamable server that responds with an SSE frame for a different
         // request id must surface a clear error, not a stale result.
         let (url, server) = spawn_http_mock(
@@ -1011,6 +1068,8 @@ data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"second\":true}}
 
     #[tokio::test]
     async fn http_session_id_is_persisted_and_resent() {
+        let _guard = ENV_LOCK.lock().await;
+        clear_proxy_env();
         let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let seen_capture = Arc::clone(&seen);
         // initialize issues sess-1; each subsequent request rotates to sess-2.
@@ -1093,6 +1152,8 @@ data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"second\":true}}
 
     #[tokio::test]
     async fn http_session_expired_404_clears_session() {
+        let _guard = ENV_LOCK.lock().await;
+        clear_proxy_env();
         // A 404 carrying an empty Mcp-Session-Id means the session was
         // terminated: the client must drop the id and fail the request.
         let (url, server) = spawn_http_mock(
@@ -1138,6 +1199,8 @@ data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"second\":true}}
 
     #[tokio::test]
     async fn session_expired_404_reconnects_and_retries_request() {
+        let _guard = ENV_LOCK.lock().await;
+        clear_proxy_env();
         // Sequence: connect initialize → sess-1; first ping → 404 + session
         // header (expired); reconnect initialize → sess-2; retried ping → 200.
         // The caller must observe a plain success.
@@ -1208,6 +1271,8 @@ data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"second\":true}}
 
     #[tokio::test]
     async fn empty_session_id_on_response_triggers_reconnect() {
+        let _guard = ENV_LOCK.lock().await;
+        clear_proxy_env();
         // A successful response carrying an empty Mcp-Session-Id signals that
         // the server terminated the session: the client must reconnect and
         // retry the request transparently.
@@ -1260,6 +1325,8 @@ data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"second\":true}}
 
     #[tokio::test]
     async fn reconnect_does_not_mask_persistent_session_expiry() {
+        let _guard = ENV_LOCK.lock().await;
+        clear_proxy_env();
         // initialize always succeeds (sess-1); every ping 404s with the session
         // header. The single reconnect attempt cannot restore the session, so
         // the request must fail with a clear error instead of looping.
@@ -1310,6 +1377,8 @@ data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"second\":true}}
 
     #[tokio::test]
     async fn reconnect_initialize_failure_surfaces_clear_error() {
+        let _guard = ENV_LOCK.lock().await;
+        clear_proxy_env();
         // The ping expires the session; the re-run initialize then fails with
         // an HTTP 500. The request must surface that reconnect failure rather
         // than silently retrying.
@@ -1362,6 +1431,8 @@ data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"second\":true}}
 
     #[tokio::test]
     async fn concurrent_requests_share_single_reconnect() {
+        let _guard = ENV_LOCK.lock().await;
+        clear_proxy_env();
         // All pings carrying the stale session (sess-1) expire; only pings with
         // the re-established session (sess-2) succeed. Concurrent requests must
         // be serialized through the reconnect lock — one reconnect total — and
@@ -1445,6 +1516,8 @@ data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"second\":true}}
 
     #[tokio::test]
     async fn http_protocol_version_negotiates_down_on_version_mismatch() {
+        let _guard = ENV_LOCK.lock().await;
+        clear_proxy_env();
         let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let seen_capture = Arc::clone(&seen);
         // Reject 2025-06-18; accept only 2025-03-26.

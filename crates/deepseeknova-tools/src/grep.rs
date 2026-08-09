@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use deepseeknova_core::{Tool, ToolContext, ToolSchema};
+use deepseeknova_core::{DeepseeknovaError, Tool, ToolContext, ToolSchema};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -45,7 +45,11 @@ impl Tool for GrepTool {
         true
     }
 
-    async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
+    async fn execute(
+        &self,
+        ctx: &ToolContext,
+        args: &str,
+    ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
         deepseeknova_security::context::enforce_capability(
             ctx,
             &self.schema().name,
@@ -54,11 +58,11 @@ impl Tool for GrepTool {
         let parsed: GrepArgs = serde_json::from_str(args)?;
 
         if ctx.cancellation.is_cancelled() {
-            anyhow::bail!("cancelled");
+            return Err(deepseeknova_core::DeepseeknovaError::Cancelled);
         }
 
         let re = regex::Regex::new(&parsed.pattern)
-            .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))?;
+            .map_err(|e| DeepseeknovaError::Tool(format!("invalid regex: {e}")))?;
 
         let base = match parsed.path {
             Some(ref p) => deepseeknova_security::path::sanitize_path(&ctx.workspace_root, p)?,
@@ -155,7 +159,7 @@ async fn walk_dir(
     ctx: &ToolContext,
     state: &mut ScanState,
     limits: ScanLimits,
-) -> anyhow::Result<()> {
+) -> Result<(), DeepseeknovaError> {
     let mut read_dir = tokio::fs::read_dir(dir).await?;
     while let Some(entry) = read_dir.next_entry().await? {
         if state.files_searched >= limits.max_files {
@@ -172,7 +176,7 @@ async fn walk_dir(
             return Ok(());
         }
         if ctx.cancellation.is_cancelled() {
-            anyhow::bail!("cancelled");
+            return Err(DeepseeknovaError::Cancelled);
         }
         let path = entry.path();
         // Ensure the path is safe (prevent symlink escape)
@@ -205,7 +209,7 @@ fn search_file(
     re: &regex::Regex,
     results: &mut Vec<String>,
     max_file_size: u64,
-) -> anyhow::Result<u64> {
+) -> Result<u64, DeepseeknovaError> {
     let metadata = std::fs::metadata(path)?;
     let size = metadata.len();
     if size > max_file_size {

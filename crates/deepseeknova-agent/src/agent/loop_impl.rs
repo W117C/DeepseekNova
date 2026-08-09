@@ -6,6 +6,7 @@
 //! 与辅助项（`maybe_spawn_adversarial_review` / `UserHooks` 等）。
 
 use super::*;
+use deepseeknova_core::DeepseeknovaError;
 
 async fn wire_session_adversarial_review(
     diagnose: &mut DiagnoseGuard,
@@ -129,7 +130,7 @@ pub(crate) async fn run_agent_loop(
     compaction_threshold: Option<u32>,
     memory: Arc<tokio::sync::RwLock<Memory>>,
     input: RunInput,
-    tx: &mpsc::Sender<anyhow::Result<RunEvent>>,
+    tx: &mpsc::Sender<Result<RunEvent, DeepseeknovaError>>,
     cancel: &CancellationToken,
     workspace_root: PathBuf,
     security: SecurityContext,
@@ -164,7 +165,7 @@ pub(crate) async fn run_agent_loop(
     diagnose_hook: Option<DiagnoseHook>,
     protocol_gates: Vec<Arc<dyn PhaseGate>>,
     adversarial_review_enabled: bool,
-) -> anyhow::Result<()> {
+) -> Result<(), DeepseeknovaError> {
     // serve 等共享 Agent 场景未配置会话标注：每次 run 生成唯一 id，避免
     // 多会话共用同一 Paused session_id / 诊断报告文件名互相覆盖。
     let session_label = session_label.or_else(|| Some(unique_run_label()));
@@ -270,20 +271,20 @@ pub(crate) async fn run_agent_loop(
                 "agent exceeded max_execution_time ({:?})",
                 security.limits.max_execution_time
             );
-            return Err(anyhow::anyhow!(
+            return Err(DeepseeknovaError::Runner(format!(
                 "exceeded max execution time ({:?})",
                 security.limits.max_execution_time
-            ));
+            )));
         }
         if tool_calls_made >= security.limits.max_tool_calls {
             warn!(
                 "agent exceeded max_tool_calls ({})",
                 security.limits.max_tool_calls
             );
-            return Err(anyhow::anyhow!(
+            return Err(DeepseeknovaError::Runner(format!(
                 "exceeded max tool calls ({})",
                 security.limits.max_tool_calls
-            ));
+            )));
         }
 
         info!("agent step {}/{}", step + 1, max_steps);
@@ -982,9 +983,9 @@ pub(crate) async fn run_agent_loop(
                     .ok();
                     return Ok(());
                 }
-                return Err(anyhow::anyhow!(
+                return Err(DeepseeknovaError::Runner(format!(
                     "reached max steps ({max_steps}) without completing the task"
-                ));
+                )));
             }
         }
     }
@@ -1021,9 +1022,9 @@ pub(crate) async fn run_agent_loop(
         .ok();
         return Ok(());
     }
-    Err(anyhow::anyhow!(
+    Err(DeepseeknovaError::Runner(format!(
         "reached max steps ({max_steps}) without completing the task"
-    ))
+    )))
 }
 
 // ---------------------------------------------------------------------------
@@ -1088,7 +1089,7 @@ async fn stream_and_process_turn(
     tools: &[Arc<dyn Tool>],
     tool_map: &HashMap<String, Arc<dyn Tool>>,
     memory: Arc<tokio::sync::RwLock<Memory>>,
-    tx: &mpsc::Sender<anyhow::Result<RunEvent>>,
+    tx: &mpsc::Sender<Result<RunEvent, DeepseeknovaError>>,
     cancel: &CancellationToken,
     workspace_root: &std::path::Path,
     security: &SecurityContext,
@@ -1113,7 +1114,7 @@ async fn stream_and_process_turn(
     // A1：本步消息快照（由调用方在步开始时取，压缩后重新快照）。
     // provider 请求复用此快照，不再在步内重复全量克隆。
     messages: &[Message],
-) -> anyhow::Result<StepOutcome> {
+) -> Result<StepOutcome, DeepseeknovaError> {
     // Build tool refs for provider
     let tool_refs: Vec<&dyn Tool> = tools.iter().map(|t| t.as_ref()).collect();
 
@@ -1125,10 +1126,10 @@ async fn stream_and_process_turn(
             for v in &violations {
                 tracing::error!(?v, "replay invariant violation before provider call");
             }
-            anyhow::anyhow!(
+            DeepseeknovaError::Runner(format!(
                 "history replay invariant violated: {} violation(s) detected",
                 violations.len()
-            )
+            ))
         },
     )?;
 

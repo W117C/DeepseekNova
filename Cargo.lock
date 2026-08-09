@@ -588,7 +588,6 @@ dependencies = [
 name = "deepseeknova-agent"
 version = "0.5.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "deepseeknova-context",
  "deepseeknova-core",
@@ -612,7 +611,6 @@ dependencies = [
 name = "deepseeknova-checkpoint"
 version = "0.5.0"
 dependencies = [
- "anyhow",
  "chrono",
  "deepseeknova-core",
  "hex",
@@ -628,7 +626,6 @@ dependencies = [
 name = "deepseeknova-cli"
 version = "0.5.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "chrono",
  "clap",
@@ -665,7 +662,7 @@ dependencies = [
 name = "deepseeknova-config"
 version = "0.5.0"
 dependencies = [
- "anyhow",
+ "deepseeknova-core",
  "dirs",
  "serde",
  "serde_json",
@@ -677,7 +674,6 @@ dependencies = [
 name = "deepseeknova-context"
 version = "0.5.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "chrono",
  "deepseeknova-core",
@@ -695,7 +691,6 @@ dependencies = [
 name = "deepseeknova-core"
 version = "0.5.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "chrono",
  "criterion",
@@ -707,9 +702,10 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
- "serde_yaml",
+ "serde_yml",
  "sha2 0.11.0",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -731,7 +727,6 @@ dependencies = [
 name = "deepseeknova-graph"
 version = "0.5.0"
 dependencies = [
- "anyhow",
  "deepseeknova-core",
  "hex",
  "rusqlite",
@@ -753,7 +748,6 @@ dependencies = [
 name = "deepseeknova-mcp"
 version = "0.5.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "deepseeknova-config",
  "deepseeknova-core",
@@ -782,7 +776,6 @@ dependencies = [
 name = "deepseeknova-permission"
 version = "0.5.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "deepseeknova-config",
  "deepseeknova-core",
@@ -800,7 +793,6 @@ dependencies = [
 name = "deepseeknova-provider"
 version = "0.5.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "deepseeknova-config",
  "deepseeknova-context",
@@ -823,7 +815,6 @@ dependencies = [
 name = "deepseeknova-runtime"
 version = "0.5.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "deepseeknova-agent",
  "deepseeknova-checkpoint",
@@ -850,7 +841,6 @@ dependencies = [
 name = "deepseeknova-sandbox"
 version = "0.5.0"
 dependencies = [
- "anyhow",
  "deepseeknova-core",
  "tokio",
  "tracing",
@@ -860,7 +850,6 @@ dependencies = [
 name = "deepseeknova-scanner"
 version = "0.5.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "deepseeknova-core",
  "deepseeknova-graph",
@@ -878,7 +867,6 @@ dependencies = [
 name = "deepseeknova-security"
 version = "0.5.0"
 dependencies = [
- "anyhow",
  "deepseeknova-core",
  "glob",
  "regex",
@@ -892,7 +880,6 @@ dependencies = [
 name = "deepseeknova-serve"
 version = "0.5.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "axum",
  "deepseeknova-core",
@@ -916,7 +903,6 @@ dependencies = [
 name = "deepseeknova-skills"
 version = "0.5.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "deepseeknova-core",
  "serde",
@@ -932,7 +918,6 @@ dependencies = [
 name = "deepseeknova-store"
 version = "0.5.0"
 dependencies = [
- "anyhow",
  "chrono",
  "deepseeknova-context",
  "deepseeknova-core",
@@ -947,7 +932,7 @@ dependencies = [
 name = "deepseeknova-telemetry"
 version = "0.5.0"
 dependencies = [
- "anyhow",
+ "deepseeknova-core",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry-stdout",
@@ -962,7 +947,6 @@ dependencies = [
 name = "deepseeknova-tools"
 version = "0.5.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "chrono",
  "deepseeknova-checkpoint",
@@ -989,7 +973,6 @@ dependencies = [
 name = "deepseeknova-tui"
 version = "0.5.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "chrono",
  "crossterm",
@@ -2948,19 +2931,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde_yaml"
-version = "0.9.34+deprecated"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a8b1a1a2ebf674015cc02edccce75287f1a0130d394307b36743c2f5d504b47"
-dependencies = [
- "indexmap",
- "itoa",
- "ryu",
- "serde",
- "unsafe-libyaml",
-]
-
-[[package]]
 name = "serde_yml"
 version = "0.0.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3764,12 +3734,6 @@ name = "unicode-width"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fc81956842c57dac11422a97c3b8195a1ff727f06e85c84ed2e8aa277c9a0fd"
-
-[[package]]
-name = "unsafe-libyaml"
-version = "0.2.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
 
 [[package]]
 name = "untrusted"

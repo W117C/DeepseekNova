@@ -24,17 +24,19 @@
 //! # struct DummyRunner;
 //! # #[async_trait::async_trait]
 //! # impl deepseeknova_core::runner::Runner for DummyRunner {
-//! #     async fn run_stream(&self, _input: deepseeknova_core::runner::RunInput) -> anyhow::Result<deepseeknova_core::runner::RunEventStream> {
+//! #     async fn run_stream(&self, _input: deepseeknova_core::runner::RunInput) -> Result<deepseeknova_core::runner::RunEventStream, deepseeknova_core::DeepseeknovaError> {
 //! #         unreachable!()
 //! #     }
 //! # }
 //! # #[tokio::main]
-//! # async fn main() -> anyhow::Result<()> {
+//! # async fn main() -> Result<(), deepseeknova_core::DeepseeknovaError> {
 //! # let runner = Arc::new(DummyRunner);
 //! TuiRunner::new(runner).run().await?;
 //! # Ok(())
 //! # }
 //! ```
+
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 mod app;
 pub mod approval;
@@ -65,7 +67,10 @@ use commands::TuiCaps;
 
 /// agent 重建工厂类型。
 type AgentFactory = Arc<
-    dyn Fn(Option<ReasoningEffort>, Option<String>) -> anyhow::Result<Arc<dyn Runner>>
+    dyn Fn(
+            Option<ReasoningEffort>,
+            Option<String>,
+        ) -> Result<Arc<dyn Runner>, deepseeknova_core::DeepseeknovaError>
         + Send
         + Sync,
 >;
@@ -236,7 +241,10 @@ impl TuiRunner {
     /// 提供 agent 重建工厂（与 chat REPL 相同的签名），启用 `/model` 热切换。
     pub fn with_agent_factory<F>(mut self, factory: F) -> Self
     where
-        F: Fn(Option<ReasoningEffort>, Option<String>) -> anyhow::Result<Arc<dyn Runner>>
+        F: Fn(
+                Option<ReasoningEffort>,
+                Option<String>,
+            ) -> Result<Arc<dyn Runner>, deepseeknova_core::DeepseeknovaError>
             + Send
             + Sync
             + 'static,
@@ -330,7 +338,7 @@ impl TuiRunner {
     }
 
     /// Enter the TUI and block until the user quits.
-    pub async fn run(&mut self) -> anyhow::Result<()> {
+    pub async fn run(&mut self) -> Result<(), deepseeknova_core::DeepseeknovaError> {
         let mut terminal = ratatui::init();
         // 启用鼠标上报：滚轮事件由应用消费并滚动对话历史，
         // 否则滚轮只会滚动终端自身滚动区（表现为“滚动到了输入框”）。
@@ -345,7 +353,10 @@ impl TuiRunner {
         result
     }
 
-    async fn run_inner(&mut self, terminal: &mut ratatui::DefaultTerminal) -> anyhow::Result<()> {
+    async fn run_inner(
+        &mut self,
+        terminal: &mut ratatui::DefaultTerminal,
+    ) -> Result<(), deepseeknova_core::DeepseeknovaError> {
         let lang = self.lang;
         let tr = Tr::new(lang);
         // 主题：编程式注入优先，否则读环境变量（未知值回退 codex + 提示）。
@@ -407,7 +418,8 @@ impl TuiRunner {
             && self.permission.as_ref().is_some_and(|g| !g.trusted());
         if needs_prompt {
             app.trust_prompt = Some(crate::app::state::TrustPrompt {
-                workspace_root: self.workspace_root.clone().unwrap(),
+                // needs_prompt 已检查 workspace_root.is_some()
+                workspace_root: self.workspace_root.clone().unwrap_or_default(),
                 rule_count: self.project_rule_count,
             });
         }

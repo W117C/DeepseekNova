@@ -3,11 +3,14 @@
 //! Builds and maintains the agent's contextual understanding of the
 //! workspace: file trees, project memory (DEEPSEEKNOVA.md), and session state.
 
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 pub mod history;
 
 use chrono::{DateTime, Utc};
 use deepseeknova_core::registry::Command;
 use deepseeknova_core::types::{Message, Role, ToolSchema};
+use deepseeknova_core::DeepseeknovaError;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 
@@ -33,7 +36,7 @@ pub struct WorkspaceIndex {
 
 impl WorkspaceIndex {
     /// Scan a directory and return a file tree. Respects .gitignore.
-    pub fn scan(root: &Path) -> anyhow::Result<Self> {
+    pub fn scan(root: &Path) -> Result<Self, DeepseeknovaError> {
         let mut entries = Vec::new();
         let mut gitignore_patterns = Vec::new();
 
@@ -58,7 +61,7 @@ impl WorkspaceIndex {
     }
 
     /// Reload the workspace index.
-    pub fn refresh(&mut self) -> anyhow::Result<()> {
+    pub fn refresh(&mut self) -> Result<(), DeepseeknovaError> {
         *self = Self::scan(&self.root)?;
         Ok(())
     }
@@ -70,7 +73,7 @@ fn scan_dir(
     dir: &Path,
     entries: &mut Vec<FileEntry>,
     ignores: &[String],
-) -> anyhow::Result<()> {
+) -> Result<(), DeepseeknovaError> {
     // Skip hidden directories except .git and .deepseeknova
     if let Some(name) = dir.file_name().and_then(|n| n.to_str()) {
         if name.starts_with('.') && name != "." && name != ".deepseeknova" {
@@ -417,6 +420,16 @@ pub struct PromptSection {
 pub struct BuilderOrderError {
     pub attempted: SectionStability,
     pub last: SectionStability,
+}
+
+/// 把 [`BuilderOrderError`] 转换为 [`deepseeknova_core::DeepseeknovaError`]。
+///
+/// orphan rule：impl 放在拥有 `BuilderOrderError` 的本 crate。`?` 可直接把
+/// `Result<_, BuilderOrderError>` 用于返回 `Result<_, DeepseeknovaError>` 的函数。
+impl From<BuilderOrderError> for deepseeknova_core::DeepseeknovaError {
+    fn from(err: BuilderOrderError) -> Self {
+        deepseeknova_core::DeepseeknovaError::Context(err.to_string())
+    }
 }
 
 /// **库级公开 API**：供嵌入方自行接线；默认 agent prompt 路径**未接入**
@@ -920,7 +933,7 @@ pub struct ContextEngine {
 }
 
 impl ContextEngine {
-    pub fn new(root: PathBuf) -> anyhow::Result<Self> {
+    pub fn new(root: PathBuf) -> Result<Self, DeepseeknovaError> {
         let workspace = WorkspaceIndex::scan(&root)?;
         let mut project_memory = ProjectMemory::new();
         project_memory.load_deepseeknova_md(&root);

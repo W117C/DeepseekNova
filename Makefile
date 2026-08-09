@@ -15,7 +15,7 @@ check:
 	cargo fmt --all -- --check
 	cargo clippy --workspace --all-targets -- -D warnings
 	cargo test --workspace
-	cargo doc --workspace --no-deps --document-private-items
+	RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
 
 check-all:
 	cargo fmt --all -- --check

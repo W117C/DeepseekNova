@@ -14,7 +14,7 @@ use crate::memory::store::{
     make_entry, MemoryCategory, MemoryEntry, MemoryScoreBreakdown, MemorySearchResult, MemoryStore,
     DEFAULT_RANK_WEIGHT,
 };
-use anyhow::Result;
+use crate::DeepseeknovaError;
 use chrono::Utc;
 use std::collections::HashMap;
 use std::path::Path;
@@ -22,23 +22,34 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use tracing::{info, warn};
 
+/// 模块内 Result 简写：默认错误类型为 [`DeepseeknovaError`]。
+type Result<T> = std::result::Result<T, DeepseeknovaError>;
+
 /// 沉淀护栏（由 runtime 从 `[memory]` 配置装填）。
 #[derive(Debug, Clone)]
 pub struct DistillGuards {
+    /// 是否启用自动经验沉淀（false 时所有 distill 入口短路）。
     pub auto_learn: bool,
+    /// 触发沉淀所需的最小工具调用次数。
     pub min_tool_calls: usize,
+    /// 触发沉淀所需的最小执行步数。
     pub min_steps: usize,
+    /// 每日沉淀次数上限（UTC 日）。
     pub max_per_day: u32,
+    /// 单会话沉淀次数上限（原子预留槽位，并发安全）。
     pub max_per_session: u32,
 }
 
 /// 统计快照（CLI `memory stats`；P2 决策依据）。
 #[derive(Debug, Clone)]
 pub struct MemoryStats {
+    /// 记忆库总条目数。
     pub total: usize,
     /// 已有嵌入向量的条目数（覆盖率；embedder=none 时恒 0）。
     pub embedded: usize,
+    /// 召回命中率（recall_nonempty / recall_calls；零调用时为 0.0）。
     pub recall_hit_rate: f64,
+    /// auto-distill 来源条目中已达 verified/permanent 的比例。
     pub reinforce_ratio: f64,
     /// stage 分布（真实条目；含 archived，按 stage 名排序）。
     pub stage_counts: Vec<(String, usize)>,
@@ -958,7 +969,7 @@ mod tests {
     struct FakeEmbed;
 
     impl EmbeddingProvider for FakeEmbed {
-        fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+        fn embed(&self, text: &str) -> Result<Vec<f32>> {
             if text.contains("ferris") {
                 Ok(vec![0.9, 0.1])
             } else if text.contains("rust") {
@@ -973,8 +984,8 @@ mod tests {
     struct FailingEmbed;
 
     impl EmbeddingProvider for FailingEmbed {
-        fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
-            anyhow::bail!("network unavailable")
+        fn embed(&self, _text: &str) -> Result<Vec<f32>> {
+            Err(DeepseeknovaError::provider_retryable("network unavailable"))
         }
     }
 

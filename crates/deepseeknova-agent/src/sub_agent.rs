@@ -10,7 +10,8 @@ use deepseeknova_core::tool_hook::{
 };
 use deepseeknova_core::types::{FunctionCall, ToolCall};
 use deepseeknova_core::{
-    Message, Role, RunEvent, RunEventStream, RunInput, RunOutput, Runner, Tool, ToolContext,
+    DeepseeknovaError, Message, Role, RunEvent, RunEventStream, RunInput, RunOutput, Runner, Tool,
+    ToolContext,
 };
 use deepseeknova_provider::Provider;
 use std::collections::{HashMap, HashSet};
@@ -363,26 +364,30 @@ impl SubAgentRunner {
     }
 
     /// Resolve the sub-agent to use. Falls back to default or error.
-    fn resolve_sub_agent(&self, name: Option<String>) -> anyhow::Result<&SubAgentConfig> {
+    fn resolve_sub_agent(
+        &self,
+        name: Option<String>,
+    ) -> Result<&SubAgentConfig, DeepseeknovaError> {
         if let Some(ref n) = name {
             self.sub_agents
                 .get(n)
-                .ok_or_else(|| anyhow::anyhow!("unknown sub-agent: '{n}'"))
+                .ok_or_else(|| DeepseeknovaError::Agent(format!("unknown sub-agent: '{n}'")))
         } else if let Some(ref default) = self.default_sub_agent {
-            self.sub_agents
-                .get(default)
-                .ok_or_else(|| anyhow::anyhow!("default sub-agent '{default}' not registered"))
+            self.sub_agents.get(default).ok_or_else(|| {
+                DeepseeknovaError::Agent(format!("default sub-agent '{default}' not registered"))
+            })
         } else {
-            anyhow::bail!(
+            Err(DeepseeknovaError::Agent(
                 "no sub-agent specified and no default configured. \
                  Use 'sub_agent:<name>' in the prompt or register a default."
-            )
+                    .to_string(),
+            ))
         }
     }
 
     /// @-mention 解析：返回首个**已知**子代理引用（零个 → None）。
     /// 多个已知引用 → Err（消歧失败，提示用户一次引用一个）。
-    fn resolve_mention(&self, prompt: &str) -> anyhow::Result<Option<String>> {
+    fn resolve_mention(&self, prompt: &str) -> Result<Option<String>, DeepseeknovaError> {
         let known: Vec<String> = self.sub_agents.keys().cloned().collect();
         Ok(resolve_mention(prompt, &known)?.map(|m| m.name))
     }
@@ -395,7 +400,7 @@ impl SubAgentRunner {
         goal: &str,
         values: &InputValues,
         depth: usize,
-    ) -> anyhow::Result<String> {
+    ) -> Result<String, DeepseeknovaError> {
         let mut stream = self
             .dispatch_stream(
                 Some(agent.to_string()),
@@ -416,7 +421,9 @@ impl SubAgentRunner {
             }
         }
         if text.is_empty() {
-            anyhow::bail!("sub-agent '{agent}' produced no output");
+            return Err(DeepseeknovaError::Runner(format!(
+                "sub-agent '{agent}' produced no output"
+            )));
         }
         Ok(text)
     }
@@ -428,13 +435,13 @@ impl SubAgentRunner {
         goal: String,
         parsed_inputs: InputValues,
         depth: usize,
-    ) -> anyhow::Result<RunEventStream> {
+    ) -> Result<RunEventStream, DeepseeknovaError> {
         // 深度上限：超深拒绝（递归守门；根派发 depth 1）。
         if depth > self.max_depth {
-            anyhow::bail!(
+            return Err(DeepseeknovaError::Runner(format!(
                 "sub-agent recursion depth exceeded (max {}, depth requested: {depth})",
                 self.max_depth
-            );
+            )));
         }
         let (tx, rx) = mpsc::channel(64);
 
@@ -600,14 +607,17 @@ impl DelegationSink for SubAgentRunner {
         goal: &str,
         values: &InputValues,
         depth: usize,
-    ) -> anyhow::Result<String> {
+    ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
         self.run_at_depth(agent, goal, values, depth).await
     }
 }
 
 #[async_trait::async_trait]
 impl Runner for SubAgentRunner {
-    async fn run_stream(&self, input: RunInput) -> anyhow::Result<RunEventStream> {
+    async fn run_stream(
+        &self,
+        input: RunInput,
+    ) -> Result<RunEventStream, deepseeknova_core::DeepseeknovaError> {
         // Parse input: extract sub-agent name, goal, and input values
         let (sub_agent_name, goal, parsed_inputs) = Self::parse_input(&input.prompt);
 
@@ -632,12 +642,12 @@ impl Runner for SubAgentRunner {
 /// 会继续跑到 `max_steps`，导致重试并发 fan-out）。本包装在 stream 被 drop
 /// 时 abort 子代理任务，阻断后台执行与重复副作用（Bugbot 审查 HIGH-2 修复）。
 struct AbortOnDropStream {
-    inner: mpsc::Receiver<anyhow::Result<RunEvent>>,
+    inner: mpsc::Receiver<Result<RunEvent, DeepseeknovaError>>,
     handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl tokio_stream::Stream for AbortOnDropStream {
-    type Item = anyhow::Result<RunEvent>;
+    type Item = Result<RunEvent, DeepseeknovaError>;
 
     fn poll_next(
         mut self: std::pin::Pin<&mut Self>,
@@ -667,7 +677,7 @@ async fn run_sub_agent_loop(
     compaction_threshold: Option<u32>,
     memory: &mut Memory,
     goal: String,
-    tx: &mpsc::Sender<anyhow::Result<RunEvent>>,
+    tx: &mpsc::Sender<Result<RunEvent, DeepseeknovaError>>,
     permission: Option<Arc<deepseeknova_permission::PermissionGate>>,
     security: Option<deepseeknova_security::context::SecurityContext>,
     workspace_root: std::path::PathBuf,
@@ -677,7 +687,7 @@ async fn run_sub_agent_loop(
     tool_hooks: Vec<Arc<dyn ToolHook>>,
     user_hooks: UserHooks,
     sub_agent_name: String,
-) -> anyhow::Result<()> {
+) -> Result<(), DeepseeknovaError> {
     let cancel = CancellationToken::new();
 
     // 构建工具执行上下文：工作区 + 安全上下文 + 递归深度 + 递归派发出口。
@@ -760,10 +770,10 @@ async fn run_sub_agent_loop(
                 for v in &violations {
                     tracing::error!(?v, "replay invariant violation in sub-agent");
                 }
-                anyhow::anyhow!(
+                DeepseeknovaError::Runner(format!(
                     "history replay invariant violated in sub-agent: {} violation(s)",
                     violations.len()
-                )
+                ))
             })?;
 
         // Stream from provider
@@ -1173,16 +1183,16 @@ async fn run_sub_agent_loop(
     }
 
     warn!("sub-agent reached max steps ({max_steps})");
-    Err(anyhow::anyhow!(
+    Err(DeepseeknovaError::Runner(format!(
         "sub-agent reached max steps ({max_steps}) without completing the task"
-    ))
+    )))
 }
 
 /// Build a compaction digest by asking the provider to summarize old messages.
 async fn compact_with_provider(
     provider: &dyn Provider,
     messages: &[Message],
-) -> anyhow::Result<String> {
+) -> Result<String, DeepseeknovaError> {
     let conversation_text: String = messages
         .iter()
         .map(|m| format!("[{}]: {}", format_role(m.role.clone()), m.content))
@@ -1210,8 +1220,13 @@ async fn compact_with_provider(
         reasoning_content: None,
     }];
 
-    let validated = deepseeknova_provider::ValidatedRequest::new(&summary_msgs, &[])
-        .map_err(|v| anyhow::anyhow!("invariant violation in sub-agent summarize: {:?}", v))?;
+    let validated =
+        deepseeknova_provider::ValidatedRequest::new(&summary_msgs, &[]).map_err(|v| {
+            DeepseeknovaError::Runner(format!(
+                "invariant violation in sub-agent summarize: {:?}",
+                v
+            ))
+        })?;
     let mut stream = provider.stream(validated).await?;
     let mut out = String::new();
     while let Some(chunk) = stream.next().await {
@@ -1276,7 +1291,11 @@ mod tests {
                     parameters: json!({}),
                 }
             }
-            async fn execute(&self, _ctx: &ToolContext, _args: &str) -> anyhow::Result<String> {
+            async fn execute(
+                &self,
+                _ctx: &ToolContext,
+                _args: &str,
+            ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
                 Ok("done".to_string())
             }
         }
@@ -1367,7 +1386,7 @@ mod tests {
         async fn generate(
             &self,
             _validated: deepseeknova_provider::ValidatedRequest<'_>,
-        ) -> anyhow::Result<Message> {
+        ) -> Result<Message, DeepseeknovaError> {
             Ok(Message {
                 role: Role::Assistant,
                 content: "mock".to_string(),
@@ -1729,7 +1748,7 @@ mod tests {
         async fn generate(
             &self,
             _v: deepseeknova_provider::ValidatedRequest<'_>,
-        ) -> anyhow::Result<Message> {
+        ) -> Result<Message, DeepseeknovaError> {
             Ok(Message {
                 role: Role::Assistant,
                 content: "echo".into(),
@@ -1742,10 +1761,10 @@ mod tests {
         async fn stream(
             &self,
             v: deepseeknova_provider::ValidatedRequest<'_>,
-        ) -> anyhow::Result<deepseeknova_core::chunk::ChunkStream> {
+        ) -> Result<deepseeknova_core::chunk::ChunkStream, DeepseeknovaError> {
             use deepseeknova_core::chunk::{Chunk, Usage};
             let tool_count = v.messages.iter().filter(|m| m.role == Role::Tool).count();
-            let chunks: Vec<anyhow::Result<Chunk>> = if tool_count == 0 {
+            let chunks: Vec<Result<Chunk, DeepseeknovaError>> = if tool_count == 0 {
                 vec![
                     Ok(Chunk::ToolCallStart {
                         id: "call_1".into(),
@@ -1787,7 +1806,11 @@ mod tests {
                 parameters: serde_json::json!({}),
             }
         }
-        async fn execute(&self, ctx: &ToolContext, _args: &str) -> anyhow::Result<String> {
+        async fn execute(
+            &self,
+            ctx: &ToolContext,
+            _args: &str,
+        ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
             deepseeknova_security::context::enforce_capability(
                 ctx,
                 "write_file",
@@ -1807,7 +1830,11 @@ mod tests {
                 parameters: serde_json::json!({}),
             }
         }
-        async fn execute(&self, _ctx: &ToolContext, _args: &str) -> anyhow::Result<String> {
+        async fn execute(
+            &self,
+            _ctx: &ToolContext,
+            _args: &str,
+        ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
             Ok("read ok".to_string())
         }
     }

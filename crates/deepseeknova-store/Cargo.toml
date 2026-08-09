@@ -9,7 +9,6 @@ readme = "README.md"
 documentation = "https://docs.rs/deepseeknova-store"
 
 [dependencies]
-anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
@@ -20,3 +19,6 @@ deepseeknova-core = { workspace = true }
 [dev-dependencies]
 deepseeknova-context = { workspace = true }
 tempfile = { workspace = true }
+
+[lints]
+workspace = true

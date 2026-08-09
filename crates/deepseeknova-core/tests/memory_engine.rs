@@ -1,4 +1,5 @@
 //! 集成：记忆跨重启持久 + 进程内并发写安全。
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use deepseeknova_core::memory::engine::MemoryEngine;
 use deepseeknova_core::memory::store::MemoryCategory;

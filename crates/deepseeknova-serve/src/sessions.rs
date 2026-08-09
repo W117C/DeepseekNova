@@ -26,8 +26,13 @@ use tokio::sync::Mutex;
 /// session's shared multi-turn conversation store; wire it into the agent
 /// (e.g. via `Agent::with_conversation_history`) before wrapping it as a
 /// [`Runner`], so consecutive prompts share context.
-pub type SessionRunnerFactory =
-    Arc<dyn Fn(Arc<Mutex<Vec<Message>>>) -> anyhow::Result<Arc<dyn Runner>> + Send + Sync>;
+pub type SessionRunnerFactory = Arc<
+    dyn Fn(
+            Arc<Mutex<Vec<Message>>>,
+        ) -> Result<Arc<dyn Runner>, deepseeknova_core::DeepseeknovaError>
+        + Send
+        + Sync,
+>;
 
 /// One in-memory session: a runner bound to a shared history plus turn
 /// bookkeeping. Kept in [`SessionManager::live`] across requests.
@@ -65,7 +70,10 @@ pub struct SessionManager {
 
 impl SessionManager {
     /// Open (or create) the session store at `dir` and wrap `factory`.
-    pub fn open(dir: PathBuf, factory: SessionRunnerFactory) -> anyhow::Result<Self> {
+    pub fn open(
+        dir: PathBuf,
+        factory: SessionRunnerFactory,
+    ) -> Result<Self, deepseeknova_core::DeepseeknovaError> {
         Ok(Self {
             store: SessionStore::new(dir)?,
             factory,
@@ -74,14 +82,16 @@ impl SessionManager {
     }
 
     /// List stored sessions (newest first) with display metadata.
-    pub fn list(&self) -> anyhow::Result<Vec<deepseeknova_store::SessionSummary>> {
+    pub fn list(
+        &self,
+    ) -> Result<Vec<deepseeknova_store::SessionSummary>, deepseeknova_core::DeepseeknovaError> {
         self.store.list_summaries()
     }
 
     /// Create a fresh empty session and return its id. Same-second collisions
     /// with existing ids get a numeric suffix so two rapid creates never
     /// share a file.
-    pub async fn create(&self) -> anyhow::Result<String> {
+    pub async fn create(&self) -> Result<String, deepseeknova_core::DeepseeknovaError> {
         let base = deepseeknova_store::new_session_id();
         let live = self.live.lock().await;
         let existing: std::collections::HashSet<String> =
@@ -97,7 +107,10 @@ impl SessionManager {
     }
 
     /// Load a session's persisted turns.
-    pub fn history(&self, id: &str) -> anyhow::Result<Option<Vec<StoredTurn>>> {
+    pub fn history(
+        &self,
+        id: &str,
+    ) -> Result<Option<Vec<StoredTurn>>, deepseeknova_core::DeepseeknovaError> {
         if !self.exists(id)? {
             return Ok(None);
         }
@@ -106,7 +119,10 @@ impl SessionManager {
 
     /// Delete a session (its live runner and its file). Returns `false` when
     /// the session does not exist. A busy session cannot be deleted.
-    pub async fn delete(&self, id: &str) -> anyhow::Result<Result<bool, Busy>> {
+    pub async fn delete(
+        &self,
+        id: &str,
+    ) -> Result<Result<bool, Busy>, deepseeknova_core::DeepseeknovaError> {
         let mut live = self.live.lock().await;
         if let Some(session) = live.get(id) {
             if session.busy.load(Ordering::Acquire) {
@@ -122,7 +138,7 @@ impl SessionManager {
         Ok(Ok(true))
     }
 
-    fn exists(&self, id: &str) -> anyhow::Result<bool> {
+    fn exists(&self, id: &str) -> Result<bool, deepseeknova_core::DeepseeknovaError> {
         Ok(self.store.list_sessions()?.iter().any(|s| s == id))
     }
 
@@ -132,7 +148,10 @@ impl SessionManager {
     pub(crate) async fn claim_for_chat(
         &self,
         id: &str,
-    ) -> anyhow::Result<Option<Result<(Arc<LiveSession>, BusyGuard), Busy>>> {
+    ) -> Result<
+        Option<Result<(Arc<LiveSession>, BusyGuard), Busy>>,
+        deepseeknova_core::DeepseeknovaError,
+    > {
         let mut live = self.live.lock().await;
         let session = match live.get(id) {
             Some(s) => Arc::clone(s),

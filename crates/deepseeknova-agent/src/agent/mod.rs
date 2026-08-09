@@ -869,7 +869,10 @@ pub(crate) fn build_tool_context(
 
 #[async_trait::async_trait]
 impl Runner for Agent {
-    async fn run_stream(&self, input: RunInput) -> anyhow::Result<RunEventStream> {
+    async fn run_stream(
+        &self,
+        input: RunInput,
+    ) -> Result<RunEventStream, deepseeknova_core::DeepseeknovaError> {
         let (tx, rx) = mpsc::channel(64);
 
         let provider = Arc::clone(&self.provider);
@@ -1327,7 +1330,11 @@ mod tests {
         fn read_only(&self) -> bool {
             true
         }
-        async fn execute(&self, _ctx: &ToolContext, _args: &str) -> anyhow::Result<String> {
+        async fn execute(
+            &self,
+            _ctx: &ToolContext,
+            _args: &str,
+        ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
             Ok(self.result.clone())
         }
     }
@@ -1963,7 +1970,11 @@ mod tests {
             fn read_only(&self) -> bool {
                 true
             }
-            async fn execute(&self, _ctx: &ToolContext, _args: &str) -> anyhow::Result<String> {
+            async fn execute(
+                &self,
+                _ctx: &ToolContext,
+                _args: &str,
+            ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
                 self.inv.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 Ok("ran".to_string())
             }
@@ -2663,7 +2674,11 @@ mod tests {
         fn read_only(&self) -> bool {
             false
         }
-        async fn execute(&self, _ctx: &ToolContext, _args: &str) -> anyhow::Result<String> {
+        async fn execute(
+            &self,
+            _ctx: &ToolContext,
+            _args: &str,
+        ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
             self.ran.store(true, std::sync::atomic::Ordering::SeqCst);
             Ok("danger executed".to_string())
         }
@@ -2861,7 +2876,11 @@ mod tests {
             fn read_only(&self) -> bool {
                 true
             }
-            async fn execute(&self, ctx: &ToolContext, _args: &str) -> anyhow::Result<String> {
+            async fn execute(
+                &self,
+                ctx: &ToolContext,
+                _args: &str,
+            ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
                 let m = ctx.extensions.get::<Marker>().map(|m| m.0).unwrap_or(0);
                 Ok(format!("marker={m}"))
             }
@@ -2894,7 +2913,7 @@ mod tests {
             async fn generate(
                 &self,
                 _v: deepseeknova_provider::ValidatedRequest<'_>,
-            ) -> anyhow::Result<Message> {
+            ) -> Result<Message, deepseeknova_core::DeepseeknovaError> {
                 Ok(Message {
                     role: Role::Assistant,
                     content: "done".into(),
@@ -2907,9 +2926,12 @@ mod tests {
             async fn stream(
                 &self,
                 v: deepseeknova_provider::ValidatedRequest<'_>,
-            ) -> anyhow::Result<deepseeknova_core::chunk::ChunkStream> {
+            ) -> Result<deepseeknova_core::chunk::ChunkStream, deepseeknova_core::DeepseeknovaError>
+            {
                 *self.seen.lock().unwrap_or_else(|e| e.into_inner()) = v.messages.to_vec();
-                let chunks: Vec<anyhow::Result<deepseeknova_core::chunk::Chunk>> = vec![
+                let chunks: Vec<
+                    Result<deepseeknova_core::chunk::Chunk, deepseeknova_core::DeepseeknovaError>,
+                > = vec![
                     Ok(deepseeknova_core::chunk::Chunk::TextDelta("done".into())),
                     Ok(deepseeknova_core::chunk::Chunk::Usage(
                         deepseeknova_core::chunk::Usage::default(),
@@ -3050,7 +3072,7 @@ mod tests {
         async fn generate(
             &self,
             _v: deepseeknova_provider::ValidatedRequest<'_>,
-        ) -> anyhow::Result<Message> {
+        ) -> Result<Message, deepseeknova_core::DeepseeknovaError> {
             let mut lock = self.responses.lock().unwrap_or_else(|e| e.into_inner());
             let content = if lock.len() > 1 {
                 lock.remove(0)
@@ -3069,8 +3091,11 @@ mod tests {
         async fn stream(
             &self,
             _v: deepseeknova_provider::ValidatedRequest<'_>,
-        ) -> anyhow::Result<deepseeknova_core::chunk::ChunkStream> {
-            anyhow::bail!("SeqProvider is generate-only (review path)")
+        ) -> Result<deepseeknova_core::chunk::ChunkStream, deepseeknova_core::DeepseeknovaError>
+        {
+            return Err(deepseeknova_core::DeepseeknovaError::provider(
+                "SeqProvider is generate-only (review path)",
+            ));
         }
     }
 
@@ -3377,7 +3402,11 @@ mod tests {
         fn read_only(&self) -> bool {
             false
         }
-        async fn execute(&self, _ctx: &ToolContext, _args: &str) -> anyhow::Result<String> {
+        async fn execute(
+            &self,
+            _ctx: &ToolContext,
+            _args: &str,
+        ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
             Ok(self.result.clone())
         }
     }
@@ -3399,9 +3428,15 @@ mod tests {
         fn read_only(&self) -> bool {
             false
         }
-        async fn execute(&self, _ctx: &ToolContext, _args: &str) -> anyhow::Result<String> {
+        async fn execute(
+            &self,
+            _ctx: &ToolContext,
+            _args: &str,
+        ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
             if self.fail {
-                anyhow::bail!("command exited with code 1");
+                return Err(deepseeknova_core::DeepseeknovaError::Tool(
+                    "command exited with code 1".to_string(),
+                ));
             }
             Ok("ok".to_string())
         }
@@ -3588,7 +3623,11 @@ mod tests {
         fn read_only(&self) -> bool {
             true
         }
-        async fn execute(&self, _ctx: &ToolContext, _args: &str) -> anyhow::Result<String> {
+        async fn execute(
+            &self,
+            _ctx: &ToolContext,
+            _args: &str,
+        ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(self.result.clone())
         }
@@ -3611,8 +3650,14 @@ mod tests {
         fn read_only(&self) -> bool {
             true
         }
-        async fn execute(&self, _ctx: &ToolContext, _args: &str) -> anyhow::Result<String> {
-            anyhow::bail!("boom")
+        async fn execute(
+            &self,
+            _ctx: &ToolContext,
+            _args: &str,
+        ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
+            return Err(deepseeknova_core::DeepseeknovaError::Tool(
+                "boom".to_string(),
+            ));
         }
     }
 

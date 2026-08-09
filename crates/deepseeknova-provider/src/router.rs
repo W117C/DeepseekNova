@@ -39,7 +39,7 @@ impl ModelRouter {
     pub fn from_config(
         config: &deepseeknova_config::Config,
         ledger: Arc<CostLedger>,
-    ) -> anyhow::Result<Self> {
+    ) -> Result<Self, deepseeknova_core::DeepseeknovaError> {
         config.validate()?;
         let mut pointers = HashMap::new();
         for (role_name, ptr) in config.model_pointers.entries() {
@@ -77,14 +77,18 @@ impl ModelRouter {
 
     /// In-session hot switch (memory only, never persisted). Fails when the
     /// model is not defined in `[[models]]`.
-    pub fn set_pointer(&self, role: ModelRole, model: &str) -> anyhow::Result<()> {
+    pub fn set_pointer(
+        &self,
+        role: ModelRole,
+        model: &str,
+    ) -> Result<(), deepseeknova_core::DeepseeknovaError> {
         if self.config.find_model(model).is_none() {
             let known: Vec<&str> = self.config.models.iter().map(|m| m.name.as_str()).collect();
-            anyhow::bail!(
+            return Err(deepseeknova_core::DeepseeknovaError::Config(format!(
                 "unknown model '{model}' for pointer '{}' (known models: {})",
                 role.label(),
                 known.join(", ")
-            );
+            )));
         }
         self.pointers
             .write()
@@ -99,7 +103,7 @@ impl ModelRouter {
         &self,
         role: ModelRole,
         effort: Option<ReasoningEffort>,
-    ) -> anyhow::Result<Arc<dyn Provider>> {
+    ) -> Result<Arc<dyn Provider>, deepseeknova_core::DeepseeknovaError> {
         match self.pointer(role) {
             Some(model) => self.provider_for_model(&model, role, effort),
             None => self.default_provider(role, effort),
@@ -114,11 +118,15 @@ impl ModelRouter {
         model_name: &str,
         role: ModelRole,
         effort: Option<ReasoningEffort>,
-    ) -> anyhow::Result<Arc<dyn Provider>> {
+    ) -> Result<Arc<dyn Provider>, deepseeknova_core::DeepseeknovaError> {
         let pcfg = self
             .config
             .resolve_provider_for_model(model_name)
-            .ok_or_else(|| anyhow::anyhow!("no provider found for model '{model_name}'"))?;
+            .ok_or_else(|| {
+                deepseeknova_core::DeepseeknovaError::Config(format!(
+                    "no provider found for model '{model_name}'"
+                ))
+            })?;
         // Per-model sampling temperature from [[models]]; `None` (unset) keeps
         // the provider default — no temperature field in the request body.
         let temperature = self
@@ -155,7 +163,7 @@ impl ModelRouter {
         role: ModelRole,
         model_override: Option<&str>,
         effort: Option<ReasoningEffort>,
-    ) -> anyhow::Result<Arc<dyn Provider>> {
+    ) -> Result<Arc<dyn Provider>, deepseeknova_core::DeepseeknovaError> {
         match model_override {
             Some(model) => self.provider_for_model(model, role, effort),
             None => self.provider_for(role, effort),
@@ -166,12 +174,10 @@ impl ModelRouter {
         &self,
         role: ModelRole,
         effort: Option<ReasoningEffort>,
-    ) -> anyhow::Result<Arc<dyn Provider>> {
-        let pcfg = self
-            .config
-            .providers
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("no providers configured"))?;
+    ) -> Result<Arc<dyn Provider>, deepseeknova_core::DeepseeknovaError> {
+        let pcfg = self.config.providers.first().ok_or_else(|| {
+            deepseeknova_core::DeepseeknovaError::Config("no providers configured".into())
+        })?;
         let model_label = pcfg
             .model
             .clone()
@@ -191,8 +197,8 @@ impl ModelRouter {
     fn cached_or_build(
         &self,
         key: CacheKey,
-        build: impl FnOnce() -> anyhow::Result<Arc<dyn Provider>>,
-    ) -> anyhow::Result<Arc<dyn Provider>> {
+        build: impl FnOnce() -> Result<Arc<dyn Provider>, deepseeknova_core::DeepseeknovaError>,
+    ) -> Result<Arc<dyn Provider>, deepseeknova_core::DeepseeknovaError> {
         let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(p) = cache.get(&key) {
             return Ok(Arc::clone(p));

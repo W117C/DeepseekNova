@@ -1,25 +1,26 @@
 //! # 嵌入检索支撑（P3.3）
 //!
 //! 记忆库混合检索的嵌入后端抽象与余弦工具。当前项目默认 `embedder = "none"`，
-//! 不内置任何模型；接入方（如本地/远程嵌入服务）实现 [`EmbeddingProvider`] 后
-//! 经 [`MemoryStore::search_hybrid`](super::store::MemoryStore::search_hybrid) 使用。
+//! 不内置任何模型；接入方（如本地/远程嵌入服务）实现 `EmbeddingProvider` 后
+//! 经 `MemoryStore::search_hybrid`（见 `super::store`）使用。
 //!
 //! 双路径：
-//! - **同步** [`EmbeddingProvider::embed`]：兼容既有调用方。远程 HTTP 实现内部
+//! - **同步** `EmbeddingProvider::embed`：兼容既有调用方。远程 HTTP 实现内部
 //!   自行阻塞等待，在 async 调用链（graph refresh / memory 写入路径）中会占用
 //!   tokio worker 线程。
-//! - **异步** [`EmbeddingProvider::embed_async`]：async 调用链使用。默认实现经
-//!   `spawn_blocking` 桥接到同步 [`embed`](EmbeddingProvider::embed)，await 时
+//! - **异步** `EmbeddingProvider::embed_async`：async 调用链使用。默认实现经
+//!   `spawn_blocking` 桥接到同步 `EmbeddingProvider::embed`，await 时
 //!   不阻塞 worker 线程（仅占用 blocking 线程池）；远程 HTTP 实现应覆写为真实
 //!   async（直接 await 网络）。
 
-use anyhow::{anyhow, Result};
+use crate::DeepseeknovaError;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
 /// 异步嵌入返回的 future：`Send + 'static`，可安全 `tokio::spawn` 或直接 await。
-pub type EmbedAsyncFuture = Pin<Box<dyn Future<Output = Result<Vec<f32>>> + Send + 'static>>;
+pub type EmbedAsyncFuture =
+    Pin<Box<dyn Future<Output = Result<Vec<f32>, DeepseeknovaError>> + Send + 'static>>;
 
 /// 嵌入提供器：把文本映射为归一化向量（余弦相似度）。
 /// `'static` 超 trait 保证默认 [`Self::embed_async`] 的 `spawn_blocking`
@@ -27,7 +28,7 @@ pub type EmbedAsyncFuture = Pin<Box<dyn Future<Output = Result<Vec<f32>>> + Send
 pub trait EmbeddingProvider: Send + Sync + 'static {
     /// 同步嵌入（兼容既有调用方）。远程 HTTP 实现在此内部阻塞等待；在
     /// async 调用链中建议改走 [`Self::embed_async`] 避免阻塞 worker 线程。
-    fn embed(&self, text: &str) -> Result<Vec<f32>>;
+    fn embed(&self, text: &str) -> Result<Vec<f32>, DeepseeknovaError>;
 
     /// 异步嵌入路径。默认实现经 `tokio::task::spawn_blocking` 桥接到同步
     /// [`Self::embed`]，调用方 await 时不阻塞 tokio worker 线程（仅占用
@@ -40,7 +41,9 @@ pub trait EmbeddingProvider: Send + Sync + 'static {
         Box::pin(async move {
             tokio::task::spawn_blocking(move || self.embed(&text))
                 .await
-                .map_err(|e| anyhow!("embedding spawn_blocking task failed: {e}"))?
+                .map_err(|e| {
+                    DeepseeknovaError::Runner(format!("embedding spawn_blocking task failed: {e}"))
+                })?
         })
     }
 }
@@ -95,7 +98,7 @@ mod tests {
             embed_thread: Mutex<Option<std::thread::ThreadId>>,
         }
         impl EmbeddingProvider for SyncOnly {
-            fn embed(&self, _text: &str) -> Result<Vec<f32>> {
+            fn embed(&self, _text: &str) -> Result<Vec<f32>, DeepseeknovaError> {
                 *self.embed_thread.lock().unwrap() = Some(std::thread::current().id());
                 Ok(vec![0.25, 0.75])
             }

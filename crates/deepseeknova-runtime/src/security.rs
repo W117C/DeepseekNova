@@ -121,7 +121,7 @@ fn parse_capability(raw: &str) -> Option<Capability> {
 pub fn build_security_context(
     config: &Config,
     workspace_root: &std::path::Path,
-) -> anyhow::Result<SecurityContext> {
+) -> Result<SecurityContext, deepseeknova_core::DeepseeknovaError> {
     let sec = &config.security;
 
     // Capabilities: start from safe defaults, then disable configured ones.
@@ -339,7 +339,7 @@ mod tests {
             &self,
             _ctx: &deepseeknova_core::tool::ToolContext,
             _args: &str,
-        ) -> anyhow::Result<String> {
+        ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
             Ok(String::new())
         }
     }

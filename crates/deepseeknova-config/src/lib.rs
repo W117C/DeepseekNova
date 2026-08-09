@@ -7,7 +7,9 @@
 //!   4. Environment variables       (DEEPSEEKNOVA_*)
 //!   5. CLI flags                   (applied by caller)
 
-use anyhow::Context;
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
+use deepseeknova_core::DeepseeknovaError;
 use serde::{Deserialize, Serialize};
 
 use std::collections::HashMap;
@@ -1064,16 +1066,18 @@ impl TrustStore {
     }
 
     /// 写入默认路径（父目录不存在时创建）。
-    pub fn save(&self) -> anyhow::Result<()> {
+    pub fn save(&self) -> Result<(), DeepseeknovaError> {
         self.save_to(&Self::default_path())
     }
 
     /// 写入指定路径（测试/嵌入方）。
-    pub fn save_to(&self, path: &Path) -> anyhow::Result<()> {
+    pub fn save_to(&self, path: &Path) -> Result<(), DeepseeknovaError> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let content = toml::to_string_pretty(self)?;
+        let content = toml::to_string_pretty(self).map_err(|e| {
+            DeepseeknovaError::Config(format!("failed to serialize config to TOML: {e}"))
+        })?;
         std::fs::write(path, content)?;
         Ok(())
     }
@@ -1735,17 +1739,22 @@ pub struct HookCommandConfig {
 
 impl Config {
     /// Load from a specific file path.
-    pub fn load_from_file<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
+    pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self, DeepseeknovaError> {
         let path = path.as_ref();
-        let content = fs::read_to_string(path)
-            .with_context(|| format!("failed to read config file: {}", path.display()))?;
-        let config: Config = toml::from_str(&content)
-            .with_context(|| format!("failed to parse TOML: {}", path.display()))?;
+        let content = fs::read_to_string(path).map_err(|e| {
+            DeepseeknovaError::Io(std::io::Error::new(
+                e.kind(),
+                format!("failed to read config file {}: {e}", path.display()),
+            ))
+        })?;
+        let config: Config = toml::from_str(&content).map_err(|e| {
+            DeepseeknovaError::Config(format!("failed to parse TOML {}: {e}", path.display()))
+        })?;
         Ok(config)
     }
 
     /// Load with layered precedence: defaults → user → project → env.
-    pub fn load() -> anyhow::Result<Self> {
+    pub fn load() -> Result<Self, DeepseeknovaError> {
         let user_path = user_config_path();
         Self::load_from_layers(
             user_path.as_deref(),
@@ -1759,7 +1768,10 @@ impl Config {
     /// 与 [`Config::load`] 语义完全一致；额外在项目层贡献权限规则时置位
     /// `permissions.project_owns_rules`（untrusted 工作区降级项目层 allow 用）。
     #[doc(hidden)]
-    pub fn load_from_layers(user_path: Option<&Path>, project_path: &Path) -> anyhow::Result<Self> {
+    pub fn load_from_layers(
+        user_path: Option<&Path>,
+        project_path: &Path,
+    ) -> Result<Self, DeepseeknovaError> {
         let mut config = Config::default();
 
         // Layer 1: user-global config (~/.deepseeknova/config.toml)
@@ -1868,7 +1880,7 @@ impl Config {
     /// Validate cross-references: model pointers must name a defined model,
     /// and prices must be non-negative. Called by [`Config::load`]; callers
     /// constructing configs programmatically may call it directly.
-    pub fn validate(&self) -> anyhow::Result<()> {
+    pub fn validate(&self) -> Result<(), DeepseeknovaError> {
         // 域名白名单校验：非法条目仅 warn 不 fail（fail-open，增强性配置
         // 不阻断配置加载）。
         self.sandbox.warn_invalid_network_allow_domains();
@@ -1876,11 +1888,11 @@ impl Config {
         for (role, ptr) in self.model_pointers.entries() {
             if let Some(model) = ptr {
                 if !names.contains(&model.as_str()) {
-                    anyhow::bail!(
+                    return Err(DeepseeknovaError::Config(format!(
                         "model_pointers.{role} points to unknown model '{model}' \
                          (known models: {})",
                         names.join(", ")
-                    );
+                    )));
                 }
             }
         }
@@ -1892,17 +1904,19 @@ impl Config {
             ] {
                 if let Some(p) = price {
                     if !p.is_finite() || p < 0.0 {
-                        anyhow::bail!(
+                        return Err(DeepseeknovaError::Config(format!(
                             "models.{}.{field} must be a finite value >= 0, got {p}",
                             m.name
-                        );
+                        )));
                     }
                 }
             }
         }
         if let Some(cost) = self.budget.max_total_cost_usd {
             if !cost.is_finite() || cost < 0.0 {
-                anyhow::bail!("budget.max_total_cost_usd must be a finite value >= 0, got {cost}");
+                return Err(DeepseeknovaError::Config(format!(
+                    "budget.max_total_cost_usd must be a finite value >= 0, got {cost}"
+                )));
             }
         }
         Ok(())

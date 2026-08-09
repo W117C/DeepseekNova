@@ -12,7 +12,6 @@
 //! 产生面向用户的输出的函数返回 `String`（由 main.rs 打印），便于测试断言；
 //! `run_new` 返回解析后的名称与路径供调用方拼装提示。
 
-use anyhow::{bail, Context, Result};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
@@ -38,19 +37,22 @@ struct GitOut {
 
 /// 在 `dir` 下执行一条 git 命令并捕获输出。git 缺失（不在 PATH）给出明确报错；
 /// 非零退出码由调用方决定如何处理（错误透传含 stderr）。
-fn git_in(dir: &Path, args: &[&str]) -> Result<GitOut> {
+fn git_in(dir: &Path, args: &[&str]) -> Result<GitOut, deepseeknova_core::DeepseeknovaError> {
     let out = Command::new("git")
         .args(args)
         .current_dir(dir)
         .output()
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                anyhow::anyhow!(
+                deepseeknova_core::DeepseeknovaError::Runner(format!(
                     "`git` was not found in PATH — worktree management requires git (cwd: {})",
                     dir.display()
-                )
+                ))
             } else {
-                anyhow::anyhow!("failed to run `git` in {}: {e}", dir.display())
+                deepseeknova_core::DeepseeknovaError::Runner(format!(
+                    "failed to run `git` in {}: {e}",
+                    dir.display()
+                ))
             }
         })?;
     Ok(GitOut {
@@ -61,7 +63,7 @@ fn git_in(dir: &Path, args: &[&str]) -> Result<GitOut> {
 }
 
 /// 执行一条必须成功的 git 命令，返回 stdout；失败时透传 git stderr。
-fn git_ok(dir: &Path, args: &[&str]) -> Result<String> {
+fn git_ok(dir: &Path, args: &[&str]) -> Result<String, deepseeknova_core::DeepseeknovaError> {
     let out = git_in(dir, args)?;
     if !out.status.success() {
         let code = out
@@ -71,12 +73,15 @@ fn git_ok(dir: &Path, args: &[&str]) -> Result<String> {
             .unwrap_or_else(|| "signal".to_string());
         let stderr = out.stderr.trim();
         if stderr.is_empty() {
-            bail!("git {} failed (exit {code})", args.first().unwrap_or(&""))
+            return Err(deepseeknova_core::DeepseeknovaError::Runner(format!(
+                "git {} failed (exit {code})",
+                args.first().unwrap_or(&"")
+            )));
         } else {
-            bail!(
+            return Err(deepseeknova_core::DeepseeknovaError::Runner(format!(
                 "git {} failed (exit {code}): {stderr}",
                 args.first().unwrap_or(&"")
-            )
+            )));
         }
     }
     Ok(out.stdout)
@@ -84,11 +89,11 @@ fn git_ok(dir: &Path, args: &[&str]) -> Result<String> {
 
 /// 校验 `cwd` 位于 git 仓库内（含子目录与 worktree）。`git rev-parse` 失败即
 /// 非 git 仓库，给出清晰报错。
-fn require_git_repo(cwd: &Path) -> Result<()> {
+fn require_git_repo(cwd: &Path) -> Result<(), deepseeknova_core::DeepseeknovaError> {
     let out = git_in(cwd, &["rev-parse", "--is-inside-work-tree"])?;
     if !out.status.success() {
         let stderr = out.stderr.trim();
-        bail!(
+        return Err(deepseeknova_core::DeepseeknovaError::Runner(format!(
             "not a git repository (or any parent directory): {} — run `git init` first{}",
             cwd.display(),
             if stderr.is_empty() {
@@ -96,7 +101,7 @@ fn require_git_repo(cwd: &Path) -> Result<()> {
             } else {
                 format!(" ({stderr})")
             }
-        );
+        )));
     }
     Ok(())
 }
@@ -104,7 +109,7 @@ fn require_git_repo(cwd: &Path) -> Result<()> {
 /// 主 worktree 根：`git rev-parse --git-common-dir` 的父目录。无论从主工作树、
 /// 子目录还是已链接 worktree 内调用，都解析到同一主根，保证 CLI 创建的
 /// worktree 集中在同一处。
-fn main_worktree_root(cwd: &Path) -> Result<PathBuf> {
+fn main_worktree_root(cwd: &Path) -> Result<PathBuf, deepseeknova_core::DeepseeknovaError> {
     let common = git_ok(cwd, &["rev-parse", "--git-common-dir"])?;
     let common_path = PathBuf::from(common.trim());
     let abs = if common_path.is_absolute() {
@@ -112,9 +117,12 @@ fn main_worktree_root(cwd: &Path) -> Result<PathBuf> {
     } else {
         cwd.join(common_path)
     };
-    abs.parent()
-        .map(|p| p.to_path_buf())
-        .with_context(|| format!("cannot locate main worktree root from {}", cwd.display()))
+    abs.parent().map(|p| p.to_path_buf()).ok_or_else(|| {
+        deepseeknova_core::DeepseeknovaError::Config(format!(
+            "cannot locate main worktree root from {}",
+            cwd.display()
+        ))
+    })
 }
 
 /// 本 CLI 管理的 worktree 基目录（主 worktree 根的 `.deepseeknova/worktrees`）。
@@ -122,33 +130,46 @@ fn main_worktree_root(cwd: &Path) -> Result<PathBuf> {
 /// git（如 `worktree list --porcelain`）会解析符号链接规范化路径（macOS 上
 /// `/var` → `/private/var`），此处同步 canonicalize，保证 `starts_with` /
 /// 相等比较两侧一致；解析失败退回原值。
-fn worktrees_base(cwd: &Path) -> Result<PathBuf> {
+fn worktrees_base(cwd: &Path) -> Result<PathBuf, deepseeknova_core::DeepseeknovaError> {
     Ok(canon(&main_worktree_root(cwd)?.join(WORKTREES_SUBDIR)))
 }
 
 /// 校验 worktree 名可安全用作目录名（路径分量合法性；git 分支名由
 /// `check-ref-format` 另行校验）。
-fn validate_name(name: &str) -> Result<()> {
+fn validate_name(name: &str) -> Result<(), deepseeknova_core::DeepseeknovaError> {
     if name.is_empty() {
-        bail!("worktree name must not be empty");
+        return Err(deepseeknova_core::DeepseeknovaError::Config(
+            "worktree name must not be empty".to_string(),
+        ));
     }
     if name == "." || name == ".." {
-        bail!("worktree name must not be `.` or `..`");
+        return Err(deepseeknova_core::DeepseeknovaError::Config(
+            "worktree name must not be `.` or `..`".to_string(),
+        ));
     }
     if name.contains(['/', '\\']) {
-        bail!("worktree name must not contain path separators: `{name}`");
+        return Err(deepseeknova_core::DeepseeknovaError::Config(format!(
+            "worktree name must not contain path separators: `{name}`"
+        )));
     }
     if name.chars().any(char::is_whitespace) {
-        bail!("worktree name must not contain whitespace: `{name}`");
+        return Err(deepseeknova_core::DeepseeknovaError::Config(format!(
+            "worktree name must not contain whitespace: `{name}`"
+        )));
     }
     Ok(())
 }
 
 /// 校验 worktree 名可作为 git 分支名（`refs/heads/<name>` 合法）。
-fn validate_branch_name(cwd: &Path, name: &str) -> Result<()> {
+fn validate_branch_name(
+    cwd: &Path,
+    name: &str,
+) -> Result<(), deepseeknova_core::DeepseeknovaError> {
     let out = git_in(cwd, &["check-ref-format", &format!("refs/heads/{name}")])?;
     if !out.status.success() {
-        bail!("invalid worktree name `{name}`: not a valid git branch name");
+        return Err(deepseeknova_core::DeepseeknovaError::Config(format!(
+            "invalid worktree name `{name}`: not a valid git branch name"
+        )));
     }
     Ok(())
 }
@@ -211,7 +232,11 @@ fn canon(p: &Path) -> PathBuf {
 /// 默认 `git worktree add -b <name> <dest> HEAD` 到主根
 /// `.deepseeknova/worktrees/<name>`；`--base` 指定基础 ref。成功后返回实际
 /// 名称与路径（main.rs 负责打印"在该 worktree 内启动隔离会话"的指引）。
-pub fn run_new(cwd: &Path, name: Option<&str>, base: Option<&str>) -> Result<NewWorktree> {
+pub fn run_new(
+    cwd: &Path,
+    name: Option<&str>,
+    base: Option<&str>,
+) -> Result<NewWorktree, deepseeknova_core::DeepseeknovaError> {
     require_git_repo(cwd)?;
     let name = name.map(str::to_string).unwrap_or_else(default_name);
     validate_name(&name)?;
@@ -219,7 +244,10 @@ pub fn run_new(cwd: &Path, name: Option<&str>, base: Option<&str>) -> Result<New
 
     let dest = worktrees_base(cwd)?.join(&name);
     if dest.exists() {
-        bail!("worktree `{name}` already exists at {}", dest.display());
+        return Err(deepseeknova_core::DeepseeknovaError::Config(format!(
+            "worktree `{name}` already exists at {}",
+            dest.display()
+        )));
     }
 
     let base_ref = base.unwrap_or("HEAD").to_string();
@@ -233,9 +261,13 @@ pub fn run_new(cwd: &Path, name: Option<&str>, base: Option<&str>) -> Result<New
             .unwrap_or_else(|| "signal".to_string());
         let stderr = out.stderr.trim();
         if stderr.is_empty() {
-            bail!("git worktree add failed (exit {code})")
+            return Err(deepseeknova_core::DeepseeknovaError::Runner(format!(
+                "git worktree add failed (exit {code})"
+            )));
         } else {
-            bail!("git worktree add failed (exit {code}): {stderr}")
+            return Err(deepseeknova_core::DeepseeknovaError::Runner(format!(
+                "git worktree add failed (exit {code}): {stderr}"
+            )));
         }
     }
 
@@ -247,7 +279,7 @@ pub fn run_new(cwd: &Path, name: Option<&str>, base: Option<&str>) -> Result<New
 }
 
 /// `worktree list`：渲染全部 git worktree（路径 / 分支 / 当前标记 / \[cli\] 标记）。
-pub fn run_list(cwd: &Path) -> Result<String> {
+pub fn run_list(cwd: &Path) -> Result<String, deepseeknova_core::DeepseeknovaError> {
     require_git_repo(cwd)?;
     let out = git_ok(cwd, &["worktree", "list", "--porcelain"])?;
     let infos = parse_worktree_list(&out);
@@ -289,16 +321,22 @@ pub fn run_list(cwd: &Path) -> Result<String> {
 
 /// `worktree switch 名称`：返回目标目录供用户 cd 进入（CLI 无法改变父进程
 /// 的 cwd，故只引导）。
-pub fn run_switch(cwd: &Path, name: &str) -> Result<String> {
+pub fn run_switch(cwd: &Path, name: &str) -> Result<String, deepseeknova_core::DeepseeknovaError> {
     require_git_repo(cwd)?;
     validate_name(name)?;
     let dest = worktrees_base(cwd)?.join(name);
     if !dest.is_dir() {
-        bail!("worktree `{name}` not found at {}", dest.display());
+        return Err(deepseeknova_core::DeepseeknovaError::Config(format!(
+            "worktree `{name}` not found at {}",
+            dest.display()
+        )));
     }
     let out = git_in(&dest, &["rev-parse", "--is-inside-work-tree"])?;
     if !out.status.success() {
-        bail!("`{}` exists but is not a git worktree", dest.display());
+        return Err(deepseeknova_core::DeepseeknovaError::Runner(format!(
+            "`{}` exists but is not a git worktree",
+            dest.display()
+        )));
     }
     Ok(format!(
         "worktree `{name}` is at:\n  {}\n\ncd into it and start an isolated session:\n  cd {}\n  deepseeknova chat --tui",
@@ -310,28 +348,35 @@ pub fn run_switch(cwd: &Path, name: &str) -> Result<String> {
 /// `worktree delete 名称 [--force]`：删除 worktree。有未提交/未跟踪变更时
 /// 拒绝（除非 `--force`）；成功删除后保留分支（提示用 `git branch -D` 清理）。
 /// 返回成功提示文本。
-pub fn run_delete(cwd: &Path, name: &str, force: bool) -> Result<String> {
+pub fn run_delete(
+    cwd: &Path,
+    name: &str,
+    force: bool,
+) -> Result<String, deepseeknova_core::DeepseeknovaError> {
     require_git_repo(cwd)?;
     validate_name(name)?;
     let dest = worktrees_base(cwd)?.join(name);
     if !dest.is_dir() {
-        bail!("worktree `{name}` not found at {}", dest.display());
+        return Err(deepseeknova_core::DeepseeknovaError::Config(format!(
+            "worktree `{name}` not found at {}",
+            dest.display()
+        )));
     }
 
     let out = git_in(&dest, &["status", "--porcelain"])?;
     if !out.status.success() {
-        bail!(
+        return Err(deepseeknova_core::DeepseeknovaError::Runner(format!(
             "cannot inspect worktree `{name}` ({}): {}",
             dest.display(),
             out.stderr.trim()
-        );
+        )));
     }
     if !out.stdout.trim().is_empty() && !force {
         let count = out.stdout.lines().count();
-        bail!(
+        return Err(deepseeknova_core::DeepseeknovaError::Runner(format!(
             "worktree `{name}` has {count} uncommitted change(s) — commit or stash them first, \
              or pass --force to discard"
-        );
+        )));
     }
 
     let dest_str = dest.to_string_lossy().into_owned();
@@ -343,7 +388,7 @@ pub fn run_delete(cwd: &Path, name: &str, force: bool) -> Result<String> {
     let out = git_in(cwd, &args)?;
     if !out.status.success() {
         let stderr = out.stderr.trim();
-        bail!(
+        return Err(deepseeknova_core::DeepseeknovaError::Runner(format!(
             "git worktree remove failed (exit {}): {}",
             out.status
                 .code()
@@ -354,7 +399,7 @@ pub fn run_delete(cwd: &Path, name: &str, force: bool) -> Result<String> {
             } else {
                 stderr
             }
-        );
+        )));
     }
 
     Ok(format!(
@@ -365,7 +410,7 @@ pub fn run_delete(cwd: &Path, name: &str, force: bool) -> Result<String> {
 /// `worktree clean`：清理主根 `.deepseeknova/worktrees/` 下所有由本 CLI 创建的
 /// worktree。有未提交变更的跳过并报告（不强制删除）。目录中 git 未登记的
 /// 残留（如失败的 add）仅提示，不自动删除。
-pub fn run_clean(cwd: &Path) -> Result<String> {
+pub fn run_clean(cwd: &Path) -> Result<String, deepseeknova_core::DeepseeknovaError> {
     require_git_repo(cwd)?;
     let base = worktrees_base(cwd)?;
     if !base.is_dir() {

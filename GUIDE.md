@@ -45,7 +45,11 @@ search code, fetch URLs, and more. Every tool implements the `Tool` trait:
 pub trait Tool: Send + Sync {
     fn schema(&self) -> ToolSchema;
     fn read_only(&self) -> bool { false }
-    async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String>;
+    async fn execute(
+        &self,
+        ctx: &ToolContext,
+        args: &str,
+    ) -> Result<String, deepseeknova_core::DeepseeknovaError>;
 }
 ```
 

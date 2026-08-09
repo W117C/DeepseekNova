@@ -21,6 +21,8 @@
 //!     .collect();
 //! ```
 
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 mod loader;
 
 pub mod fitness;
@@ -97,7 +99,11 @@ impl Tool for SkillTool {
         true
     }
 
-    async fn execute(&self, _ctx: &ToolContext, _args: &str) -> anyhow::Result<String> {
+    async fn execute(
+        &self,
+        _ctx: &ToolContext,
+        _args: &str,
+    ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
         let mut output = String::new();
         output.push_str(&format!("# Skill Activated: {}\n\n", self.skill.name));
         output.push_str(&self.skill.system_prompt);

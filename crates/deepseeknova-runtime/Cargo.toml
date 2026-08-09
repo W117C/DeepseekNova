@@ -9,7 +9,6 @@ readme = "README.md"
 documentation = "https://docs.rs/deepseeknova-runtime"
 
 [dependencies]
-anyhow = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
 tracing = { workspace = true }
@@ -32,3 +31,6 @@ deepseeknova-skills = { workspace = true }
 [dev-dependencies]
 async-trait = { workspace = true }
 serde_json = { workspace = true }
+
+[lints]
+workspace = true

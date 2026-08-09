@@ -10,12 +10,19 @@ use tracing::info;
 /// A user profile entry — a single fact or preference about the user.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProfileEntry {
+    /// 条目键（如 "language"）。
     pub key: String,
+    /// 条目值（如 "Rust"）。
     pub value: String,
+    /// 条目所属类别。
     pub category: ProfileCategory,
+    /// 置信度 [0.0, 1.0]：随观察次数提升，封顶 1.0。
     pub confidence: f32,
+    /// 累计观察到该条目的次数。
     pub times_observed: u32,
+    /// 首次观察时间戳（unix 秒）。
     pub first_seen: i64,
+    /// 最近一次观察时间戳（unix 秒）。
     pub last_seen: i64,
 }
 
@@ -42,6 +49,7 @@ pub enum ProfileCategory {
 }
 
 impl ProfileCategory {
+    /// 返回类别的字符串标识（与序列化值一致）。
     pub fn as_str(&self) -> &str {
         match self {
             Self::LanguagePreference => "language_preference",
@@ -62,6 +70,7 @@ pub struct UserProfile {
 }
 
 impl UserProfile {
+    /// 创建空的用户画像。
     pub fn new() -> Self {
         Self {
             entries: HashMap::new(),

@@ -2,9 +2,13 @@ use super::evidence::MemoryEvidence;
 use super::lifecycle::MemoryLifecycleStage;
 use chrono::Utc;
 
+/// 记忆晋升策略：基于证据（频次/置信度/年龄）评估阶段迁移。
 pub struct MemoryPromotionPolicy {
+    /// 晋升 Permanent 所需的最小观察频次。
     pub min_frequency: u32,
+    /// 晋升 Permanent 所需的最小置信度。
     pub min_confidence: f64,
+    /// 晋升 Permanent 所需的最小首次观察年龄（天）。
     pub min_age_days: i64,
 }
 
@@ -19,6 +23,9 @@ impl Default for MemoryPromotionPolicy {
 }
 
 impl MemoryPromotionPolicy {
+    /// 依据当前阶段与证据评估目标阶段：Candidate 在频次/置信度达标后晋升 Verified；
+    /// Verified 在频次/置信度/年龄三者均达标后晋升 Permanent；Permanent 在
+    /// 90 天未观察后降为 Archived；其余维持原阶段。
     pub fn evaluate(
         &self,
         current_stage: &MemoryLifecycleStage,

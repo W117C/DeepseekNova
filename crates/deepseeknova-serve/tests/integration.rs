@@ -1,5 +1,6 @@
 //! Integration tests for the HTTP serve crate — SSE streaming, error paths,
 //! and input validation using a spawned axum server.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use deepseeknova_core::runner::{RunEvent, RunEventStream, RunInput, RunOutput, Runner};
 use deepseeknova_serve::{ChatRequest, Server};
@@ -18,8 +19,11 @@ struct ServeMockRunner;
 
 #[async_trait::async_trait]
 impl Runner for ServeMockRunner {
-    async fn run_stream(&self, _input: RunInput) -> anyhow::Result<RunEventStream> {
-        let events: Vec<anyhow::Result<RunEvent>> = vec![
+    async fn run_stream(
+        &self,
+        _input: RunInput,
+    ) -> Result<RunEventStream, deepseeknova_core::DeepseeknovaError> {
+        let events: Vec<Result<RunEvent, deepseeknova_core::DeepseeknovaError>> = vec![
             Ok(RunEvent::TextDelta("Hello ".to_string())),
             Ok(RunEvent::TextDelta("World".to_string())),
             Ok(RunEvent::Usage(deepseeknova_core::chunk::Usage::default())),
@@ -990,7 +994,10 @@ async fn sessions_chat_busy_returns_conflict() {
     struct BlockingRunner(tokio::sync::mpsc::UnboundedSender<()>);
     #[async_trait::async_trait]
     impl Runner for BlockingRunner {
-        async fn run_stream(&self, _input: RunInput) -> anyhow::Result<RunEventStream> {
+        async fn run_stream(
+            &self,
+            _input: RunInput,
+        ) -> Result<RunEventStream, deepseeknova_core::DeepseeknovaError> {
             let _ = self.0.send(());
             // 挂起直到测试结束（oneshot 永不完成）。
             let (_tx, rx) = tokio::sync::oneshot::channel::<()>();

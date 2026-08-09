@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use deepseeknova_core::{Tool, ToolContext, ToolSchema};
+use deepseeknova_core::{DeepseeknovaError, Tool, ToolContext, ToolSchema};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -39,7 +39,11 @@ impl Tool for GlobTool {
         true
     }
 
-    async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
+    async fn execute(
+        &self,
+        ctx: &ToolContext,
+        args: &str,
+    ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
         deepseeknova_security::context::enforce_capability(
             ctx,
             &self.schema().name,
@@ -48,7 +52,7 @@ impl Tool for GlobTool {
         let parsed: GlobArgs = serde_json::from_str(args)?;
 
         if ctx.cancellation.is_cancelled() {
-            anyhow::bail!("cancelled");
+            return Err(deepseeknova_core::DeepseeknovaError::Cancelled);
         }
 
         let base = match parsed.path {
@@ -61,7 +65,9 @@ impl Tool for GlobTool {
         let pattern_str = full_pattern.to_string_lossy();
 
         let mut matches: Vec<String> = Vec::new();
-        let paths = glob::glob(&pattern_str)?;
+        let paths = glob::glob(&pattern_str).map_err(|e| {
+            DeepseeknovaError::Tool(format!("invalid glob pattern '{pattern_str}': {e}"))
+        })?;
 
         for entry in paths {
             match entry {

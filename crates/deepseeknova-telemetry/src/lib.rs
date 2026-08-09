@@ -7,7 +7,7 @@
 //! ## Quick start
 //!
 //! ```no_run
-//! # fn main() -> anyhow::Result<()> {
+//! # fn main() -> Result<(), deepseeknova_core::DeepseeknovaError> {
 //! // Export to an OTLP collector (e.g. local Jaeger, Grafana Agent)
 //! let _guard = deepseeknova_telemetry::TelemetryGuard::init(
 //!     "deepseeknova",
@@ -33,7 +33,9 @@
 //! | `agent.plan` | `plan.steps`, `plan.model` | Plan generation |
 //! | `agent.compact` | `memory.tokens_before`, `memory.tokens_after` | Memory compaction |
 
-use anyhow::Context;
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
+use deepseeknova_core::DeepseeknovaError;
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::trace::SdkTracerProvider;
@@ -57,14 +59,19 @@ impl TelemetryGuard {
     ///
     /// `otlp_endpoint` should point to an OTLP collector (default: `http://localhost:4317`).
     /// Pass `None` to use the default endpoint.
-    pub fn init(service_name: &str, otlp_endpoint: Option<&str>) -> anyhow::Result<Self> {
+    pub fn init(
+        service_name: &str,
+        otlp_endpoint: Option<&str>,
+    ) -> Result<Self, DeepseeknovaError> {
         let endpoint = otlp_endpoint.unwrap_or("http://localhost:4317");
 
         let exporter = opentelemetry_otlp::SpanExporter::builder()
             .with_tonic()
             .with_endpoint(endpoint)
             .build()
-            .context("failed to create OTLP span exporter")?;
+            .map_err(|e| {
+                DeepseeknovaError::Config(format!("failed to create OTLP span exporter: {e}"))
+            })?;
 
         let tracer_provider = SdkTracerProvider::builder()
             .with_batch_exporter(exporter)
@@ -103,7 +110,7 @@ impl TelemetryGuard {
     /// Initialize with a stdout exporter (useful for local debugging).
     ///
     /// Traces are printed as JSON to stdout.
-    pub fn init_stdout(service_name: &str) -> anyhow::Result<Self> {
+    pub fn init_stdout(service_name: &str) -> Result<Self, DeepseeknovaError> {
         let exporter = opentelemetry_stdout::SpanExporter::default();
 
         let tracer_provider = SdkTracerProvider::builder()

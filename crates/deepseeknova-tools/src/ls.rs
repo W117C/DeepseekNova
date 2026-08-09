@@ -34,7 +34,11 @@ impl Tool for LsTool {
         true
     }
 
-    async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
+    async fn execute(
+        &self,
+        ctx: &ToolContext,
+        args: &str,
+    ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
         deepseeknova_security::context::enforce_capability(
             ctx,
             &self.schema().name,
@@ -47,7 +51,7 @@ impl Tool for LsTool {
         };
 
         if ctx.cancellation.is_cancelled() {
-            anyhow::bail!("cancelled");
+            return Err(deepseeknova_core::DeepseeknovaError::Cancelled);
         }
 
         let dir = match parsed.path {

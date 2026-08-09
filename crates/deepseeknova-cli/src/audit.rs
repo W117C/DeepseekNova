@@ -30,9 +30,13 @@ pub enum AuditTarget {
 ///
 /// 双参数且第二个参数是合法 JSON（对象或字符串）时判定为
 /// `<tool> <json-args>` 形态；其余一律按 shell 命令空格连接。
-pub fn parse_audit_target(args: &[String]) -> anyhow::Result<AuditTarget> {
+pub fn parse_audit_target(
+    args: &[String],
+) -> Result<AuditTarget, deepseeknova_core::DeepseeknovaError> {
     if args.is_empty() {
-        anyhow::bail!("audit 需要一条 shell 命令，或 <tool> <json-args>");
+        return Err(deepseeknova_core::DeepseeknovaError::Config(
+            "audit 需要一条 shell 命令，或 <tool> <json-args>".to_string(),
+        ));
     }
     if args.len() == 2 {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&args[1]) {
@@ -121,7 +125,10 @@ fn tool_read_only(tool_name: &str) -> bool {
 }
 
 /// 输出 `--rules`（全部权限规则）。
-pub fn render_rules(config: &Config, format: &str) -> anyhow::Result<()> {
+pub fn render_rules(
+    config: &Config,
+    format: &str,
+) -> Result<(), deepseeknova_core::DeepseeknovaError> {
     if format == "json" {
         let mut deny = Vec::new();
         let mut ask = Vec::new();
@@ -187,7 +194,10 @@ pub fn render_rules(config: &Config, format: &str) -> anyhow::Result<()> {
 }
 
 /// 输出一次 audit 的报表。
-pub fn render_report(report: &AuditReport, format: &str) -> anyhow::Result<()> {
+pub fn render_report(
+    report: &AuditReport,
+    format: &str,
+) -> Result<(), deepseeknova_core::DeepseeknovaError> {
     match format {
         "json" => println!("{}", serde_json::to_string_pretty(report)?),
         _ => println!("{}", render_markdown(report)),

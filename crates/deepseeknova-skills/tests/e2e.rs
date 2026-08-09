@@ -1,5 +1,6 @@
 //! End-to-end tests for the Skills system — load from real files, wrap as tools,
 //! and execute.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use deepseeknova_core::registry::Skill;
 use deepseeknova_core::{Tool, ToolContext};

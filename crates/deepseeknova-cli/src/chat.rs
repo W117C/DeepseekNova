@@ -60,12 +60,16 @@ impl SessionTitles {
     }
 
     /// 设置会话标题并落盘（改名）。
-    pub fn set(&mut self, id: &str, title: &str) -> anyhow::Result<()> {
+    pub fn set(
+        &mut self,
+        id: &str,
+        title: &str,
+    ) -> Result<(), deepseeknova_core::DeepseeknovaError> {
         self.titles.insert(id.to_string(), title.to_string());
         self.save()
     }
 
-    fn save(&self) -> anyhow::Result<()> {
+    fn save(&self) -> Result<(), deepseeknova_core::DeepseeknovaError> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
@@ -81,12 +85,18 @@ impl ChatPersistence {
     }
 
     /// 重命名会话（`/rename <title>` 作用于当前会话）。
-    pub fn rename(&mut self, id: &str, title: &str) -> anyhow::Result<()> {
+    pub fn rename(
+        &mut self,
+        id: &str,
+        title: &str,
+    ) -> Result<(), deepseeknova_core::DeepseeknovaError> {
         self.titles.set(id, title)
     }
 
     /// 会话列表（最新优先），每条为 `(id, 首句预览, title, workspace)`。
-    pub fn list_sessions_with_titles(&self) -> anyhow::Result<Vec<SessionRow>> {
+    pub fn list_sessions_with_titles(
+        &self,
+    ) -> Result<Vec<SessionRow>, deepseeknova_core::DeepseeknovaError> {
         Ok(self
             .store
             .list_sessions_with_preview()?
@@ -141,9 +151,12 @@ pub async fn run_chat_repl<F>(
     initial_model: Option<String>,
     mut persist: Option<ChatPersistence>,
     router: Option<std::sync::Arc<deepseeknova_provider::router::ModelRouter>>,
-) -> anyhow::Result<bool>
+) -> Result<bool, deepseeknova_core::DeepseeknovaError>
 where
-    F: Fn(Option<ReasoningEffort>, Option<String>) -> anyhow::Result<Box<dyn Runner + Send>>,
+    F: Fn(
+        Option<ReasoningEffort>,
+        Option<String>,
+    ) -> Result<Box<dyn Runner + Send>, deepseeknova_core::DeepseeknovaError>,
 {
     let mut current_effort = baseline_effort;
     let mut current_model = initial_model;
@@ -501,7 +514,7 @@ async fn handle_slash_command(
     current_model: &mut Option<String>,
     persist: Option<&mut ChatPersistence>,
     router: Option<&std::sync::Arc<deepseeknova_provider::router::ModelRouter>>,
-) -> anyhow::Result<SlashAction> {
+) -> Result<SlashAction, deepseeknova_core::DeepseeknovaError> {
     // Split command and optional arguments
     let (name, args) = cmd.split_once(' ').unwrap_or((cmd, ""));
 

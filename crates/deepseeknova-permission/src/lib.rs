@@ -4,6 +4,8 @@
 //! Supports per-tool rules, user confirmation prompts, and session-level
 //! permission caching.
 
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 use deepseeknova_core::tool::Tool;
 use deepseeknova_security::audit::{AuditLogger, SecurityEvent};
 use deepseeknova_security::capability::Capability;
@@ -402,20 +404,24 @@ impl Policy {
     }
 
     /// Load a Policy from a JSON or TOML file.
-    pub fn from_file(path: &Path) -> anyhow::Result<Self> {
+    pub fn from_file(path: &Path) -> Result<Self, deepseeknova_core::DeepseeknovaError> {
         let content = std::fs::read_to_string(path)?;
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
         match ext {
             "toml" => {
-                let policy: Policy = toml::from_str(&content)?;
+                let policy: Policy = toml::from_str(&content).map_err(|e| {
+                    deepseeknova_core::DeepseeknovaError::Config(format!("toml parse: {e}"))
+                })?;
                 Ok(policy)
             }
             "json" => {
                 let policy: Policy = serde_json::from_str(&content)?;
                 Ok(policy)
             }
-            other => anyhow::bail!("unsupported policy format: .{other}"),
+            other => Err(deepseeknova_core::DeepseeknovaError::Config(format!(
+                "unsupported policy format: .{other}"
+            ))),
         }
     }
 }
@@ -1322,6 +1328,22 @@ pub enum PermissionError {
     Io(#[from] std::io::Error),
 }
 
+/// 把 [`PermissionError`] 转换为 [`deepseeknova_core::DeepseeknovaError`]。
+///
+/// 本 impl 利用 orphan rule 放在拥有 `PermissionError` 的本 crate 中
+/// （`DeepseeknovaError` 来自 `deepseeknova-core`，`From` 来自 std）。这使 `?`
+/// 运算符能把 `Result<_, PermissionError>` 直接用于返回
+/// `Result<_, DeepseeknovaError>` 的函数，无需显式 `.map_err`。
+///
+/// 当前映射保留人可读消息（`to_string()`），丢失变体级别的类型信息（如
+/// `Denied` vs `RequiresApproval` 的区分）；`DeepseeknovaError::Permission`
+/// 变体的 `is_retryable()` 返回 `false`，与权限错误的确定性语义一致。
+impl From<PermissionError> for deepseeknova_core::DeepseeknovaError {
+    fn from(err: PermissionError) -> Self {
+        deepseeknova_core::DeepseeknovaError::Permission(err.to_string())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1469,7 +1491,7 @@ mod tests {
             &self,
             _ctx: &deepseeknova_core::ToolContext,
             _args: &str,
-        ) -> anyhow::Result<String> {
+        ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
             Ok(String::new())
         }
     }
@@ -1624,7 +1646,7 @@ mod tests {
             &self,
             _ctx: &deepseeknova_core::ToolContext,
             _args: &str,
-        ) -> anyhow::Result<String> {
+        ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
             Ok(String::new())
         }
     }
@@ -2583,5 +2605,27 @@ mod tests {
         assert_eq!(v.decision(), Decision::Deny);
         let log = dir.path().join(".deepseeknova/security/audit.jsonl");
         assert!(!log.exists(), "无审计器不得写审计文件");
+    }
+
+    /// 验证 `From<PermissionError> for DeepseeknovaError` 让 `?` 直接把
+    /// `Result<_, PermissionError>` 用于返回 `Result<_, DeepseeknovaError>` 的函数。
+    #[test]
+    fn permission_error_converts_via_question_mark() {
+        fn inner() -> Result<(), PermissionError> {
+            Err(PermissionError::Denied {
+                tool: "Bash".into(),
+                reason: "blocked".into(),
+            })
+        }
+        fn outer() -> Result<(), deepseeknova_core::DeepseeknovaError> {
+            inner()?;
+            Ok(())
+        }
+        let err = outer().unwrap_err();
+        assert!(
+            matches!(err, deepseeknova_core::DeepseeknovaError::Permission(_)),
+            "应映射到 Permission 类别"
+        );
+        assert!(!err.is_retryable(), "权限错误不应可重试");
     }
 }

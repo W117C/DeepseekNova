@@ -20,7 +20,6 @@
 //! CLI 级 CI 门槛（`--require-min-score` / `--require-dimension name>=N`）见
 //! [`CiThresholds`]；任一门槛未达 → [`eval_exit_code`] 非零退出。
 
-use anyhow::Context;
 use deepseeknova_metrics::{ScoreDimensions, Scorecard};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -358,21 +357,30 @@ pub fn eval_exit_code(summary: &EvalSummary) -> i32 {
 }
 
 /// Load cases from a JSONL file. Blank lines and `#` comments are skipped.
-pub fn load_cases(path: &str) -> anyhow::Result<Vec<EvalCase>> {
-    let text =
-        fs::read_to_string(path).with_context(|| format!("failed to read eval file {path}"))?;
+pub fn load_cases(path: &str) -> Result<Vec<EvalCase>, deepseeknova_core::DeepseeknovaError> {
+    let text = fs::read_to_string(path).map_err(|e| {
+        deepseeknova_core::DeepseeknovaError::Io(std::io::Error::other(format!(
+            "failed to read eval file {path}: {e}"
+        )))
+    })?;
     let mut cases = Vec::new();
     for (idx, line) in text.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let case: EvalCase = serde_json::from_str(line)
-            .with_context(|| format!("eval file {path}:{} is not a valid case", idx + 1))?;
+        let case: EvalCase = serde_json::from_str(line).map_err(|e| {
+            deepseeknova_core::DeepseeknovaError::Config(format!(
+                "eval file {path}:{} is not a valid case: {e}",
+                idx + 1
+            ))
+        })?;
         cases.push(case);
     }
     if cases.is_empty() {
-        anyhow::bail!("eval file {path} contains no cases");
+        return Err(deepseeknova_core::DeepseeknovaError::Config(format!(
+            "eval file {path} contains no cases"
+        )));
     }
     Ok(cases)
 }

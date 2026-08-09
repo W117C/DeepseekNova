@@ -2,6 +2,7 @@
 
 use crate::finding::Finding;
 use crate::rule::Rule;
+use deepseeknova_core::DeepseeknovaError;
 use deepseeknova_graph::parser::Lang;
 use std::path::Path;
 use walkdir::WalkDir;
@@ -14,7 +15,7 @@ const MAX_FILE_BYTES: u64 = 1_000_000;
 
 /// Scan every supported source file under `root`, returning findings with no
 /// verdict. Unreadable / non-UTF-8 / oversized files are skipped silently.
-pub fn scan_files(root: &Path, rules: &[Rule]) -> anyhow::Result<Vec<Finding>> {
+pub fn scan_files(root: &Path, rules: &[Rule]) -> Result<Vec<Finding>, DeepseeknovaError> {
     let ignores = load_gitignore(root);
     let mut out = Vec::new();
     for entry in WalkDir::new(root).into_iter().filter_map(Result::ok) {

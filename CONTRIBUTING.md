@@ -69,8 +69,10 @@ crates/
 - Follow Rust conventions: `cargo fmt` and `cargo clippy`
 - Functions under 50 lines, files under 500 lines
 - Prefer immutability — use `let` by default, `let mut` only when needed
-- Use `thiserror` for library errors, `anyhow` for binary code
-- No `unwrap()` or `expect()` in production code — use `?` and `Context`
+- Use `thiserror` / `deepseeknova_core::DeepseeknovaError` for all errors —
+  `anyhow` 已从 workspace 移除
+- No `unwrap()` or `expect()` in production code — use `?` with explicit
+  `.map_err(...)` 归类到 `DeepseeknovaError`
 
 ## CI/CD
 

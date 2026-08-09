@@ -207,6 +207,42 @@ make audit          # 安全审计（先检查 cargo-deny，再执行 cargo deny
   allow 规则无法放行，`cat a | head`、`echo x > file` 等常规命令不可执行
 - [如何避免]：普通 shell 组合归 NotReadOnly 走权限审批/规则；Dangerous 仅保留
   工具级注入面（git -c/--config-env、格式串注入、UNC/URL/SMB 路径形态）
+- [missing-docs lint 阻断 make check]：core/event/metrics 启用
+  `#![warn(missing_docs)]` 后，新增 pub 项（struct/enum/fn/trait/字段/变体/方法/
+  `pub mod`）未补 `///` 文档注释，`make check` 的 clippy 阶段（`-D warnings`）
+  与 doc 阶段（`RUSTDOCFLAGS="-D warnings"`）会失败
+- [如何避免]：新增/改动 pub 项时同步补全 `///` 中文文档注释；doc 注释中的交叉
+  引用用完整路径 `[`crate::Type`]` 或纯反引号文字，避免 broken intra-doc link；
+  本地 `make check` 通过后再提交
+- [reqwest 测试被 HTTP_PROXY 环境变量劫持]：开发机设置了 `HTTP_PROXY`/
+  `HTTPS_PROXY`（如 `127.0.0.1:7890`），reqwest 默认尊重这些变量，把对本地
+  mock server（`127.0.0.1:随机端口`）的请求转发到代理，代理无法连本地端口导致
+  `Connection refused (os error 61)` 或 hang 到超时。此问题跨 4 crate 出现：
+  mcp（15 测试）、provider/openai（1）+provider/embeddings（9）、runtime（1）、
+  tools/docs_tools（3）
+- [如何避免]：凡测试用 `TcpListener::bind("127.0.0.1:0")` 起 mock server 且用
+  reqwest::Client 连接的，测试开头必须 `let _guard = ENV_LOCK.lock().await;
+  clear_proxy_env();`（同步测试用 `blocking_lock()`）；同一 crate 内的 ENV_LOCK
+  必须共享同一把 `tokio::sync::Mutex`（不可一个模块用 `tokio::sync::Mutex`、
+  另一个用 `std::sync::Mutex`——两把不同的锁不互相同步，`std::env` 并发修改
+  是 UB）；新增 reqwest mock 测试时 grep 同 crate 是否已有 `clear_proxy_env`，
+  有则复用，无则在 crate 级 test_util 模块新增
+- [下游 `From<TheirTypedError> for DeepseeknovaError` 放错 crate]：把 impl 写在
+  core 中会因 orphan rule 失败（core 不拥有 `TheirTypedError`），或写在错误的
+  下游 crate 中导致 `?` 在调用点找不到 `From` 实现
+- [如何避免]：所有 `From<TheirTypedError> for DeepseeknovaError` 必须放在
+  **拥有 `TheirTypedError` 的 crate** 中（orphan rule：impl 可放在拥有 trait
+  或任一类型的 crate，`From` 来自 std 所以只能放在拥有 `TheirTypedError` 的
+  crate）；当前已落地：`graph`、`provider`、`permission`、`context`、`agent`
+  crate 的 `From<TheirError>`
+- [`?` 单步解析导致未注册的外部错误编译失败]：`Result<_, reqwest::Error>` 上
+  用 `?` 转入 `Result<_, DeepseeknovaError>` 会编译失败，因为 `?` 仅查找一个
+  `From` 实现，不进行多步链式转换（anyhow 已于 Phase 4 移除，不再有
+  `reqwest::Error → anyhow::Error → DeepseeknovaError` 的桥接路径）
+- [如何避免]：调用点对未在 `DeepseeknovaError` 注册 `From` 的外部错误类型，
+  必须显式 `.map_err(DeepseeknovaError::from)?` 或归类到具体变体
+  （如 `.map_err(|e| DeepseeknovaError::Tool(e.to_string()))?`）；不要假设
+  `?` 会自动多步转换
 
 ---
 

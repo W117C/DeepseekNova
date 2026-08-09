@@ -13,7 +13,7 @@ pub struct TuiUndoController {
 
 #[async_trait]
 impl UndoController for TuiUndoController {
-    async fn list(&self) -> anyhow::Result<Vec<String>> {
+    async fn list(&self) -> Result<Vec<String>, deepseeknova_core::DeepseeknovaError> {
         let ck = CheckpointManager::load_from(&self.path)?;
         if ck.is_empty() {
             return Ok(Vec::new());
@@ -32,7 +32,7 @@ impl UndoController for TuiUndoController {
         Ok(lines)
     }
 
-    async fn rollback_one(&self) -> anyhow::Result<Option<String>> {
+    async fn rollback_one(&self) -> Result<Option<String>, deepseeknova_core::DeepseeknovaError> {
         let mut ck = CheckpointManager::load_from(&self.path)?;
         match ck.rollback().await? {
             Some((path, hash)) => Ok(Some(format!(
@@ -44,9 +44,9 @@ impl UndoController for TuiUndoController {
         }
     }
 
-    async fn rollback_all(&self) -> anyhow::Result<usize> {
+    async fn rollback_all(&self) -> Result<usize, deepseeknova_core::DeepseeknovaError> {
         let mut ck = CheckpointManager::load_from(&self.path)?;
-        ck.rollback_all().await
+        Ok(ck.rollback_all().await?)
     }
 }
 

@@ -1,11 +1,10 @@
 use crate::retry::{retry_with_backoff, HttpAttempt};
 use crate::tool_cache::ToolSchemaCache;
 use crate::{Provider, ValidatedRequest};
-use anyhow::Context;
 use async_trait::async_trait;
 use deepseeknova_core::chunk::{Chunk, ChunkStream, Usage};
 use deepseeknova_core::types::{FunctionCall, ToolCall};
-use deepseeknova_core::{Message, Role, Tool};
+use deepseeknova_core::{DeepseeknovaError, Message, Role, Tool};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
@@ -50,14 +49,17 @@ impl AnthropicProvider {
         api_key_env: &str,
         timeout_secs: u64,
         max_retries: u32,
-    ) -> anyhow::Result<Self> {
-        let api_key = env::var(api_key_env)
-            .with_context(|| format!("environment variable {api_key_env} is not set"))?;
+    ) -> Result<Self, DeepseeknovaError> {
+        let api_key = env::var(api_key_env).map_err(|_| {
+            DeepseeknovaError::Config(format!("environment variable {api_key_env} is not set"))
+        })?;
 
         let client = Client::builder()
             .timeout(Duration::from_secs(timeout_secs))
             .build()
-            .context("failed to build HTTP client")?;
+            .map_err(|e| {
+                DeepseeknovaError::provider(format!("failed to build HTTP client: {e}"))
+            })?;
 
         Ok(Self {
             client,
@@ -188,7 +190,7 @@ impl AnthropicProvider {
         &self,
         body: &AnthropicRequest,
         stream: bool,
-    ) -> anyhow::Result<reqwest::Response> {
+    ) -> Result<reqwest::Response, DeepseeknovaError> {
         let url = format!("{}/v1/messages", self.base_url);
         info!("POST {} (stream={})", url, stream);
 
@@ -240,26 +242,28 @@ impl AnthropicProvider {
 
         match result {
             HttpAttempt::Success(response) => Ok(response),
-            HttpAttempt::Retryable(msg) => {
-                Err(anyhow::anyhow!("request failed after retries: {msg}"))
-            }
-            HttpAttempt::Fatal(msg) => Err(anyhow::anyhow!("{msg}")),
+            HttpAttempt::Retryable(msg) => Err(DeepseeknovaError::provider_retryable(format!(
+                "request failed after retries: {msg}"
+            ))),
+            HttpAttempt::Fatal(msg) => Err(DeepseeknovaError::provider(msg)),
         }
     }
 }
 
 #[async_trait]
 impl Provider for AnthropicProvider {
-    async fn generate(&self, validated: ValidatedRequest<'_>) -> anyhow::Result<Message> {
+    async fn generate(
+        &self,
+        validated: ValidatedRequest<'_>,
+    ) -> Result<Message, DeepseeknovaError> {
         let messages = validated.messages;
         let tools = validated.tools;
         let body = self.build_request(messages, tools, false);
         let response = self.send_request(&body, false).await?;
 
-        let resp: AnthropicResponse = response
-            .json()
-            .await
-            .context("failed to parse Anthropic response")?;
+        let resp: AnthropicResponse = response.json().await.map_err(|e| {
+            DeepseeknovaError::provider(format!("failed to parse Anthropic response: {e}"))
+        })?;
 
         // Surface DeepSeek token accounting (context-cache read/write) for this
         // non-streaming path so cache efficiency stays observable.
@@ -333,14 +337,17 @@ impl Provider for AnthropicProvider {
         })
     }
 
-    async fn stream(&self, validated: ValidatedRequest<'_>) -> anyhow::Result<ChunkStream> {
+    async fn stream(
+        &self,
+        validated: ValidatedRequest<'_>,
+    ) -> Result<ChunkStream, DeepseeknovaError> {
         let messages = validated.messages;
         let tools = validated.tools;
         let body = self.build_request(messages, tools, true);
         let response = self.send_request(&body, true).await?;
 
         // True streaming via bytes_stream — same pattern as OpenAI provider
-        let (tx, rx) = mpsc::channel::<anyhow::Result<Chunk>>(64);
+        let (tx, rx) = mpsc::channel::<Result<Chunk, DeepseeknovaError>>(64);
 
         tokio::spawn(async move {
             if let Err(e) = stream_anthropic_sse(response, &tx).await {
@@ -546,8 +553,8 @@ impl AnthropicUsageAcc {
 
 async fn stream_anthropic_sse(
     response: reqwest::Response,
-    tx: &mpsc::Sender<anyhow::Result<Chunk>>,
-) -> anyhow::Result<()> {
+    tx: &mpsc::Sender<Result<Chunk, DeepseeknovaError>>,
+) -> Result<(), DeepseeknovaError> {
     let mut line_bytes: Vec<u8> = Vec::new();
     let mut current_event_type: Option<String> = None;
     let mut current_data: Option<String> = None;
@@ -557,13 +564,16 @@ async fn stream_anthropic_sse(
     let mut byte_stream = response.bytes_stream();
 
     while let Some(chunk_result) = byte_stream.next().await {
-        let bytes = chunk_result.context("failed to read chunk from Anthropic stream")?;
+        let bytes = chunk_result.map_err(|e| {
+            DeepseeknovaError::provider(format!("failed to read chunk from Anthropic stream: {e}"))
+        })?;
 
         for &b in bytes.iter() {
             match b {
                 b'\n' => {
-                    let line_str = String::from_utf8(line_bytes.clone())
-                        .map_err(|e| anyhow::anyhow!("invalid UTF-8 in Anthropic SSE: {e}"))?;
+                    let line_str = String::from_utf8(line_bytes.clone()).map_err(|e| {
+                        DeepseeknovaError::provider(format!("invalid UTF-8 in Anthropic SSE: {e}"))
+                    })?;
                     line_bytes.clear();
 
                     let trimmed = line_str.trim().to_string();
@@ -616,10 +626,10 @@ async fn stream_anthropic_sse(
 async fn process_anthropic_event(
     _event_type: Option<&str>,
     data: &str,
-    tx: &mpsc::Sender<anyhow::Result<Chunk>>,
+    tx: &mpsc::Sender<Result<Chunk, DeepseeknovaError>>,
     tool_acc: &mut Vec<AccToolCall>,
     usage_acc: &mut AnthropicUsageAcc,
-) -> anyhow::Result<()> {
+) -> Result<(), DeepseeknovaError> {
     let Ok(event) = serde_json::from_str::<AnthropicSseEvent>(data) else {
         return Ok(());
     };
@@ -730,9 +740,9 @@ async fn process_anthropic_event(
 
 #[allow(clippy::ptr_arg)]
 async fn flush_anthropic_tool_calls(
-    tx: &mpsc::Sender<anyhow::Result<Chunk>>,
+    tx: &mpsc::Sender<Result<Chunk, DeepseeknovaError>>,
     tool_acc: &mut Vec<AccToolCall>,
-) -> anyhow::Result<()> {
+) -> Result<(), DeepseeknovaError> {
     for tc in tool_acc.iter_mut() {
         if tc.started {
             let _ = tx
@@ -889,7 +899,11 @@ mod tests {
                     parameters: serde_json::json!({"type": "object"}),
                 }
             }
-            async fn execute(&self, _ctx: &ToolContext, _args: &str) -> anyhow::Result<String> {
+            async fn execute(
+                &self,
+                _ctx: &ToolContext,
+                _args: &str,
+            ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
                 Ok("ok".into())
             }
         }

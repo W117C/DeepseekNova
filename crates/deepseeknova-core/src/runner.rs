@@ -13,10 +13,16 @@ use tokio_stream::StreamExt;
 #[async_trait::async_trait]
 pub trait Runner: Send + Sync {
     /// Streaming run — returns a stream of events.
-    async fn run_stream(&self, input: RunInput) -> anyhow::Result<RunEventStream>;
+    ///
+    /// 返回 [`crate::DeepseeknovaError`] 而非 `anyhow::Error`。stream 的
+    /// item 类型也是 `Result<RunEvent, DeepseeknovaError>`——Phase 4
+    /// keystone 变更后，stream 内部错误统一使用 `DeepseeknovaError`，
+    /// 全链路不再依赖 `anyhow::Result`。
+    async fn run_stream(&self, input: RunInput)
+        -> Result<RunEventStream, crate::DeepseeknovaError>;
 
     /// Convenience: collect the stream into a final output.
-    async fn run(&self, input: RunInput) -> anyhow::Result<RunOutput> {
+    async fn run(&self, input: RunInput) -> Result<RunOutput, crate::DeepseeknovaError> {
         let mut stream = self.run_stream(input).await?;
         let mut text = String::new();
         let mut tool_calls = Vec::new();
@@ -48,21 +54,34 @@ pub trait Runner: Send + Sync {
     }
 }
 
+/// Runner 一次执行的输入。
 #[derive(Debug, Clone)]
 pub struct RunInput {
+    /// 用户输入的提示文本。
     pub prompt: String,
+    /// 附加图像列表（data: URL 形式，供视觉模型消费）。
     pub images: Vec<String>, // data: URLs for vision-capable models
+    /// 模型覆盖（运行时指定模型，覆盖默认配置）。
     pub model_override: Option<String>,
 }
 
+/// Runner 一次执行的最终输出。
 #[derive(Debug, Clone)]
 pub struct RunOutput {
+    /// 模型产出的文本。
     pub text: String,
+    /// 模型请求的工具调用列表。
     pub tool_calls: Vec<ToolCall>,
+    /// 本次执行的 token 用量（若可用）。
     pub usage: Option<Usage>,
 }
 
-pub type RunEventStream = Pin<Box<dyn Stream<Item = anyhow::Result<RunEvent>> + Send>>;
+/// 运行事件流类型（boxed + pinned 的异步流）。
+///
+/// Phase 4 keystone：item 类型从 `anyhow::Result<RunEvent>` 迁移到
+/// `Result<RunEvent, DeepseeknovaError>`，全链路统一错误类型。
+pub type RunEventStream =
+    Pin<Box<dyn Stream<Item = Result<RunEvent, crate::DeepseeknovaError>> + Send>>;
 
 /// Resolves a permission-gate `Ask` decision by asking a frontend for a user
 /// decision. Returning `true` allows the pending tool call; `false` denies it.
@@ -72,32 +91,52 @@ pub type RunEventStream = Pin<Box<dyn Stream<Item = anyhow::Result<RunEvent>> + 
 /// decisions so non-interactive callers (CLI, tests) keep working.
 #[async_trait::async_trait]
 pub trait ApprovalResponder: Send + Sync {
+    /// 请求用户对一次待审批工具调用的裁决。
+    ///
+    /// 返回 `true` 表示允许执行，`false` 表示拒绝。
     async fn request(&self, id: &str, title: &str, description: Option<&str>) -> bool;
 }
 
 /// RunEvent has no Error variant — errors ride the Stream's Result.
 #[derive(Debug, Clone)]
 pub enum RunEvent {
+    /// 增量文本片段。
     TextDelta(String),
+    /// 增量推理（chain-of-thought）片段，附可选签名。
     ReasoningDelta {
+        /// 推理文本片段。
         text: String,
+        /// 推理签名（部分模型用于校验推理完整性）。
         signature: Option<String>,
     },
+    /// 工具调用开始（携带 id 与工具名）。
     ToolCallStart {
+        /// 工具调用 id。
         id: String,
+        /// 工具名。
         name: String,
     },
+    /// 工具调用参数增量片段。
     ToolCallDelta {
+        /// 工具调用 id。
         id: String,
+        /// 参数增量片段。
         args_delta: String,
     },
+    /// 工具调用结束（携带完整参数）。
     ToolCallEnd {
+        /// 工具调用 id。
         id: String,
+        /// 工具名。
         name: String,
+        /// 完整参数 JSON 字符串。
         arguments: String,
     },
+    /// 工具执行结果（供前端回显）。
     ToolResult {
+        /// 对应的工具调用 id。
         call_id: String,
+        /// 工具结果文本。
         result: String,
     },
     /// 任务质量闭环（A 阶段）：工具执行后质量策略产出的 finding。
@@ -105,6 +144,7 @@ pub enum RunEvent {
     QualityFinding(QualityFinding),
     /// 协议增强：阶段迁移事件（供前端渲染 + 度量）。
     PhaseTransition {
+        /// 阶段迁移详情。
         transition: PhaseTransition,
     },
     /// 协议增强：门控违规记录（供评分卡 protocol 维）。
@@ -113,24 +153,36 @@ pub enum RunEvent {
     DriftFinding(DriftFinding),
     /// P4 完成前确定性验证：一条验证命令的结果（供前端渲染）。
     Verification {
+        /// 验证命令。
         command: String,
+        /// 是否通过。
         passed: bool,
+        /// 结果摘要。
         summary: String,
     },
+    /// 本次执行的 token 用量。
     Usage(Usage),
+    /// 一个对话轮次完成。
     TurnComplete,
+    /// 请求用户审批一次待执行的工具调用。
     ApprovalRequest {
+        /// 审批请求 id。
         id: String,
+        /// 审批标题。
         title: String,
+        /// 审批描述（可选）。
         description: Option<String>,
     },
     /// The run stopped gracefully before completion (max-steps pause or
     /// budget rejection). The task is resumable: frontends should surface
     /// `reason` and, when present, which saved session to resume.
     Paused {
+        /// 暂停原因。
         reason: String,
+        /// 可恢复的会话 id（供前端 resume）。
         session_id: Option<String>,
     },
+    /// 执行完成，携带最终输出。
     Done(RunOutput),
 }
 
@@ -145,52 +197,88 @@ pub enum RunEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WireEvent {
+    /// 增量文本片段。
     TextDelta {
+        /// 文本片段。
         text: String,
     },
+    /// 增量推理片段，附可选签名。
     ReasoningDelta {
+        /// 推理文本片段。
         text: String,
+        /// 推理签名（部分模型用于校验推理完整性）。
         signature: Option<String>,
     },
+    /// 工具调用开始。
     ToolCallStart {
+        /// 工具调用 id。
         id: String,
+        /// 工具名。
         name: String,
     },
+    /// 工具调用参数增量片段。
     ToolCallDelta {
+        /// 工具调用 id。
         id: String,
+        /// 参数增量片段。
         args_delta: String,
     },
+    /// 工具调用结束（携带完整参数）。
     ToolCallEnd {
+        /// 工具调用 id。
         id: String,
+        /// 工具名。
         name: String,
+        /// 完整参数 JSON 字符串。
         arguments: String,
     },
+    /// 工具执行结果。
     ToolResult {
+        /// 对应的工具调用 id。
         call_id: String,
+        /// 工具结果文本。
         result: String,
     },
+    /// 任务质量闭环 finding。
     QualityFinding {
+        /// 质量策略评估结果。
         finding: QualityFinding,
     },
+    /// 协议阶段迁移事件。
     PhaseTransition {
+        /// 阶段迁移详情。
         transition: PhaseTransition,
     },
+    /// 协议门控违规记录。
     GateViolation {
+        /// 门控违规详情。
         violation: GateViolation,
     },
+    /// Execute 阶段 drift 检测产出。
     DriftFinding {
+        /// drift 检测详情。
         drift: DriftFinding,
     },
+    /// P4 完成前确定性验证结果。
     Verification {
+        /// 验证命令。
         command: String,
+        /// 是否通过。
         passed: bool,
+        /// 结果摘要。
         summary: String,
     },
+    /// 本次执行的 token 用量。
     Usage {
+        /// 提示 token 数。
         prompt_tokens: u32,
+        /// 生成 token 数。
         completion_tokens: u32,
+        /// 总 token 数。
         total_tokens: u32,
+        /// 单请求级缓存命中 token 数。
         cache_hit_tokens: u32,
+        /// 单请求级缓存未命中 token 数。
         cache_miss_tokens: u32,
         /// DeepSeek-V4 billed reasoning (chain-of-thought) tokens.
         reasoning_tokens: u32,
@@ -202,14 +290,22 @@ pub enum WireEvent {
         /// （见 [`WireUsageInfo::session_cache_hit_tokens`] 的说明）。
         session_cache_miss_tokens: u32,
     },
+    /// 一个对话轮次完成。
     TurnComplete,
+    /// 请求用户审批一次待执行的工具调用。
     ApprovalRequest {
+        /// 审批请求 id。
         id: String,
+        /// 审批标题。
         title: String,
+        /// 审批描述（可选）。
         description: Option<String>,
     },
+    /// 执行完成，携带最终输出与可选用量。
     Done {
+        /// 最终文本输出。
         text: String,
+        /// token 用量（若可用）。
         usage: Option<WireUsageInfo>,
         /// 关联 run/会话/metrics 的关联键：serve 透传当前 run 对应的
         /// session_id（`/v1/sessions/{id}/chat` 为会话 id，`/v1/chat` 与
@@ -220,19 +316,28 @@ pub enum WireEvent {
         #[serde(default)]
         session_id: Option<String>,
     },
+    /// 执行暂停（可恢复）。
     Paused {
+        /// 暂停原因。
         reason: String,
+        /// 可恢复的会话 id。
         session_id: Option<String>,
     },
+    /// 执行出错。
     Error {
+        /// 错误信息。
         message: String,
     },
 }
 
+/// wire 格式的 token 用量信息（`WireEvent::Usage` 与 `WireEvent::Done` 携带）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireUsageInfo {
+    /// 提示 token 数。
     pub prompt_tokens: u32,
+    /// 生成 token 数。
     pub completion_tokens: u32,
+    /// 总 token 数。
     pub total_tokens: u32,
     /// 单请求级缓存命中 token 数（来自 provider API 的 usage）。
     pub cache_hit_tokens: u32,
@@ -252,6 +357,7 @@ pub struct WireUsageInfo {
 }
 
 impl From<Usage> for WireUsageInfo {
+    /// 将 provider usage 转为 wire 用量信息（会话级缓存字段当前置 0）。
     fn from(u: Usage) -> Self {
         Self {
             prompt_tokens: u.prompt_tokens,
@@ -269,6 +375,7 @@ impl From<Usage> for WireUsageInfo {
 }
 
 impl From<RunEvent> for WireEvent {
+    /// 将运行时事件转为前端消费的 wire 格式。
     fn from(event: RunEvent) -> Self {
         match event {
             RunEvent::TextDelta(text) => WireEvent::TextDelta { text },

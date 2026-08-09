@@ -14,29 +14,43 @@
 //! 等元数据键（`SkillFrontmatter` 结构本身不含这些字段，旧文件解析回退为
 //! 用户手写来源，天然豁免清理）。`reload()` 可在会话边界重新扫描目录。
 
+use crate::DeepseeknovaError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
+/// 模块内 Result 简写：默认错误类型为 [`DeepseeknovaError`]。
+type Result<T> = std::result::Result<T, DeepseeknovaError>;
+
 /// Frontmatter metadata for a skill file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillFrontmatter {
+    /// 技能名（唯一标识；落盘文件名以小写化 + 空格替换为 `-` 派生）。
     pub name: String,
+    /// 技能版本号（语义化版本字符串）。
     pub version: String,
+    /// 一句话描述，用于注入提示与匹配展示。
     pub description: String,
+    /// 触发词列表（强匹配字段，参与 find_matching_skills 命中）。
     #[serde(default)]
     pub triggers: Vec<String>,
+    /// 标签列表（强匹配字段，参与 find_matching_skills 命中）。
     #[serde(default)]
     pub tags: Vec<String>,
+    /// 创建时间（RFC3339 字符串）。
     #[serde(default)]
     pub created_at: String,
+    /// 最近更新时间（RFC3339 字符串；record_use 时刷新）。
     #[serde(default)]
     pub updated_at: String,
+    /// 累计使用次数（record_use 自增；驱动 draft → verified 状态迁移）。
     #[serde(default)]
     pub use_count: u32,
+    /// 累计成功次数（record_use(success=true) 自增）。
     #[serde(default)]
     pub success_count: u32,
+    /// 首次蒸馏产出该技能的会话 id（用户手写 skill 为 None）。
     #[serde(default)]
     pub source_session: Option<String>,
 }
@@ -44,14 +58,16 @@ pub struct SkillFrontmatter {
 /// A complete skill file (frontmatter + body).
 #[derive(Debug, Clone)]
 pub struct Skill {
+    /// YAML frontmatter 元数据。
     pub frontmatter: SkillFrontmatter,
+    /// Markdown 正文（技能说明 / 步骤 / 示例）。
     pub body: String,
 }
 
 impl Skill {
     /// Serialize to Markdown with YAML frontmatter.
     pub fn to_markdown(&self) -> String {
-        let yaml = serde_yaml::to_string(&self.frontmatter).unwrap_or_default();
+        let yaml = serde_yml::to_string(&self.frontmatter).unwrap_or_default();
         format!("---\n{yaml}---\n\n{}\n", self.body)
     }
 
@@ -65,7 +81,7 @@ impl Skill {
         let yaml_part = &content[3..3 + end];
         let body = content[3 + end + 3..].trim().to_string();
 
-        let frontmatter: SkillFrontmatter = serde_yaml::from_str(yaml_part).ok()?;
+        let frontmatter: SkillFrontmatter = serde_yml::from_str(yaml_part).ok()?;
         Some(Self { frontmatter, body })
     }
 }
@@ -73,11 +89,17 @@ impl Skill {
 /// Skill extraction input — what the agent observed during task execution.
 #[derive(Debug, Clone)]
 pub struct TaskObservation {
+    /// 任务的自然语言描述。
     pub task_description: String,
+    /// 任务期间调用的工具列表（用于护栏与摘要沉淀）。
     pub tool_calls: Vec<String>,
+    /// 任务执行的步骤序列（用于护栏与摘要沉淀）。
     pub steps_taken: Vec<String>,
+    /// 任务最终结果。
     pub outcome: TaskOutcome,
+    /// 用户反馈（失败场景下沉淀为教训）。
     pub user_feedback: Option<String>,
+    /// 所属会话 id（用于会话级护栏与跨会话统计）。
     pub session_id: String,
     /// 任务触碰的文件路径（写类工具参数提取），用于任务-文件关联沉淀（P3.3）。
     pub files: Vec<String>,
@@ -86,8 +108,11 @@ pub struct TaskObservation {
 /// Outcome of a task execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskOutcome {
+    /// 任务成功完成。
     Success,
+    /// 部分完成（有进展但未达全部目标）。
     PartialSuccess,
+    /// 任务失败（会触发教训沉淀路径）。
     Failure,
 }
 
@@ -215,19 +240,19 @@ fn meta_from_markdown(content: &str) -> SkillMeta {
     let Some(yaml_part) = frontmatter_yaml(content) else {
         return meta;
     };
-    let Ok(v) = serde_yaml::from_str::<serde_yaml::Value>(yaml_part) else {
+    let Ok(v) = serde_yml::from_str::<serde_yml::Value>(yaml_part) else {
         return meta;
     };
     let Some(map) = v.as_mapping() else {
         return meta;
     };
     if let Some(s) = map.get("source") {
-        if let Ok(src) = serde_yaml::from_value::<SkillSource>(s.clone()) {
+        if let Ok(src) = serde_yml::from_value::<SkillSource>(s.clone()) {
             meta.source = src;
         }
     }
     if let Some(s) = map.get("state") {
-        if let Ok(st) = serde_yaml::from_value::<SkillState>(s.clone()) {
+        if let Ok(st) = serde_yml::from_value::<SkillState>(s.clone()) {
             meta.state = st;
         }
     }
@@ -254,15 +279,15 @@ fn meta_from_markdown(content: &str) -> SkillMeta {
 /// `SkillFrontmatter` 结构不含这些键，`Skill::from_markdown` 解析时忽略未知键，
 /// 故用户手写文件与旧文件格式不受影响。
 fn skill_markdown_with_meta(skill: &Skill, meta: &SkillMeta) -> String {
-    let mut map: serde_yaml::Mapping =
-        serde_yaml::from_str(&serde_yaml::to_string(&skill.frontmatter).unwrap_or_default())
+    let mut map: serde_yml::Mapping =
+        serde_yml::from_str(&serde_yml::to_string(&skill.frontmatter).unwrap_or_default())
             .unwrap_or_default();
-    if let serde_yaml::Value::Mapping(m) = serde_yaml::to_value(meta).unwrap_or_default() {
+    if let serde_yml::Value::Mapping(m) = serde_yml::to_value(meta).unwrap_or_default() {
         for (k, v) in m {
             map.insert(k, v);
         }
     }
-    let yaml = serde_yaml::to_string(&serde_yaml::Value::Mapping(map)).unwrap_or_default();
+    let yaml = serde_yml::to_string(&serde_yml::Value::Mapping(map)).unwrap_or_default();
     format!("---\n{yaml}---\n\n{}\n", skill.body)
 }
 
@@ -274,6 +299,7 @@ pub struct SkillManager {
 }
 
 impl SkillManager {
+    /// 创建技能管理器并立即从配置的 skill_dir 装载（含 auto/ 子目录）。
     pub fn new(config: SkillExtractionConfig) -> Self {
         let mut manager = Self {
             config,
@@ -285,7 +311,7 @@ impl SkillManager {
 
     /// Load all skills from the skill directory (recursively, including
     /// the `auto/` subdirectory for distilled skills).
-    fn load_skills(&mut self) -> anyhow::Result<()> {
+    fn load_skills(&mut self) -> Result<()> {
         let dir = self.config.skill_dir.clone();
         if !dir.exists() {
             return Ok(());
@@ -295,7 +321,7 @@ impl SkillManager {
         Ok(())
     }
 
-    fn load_dir(&mut self, dir: &Path) -> anyhow::Result<()> {
+    fn load_dir(&mut self, dir: &Path) -> Result<()> {
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
@@ -319,7 +345,7 @@ impl SkillManager {
     /// Re-scan the skill directory (including `auto/`) and rebuild the
     /// in-memory cache. Runtime state (source/state/sessions) is persisted in
     /// the skill file frontmatter, so it survives reloads.
-    pub fn reload(&mut self) -> anyhow::Result<()> {
+    pub fn reload(&mut self) -> Result<()> {
         self.skills.clear();
         self.load_skills()
     }
@@ -335,7 +361,7 @@ impl SkillManager {
     /// The actual content extraction is done by the LLM — this handles storage.
     /// User-authored skills are written to the skill directory root (no
     /// `source`/`state` meta keys → always exempt from auto-cleanup).
-    pub fn create_skill(&mut self, skill: Skill) -> anyhow::Result<()> {
+    pub fn create_skill(&mut self, skill: Skill) -> Result<()> {
         std::fs::create_dir_all(&self.config.skill_dir)?;
         let filename = format!(
             "{}/{}.md",
@@ -366,10 +392,12 @@ impl SkillManager {
         body: &str,
         tags: Vec<String>,
         source_session: Option<&str>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<()> {
         let title = title.trim();
         if title.is_empty() {
-            anyhow::bail!("distilled skill title is empty");
+            return Err(DeepseeknovaError::Config(
+                "distilled skill title is empty".into(),
+            ));
         }
         let now = chrono::Utc::now().to_rfc3339();
         // slug 白名单化：LLM 蒸馏产出的 title 不可信，含路径分隔符/.. 的
@@ -377,7 +405,9 @@ impl SkillManager {
         // Unicode 字母数字（含 CJK，中文标题蒸馏产物很常见）与 `-`，其余
         // 映射为 `-`；纯标点/空白标题仍会产出空 slug 并拒绝。
         if title.contains('/') || title.contains('\\') || title.contains("..") {
-            anyhow::bail!("distilled skill title contains path separators: {title:?}");
+            return Err(DeepseeknovaError::Config(format!(
+                "distilled skill title contains path separators: {title:?}"
+            )));
         }
         let name: String = title
             .to_lowercase()
@@ -393,11 +423,15 @@ impl SkillManager {
             .trim_matches('-')
             .to_string();
         if name.is_empty() {
-            anyhow::bail!("distilled skill title produced an empty slug: {title:?}");
+            return Err(DeepseeknovaError::Config(format!(
+                "distilled skill title produced an empty slug: {title:?}"
+            )));
         }
         // 标点类标题可能缩成 "." / ".."（如 `。.`），会生成隐藏/危险文件名。
         if name == "." || name == ".." {
-            anyhow::bail!("distilled skill title produced a dot-only slug: {title:?}");
+            return Err(DeepseeknovaError::Config(format!(
+                "distilled skill title produced a dot-only slug: {title:?}"
+            )));
         }
         let skill = Skill {
             frontmatter: SkillFrontmatter {
@@ -420,10 +454,10 @@ impl SkillManager {
         // 期望行为，允许覆盖。检查先于写盘，避免失败时留下孤儿文件。
         if let Some(existing) = self.skills.get(&name) {
             if existing.meta.source != SkillSource::Distill {
-                anyhow::bail!(
+                return Err(DeepseeknovaError::Config(format!(
                     "distilled skill name '{name}' collides with user skill (source={:?})",
                     existing.meta.source
-                );
+                )));
             }
         }
         let auto_dir = self.config.skill_dir.join("auto");
@@ -456,7 +490,7 @@ impl SkillManager {
         skill_name: &str,
         success: bool,
         session_id: Option<&str>,
-    ) -> anyhow::Result<Option<SkillState>> {
+    ) -> Result<Option<SkillState>> {
         let Some(ms) = self.skills.get_mut(skill_name) else {
             return Ok(None);
         };
@@ -502,7 +536,7 @@ impl SkillManager {
     /// ordered by `use_count` asc then `updated_at` asc. User-authored,
     /// `verified`, and `active` skills are always exempt — never deleted.
     /// Returns the number of removed skills.
-    pub fn prune_auto_drafts(&mut self, max_retain: usize) -> anyhow::Result<usize> {
+    pub fn prune_auto_drafts(&mut self, max_retain: usize) -> Result<usize> {
         let mut candidates: Vec<(String, PathBuf, u32, String)> = self
             .skills
             .iter()

@@ -38,13 +38,21 @@ impl Default for WikiConfig {
 /// An architecture decision record (ADR).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Adr {
+    /// ADR 编号（如 "001"）。
     pub id: String,
+    /// 决策标题。
     pub title: String,
+    /// 当前状态。
     pub status: AdrStatus,
+    /// 决策日期（字符串形式）。
     pub date: String,
+    /// 决策背景与约束。
     pub context: String,
+    /// 最终决策内容。
     pub decision: String,
+    /// 决策带来的后果。
     pub consequences: String,
+    /// 考虑过的备选方案列表。
     pub alternatives: Vec<String>,
 }
 
@@ -52,13 +60,18 @@ pub struct Adr {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum AdrStatus {
+    /// 已提出，待评审。
     Proposed,
+    /// 已采纳。
     Accepted,
+    /// 已废弃。
     Deprecated,
+    /// 已被后续 ADR 取代。
     Superseded,
 }
 
 impl Adr {
+    /// 将 ADR 渲染为 Markdown 文本。
     pub fn to_markdown(&self) -> String {
         format!(
             "# ADR-{id}: {title}\n\n\
@@ -94,25 +107,37 @@ impl Adr {
 /// A project wiki entry (a single wiki page).
 #[derive(Debug, Clone)]
 pub struct WikiPage {
+    /// 页面标题。
     pub title: String,
+    /// 输出文件名（含 `.md` 后缀）。
     pub filename: String,
+    /// 页面 Markdown 内容。
     pub content: String,
+    /// 页面所属类别。
     pub category: PageCategory,
 }
 
 /// Wiki page category.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PageCategory {
+    /// 首页。
     Home,
+    /// 架构文档。
     Architecture,
+    /// 架构决策记录（ADR）。
     Adr,
+    /// API 参考。
     Api,
+    /// 使用指南。
     Guide,
+    /// 变更日志。
     Changelog,
+    /// 依赖说明。
     Dependency,
 }
 
 impl PageCategory {
+    /// 返回该类别在 wiki 输出目录下的子目录名；首页与变更日志返回空串。
     pub fn dir(&self) -> &str {
         match self {
             Self::Home => "",
@@ -133,6 +158,7 @@ pub struct WikiGenerator {
 }
 
 impl WikiGenerator {
+    /// 用给定配置创建一个 wiki 生成器。
     pub fn new(config: WikiConfig) -> Self {
         Self {
             config,
@@ -196,7 +222,7 @@ impl WikiGenerator {
     }
 
     /// Write all pages to disk.
-    pub fn generate(&self) -> anyhow::Result<Vec<PathBuf>> {
+    pub fn generate(&self) -> Result<Vec<PathBuf>, crate::DeepseeknovaError> {
         std::fs::create_dir_all(&self.config.output_dir)?;
         let mut written = Vec::new();
 
@@ -274,18 +300,26 @@ impl WikiGenerator {
 /// Project summary for the home page.
 #[derive(Debug, Clone)]
 pub struct ProjectSummary {
+    /// 项目名称。
     pub name: String,
+    /// 项目简介。
     pub description: String,
+    /// 项目包含的模块列表。
     pub modules: Vec<ModuleSummary>,
+    /// 关键决策列表。
     pub key_decisions: Vec<String>,
+    /// 度量指标（键值对）列表。
     pub metrics: Vec<(String, String)>,
 }
 
 /// Module summary.
 #[derive(Debug, Clone)]
 pub struct ModuleSummary {
+    /// 模块名称。
     pub name: String,
+    /// 模块简介。
     pub description: String,
+    /// 指向模块文档的链接。
     pub doc_link: String,
 }
 

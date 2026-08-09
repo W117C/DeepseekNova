@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use deepseeknova_context::*;
 use deepseeknova_core::types::{Message, Role, ToolSchema};
 use tempfile::TempDir;

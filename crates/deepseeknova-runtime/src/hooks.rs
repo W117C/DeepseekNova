@@ -154,7 +154,11 @@ mod tests {
         fn read_only(&self) -> bool {
             false
         }
-        async fn execute(&self, _ctx: &ToolContext, _args: &str) -> anyhow::Result<String> {
+        async fn execute(
+            &self,
+            _ctx: &ToolContext,
+            _args: &str,
+        ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
             *self.calls.lock().unwrap() += 1;
             Ok("written".into())
         }

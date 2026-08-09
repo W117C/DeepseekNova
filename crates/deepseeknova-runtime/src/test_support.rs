@@ -13,7 +13,7 @@ impl deepseeknova_provider::Provider for StubProvider {
     async fn generate(
         &self,
         _validated: deepseeknova_provider::ValidatedRequest<'_>,
-    ) -> anyhow::Result<deepseeknova_core::Message> {
+    ) -> Result<deepseeknova_core::Message, deepseeknova_core::DeepseeknovaError> {
         Ok(deepseeknova_core::Message {
             role: deepseeknova_core::Role::Assistant,
             content: "ok".to_string(),
@@ -39,7 +39,7 @@ impl deepseeknova_provider::Provider for EmptyProvider {
     async fn generate(
         &self,
         _validated: deepseeknova_provider::ValidatedRequest<'_>,
-    ) -> anyhow::Result<deepseeknova_core::Message> {
+    ) -> Result<deepseeknova_core::Message, deepseeknova_core::DeepseeknovaError> {
         Ok(deepseeknova_core::Message {
             role: deepseeknova_core::Role::Assistant,
             content: String::new(),
@@ -64,5 +64,26 @@ pub(crate) fn marker_cmd(
         ],
         timeout_secs: Some(10),
         disabled: false,
+    }
+}
+
+/// env 串行化锁：`std::env` 的 `set_var`/`remove_var` 非线程安全，所有修改
+/// env 或构建 reqwest::Client 的测试须用此锁串行化，避免并发 UB。
+/// 异步测试用 `.lock().await`，同步测试用 `.blocking_lock()`。
+pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// 清除代理环境变量：reqwest 默认尊重 HTTP_PROXY/HTTPS_PROXY，会把请求转发
+/// 到代理，代理无法连本地 mock 端口导致 Connect 失败。须在 ENV_LOCK guard
+/// 内调用。
+pub(crate) fn clear_proxy_env() {
+    for v in &[
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ] {
+        std::env::remove_var(v);
     }
 }

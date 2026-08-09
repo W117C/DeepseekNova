@@ -2,6 +2,7 @@
 
 use crate::finding::Finding;
 use crate::rule::Severity;
+use deepseeknova_core::DeepseeknovaError;
 
 /// Aggregated scan output.
 pub struct ScanReport {
@@ -56,7 +57,7 @@ impl ScanReport {
     }
 
     /// Render as JSON (array of findings).
-    pub fn to_json(&self) -> anyhow::Result<String> {
+    pub fn to_json(&self) -> Result<String, DeepseeknovaError> {
         Ok(serde_json::to_string_pretty(&self.findings)?)
     }
 

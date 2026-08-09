@@ -115,6 +115,22 @@ pub enum GraphError {
     EntityNotFound(String),
 }
 
+/// 把 [`GraphError`] 转换为 [`deepseeknova_core::DeepseeknovaError`]。
+///
+/// 本 impl 利用 orphan rule 放在拥有 `GraphError` 的本 crate 中
+/// （`DeepseeknovaError` 来自 `deepseeknova-core`，`From` 来自 std）。这使 `?`
+/// 运算符能把 `Result<_, GraphError>` 直接用于返回 `Result<_, DeepseeknovaError>`
+/// 的函数，无需显式 `.map_err`。
+///
+/// 当前映射保留人可读消息（`to_string()`），丢失变体级别的类型信息；未来若
+/// 需在 `DeepseeknovaError` 上做按变体 dispatch，可在 core 加 `Graph(Box<dyn
+/// std::error::Error>)` 之类的富类型变体（additive，不破坏下游 match）。
+impl From<GraphError> for deepseeknova_core::DeepseeknovaError {
+    fn from(err: GraphError) -> Self {
+        deepseeknova_core::DeepseeknovaError::Graph(err.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,6 +163,54 @@ mod tests {
             EdgeKind::References,
         ] {
             assert_eq!(EdgeKind::parse(e.as_str()), Some(e));
+        }
+    }
+
+    /// 验证 `From<GraphError> for DeepseeknovaError` 让 `?` 直接把
+    /// `Result<_, GraphError>` 用于返回 `Result<_, DeepseeknovaError>` 的函数。
+    /// 这是 P1-3 Phase 2 在 graph crate 的 pilot：orphan rule impl 落地。
+    #[test]
+    fn graph_error_converts_to_deepseeknova_error_via_question_mark() {
+        fn inner() -> Result<(), GraphError> {
+            Err(GraphError::EntityNotFound("missing".into()))
+        }
+        fn outer() -> Result<(), deepseeknova_core::DeepseeknovaError> {
+            inner()?;
+            Ok(())
+        }
+        let err = outer().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("entity not found"),
+            "应保留 GraphError 的消息: {msg}"
+        );
+        assert!(
+            msg.contains("graph error"),
+            "应通过 DeepseeknovaError::Graph 变体渲染: {msg}"
+        );
+        assert!(!err.is_retryable(), "Graph 错误默认不可重试");
+    }
+
+    /// 验证 `IndexBusy` 与 `Storage` 变体也走同一映射路径。
+    #[test]
+    fn graph_error_variants_all_map_to_graph_category() {
+        let cases: Vec<GraphError> = vec![
+            GraphError::IndexBusy,
+            GraphError::Parse {
+                path: "src/x.rs".into(),
+                lang: "rust",
+            },
+            GraphError::Storage(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(1),
+                Some("database locked".into()),
+            )),
+        ];
+        for ge in cases {
+            let de: deepseeknova_core::DeepseeknovaError = ge.into();
+            assert!(
+                matches!(de, deepseeknova_core::DeepseeknovaError::Graph(_)),
+                "所有 GraphError 变体应映射到 Graph 类别"
+            );
         }
     }
 }

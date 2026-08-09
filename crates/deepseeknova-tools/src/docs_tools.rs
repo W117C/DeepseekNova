@@ -6,7 +6,7 @@
 //! 所有错误转成对模型友好的提示文本，不向运行器抛 Err。
 
 use async_trait::async_trait;
-use deepseeknova_core::{Tool, ToolContext, ToolSchema};
+use deepseeknova_core::{DeepseeknovaError, Tool, ToolContext, ToolSchema};
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
@@ -28,16 +28,17 @@ pub struct Context7DocsTool {
 
 /// 进程级共享 HTTP 客户端构造（客户端不随请求变化，一次构建复用）。
 /// 构造失败返回 `Err` 向上传播（L2：不再 `expect` panic 宿主）。
-fn build_shared_client() -> anyhow::Result<reqwest::Client> {
-    Ok(reqwest::Client::builder()
+fn build_shared_client() -> Result<reqwest::Client, DeepseeknovaError> {
+    reqwest::Client::builder()
         .timeout(DEFAULT_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
         .user_agent(format!("deepseeknova-tools/{}", env!("CARGO_PKG_VERSION")))
-        .build()?)
+        .build()
+        .map_err(|e| DeepseeknovaError::Tool(format!("failed to build HTTP client: {e}")))
 }
 
 impl Context7DocsTool {
-    pub fn new() -> anyhow::Result<Self> {
+    pub fn new() -> Result<Self, DeepseeknovaError> {
         Ok(Self {
             base_url: DEFAULT_BASE_URL.to_string(),
             client: build_shared_client()?,
@@ -46,7 +47,7 @@ impl Context7DocsTool {
 
     /// 仅测试可见：注入本地测试服务器地址（127.0.0.1 / localhost）。
     #[cfg(test)]
-    fn with_base_url(base_url: impl Into<String>) -> anyhow::Result<Self> {
+    fn with_base_url(base_url: impl Into<String>) -> Result<Self, DeepseeknovaError> {
         Ok(Self {
             base_url: base_url.into(),
             client: build_shared_client()?,
@@ -65,8 +66,11 @@ struct Context7DocsArgs {
 }
 
 /// 构造搜索库的 URL：`/api/v2/libs/search?libraryName=<名>&query=<主题>`。
-fn search_url(base: &str, library: &str, query: &str) -> anyhow::Result<url::Url> {
-    let mut u = url::Url::parse(base)?.join(SEARCH_PATH)?;
+fn search_url(base: &str, library: &str, query: &str) -> Result<url::Url, DeepseeknovaError> {
+    let mut u = url::Url::parse(base)
+        .map_err(|e| DeepseeknovaError::Tool(format!("invalid base URL '{base}': {e}")))?
+        .join(SEARCH_PATH)
+        .map_err(|e| DeepseeknovaError::Tool(format!("failed to join search path: {e}")))?;
     u.query_pairs_mut()
         .append_pair("libraryName", library)
         .append_pair("query", query);
@@ -74,8 +78,11 @@ fn search_url(base: &str, library: &str, query: &str) -> anyhow::Result<url::Url
 }
 
 /// 构造拉文档片段的 URL：`/api/v2/context?libraryId=<id>&query=<主题>&type=txt`。
-fn context_url(base: &str, library_id: &str, query: &str) -> anyhow::Result<url::Url> {
-    let mut u = url::Url::parse(base)?.join(CONTEXT_PATH)?;
+fn context_url(base: &str, library_id: &str, query: &str) -> Result<url::Url, DeepseeknovaError> {
+    let mut u = url::Url::parse(base)
+        .map_err(|e| DeepseeknovaError::Tool(format!("invalid base URL '{base}': {e}")))?
+        .join(CONTEXT_PATH)
+        .map_err(|e| DeepseeknovaError::Tool(format!("failed to join context path: {e}")))?;
     u.query_pairs_mut()
         .append_pair("libraryId", library_id)
         .append_pair("query", query)
@@ -110,11 +117,12 @@ fn truncate_text(text: &str, max_chars: usize) -> String {
 }
 
 /// 域名固定：生产只允许 `context7.com`；测试构建额外允许本地地址。
-fn validate_base_url(base: &str) -> anyhow::Result<()> {
-    let u = url::Url::parse(base).map_err(|e| anyhow::anyhow!("invalid base URL '{base}': {e}"))?;
+fn validate_base_url(base: &str) -> Result<(), DeepseeknovaError> {
+    let u = url::Url::parse(base)
+        .map_err(|e| DeepseeknovaError::Tool(format!("invalid base URL '{base}': {e}")))?;
     let host = u
         .host_str()
-        .ok_or_else(|| anyhow::anyhow!("base URL has no host"))?;
+        .ok_or_else(|| DeepseeknovaError::Tool("base URL has no host".to_string()))?;
     if host == "context7.com" {
         return Ok(());
     }
@@ -122,7 +130,9 @@ fn validate_base_url(base: &str) -> anyhow::Result<()> {
     if host == "127.0.0.1" || host == "localhost" {
         return Ok(());
     }
-    anyhow::bail!("blocked base URL host '{host}'; only context7.com is allowed")
+    Err(DeepseeknovaError::Tool(format!(
+        "blocked base URL host '{host}'; only context7.com is allowed"
+    )))
 }
 
 fn render_docs(
@@ -202,7 +212,11 @@ impl Tool for Context7DocsTool {
         true
     }
 
-    async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
+    async fn execute(
+        &self,
+        ctx: &ToolContext,
+        args: &str,
+    ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
         deepseeknova_security::context::enforce_capability(
             ctx,
             &self.schema().name,
@@ -210,7 +224,7 @@ impl Tool for Context7DocsTool {
         )?;
         let parsed: Context7DocsArgs = serde_json::from_str(args)?;
         if ctx.cancellation.is_cancelled() {
-            anyhow::bail!("cancelled");
+            return Err(deepseeknova_core::DeepseeknovaError::Cancelled);
         }
         if let Err(e) = validate_base_url(&self.base_url) {
             return Ok(e.to_string());
@@ -278,6 +292,25 @@ mod tests {
     use super::*;
     use deepseeknova_core::tool::{Tool, ToolContext};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// env 串行化锁：std::env 修改非线程安全，所有修改 env 或构建 reqwest::Client
+    /// 的测试须用此锁串行化。异步测试用 `.lock().await`。
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// 清除代理环境变量：reqwest 默认尊重 HTTP_PROXY/HTTPS_PROXY，会把请求转发
+    /// 到代理，代理无法连本地 mock 端口导致 Connect 失败或 hang。
+    fn clear_proxy_env() {
+        for v in &[
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+        ] {
+            std::env::remove_var(v);
+        }
+    }
 
     fn ctx_with_network() -> ToolContext {
         ToolContext::new("c7")
@@ -410,6 +443,8 @@ mod tests {
 
     #[tokio::test]
     async fn execute_fetches_docs_from_local_server() {
+        let _guard = ENV_LOCK.lock().await;
+        clear_proxy_env();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(serve(
@@ -441,6 +476,8 @@ mod tests {
 
     #[tokio::test]
     async fn execute_reports_missing_library_via_http() {
+        let _guard = ENV_LOCK.lock().await;
+        clear_proxy_env();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(serve(listener, vec![r#"{"results":[]}"#]));
@@ -461,6 +498,8 @@ mod tests {
 
     #[tokio::test]
     async fn execute_maps_http_error_to_friendly_hint() {
+        let _guard = ENV_LOCK.lock().await;
+        clear_proxy_env();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {

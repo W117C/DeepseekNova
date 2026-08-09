@@ -1,6 +1,6 @@
 use crate::protocol;
 use crate::types::*;
-use anyhow::Context;
+use deepseeknova_core::DeepseeknovaError;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -28,7 +28,7 @@ const WRITE_CHANNEL_CAPACITY: usize = 1024;
 
 /// Tracks a pending JSON-RPC request waiting for a response.
 struct PendingRequest {
-    response_tx: oneshot::Sender<anyhow::Result<Value>>,
+    response_tx: oneshot::Sender<Result<Value, DeepseeknovaError>>,
 }
 
 /// A live, initialized connection to an MCP server process.
@@ -91,7 +91,7 @@ impl McpConnection {
         args: &[String],
         env: &[(String, String)],
         request_timeout: Duration,
-    ) -> anyhow::Result<Arc<McpConnection>> {
+    ) -> Result<Arc<McpConnection>, DeepseeknovaError> {
         // Spawn child process
         let mut cmd = Command::new(command);
         cmd.args(args)
@@ -104,18 +104,18 @@ impl McpConnection {
             cmd.env(key, val);
         }
 
-        let mut child = cmd
-            .spawn()
-            .with_context(|| format!("failed to spawn MCP server: {command}"))?;
+        let mut child = cmd.spawn().map_err(|e| {
+            DeepseeknovaError::Runner(format!("failed to spawn MCP server: {command}: {e}"))
+        })?;
 
         let stdin = child
             .stdin
             .take()
-            .context("no stdin on MCP child process")?;
+            .ok_or_else(|| DeepseeknovaError::Runner("no stdin on MCP child process".into()))?;
         let stdout = child
             .stdout
             .take()
-            .context("no stdout on MCP child process")?;
+            .ok_or_else(|| DeepseeknovaError::Runner("no stdout on MCP child process".into()))?;
 
         let conn = Self::from_streams(
             stdin,
@@ -148,7 +148,7 @@ impl McpConnection {
         child: Option<Child>,
         request_timeout: Duration,
         write_capacity: usize,
-    ) -> anyhow::Result<Arc<Self>>
+    ) -> Result<Arc<Self>, DeepseeknovaError>
     where
         W: AsyncWrite + Unpin + Send + 'static,
         R: AsyncRead + Unpin + Send + 'static,
@@ -238,9 +238,9 @@ impl McpConnection {
             // Drain pending on disconnect
             let mut map = pending_r.write().await;
             for (_, p) in map.drain() {
-                let _ = p
-                    .response_tx
-                    .send(Err(anyhow::anyhow!("MCP connection closed")));
+                let _ = p.response_tx.send(Err(DeepseeknovaError::Runner(
+                    "MCP connection closed".into(),
+                )));
             }
         });
 
@@ -277,14 +277,18 @@ impl McpConnection {
     /// supported version and retries with the highest mutually supported one
     /// when the server reports a version mismatch. The version the server
     /// echoes back in `InitializeResult.protocolVersion` is authoritative.
-    pub(crate) async fn handshake(&self, request_timeout: Duration) -> anyhow::Result<()> {
+    pub(crate) async fn handshake(
+        &self,
+        request_timeout: Duration,
+    ) -> Result<(), DeepseeknovaError> {
         let init_result = self
             .negotiate_initialize(request_timeout)
             .await
-            .context("MCP initialize failed")?;
+            .map_err(|e| DeepseeknovaError::Runner(format!("MCP initialize failed: {e}")))?;
 
-        let init: InitializeResult =
-            serde_json::from_value(init_result).context("failed to parse MCP initialize result")?;
+        let init: InitializeResult = serde_json::from_value(init_result).map_err(|e| {
+            DeepseeknovaError::Runner(format!("failed to parse MCP initialize result: {e}"))
+        })?;
 
         // Store server info
         *self.server_info.write().await = init.server_info;
@@ -310,7 +314,10 @@ impl McpConnection {
 
     /// Send `initialize` to the server, retrying with a lower protocol version
     /// on a version-mismatch error. Returns the `initialize` `result` value.
-    async fn negotiate_initialize(&self, request_timeout: Duration) -> anyhow::Result<Value> {
+    async fn negotiate_initialize(
+        &self,
+        request_timeout: Duration,
+    ) -> Result<Value, DeepseeknovaError> {
         let mut candidate = protocol::preferred_protocol_version().to_string();
 
         loop {
@@ -341,16 +348,16 @@ impl McpConnection {
                             continue;
                         }
                     }
-                    anyhow::bail!(
+                    return Err(DeepseeknovaError::Runner(format!(
                         "MCP: no mutually supported protocol version (client {:?}, server {supported:?})",
                         protocol::SUPPORTED_PROTOCOL_VERSIONS
-                    );
+                    )));
                 }
                 let msg = err
                     .get("message")
                     .and_then(|m| m.as_str())
                     .unwrap_or("unknown error");
-                anyhow::bail!("MCP error: {msg}");
+                return Err(DeepseeknovaError::Runner(format!("MCP error: {msg}")));
             }
 
             return Ok(resp.get("result").cloned().unwrap_or(Value::Null));
@@ -366,7 +373,7 @@ impl McpConnection {
         method: &str,
         params: Option<Value>,
         timeout_dur: Duration,
-    ) -> anyhow::Result<Value> {
+    ) -> Result<Value, DeepseeknovaError> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
 
@@ -387,9 +394,10 @@ impl McpConnection {
             self.write_tx
                 .send(format!("{req_str}\n"))
                 .await
-                .map_err(|_| anyhow::anyhow!("MCP write channel closed"))?;
-            rx.await
-                .map_err(|_| anyhow::anyhow!("MCP request cancelled for {method}"))?
+                .map_err(|_| DeepseeknovaError::Runner("MCP write channel closed".into()))?;
+            rx.await.map_err(|_| {
+                DeepseeknovaError::Runner(format!("MCP request cancelled for {method}"))
+            })?
         })
         .await;
 
@@ -403,7 +411,9 @@ impl McpConnection {
             }
             Err(_) => {
                 self.pending.write().await.remove(&id);
-                anyhow::bail!("MCP request '{method}' timed out after {timeout_dur:?}")
+                Err(DeepseeknovaError::Runner(format!(
+                    "MCP request '{method}' timed out after {timeout_dur:?}"
+                )))
             }
         }
     }
@@ -415,14 +425,14 @@ impl McpConnection {
         method: &str,
         params: Option<Value>,
         timeout_dur: Duration,
-    ) -> anyhow::Result<Value> {
+    ) -> Result<Value, DeepseeknovaError> {
         let resp = self.send_full(method, params, timeout_dur).await?;
         if let Some(err) = resp.get("error") {
             let msg = err
                 .get("message")
                 .and_then(|m| m.as_str())
                 .unwrap_or("unknown error");
-            anyhow::bail!("MCP error: {msg}");
+            return Err(DeepseeknovaError::Runner(format!("MCP error: {msg}")));
         }
         Ok(resp.get("result").cloned().unwrap_or(Value::Null))
     }
@@ -433,7 +443,7 @@ impl McpConnection {
         method: &str,
         params: Option<Value>,
         timeout_dur: Duration,
-    ) -> anyhow::Result<Value> {
+    ) -> Result<Value, DeepseeknovaError> {
         self.send_raw(method, params, timeout_dur).await
     }
 
@@ -709,7 +719,7 @@ mod tests {
             .await
             .expect_err("rejected initialize must fail handshake");
         assert!(
-            err.chain().any(|c| c.to_string().contains("init denied")),
+            err.to_string().contains("init denied"),
             "unexpected error: {err:#}"
         );
     }

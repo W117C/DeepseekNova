@@ -1,22 +1,33 @@
 use serde::{Deserialize, Serialize};
 
+/// 对话消息的角色类型。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
+    /// 系统指令角色。
     System,
+    /// 用户角色。
     User,
+    /// 助手角色。
     Assistant,
+    /// 工具调用结果角色。
     Tool,
 }
 
+/// 一条对话消息。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
+    /// 消息角色。
     pub role: Role,
+    /// 消息文本内容。
     pub content: String,
+    /// 可选的消息作者名称。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// 助手发起的工具调用列表。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
+    /// 该工具结果对应的工具调用 ID（仅 Tool 角色消息使用）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     /// DeepSeek reasoning content — must be passed back to the API
@@ -53,31 +64,42 @@ impl Message {
 /// while keeping tool calls causes DeepSeek V4 to return HTTP 400.
 #[derive(Debug, Clone)]
 pub struct ReasoningBlock {
+    /// 推理文本内容。
     pub text: String,
     /// True when this reasoning is paired with tool calls in the same turn.
     /// History compression must respect this — never drop reasoning alone.
     pub must_replay: bool,
 }
 
+/// 一次工具调用请求。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
+    /// 工具调用 ID（用于关联后续的 Tool 结果）。
     pub id: String,
+    /// 调用类型，通常为 "function"。
     #[serde(rename = "type")]
     pub ty: String, // typically "function"
+    /// 被调用的函数及参数。
     pub function: FunctionCall,
 }
 
+/// 函数调用的名称与参数。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionCall {
+    /// 函数名。
     pub name: String,
+    /// 函数参数（JSON 字符串）。
     pub arguments: String,
 }
 
 /// Schema definition for a tool exposed to the model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolSchema {
+    /// 工具名称。
     pub name: String,
+    /// 工具描述。
     pub description: String,
+    /// 参数 JSON Schema。
     pub parameters: serde_json::Value,
 }
 

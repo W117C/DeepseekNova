@@ -15,7 +15,7 @@
 
 use crate::memory::embedding::EmbeddingProvider;
 use crate::memory::lifecycle::{LifecycleMeta, MemoryLifecycleStage};
-use anyhow::{Context, Result};
+use crate::DeepseeknovaError;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -24,15 +24,26 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::info;
 
+/// 模块内 Result 简写：默认错误类型为 [`DeepseeknovaError`]（对齐 anyhow 迁移前
+/// 的 `anyhow::Result<T>` 习惯，所有签名无需逐条标注错误类型）。
+type Result<T> = std::result::Result<T, DeepseeknovaError>;
+
 /// A single memory entry stored in the database.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryEntry {
+    /// 唯一 id（FTS 三表与 memory_meta 行的主键）。
     pub id: String,
+    /// 记忆内容（FTS 索引主体）。
     pub content: String,
+    /// 标签列表（FTS 索引、参与匹配）。
     pub tags: Vec<String>,
+    /// 所属记忆类别。
     pub category: MemoryCategory,
+    /// 来源标识（如 "auto-distill" / "remember-tool" / "reflect-loop"）。
     pub source: String,
+    /// 创建时间戳（unix 秒）。
     pub created_at: i64,
+    /// 重要性 [0.0, 1.0]（生命周期与排序融合因子）。
     pub importance: f32,
 }
 
@@ -51,6 +62,7 @@ pub enum MemoryCategory {
 }
 
 impl MemoryCategory {
+    /// 返回类别的字符串标识（与 FTS 表中存储值一致）。
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::ShortTerm => "short_term",
@@ -64,8 +76,11 @@ impl MemoryCategory {
 /// Search result from FTS5 query.
 #[derive(Debug, Clone)]
 pub struct MemorySearchResult {
+    /// 命中的记忆条目。
     pub entry: MemoryEntry,
+    /// 排序分数（越高越相关）。
     pub score: f64,
+    /// 内容前 100 字符摘要。
     pub snippet: String,
 }
 
@@ -77,7 +92,9 @@ pub struct MemorySearchResult {
 /// - `lifecycle`：生命周期惩罚（负数，`= -rank_weight * lifecycle_factor`）。
 #[derive(Debug, Clone)]
 pub struct MemoryScoreBreakdown {
+    /// 命中的记忆条目。
     pub entry: MemoryEntry,
+    /// 内容前 100 字符摘要。
     pub snippet: String,
     /// 最终融合分（与 `recall` / `search*` 的 score 完全一致）。
     pub score: f64,
@@ -96,10 +113,15 @@ pub struct MemoryScoreBreakdown {
 /// 持久化的 lifecycle 元数据行（伴随 memory_fts.id）。
 #[derive(Debug, Clone)]
 pub struct MetaRow {
+    /// 当前生命周期阶段（字符串形式：candidate/verified/permanent/archived）。
     pub stage: String,
+    /// 累计召回次数。
     pub recall_count: u32,
+    /// 最近一次召回时间戳（unix 秒；从未召回为 None）。
     pub last_recalled_at: Option<i64>,
+    /// 嵌入向量维度（无嵌入为 None）。
     pub embed_dim: Option<i64>,
+    /// 嵌入模型名（无嵌入为 None）。
     pub embed_model: Option<String>,
 }
 
@@ -203,8 +225,12 @@ impl MemoryStore {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(&parent).ok();
         }
-        let db = rusqlite::Connection::open(&path)
-            .with_context(|| format!("failed to open memory database at {}", path.display()))?;
+        let db = rusqlite::Connection::open(&path).map_err(|e| {
+            DeepseeknovaError::Storage(format!(
+                "failed to open memory database at {}: {e}",
+                path.display()
+            ))
+        })?;
 
         db.busy_timeout(Duration::from_secs(5))?;
         let _ = db.pragma_update(None, "journal_mode", "WAL");
@@ -224,8 +250,9 @@ impl MemoryStore {
 
     /// Open an in-memory database (for tests).
     pub fn open_in_memory() -> Result<Self> {
-        let db =
-            rusqlite::Connection::open_in_memory().context("failed to open in-memory database")?;
+        let db = rusqlite::Connection::open_in_memory().map_err(|e| {
+            DeepseeknovaError::Storage(format!("failed to open in-memory database: {e}"))
+        })?;
         db.execute_batch(MEMORY_SCHEMA_SQL)?;
         ensure_schema_version(&db)?;
         ensure_cjk_backfill(&db)?;
@@ -1781,7 +1808,7 @@ mod tests {
     struct FakeEmbed;
 
     impl EmbeddingProvider for FakeEmbed {
-        fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+        fn embed(&self, text: &str) -> Result<Vec<f32>> {
             if text.contains("ferris") {
                 Ok(vec![0.9, 0.1])
             } else if text.contains("rust") {

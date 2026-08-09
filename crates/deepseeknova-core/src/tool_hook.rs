@@ -87,6 +87,7 @@ pub trait ToolHook: Send + Sync {
 pub struct NoopToolHook;
 
 impl ToolHook for NoopToolHook {
+    /// 返回固定名 `"noop"`。
     fn name(&self) -> &str {
         "noop"
     }

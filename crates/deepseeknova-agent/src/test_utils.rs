@@ -1,4 +1,5 @@
 //! Shared test utilities for deepseeknova-agent integration tests.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use deepseeknova_core::chunk::Chunk;
 use deepseeknova_core::{Message, Role, RunInput, RunOutput};
@@ -115,7 +116,10 @@ impl MockProvider {
 
 #[async_trait::async_trait]
 impl Provider for MockProvider {
-    async fn generate(&self, _validated: ValidatedRequest<'_>) -> anyhow::Result<Message> {
+    async fn generate(
+        &self,
+        _validated: ValidatedRequest<'_>,
+    ) -> Result<Message, deepseeknova_core::DeepseeknovaError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         // 与 stream 同口径记录最后一条 user 消息，便于断言非流式路径的
         // prompt 内容（coordinator think/reflect 走 generate）。
@@ -140,7 +144,7 @@ impl Provider for MockProvider {
     async fn stream(
         &self,
         validated: ValidatedRequest<'_>,
-    ) -> anyhow::Result<deepseeknova_core::chunk::ChunkStream> {
+    ) -> Result<deepseeknova_core::chunk::ChunkStream, deepseeknova_core::DeepseeknovaError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         // Record the last user message for prompt-content assertions.
         if let Some(last) = validated
@@ -162,7 +166,8 @@ impl Provider for MockProvider {
             vec![Chunk::Done]
         };
 
-        let result: Vec<anyhow::Result<Chunk>> = chunks.into_iter().map(Ok).collect();
+        let result: Vec<Result<Chunk, deepseeknova_core::DeepseeknovaError>> =
+            chunks.into_iter().map(Ok).collect();
         Ok(Box::pin(tokio_stream::iter(result)))
     }
 }
@@ -199,8 +204,8 @@ impl deepseeknova_core::Runner for MockRunner {
     async fn run_stream(
         &self,
         _input: RunInput,
-    ) -> anyhow::Result<deepseeknova_core::RunEventStream> {
-        let events: Vec<anyhow::Result<deepseeknova_core::RunEvent>> =
+    ) -> Result<deepseeknova_core::RunEventStream, deepseeknova_core::DeepseeknovaError> {
+        let events: Vec<Result<deepseeknova_core::RunEvent, deepseeknova_core::DeepseeknovaError>> =
             self.events.iter().map(|e| Ok(e.clone())).collect();
         Ok(Box::pin(tokio_stream::iter(events)))
     }

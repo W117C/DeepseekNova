@@ -29,6 +29,7 @@ pub enum MemoryLifecycleStage {
 }
 
 impl MemoryLifecycleStage {
+    /// 返回阶段的字符串标识（与序列化值一致）。
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Candidate => "candidate",
@@ -38,6 +39,7 @@ impl MemoryLifecycleStage {
         }
     }
 
+    /// 从字符串恢复阶段；未知值回退为 [`MemoryLifecycleStage::Candidate`]。
     pub fn parse(s: &str) -> Self {
         match s {
             "verified" => Self::Verified,

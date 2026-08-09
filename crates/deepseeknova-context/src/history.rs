@@ -135,22 +135,15 @@ pub fn group_into_units(messages: &[Message]) -> Vec<HistoryUnit> {
     while i < messages.len() {
         let msg = &messages[i];
 
-        let has_tool_calls = msg.role == Role::Assistant
-            && msg
-                .tool_calls
-                .as_ref()
-                .map(|tc| !tc.is_empty())
-                .unwrap_or(false);
+        let tool_calls = if msg.role == Role::Assistant {
+            msg.tool_calls.as_ref().filter(|tc| !tc.is_empty())
+        } else {
+            None
+        };
 
-        if has_tool_calls {
+        if let Some(tc) = tool_calls {
             // Collect tool call IDs from this assistant message
-            let call_ids: HashSet<String> = msg
-                .tool_calls
-                .as_ref()
-                .unwrap()
-                .iter()
-                .map(|tc| tc.id.clone())
-                .collect();
+            let call_ids: HashSet<String> = tc.iter().map(|c| c.id.clone()).collect();
 
             // Scan forward for matching tool results
             let mut results = Vec::new();
@@ -275,6 +268,26 @@ pub enum CompactionError {
     BudgetTooSmall,
     #[error("compaction failed: {0}")]
     Other(String),
+}
+
+/// 把 [`InvariantViolation`] 转换为 [`deepseeknova_core::DeepseeknovaError`]。
+///
+/// orphan rule：impl 放在拥有 `InvariantViolation` 的本 crate。`?` 可直接把
+/// `Result<_, InvariantViolation>` 用于返回 `Result<_, DeepseeknovaError>` 的函数。
+impl From<InvariantViolation> for deepseeknova_core::DeepseeknovaError {
+    fn from(err: InvariantViolation) -> Self {
+        deepseeknova_core::DeepseeknovaError::Context(err.to_string())
+    }
+}
+
+/// 把 [`CompactionError`] 转换为 [`deepseeknova_core::DeepseeknovaError`]。
+///
+/// orphan rule：impl 放在拥有 `CompactionError` 的本 crate。`?` 可直接把
+/// `Result<_, CompactionError>` 用于返回 `Result<_, DeepseeknovaError>` 的函数。
+impl From<CompactionError> for deepseeknova_core::DeepseeknovaError {
+    fn from(err: CompactionError) -> Self {
+        deepseeknova_core::DeepseeknovaError::Context(err.to_string())
+    }
 }
 
 /// Trait for history compaction strategies.
@@ -586,5 +599,48 @@ mod tests {
         let compactor = AtomicUnitCompactor;
         let result = compactor.compact(&units, TokenBudget { max_tokens: 0 });
         assert!(result.is_err());
+    }
+
+    /// 验证 `From<CompactionError> for DeepseeknovaError` 让 `?` 直接把
+    /// `Result<_, CompactionError>` 用于返回 `Result<_, DeepseeknovaError>` 的函数。
+    #[test]
+    fn compaction_error_converts_via_question_mark() {
+        fn inner() -> Result<(), CompactionError> {
+            Err(CompactionError::BudgetTooSmall)
+        }
+        fn outer() -> Result<(), deepseeknova_core::DeepseeknovaError> {
+            inner()?;
+            Ok(())
+        }
+        let err = outer().unwrap_err();
+        assert!(
+            matches!(err, deepseeknova_core::DeepseeknovaError::Context(_)),
+            "应映射到 Context 类别"
+        );
+    }
+
+    /// 验证 `From<InvariantViolation> for DeepseeknovaError` 让 `?` 直接把
+    /// `Result<_, InvariantViolation>` 用于返回 `Result<_, DeepseeknovaError>` 的函数。
+    #[test]
+    fn invariant_violation_converts_via_question_mark() {
+        fn inner() -> Result<(), InvariantViolation> {
+            Err(InvariantViolation::OrphanToolResult {
+                tool_call_id: "c1".into(),
+            })
+        }
+        fn outer() -> Result<(), deepseeknova_core::DeepseeknovaError> {
+            inner()?;
+            Ok(())
+        }
+        let err = outer().unwrap_err();
+        assert!(
+            matches!(err, deepseeknova_core::DeepseeknovaError::Context(_)),
+            "应映射到 Context 类别"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("orphan"),
+            "应保留 InvariantViolation 的消息: {msg}"
+        );
     }
 }

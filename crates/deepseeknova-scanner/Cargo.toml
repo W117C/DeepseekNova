@@ -11,7 +11,6 @@ keywords = ["security", "scanner", "static-analysis", "agent", "deepseek"]
 [dependencies]
 deepseeknova-core = { workspace = true }
 deepseeknova-graph = { workspace = true }
-anyhow = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -23,3 +22,6 @@ async-trait = { workspace = true }
 futures = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true }
+
+[lints]
+workspace = true

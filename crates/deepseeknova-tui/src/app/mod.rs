@@ -88,7 +88,7 @@ pub async fn run_loop(
     terminal: &mut DefaultTerminal,
     app: &mut AppState,
     caps: &mut TuiCaps,
-) -> anyhow::Result<bool> {
+) -> Result<bool, deepseeknova_core::DeepseeknovaError> {
     let (tx, mut rx) = mpsc::channel::<AppEvent>(256);
     // 审批通道：从 caps 取出由本循环独占消费（agent 侧 responder 持有发送端）。
     let mut approval_rx = caps.approval_rx.take();
@@ -529,7 +529,7 @@ pub async fn run_loop(
                                         let model = caps
                                             .runtime
                                             .lock()
-                                            .unwrap()
+                                            .unwrap_or_else(|e| e.into_inner())
                                             .current_model
                                             .clone();
                                         match ctrl
@@ -617,7 +617,7 @@ async fn handle_command(app: &mut AppState, caps: &TuiCaps, cmd: &str) -> bool {
 async fn edit_external(
     app: &mut AppState,
     terminal: &mut ratatui::DefaultTerminal,
-) -> anyhow::Result<()> {
+) -> Result<(), deepseeknova_core::DeepseeknovaError> {
     use std::io::Write;
 
     let mut path = std::env::temp_dir();
@@ -640,10 +640,17 @@ async fn edit_external(
     terminal.clear()?;
     let status = match result {
         Ok(s) => s,
-        Err(e) => anyhow::bail!("failed to launch editor {editor}: {e}"),
+        Err(e) => {
+            return Err(deepseeknova_core::DeepseeknovaError::Runner(format!(
+                "failed to launch editor {editor}: {e}"
+            )))
+        }
     };
     if !status.success() {
-        anyhow::bail!("editor exited with code {:?}", status.code());
+        return Err(deepseeknova_core::DeepseeknovaError::Runner(format!(
+            "editor exited with code {:?}",
+            status.code()
+        )));
     }
 
     let edited = std::fs::read_to_string(&path)?;

@@ -10,6 +10,10 @@ node_modules/
 .codegraph/
 .serena/
 .impeccable/questions/
+.freebuff/
+.terse/
+CLAUDE.md
+.vscode/
 
 # Project-local runtime state is ignored,
 # but the bundled default skills ship with the repo.

@@ -1,6 +1,7 @@
 //! Runner trait cross-implementation consistency tests.
 //!
 //! Every Runner implementation must pass these behavioral contracts.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use deepseeknova_agent::test_utils::{MockProvider, MockRunner};
 use deepseeknova_agent::Agent;

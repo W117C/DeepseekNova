@@ -26,7 +26,7 @@ use crate::attribution::{
 use crate::recursion::DelegationSink;
 use crate::sub_agent::DEFAULT_MAX_DEPTH;
 use crate::task_spec::{InputValues, TaskSpec};
-use deepseeknova_core::{RunEvent, RunInput, Runner};
+use deepseeknova_core::{DeepseeknovaError, RunEvent, RunInput, Runner};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
@@ -192,12 +192,12 @@ pub struct DelegateEngine {
 /// - [`DelegateError::Execute`]：子代理执行失败（查找 / 运行 / 收集失败），
 ///   可进入归因 → Retry/Degrade/Abort 流程。
 enum DelegateError {
-    Render(anyhow::Error),
-    Execute(anyhow::Error),
+    Render(DeepseeknovaError),
+    Execute(DeepseeknovaError),
 }
 
 impl DelegateError {
-    fn into_anyhow(self) -> anyhow::Error {
+    fn into_error(self) -> DeepseeknovaError {
         match self {
             DelegateError::Render(e) | DelegateError::Execute(e) => e,
         }
@@ -261,7 +261,7 @@ impl DelegateEngine {
     ///
     /// 兼容签名：等价于 `run_with_inputs(agent, goal, InputValues::new())`，
     /// 未传参数值时行为与引入 TaskSpec 前完全一致（内置 4 preset 零变化）。
-    pub async fn run(&self, agent: &str, goal: &str) -> anyhow::Result<String> {
+    pub async fn run(&self, agent: &str, goal: &str) -> Result<String, DeepseeknovaError> {
         self.run_with_inputs(agent, goal, InputValues::new()).await
     }
 
@@ -285,7 +285,7 @@ impl DelegateEngine {
         agent: &str,
         goal: &str,
         values: InputValues,
-    ) -> anyhow::Result<String> {
+    ) -> Result<String, DeepseeknovaError> {
         self.run_at_depth(agent, goal, values, 1).await
     }
 
@@ -298,19 +298,19 @@ impl DelegateEngine {
         goal: &str,
         values: InputValues,
         depth: usize,
-    ) -> anyhow::Result<String> {
+    ) -> Result<String, DeepseeknovaError> {
         if depth > self.max_depth {
-            anyhow::bail!(
+            return Err(DeepseeknovaError::Runner(format!(
                 "sub-agent recursion depth exceeded (max {}, depth requested: {depth})",
                 self.max_depth
-            );
+            )));
         }
         // 无归因设置：维持旧行为（失败直接上抛，不重试）。
         let Some(cfg) = self.attribution.as_ref() else {
             return self
                 .delegate_once(agent, goal, &values, depth)
                 .await
-                .map_err(DelegateError::into_anyhow);
+                .map_err(|e| e.into_error());
         };
 
         // 归因重试循环：首次尝试 + max_retries 次重试，共 max_retries+1 次。
@@ -383,13 +383,15 @@ impl DelegateEngine {
         depth: usize,
     ) -> Result<String, DelegateError> {
         if depth > self.max_depth {
-            return Err(DelegateError::Execute(anyhow::anyhow!(
+            return Err(DelegateError::Execute(DeepseeknovaError::Runner(format!(
                 "sub-agent recursion depth exceeded (max {}, depth requested: {depth})",
                 self.max_depth
-            )));
+            ))));
         }
         let sub = self.agents.get(agent).cloned().ok_or_else(|| {
-            DelegateError::Execute(anyhow::anyhow!("unknown sub-agent '{agent}'"))
+            DelegateError::Execute(DeepseeknovaError::Runner(format!(
+                "unknown sub-agent '{agent}'"
+            )))
         })?;
 
         // 渲染任务书：本次调用值优先，config 默认值仅补缺。
@@ -408,10 +410,11 @@ impl DelegateEngine {
             }
         }
 
-        let _permit =
-            self.semaphore.acquire().await.map_err(|_| {
-                DelegateError::Execute(anyhow::anyhow!("delegate semaphore closed"))
-            })?;
+        let _permit = self.semaphore.acquire().await.map_err(|_| {
+            DelegateError::Execute(DeepseeknovaError::Runner(
+                "delegate semaphore closed".into(),
+            ))
+        })?;
 
         // per-agent 模型覆盖：预设声明 model → 透传 RunInput.model_override
         //（子 Agent 自动路由跳过，运行时按 model 指针选 provider）。
@@ -436,7 +439,7 @@ impl DelegationSink for DelegateEngine {
         goal: &str,
         values: &InputValues,
         depth: usize,
-    ) -> anyhow::Result<String> {
+    ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
         self.run_at_depth(agent, goal, values.clone(), depth).await
     }
 }
@@ -445,7 +448,7 @@ impl DelegationSink for DelegateEngine {
 /// 返回前做**输出净化**：中和子代理产出中的权限修改指令形状
 /// （`permissions.allow` / `bypassPermissions` / `<settings-json` 等），
 /// 防止被父模型当作可执行指令——这是子代理 → 父上下文的唯一收口点。
-async fn collect_final_text(agent: &Agent, input: RunInput) -> anyhow::Result<String> {
+async fn collect_final_text(agent: &Agent, input: RunInput) -> Result<String, DeepseeknovaError> {
     let mut stream = agent.run_stream(input).await?;
     let mut final_text = String::new();
     while let Some(ev) = stream.next().await {
@@ -858,7 +861,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Provider for FlakyProvider {
-        async fn generate(&self, _v: ValidatedRequest<'_>) -> anyhow::Result<Message> {
+        async fn generate(&self, _v: ValidatedRequest<'_>) -> Result<Message, DeepseeknovaError> {
             Ok(Message {
                 role: Role::Assistant,
                 content: "ok".into(),
@@ -869,7 +872,7 @@ mod tests {
             })
         }
 
-        async fn stream(&self, v: ValidatedRequest<'_>) -> anyhow::Result<ChunkStream> {
+        async fn stream(&self, v: ValidatedRequest<'_>) -> Result<ChunkStream, DeepseeknovaError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             if let Some(last) = v.messages.iter().rev().find(|m| m.role == Role::User) {
                 *self.last_prompt.lock().unwrap() = Some(last.content.clone());
@@ -881,9 +884,9 @@ mod tests {
                 })
                 .is_ok();
             if should_fail {
-                anyhow::bail!("sub-agent crashed");
+                return Err(DeepseeknovaError::provider("sub-agent crashed"));
             }
-            let chunks: Vec<anyhow::Result<Chunk>> = vec![
+            let chunks: Vec<Result<Chunk, DeepseeknovaError>> = vec![
                 Ok(Chunk::TextDelta("explored ok".into())),
                 Ok(Chunk::Usage(Usage::default())),
                 Ok(Chunk::Done),
@@ -914,7 +917,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Provider for VerdictProvider {
-        async fn generate(&self, _v: ValidatedRequest<'_>) -> anyhow::Result<Message> {
+        async fn generate(&self, _v: ValidatedRequest<'_>) -> Result<Message, DeepseeknovaError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             let mut lock = self.responses.lock().unwrap();
             let content = if lock.len() > 1 {
@@ -932,8 +935,10 @@ mod tests {
             })
         }
 
-        async fn stream(&self, _v: ValidatedRequest<'_>) -> anyhow::Result<ChunkStream> {
-            anyhow::bail!("VerdictProvider is generate-only")
+        async fn stream(&self, _v: ValidatedRequest<'_>) -> Result<ChunkStream, DeepseeknovaError> {
+            return Err(DeepseeknovaError::provider(
+                "VerdictProvider is generate-only",
+            ));
         }
     }
 

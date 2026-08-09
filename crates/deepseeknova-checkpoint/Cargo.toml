@@ -9,7 +9,6 @@ readme = "README.md"
 documentation = "https://docs.rs/deepseeknova-checkpoint"
 
 [dependencies]
-anyhow = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }
@@ -19,3 +18,6 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 walkdir = { workspace = true }
 deepseeknova-core = { workspace = true }
+
+[lints]
+workspace = true

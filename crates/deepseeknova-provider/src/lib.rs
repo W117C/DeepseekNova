@@ -5,6 +5,7 @@
 //! with reasoning_effort and prompt caching.
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 use async_trait::async_trait;
 use deepseeknova_core::chunk::ChunkStream;
@@ -20,6 +21,34 @@ pub mod router;
 pub mod scavenge;
 pub mod tool_cache;
 pub mod types;
+
+/// 测试共享工具：跨模块统一的环境变量串行化锁与代理清除函数。
+///
+/// `openai` 与 `embeddings` 测试模块都需清除代理环境变量（reqwest 默认尊重
+/// HTTP_PROXY/HTTPS_PROXY，会把请求转发到代理，代理无法连本地 mock 端口导致
+/// Connect 失败）。`std::env` 的 `set_var`/`remove_var` 非线程安全，并发调用
+/// 是 UB（Rust 2024 起标 `unsafe`），因此所有修改 env 或构建 reqwest::Client
+/// 的测试必须用同一把锁串行化。
+#[cfg(test)]
+mod test_util {
+    /// 跨模块共享的 env 串行化锁。异步测试用 `.lock().await`，同步测试用
+    /// `.blocking_lock()`（在非异步上下文安全；在异步上下文会 panic）。
+    pub static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// 清除全部代理环境变量。须在 `ENV_LOCK` guard 内调用。
+    pub fn clear_proxy_env() {
+        for v in &[
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+        ] {
+            std::env::remove_var(v);
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // ValidatedRequest — compile-time guard for DeepSeek V4 invariant
@@ -104,6 +133,45 @@ pub enum ProviderError {
     InvalidRequest(String),
 }
 
+impl ProviderError {
+    /// 该错误是否属于可重试类别（限流、超时、5xx、瞬时网络故障）。
+    ///
+    /// `Http` 按状态码判定（429/5xx）；`Request` / `Stream` 复用
+    /// [`crate::retry::is_retryable_error`] 的网络故障词表；`Timeout` /
+    /// `RateLimited` 恒为可重试；认证、参数非法、无结果类为确定性错误。
+    /// 转换到 [`deepseeknova_core::DeepseeknovaError`] 时该结果写入
+    /// `Provider` 变体的 `retryable` 字段。
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::Http { status, .. } => crate::retry::is_retryable_status(*status),
+            Self::Request(e) => crate::retry::is_retryable_error(&e.to_string()),
+            Self::Stream(msg) => crate::retry::is_retryable_error(msg),
+            Self::Timeout(_) | Self::RateLimited { .. } => true,
+            Self::NoChoices | Self::Auth(_) | Self::InvalidRequest(_) => false,
+        }
+    }
+}
+
+/// 把 [`ProviderError`] 转换为 [`deepseeknova_core::DeepseeknovaError`]。
+///
+/// orphan rule：impl 放在拥有 `ProviderError` 的本 crate。`?` 可直接把
+/// `Result<_, ProviderError>` 用于返回 `Result<_, DeepseeknovaError>` 的函数。
+///
+/// **重试语义保留**：`ProviderError::RateLimited` 与 `ProviderError::Timeout`
+/// 等可重试子类别经 [`ProviderError::is_retryable`] 判定后写入
+/// `DeepseeknovaError::Provider.retryable` 字段，`is_retryable()` 直接读取
+/// 结构化标志，不依赖消息文本匹配。
+impl From<ProviderError> for deepseeknova_core::DeepseeknovaError {
+    fn from(err: ProviderError) -> Self {
+        let message = err.to_string();
+        if err.is_retryable() {
+            deepseeknova_core::DeepseeknovaError::provider_retryable(message)
+        } else {
+            deepseeknova_core::DeepseeknovaError::provider(message)
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Provider trait — now with streaming
 // ---------------------------------------------------------------------------
@@ -113,17 +181,23 @@ pub trait Provider: Send + Sync {
     /// Non-streaming generate — returns a complete Message.
     /// Accepts only a [`ValidatedRequest`] whose messages have already
     /// passed the DeepSeek V4 replay invariant check.
-    async fn generate(&self, validated: ValidatedRequest<'_>) -> anyhow::Result<Message>;
+    async fn generate(
+        &self,
+        validated: ValidatedRequest<'_>,
+    ) -> Result<Message, deepseeknova_core::DeepseeknovaError>;
 
     /// Streaming generate — returns a ChunkStream.
     /// Accepts only a [`ValidatedRequest`] — same invariant guarantee.
     /// Default implementation falls back to non-streaming generate()
     /// and emits a single TextDelta + Done.
-    async fn stream(&self, validated: ValidatedRequest<'_>) -> anyhow::Result<ChunkStream> {
+    async fn stream(
+        &self,
+        validated: ValidatedRequest<'_>,
+    ) -> Result<ChunkStream, deepseeknova_core::DeepseeknovaError> {
         let msg = self.generate(validated).await?;
         use deepseeknova_core::chunk::Chunk;
 
-        let chunks: Vec<anyhow::Result<Chunk>> =
+        let chunks: Vec<Result<Chunk, deepseeknova_core::DeepseeknovaError>> =
             vec![Ok(Chunk::TextDelta(msg.content)), Ok(Chunk::Done)];
         Ok(Box::pin(tokio_stream::iter(chunks)))
     }
@@ -140,7 +214,9 @@ pub mod factory {
 
     /// Create a Provider from a ProviderConfig (no task classification —
     /// reasoning effort falls back to the config default).
-    pub fn create_provider(cfg: &ProviderConfig) -> anyhow::Result<Box<dyn Provider>> {
+    pub fn create_provider(
+        cfg: &ProviderConfig,
+    ) -> Result<Box<dyn Provider>, deepseeknova_core::DeepseeknovaError> {
         create_provider_for_task(cfg, None)
     }
 
@@ -166,7 +242,7 @@ pub mod factory {
     pub fn create_provider_for_task(
         cfg: &ProviderConfig,
         task_classification: Option<ReasoningEffort>,
-    ) -> anyhow::Result<Box<dyn Provider>> {
+    ) -> Result<Box<dyn Provider>, deepseeknova_core::DeepseeknovaError> {
         build_provider(cfg, None, task_classification)
     }
 
@@ -177,7 +253,7 @@ pub mod factory {
         cfg: &ProviderConfig,
         model_name: &str,
         task_classification: Option<ReasoningEffort>,
-    ) -> anyhow::Result<Box<dyn Provider>> {
+    ) -> Result<Box<dyn Provider>, deepseeknova_core::DeepseeknovaError> {
         create_provider_with_model_temperature(cfg, model_name, None, task_classification)
     }
 
@@ -190,7 +266,7 @@ pub mod factory {
         model_name: &str,
         temperature: Option<f32>,
         task_classification: Option<ReasoningEffort>,
-    ) -> anyhow::Result<Box<dyn Provider>> {
+    ) -> Result<Box<dyn Provider>, deepseeknova_core::DeepseeknovaError> {
         let mut cfg = cfg.clone();
         cfg.model = Some(model_name.to_string());
         build_provider(&cfg, temperature, task_classification)
@@ -203,7 +279,7 @@ pub mod factory {
         cfg: &ProviderConfig,
         temperature: Option<f32>,
         task_classification: Option<ReasoningEffort>,
-    ) -> anyhow::Result<Box<dyn Provider>> {
+    ) -> Result<Box<dyn Provider>, deepseeknova_core::DeepseeknovaError> {
         let effort = resolve_effort(cfg, task_classification);
         let thinking = effort.thinking();
         let effort_str = effort.effort_str();
@@ -257,7 +333,11 @@ pub mod factory {
                 }
                 Box::new(p)
             }
-            other => anyhow::bail!("unknown provider kind: {other}"),
+            other => {
+                return Err(deepseeknova_core::DeepseeknovaError::Config(format!(
+                    "unknown provider kind: {other}"
+                )))
+            }
         };
         Ok(provider)
     }
@@ -270,7 +350,7 @@ pub mod factory {
         cfg: &ProviderConfig,
         temperature: Option<f32>,
         effort: ReasoningEffort,
-    ) -> anyhow::Result<crate::anthropic::AnthropicProvider> {
+    ) -> Result<crate::anthropic::AnthropicProvider, deepseeknova_core::DeepseeknovaError> {
         let mut p = crate::anthropic::AnthropicProvider::new(
             cfg.base_url
                 .as_deref()
@@ -298,7 +378,7 @@ pub mod factory {
         cfg: &ProviderConfig,
         temperature: Option<f32>,
         effort: ReasoningEffort,
-    ) -> anyhow::Result<crate::anthropic::AnthropicProvider> {
+    ) -> Result<crate::anthropic::AnthropicProvider, deepseeknova_core::DeepseeknovaError> {
         let mut p = crate::anthropic::AnthropicProvider::new(
             cfg.base_url
                 .as_deref()
@@ -619,5 +699,86 @@ mod factory_tests {
         // 构建成功即可 —— 模型名注入路径由 router 缓存键测试进一步覆盖
         let p = crate::factory::create_provider_with_model(&cfg, "my-model", None);
         assert!(p.is_ok(), "{:?}", p.err());
+    }
+}
+
+#[cfg(test)]
+mod deepseeknova_error_tests {
+    use super::*;
+
+    /// 验证 `From<ProviderError> for DeepseeknovaError` 让 `?` 直接把
+    /// `Result<_, ProviderError>` 用于返回 `Result<_, DeepseeknovaError>` 的函数。
+    #[test]
+    fn provider_error_converts_via_question_mark() {
+        fn inner() -> Result<(), ProviderError> {
+            Err(ProviderError::NoChoices)
+        }
+        fn outer() -> Result<(), deepseeknova_core::DeepseeknovaError> {
+            inner()?;
+            Ok(())
+        }
+        let err = outer().unwrap_err();
+        assert!(
+            matches!(err, deepseeknova_core::DeepseeknovaError::Provider { .. }),
+            "应映射到 Provider 类别"
+        );
+    }
+
+    /// 验证 `RateLimited` 与 `Timeout` 子类别的可重试语义在转换后保留：
+    /// 结构化 `retryable` 字段正确写入。
+    #[test]
+    fn rate_limited_and_timeout_preserve_retryability() {
+        let rl: deepseeknova_core::DeepseeknovaError =
+            ProviderError::RateLimited { retry_after: None }.into();
+        assert!(rl.is_retryable(), "RateLimited 应可重试");
+
+        let t: deepseeknova_core::DeepseeknovaError =
+            ProviderError::Timeout(std::time::Duration::from_secs(30)).into();
+        assert!(t.is_retryable(), "Timeout 应可重试");
+    }
+
+    /// 验证 `Auth` 与 `InvalidRequest` 不可重试。
+    #[test]
+    fn auth_and_invalid_request_are_not_retryable() {
+        let a: deepseeknova_core::DeepseeknovaError = ProviderError::Auth("bad key".into()).into();
+        assert!(!a.is_retryable(), "Auth 不应可重试");
+
+        let ir: deepseeknova_core::DeepseeknovaError =
+            ProviderError::InvalidRequest("bad".into()).into();
+        assert!(!ir.is_retryable(), "InvalidRequest 不应可重试");
+    }
+
+    /// 验证 HTTP 状态码（429/5xx）与网络故障在转换后保留可重试语义——
+    /// 这是原先 `contains("5xx")` 消息匹配无法覆盖的真实消息形态。
+    #[test]
+    fn http_status_and_network_errors_preserve_retryability() {
+        let h429: deepseeknova_core::DeepseeknovaError = ProviderError::Http {
+            status: 429,
+            body: "rate limit reached".into(),
+        }
+        .into();
+        assert!(h429.is_retryable(), "429 应可重试");
+
+        let h503: deepseeknova_core::DeepseeknovaError = ProviderError::Http {
+            status: 503,
+            body: "service unavailable".into(),
+        }
+        .into();
+        assert!(h503.is_retryable(), "5xx 应可重试");
+
+        let h404: deepseeknova_core::DeepseeknovaError = ProviderError::Http {
+            status: 404,
+            body: "not found".into(),
+        }
+        .into();
+        assert!(!h404.is_retryable(), "4xx（除 429）不应可重试");
+
+        let net: deepseeknova_core::DeepseeknovaError =
+            ProviderError::Stream("connection refused".into()).into();
+        assert!(net.is_retryable(), "网络瞬时故障应可重试");
+
+        let fatal_net: deepseeknova_core::DeepseeknovaError =
+            ProviderError::Stream("permission denied".into()).into();
+        assert!(!fatal_net.is_retryable(), "确定性网络错误不应可重试");
     }
 }

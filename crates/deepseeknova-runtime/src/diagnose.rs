@@ -274,7 +274,8 @@ mod tests {
             async fn generate(
                 &self,
                 validated: deepseeknova_provider::ValidatedRequest<'_>,
-            ) -> anyhow::Result<deepseeknova_core::Message> {
+            ) -> Result<deepseeknova_core::Message, deepseeknova_core::DeepseeknovaError>
+            {
                 *self.system.lock().unwrap() = validated
                     .messages
                     .iter()

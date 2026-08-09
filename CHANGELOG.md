@@ -14,6 +14,11 @@ All notable changes to DeepseekNova will be documented in this file.
 - **内置工具数 17 → 16**：delegate 委派工具从 `deepseeknova-tools` 移入
   `deepseeknova-agent`（`DelegateTool`，消除 tools→agent 依赖反转），工具数
   以当前实现为准。
+- **全 workspace 错误模型统一**：移除 `anyhow`，公开 API（`Tool::execute`、
+  `Runner::run_stream`、`ChunkStream`/`RunEventStream` 等）统一改用
+  `deepseeknova_core::DeepseeknovaError`；`Provider` 变体改为结构化
+  `{ message, retryable }`，`is_retryable()` 不再依赖消息文本匹配，IO 仅
+  瞬时错误种类（TimedOut/ConnectionRefused 等）可重试。
 
 ### Fixed（审计批次 2026-08-08，AUDIT-2026-08-08.md）
 
@@ -28,7 +33,7 @@ All notable changes to DeepseekNova will be documented in this file.
   子命令"的条目（`systemctl status`/`defaults read` 等）保留前缀匹配。封死
   `ssh-keygen -y -f /etc/shadow` 类尾部 flag 转写/泄密面。
 - **库路径构造不 panic（L2）**：docs_tools/web_fetch/web_search 的
-  `.build().expect()` 改返回 `anyhow::Result`（构造失败传播错误不 panic）。
+  `.build().expect()` 改返回 `DeepseeknovaError`（构造失败传播错误不 panic）。
 - **async 主循环 embed 不再阻塞 worker（H4）**：runtime 起点/中途召回与
   DistillHook 三处同步闭包包 `block_in_place`（多线程 runtime 释放 worker，
   current_thread 环境直调保兼容）；补"阻塞窗口内心跳推进"双向测试。

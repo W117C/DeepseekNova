@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use deepseeknova_core::{Tool, ToolContext, ToolSchema};
+use deepseeknova_core::{DeepseeknovaError, Tool, ToolContext, ToolSchema};
 use serde::Deserialize;
 use serde_json::json;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -40,7 +40,11 @@ impl Tool for WebFetchTool {
         true
     }
 
-    async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
+    async fn execute(
+        &self,
+        ctx: &ToolContext,
+        args: &str,
+    ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
         deepseeknova_security::context::enforce_capability(
             ctx,
             &self.schema().name,
@@ -49,7 +53,7 @@ impl Tool for WebFetchTool {
         let parsed: WebFetchArgs = serde_json::from_str(args)?;
 
         if ctx.cancellation.is_cancelled() {
-            anyhow::bail!("cancelled");
+            return Err(deepseeknova_core::DeepseeknovaError::Cancelled);
         }
 
         // Step 1 — Parse and validate the URL scheme + host
@@ -58,16 +62,16 @@ impl Tool for WebFetchTool {
         // Step 2 — Resolve DNS and check resolved IPs are safe
         let host = url
             .host_str()
-            .ok_or_else(|| anyhow::anyhow!("URL has no host: {}", parsed.url))?;
+            .ok_or_else(|| DeepseeknovaError::Tool(format!("URL has no host: {}", parsed.url)))?;
         let security = ctx
             .extensions
             .get::<deepseeknova_security::context::SecurityContext>();
         if let Some(sec) = security {
             if !sec.policy.is_domain_allowed(host) {
-                anyhow::bail!(
+                return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
                     "Security violation: domain '{}' is blocked by security policy",
                     host
-                );
+                )));
             }
         }
         validate_host_ssrf(host).await?;
@@ -89,19 +93,22 @@ impl Tool for WebFetchTool {
 // ---------------------------------------------------------------------------
 
 /// Accept only http/https, reject non-parseable and non-standard URLs.
-fn validate_url(raw: &str) -> anyhow::Result<url::Url> {
-    let url = url::Url::parse(raw).map_err(|e| anyhow::anyhow!("invalid URL '{raw}': {e}"))?;
+fn validate_url(raw: &str) -> Result<url::Url, DeepseeknovaError> {
+    let url = url::Url::parse(raw)
+        .map_err(|e| DeepseeknovaError::Tool(format!("invalid URL '{raw}': {e}")))?;
 
     match url.scheme() {
         "http" | "https" => {}
         other => {
-            anyhow::bail!("unsupported URL scheme '{other}'; only http and https are allowed")
+            return Err(DeepseeknovaError::Tool(format!(
+                "unsupported URL scheme '{other}'; only http and https are allowed"
+            )));
         }
     }
 
     // Reject URLs where the host is not a domain or IP (e.g. "data:", "file:", "javascript:")
     if url.host_str().is_none() {
-        anyhow::bail!("URL has no host: {raw}");
+        return Err(DeepseeknovaError::Tool(format!("URL has no host: {raw}")));
     }
 
     Ok(url)
@@ -113,7 +120,7 @@ fn validate_url(raw: &str) -> anyhow::Result<url::Url> {
 
 /// Resolve the hostname to IP addresses and reject any that fall into
 /// private, loopback, link-local, or other unsafe ranges.
-pub(crate) async fn validate_host_ssrf(host: &str) -> anyhow::Result<()> {
+pub(crate) async fn validate_host_ssrf(host: &str) -> Result<(), DeepseeknovaError> {
     // Handle raw IPv4 and IPv6 addresses directly so we don't rely on DNS.
     if let Ok(ip) = IpAddr::from_str(host) {
         ensure_safe_ip(&ip)?;
@@ -139,7 +146,9 @@ pub(crate) async fn validate_host_ssrf(host: &str) -> anyhow::Result<()> {
     let addrs: Vec<_> = lookup_host(&sockaddr_str).await?.collect();
 
     if addrs.is_empty() {
-        anyhow::bail!("DNS resolution returned no addresses for '{host}'");
+        return Err(DeepseeknovaError::Tool(format!(
+            "DNS resolution returned no addresses for '{host}'"
+        )));
     }
 
     for addr in &addrs {
@@ -150,16 +159,20 @@ pub(crate) async fn validate_host_ssrf(host: &str) -> anyhow::Result<()> {
 }
 
 /// Reject IP addresses in private, loopback, link-local, or other unsafe ranges.
-fn ensure_safe_ip(ip: &IpAddr) -> anyhow::Result<()> {
+fn ensure_safe_ip(ip: &IpAddr) -> Result<(), DeepseeknovaError> {
     match ip {
         IpAddr::V4(v4) => {
             if is_unsafe_ipv4(v4) {
-                anyhow::bail!("access to {ip} is blocked (private/internal network)");
+                return Err(DeepseeknovaError::Tool(format!(
+                    "access to {ip} is blocked (private/internal network)"
+                )));
             }
         }
         IpAddr::V6(v6) => {
             if is_unsafe_ipv6(v6) {
-                anyhow::bail!("access to {ip} is blocked (private/internal network)");
+                return Err(DeepseeknovaError::Tool(format!(
+                    "access to {ip} is blocked (private/internal network)"
+                )));
             }
         }
     }
@@ -244,7 +257,7 @@ const MAX_REDIRECTS: u32 = 10;
 /// 共享 HTTP 客户端（进程级一次构造）。无自动重定向——每跳手动重校验
 /// 域名策略与 SSRF。构造失败缓存 `Err` 并向上传播（L2：不再 `expect`
 /// panic 宿主）。
-fn shared_http_client() -> anyhow::Result<&'static reqwest::Client> {
+fn shared_http_client() -> Result<&'static reqwest::Client, DeepseeknovaError> {
     static CLIENT: std::sync::OnceLock<reqwest::Result<reqwest::Client>> =
         std::sync::OnceLock::new();
     CLIENT
@@ -256,7 +269,7 @@ fn shared_http_client() -> anyhow::Result<&'static reqwest::Client> {
                 .build()
         })
         .as_ref()
-        .map_err(|e| anyhow::anyhow!("failed to build shared HTTP client: {e}"))
+        .map_err(|e| DeepseeknovaError::Tool(format!("failed to build shared HTTP client: {e}")))
 }
 
 /// Follow redirects manually, re-validating the domain policy + SSRF safety of
@@ -273,26 +286,36 @@ fn fetch_with_redirects<'a>(
     url: url::Url,
     depth: u32,
     security: Option<&'a deepseeknova_security::context::SecurityContext>,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send + 'a>> {
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<String, DeepseeknovaError>> + Send + 'a>,
+> {
     Box::pin(async move {
         if depth > MAX_REDIRECTS {
-            anyhow::bail!("too many redirects (max {MAX_REDIRECTS})");
+            return Err(DeepseeknovaError::Tool(format!(
+                "too many redirects (max {MAX_REDIRECTS})"
+            )));
         }
 
         let response = tokio::time::timeout(DEFAULT_FETCH_TIMEOUT, client.get(url.clone()).send())
             .await
             .map_err(|_| {
-                anyhow::anyhow!("request timed out after {:?}", DEFAULT_FETCH_TIMEOUT)
-            })??;
+                DeepseeknovaError::Tool(format!(
+                    "request timed out after {:?}",
+                    DEFAULT_FETCH_TIMEOUT
+                ))
+            })?
+            .map_err(|e| DeepseeknovaError::Tool(format!("HTTP request to {url} failed: {e}")))?;
 
         let status = response.status();
 
         // Handle redirects
         if status.is_redirection() {
             if let Some(location) = response.headers().get(reqwest::header::LOCATION) {
-                let location_str = location
-                    .to_str()
-                    .map_err(|_| anyhow::anyhow!("redirect Location header is not valid UTF-8"))?;
+                let location_str = location.to_str().map_err(|_| {
+                    DeepseeknovaError::Tool(
+                        "redirect Location header is not valid UTF-8".to_string(),
+                    )
+                })?;
 
                 let next_url = validate_redirect_target(security, &url, location_str).await?;
 
@@ -302,23 +325,26 @@ fn fetch_with_redirects<'a>(
 
         // Check for error status
         if !status.is_success() {
-            anyhow::bail!("HTTP {status} fetching {url}");
+            return Err(DeepseeknovaError::Tool(format!(
+                "HTTP {status} fetching {url}"
+            )));
         }
 
         // Read body with size cap
         let body_bytes = tokio::time::timeout(DEFAULT_FETCH_TIMEOUT, response.bytes())
             .await
-            .map_err(|_| anyhow::anyhow!("body read timed out"))??;
+            .map_err(|_| DeepseeknovaError::Tool("body read timed out".to_string()))?
+            .map_err(|e| DeepseeknovaError::Tool(format!("failed to read response body: {e}")))?;
 
         if body_bytes.len() > MAX_RESPONSE_BYTES {
-            anyhow::bail!(
+            return Err(DeepseeknovaError::Tool(format!(
                 "response body exceeds maximum size of {MAX_RESPONSE_BYTES} bytes (got {} bytes)",
                 body_bytes.len()
-            );
+            )));
         }
 
         let body = String::from_utf8(body_bytes.to_vec())
-            .map_err(|e| anyhow::anyhow!("response is not valid UTF-8: {e}"))?;
+            .map_err(|e| DeepseeknovaError::Tool(format!("response is not valid UTF-8: {e}")))?;
 
         Ok(body)
     })
@@ -331,28 +357,32 @@ async fn validate_redirect_target(
     security: Option<&deepseeknova_security::context::SecurityContext>,
     from: &url::Url,
     location: &str,
-) -> anyhow::Result<url::Url> {
-    let next_url = from
-        .join(location)
-        .map_err(|e| anyhow::anyhow!("failed to resolve redirect Location '{location}': {e}"))?;
+) -> Result<url::Url, DeepseeknovaError> {
+    let next_url = from.join(location).map_err(|e| {
+        DeepseeknovaError::Tool(format!(
+            "failed to resolve redirect Location '{location}': {e}"
+        ))
+    })?;
 
     // Validate scheme
     match next_url.scheme() {
         "http" | "https" => {}
         other => {
-            anyhow::bail!("redirect to unsupported scheme '{other}' is blocked (from {from})")
+            return Err(DeepseeknovaError::Tool(format!(
+                "redirect to unsupported scheme '{other}' is blocked (from {from})"
+            )));
         }
     }
 
     // Re-validate the redirect target's host against the security policy
-    let next_host = next_url
-        .host_str()
-        .ok_or_else(|| anyhow::anyhow!("redirect Location has no host: {location}"))?;
+    let next_host = next_url.host_str().ok_or_else(|| {
+        DeepseeknovaError::Tool(format!("redirect Location has no host: {location}"))
+    })?;
     if let Some(sec) = security {
         if !sec.policy.is_domain_allowed(next_host) {
-            anyhow::bail!(
+            return Err(DeepseeknovaError::Tool(format!(
                 "Security violation: redirect to domain '{next_host}' is blocked by security policy"
-            );
+            )));
         }
     }
 

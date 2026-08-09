@@ -1,4 +1,5 @@
 //! 集成：并发委派在信号量满时排队（不失败、不死锁）。
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use deepseeknova_agent::test_utils::MockProvider;
 use deepseeknova_agent::{Agent, DelegateEngine};

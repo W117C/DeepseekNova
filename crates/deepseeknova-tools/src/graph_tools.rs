@@ -3,7 +3,7 @@
 //! 索引句柄经 `ToolContext.extensions` 注入（`GraphHandle`），缺失时优雅降级。
 
 use async_trait::async_trait;
-use deepseeknova_core::{Tool, ToolContext, ToolSchema};
+use deepseeknova_core::{DeepseeknovaError, Tool, ToolContext, ToolSchema};
 use deepseeknova_graph::{Direction, EdgeKind, GraphError, NodeKind};
 use serde::Deserialize;
 use serde_json::json;
@@ -41,10 +41,10 @@ fn graph_error_message(action: &str, err: &GraphError) -> String {
 
 fn lock_index(
     handle: &GraphHandle,
-) -> anyhow::Result<std::sync::MutexGuard<'_, deepseeknova_graph::GraphIndex>> {
+) -> Result<std::sync::MutexGuard<'_, deepseeknova_graph::GraphIndex>, DeepseeknovaError> {
     handle
         .lock()
-        .map_err(|_| anyhow::anyhow!("graph index lock poisoned"))
+        .map_err(|_| DeepseeknovaError::Tool("graph index lock poisoned".to_string()))
 }
 
 pub struct SearchCodeTool;
@@ -90,7 +90,11 @@ impl Tool for SearchCodeTool {
         true
     }
 
-    async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
+    async fn execute(
+        &self,
+        ctx: &ToolContext,
+        args: &str,
+    ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
         deepseeknova_security::context::enforce_capability(
             ctx,
             &self.schema().name,
@@ -112,7 +116,7 @@ impl Tool for SearchCodeTool {
         // 工具同款模式）。
         let nodes = match tokio::task::spawn_blocking(move || {
             let idx = lock_index(&handle)?;
-            Ok::<_, anyhow::Error>(idx.search_best(&query, kind, limit))
+            Ok::<_, DeepseeknovaError>(idx.search_best(&query, kind, limit))
         })
         .await
         {
@@ -198,7 +202,11 @@ impl Tool for TraverseGraphTool {
         true
     }
 
-    async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
+    async fn execute(
+        &self,
+        ctx: &ToolContext,
+        args: &str,
+    ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
         deepseeknova_security::context::enforce_capability(
             ctx,
             &self.schema().name,
@@ -308,7 +316,11 @@ impl Tool for RetrieveEntityTool {
         true
     }
 
-    async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
+    async fn execute(
+        &self,
+        ctx: &ToolContext,
+        args: &str,
+    ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
         deepseeknova_security::context::enforce_capability(
             ctx,
             &self.schema().name,
@@ -431,7 +443,11 @@ impl Tool for TraceCodeTool {
         true
     }
 
-    async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
+    async fn execute(
+        &self,
+        ctx: &ToolContext,
+        args: &str,
+    ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
         deepseeknova_security::context::enforce_capability(
             ctx,
             &self.schema().name,
@@ -521,7 +537,11 @@ impl Tool for ImpactCodeTool {
         true
     }
 
-    async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
+    async fn execute(
+        &self,
+        ctx: &ToolContext,
+        args: &str,
+    ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
         deepseeknova_security::context::enforce_capability(
             ctx,
             &self.schema().name,
@@ -626,7 +646,11 @@ impl Tool for ExploreCodeTool {
         true
     }
 
-    async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
+    async fn execute(
+        &self,
+        ctx: &ToolContext,
+        args: &str,
+    ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
         deepseeknova_security::context::enforce_capability(
             ctx,
             &self.schema().name,
@@ -779,7 +803,11 @@ impl Tool for DepsCodeTool {
         true
     }
 
-    async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
+    async fn execute(
+        &self,
+        ctx: &ToolContext,
+        args: &str,
+    ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
         deepseeknova_security::context::enforce_capability(
             ctx,
             &self.schema().name,

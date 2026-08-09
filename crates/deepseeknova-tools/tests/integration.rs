@@ -2,6 +2,7 @@
 //!
 //! These test the actual tool implementations (read_file, write_file, edit_file,
 //! grep, glob, ls, move_file) operating on real files in a temp directory.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use deepseeknova_core::tool::ToolContext;
 use deepseeknova_core::Tool;

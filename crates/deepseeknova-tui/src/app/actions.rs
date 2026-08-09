@@ -281,7 +281,10 @@ impl Binding {
             "insert" => KeyCode::Insert,
             "space" => KeyCode::Char(' '),
             "\\" => KeyCode::Char('\\'),
-            s if s.chars().count() == 1 => KeyCode::Char(s.chars().next().unwrap()),
+            s if s.chars().count() == 1 => {
+                // count==1 保证 next() 不为 None
+                KeyCode::Char(s.chars().next().unwrap_or('\0'))
+            }
             _ => return None,
         };
         Some(Binding::new(code, modifiers))

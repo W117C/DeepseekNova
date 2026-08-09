@@ -367,7 +367,12 @@ impl Store {
                 continue;
             }
 
-            let lang = lang.expect("manifest branch returned above");
+            // 上方 guard 已排除 lang.is_none() 且非 manifest 的文件，manifest
+            // 分支也已 continue，此处 lang 保证 Some；防御性跳过而非 panic，
+            // 与「不支持的语言」路径一致（文件不建索引，不崩溃）。
+            let Some(lang) = lang else {
+                continue;
+            };
             let parsed = match parse_source(lang, rel_path, &src) {
                 Ok(p) => p,
                 Err(e) => {
@@ -1627,6 +1632,7 @@ fn resolve_file_node(
 mod tests {
     use super::*;
     use crate::model::EdgeKind;
+    use deepseeknova_core::DeepseeknovaError;
     use tempfile::tempdir;
 
     fn write(root: &std::path::Path, rel: &str, body: &str) {
@@ -2164,7 +2170,7 @@ require github.com/single/dep v1.0.0\n";
     struct FakeEmbed;
 
     impl EmbeddingProvider for FakeEmbed {
-        fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+        fn embed(&self, text: &str) -> Result<Vec<f32>, DeepseeknovaError> {
             if text.contains("alpha") {
                 Ok(vec![1.0, 0.0])
             } else if text.contains("beta") {
@@ -2185,8 +2191,10 @@ require github.com/single/dep v1.0.0\n";
     struct FailingEmbed;
 
     impl EmbeddingProvider for FailingEmbed {
-        fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
-            anyhow::bail!("embedding endpoint unavailable")
+        fn embed(&self, _text: &str) -> Result<Vec<f32>, DeepseeknovaError> {
+            Err(DeepseeknovaError::provider(
+                "embedding endpoint unavailable",
+            ))
         }
     }
 

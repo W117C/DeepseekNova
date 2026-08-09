@@ -182,6 +182,16 @@ pub enum TaskSpecError {
     InvalidType(String, InputTypeName),
 }
 
+/// 把 [`TaskSpecError`] 转换为 [`deepseeknova_core::DeepseeknovaError`]。
+///
+/// orphan rule：impl 放在拥有 `TaskSpecError` 的本 crate。`?` 可直接把
+/// `Result<_, TaskSpecError>` 用于返回 `Result<_, DeepseeknovaError>` 的函数。
+impl From<TaskSpecError> for deepseeknova_core::DeepseeknovaError {
+    fn from(err: TaskSpecError) -> Self {
+        deepseeknova_core::DeepseeknovaError::Agent(err.to_string())
+    }
+}
+
 /// [`TaskSpecError::InvalidType`] 中可显示的输入类型名。
 #[derive(Debug, Clone, Copy)]
 pub enum InputTypeName {
@@ -376,5 +386,23 @@ mod tests {
         let get = |k: &str| merged.0.get(k).cloned().unwrap_or_default();
         assert_eq!(get("a"), "1");
         assert_eq!(get("b"), "2");
+    }
+
+    /// 验证 `From<TaskSpecError> for DeepseeknovaError` 让 `?` 直接把
+    /// `Result<_, TaskSpecError>` 用于返回 `Result<_, DeepseeknovaError>` 的函数。
+    #[test]
+    fn task_spec_error_converts_via_question_mark() {
+        fn inner() -> Result<(), TaskSpecError> {
+            Err(TaskSpecError::MissingRequired("input1".into()))
+        }
+        fn outer() -> Result<(), deepseeknova_core::DeepseeknovaError> {
+            inner()?;
+            Ok(())
+        }
+        let err = outer().unwrap_err();
+        assert!(
+            matches!(err, deepseeknova_core::DeepseeknovaError::Agent(_)),
+            "应映射到 Agent 类别"
+        );
     }
 }

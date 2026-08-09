@@ -1,4 +1,3 @@
-use anyhow::Context;
 use std::path::Path;
 
 /// AGENTS.md template — the industry-standard agent instruction filename
@@ -64,23 +63,35 @@ Custom slash commands go in .deepseeknova/commands/ as .md files.
 /// Default behavior generates the industry-standard `AGENTS.md` agent
 /// instruction file. `legacy=true` (from `init --legacy`, see cli.rs) falls
 /// back to the legacy private `DEEPSEEKNOVA.md`.
-pub async fn run_init(legacy: bool) -> anyhow::Result<()> {
-    let cwd = std::env::current_dir().context("cannot determine current directory")?;
+pub async fn run_init(legacy: bool) -> Result<(), deepseeknova_core::DeepseeknovaError> {
+    let cwd = std::env::current_dir().map_err(|e| {
+        deepseeknova_core::DeepseeknovaError::Io(std::io::Error::other(format!(
+            "cannot determine current directory: {e}"
+        )))
+    })?;
     run_init_at(&cwd, legacy)
 }
 
 /// Core init implementation, testable against an arbitrary root directory.
 /// `legacy=true` generates `DEEPSEEKNOVA.md`; otherwise `AGENTS.md`.
-pub fn run_init_at(root: &Path, legacy: bool) -> anyhow::Result<()> {
+pub fn run_init_at(root: &Path, legacy: bool) -> Result<(), deepseeknova_core::DeepseeknovaError> {
     // Create .deepseeknova/commands/
     let commands_dir = root.join(".deepseeknova").join("commands");
-    std::fs::create_dir_all(&commands_dir)
-        .with_context(|| format!("failed to create {}", commands_dir.display()))?;
+    std::fs::create_dir_all(&commands_dir).map_err(|e| {
+        deepseeknova_core::DeepseeknovaError::Io(std::io::Error::other(format!(
+            "failed to create {}: {e}",
+            commands_dir.display()
+        )))
+    })?;
 
     // Create .deepseeknova/memory/
     let memory_dir = root.join(".deepseeknova").join("memory");
-    std::fs::create_dir_all(&memory_dir)
-        .with_context(|| format!("failed to create {}", memory_dir.display()))?;
+    std::fs::create_dir_all(&memory_dir).map_err(|e| {
+        deepseeknova_core::DeepseeknovaError::Io(std::io::Error::other(format!(
+            "failed to create {}: {e}",
+            memory_dir.display()
+        )))
+    })?;
 
     let project_name = root
         .file_name()
@@ -104,7 +115,12 @@ pub fn run_init_at(root: &Path, legacy: bool) -> anyhow::Result<()> {
             &agent_path,
             template.replace("{project_name}", project_name),
         )
-        .with_context(|| format!("failed to write {}", agent_path.display()))?;
+        .map_err(|e| {
+            deepseeknova_core::DeepseeknovaError::Io(std::io::Error::other(format!(
+                "failed to write {}: {e}",
+                agent_path.display()
+            )))
+        })?;
         println!("✓ Created {}", agent_file);
     } else {
         println!("  {} already exists — skipping", agent_file);
@@ -121,8 +137,12 @@ max_steps = 25
 [permissions]
 default_mode = "ask"
 "#;
-        std::fs::write(&config_path, template)
-            .with_context(|| format!("failed to write {}", config_path.display()))?;
+        std::fs::write(&config_path, template).map_err(|e| {
+            deepseeknova_core::DeepseeknovaError::Io(std::io::Error::other(format!(
+                "failed to write {}: {e}",
+                config_path.display()
+            )))
+        })?;
         println!("✓ Created deepseeknova.toml");
     } else {
         println!("  deepseeknova.toml already exists — skipping");

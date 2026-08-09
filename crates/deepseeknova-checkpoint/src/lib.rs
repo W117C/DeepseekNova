@@ -9,6 +9,9 @@
 //! （只写新增快照），仅在淘汰 / 回滚 / 清空导致内存与文件失去对齐时
 //! 才全量重写。
 
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
+use deepseeknova_core::DeepseeknovaError;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::OpenOptions;
@@ -61,7 +64,7 @@ impl CheckpointManager {
     }
 
     /// 从 JSONL 文件恢复快照（文件不存在 → 空管理器）。
-    pub fn load_from(path: &Path) -> anyhow::Result<Self> {
+    pub fn load_from(path: &Path) -> Result<Self, DeepseeknovaError> {
         let mut manager = Self::new();
         manager.persist_path = Some(path.to_path_buf());
         let content = match std::fs::read_to_string(path) {
@@ -106,7 +109,7 @@ impl CheckpointManager {
     /// 把当前全部快照全量重写回持久化文件（JSONL，truncate + 重写）。
     /// 用于淘汰、回滚、清空等内存与文件失去对齐的场景。
     /// 未配置持久化时为空操作。
-    fn persist_all(&mut self) -> anyhow::Result<()> {
+    fn persist_all(&mut self) -> Result<(), DeepseeknovaError> {
         let Some(path) = &self.persist_path else {
             return Ok(());
         };
@@ -130,7 +133,7 @@ impl CheckpointManager {
     ///
     /// 当磁盘文件与内存状态完全无对应（新开启持久化 / 清空后）时，以
     /// 截断重写代替追加，避免把既有文件内容与新状态重复拼接。
-    fn persist_incremental(&mut self) -> anyhow::Result<()> {
+    fn persist_incremental(&mut self) -> Result<(), DeepseeknovaError> {
         let Some(path) = &self.persist_path else {
             return Ok(());
         };
@@ -157,7 +160,7 @@ impl CheckpointManager {
 
     /// 超过容量上限时按 FIFO 淘汰最旧快照。若发生淘汰，内存与文件失去
     /// 对齐（被淘汰行的旧内容仍在文件中），需全量重写持久化文件保持一致。
-    fn enforce_capacity(&mut self) -> anyhow::Result<()> {
+    fn enforce_capacity(&mut self) -> Result<(), DeepseeknovaError> {
         let evicted = self.snapshots.len().saturating_sub(self.max_snapshots);
         if evicted > 0 {
             self.snapshots.drain(..evicted);
@@ -167,7 +170,7 @@ impl CheckpointManager {
     }
 
     /// Take a snapshot of the file at `path`.
-    pub async fn snapshot_file(&mut self, path: &Path) -> anyhow::Result<()> {
+    pub async fn snapshot_file(&mut self, path: &Path) -> Result<(), DeepseeknovaError> {
         self.snapshots.push(snapshot_state(path).await?);
         self.enforce_capacity()?;
         self.persist_incremental()?;
@@ -175,7 +178,7 @@ impl CheckpointManager {
     }
 
     /// Take snapshots of multiple files.
-    pub async fn snapshot_files(&mut self, paths: &[&Path]) -> anyhow::Result<()> {
+    pub async fn snapshot_files(&mut self, paths: &[&Path]) -> Result<(), DeepseeknovaError> {
         for path in paths {
             self.snapshot_file(path).await?;
         }
@@ -184,7 +187,7 @@ impl CheckpointManager {
 
     /// Take snapshots of all files under a directory (recursive).
     /// 返回实际快照的文件数（容量淘汰不影响计数）。
-    pub async fn snapshot_dir(&mut self, root: &Path) -> anyhow::Result<usize> {
+    pub async fn snapshot_dir(&mut self, root: &Path) -> Result<usize, DeepseeknovaError> {
         let mut count = 0;
         for entry in walkdir::WalkDir::new(root)
             .into_iter()
@@ -199,7 +202,7 @@ impl CheckpointManager {
     }
 
     /// 执行单次回滚的文件系统恢复，不做持久化（由调用方统一落盘）。
-    async fn rollback_inner(&mut self) -> anyhow::Result<Option<(PathBuf, String)>> {
+    async fn rollback_inner(&mut self) -> Result<Option<(PathBuf, String)>, DeepseeknovaError> {
         match self.snapshots.pop() {
             Some(snap) => {
                 restore_state(&snap).await?;
@@ -216,7 +219,7 @@ impl CheckpointManager {
 
     /// Rollback: restore the most recent snapshot and remove it from the stack.
     /// Returns the path that was rolled back, or `None` if the stack is empty.
-    pub async fn rollback(&mut self) -> anyhow::Result<Option<(PathBuf, String)>> {
+    pub async fn rollback(&mut self) -> Result<Option<(PathBuf, String)>, DeepseeknovaError> {
         let result = self.rollback_inner().await?;
         // 内存弹出一条后与文件失去对齐，全量重写以截断末尾行。
         if result.is_some() {
@@ -226,7 +229,7 @@ impl CheckpointManager {
     }
 
     /// Rollback ALL snapshots in reverse order.
-    pub async fn rollback_all(&mut self) -> anyhow::Result<usize> {
+    pub async fn rollback_all(&mut self) -> Result<usize, DeepseeknovaError> {
         let count = self.snapshots.len();
         while !self.snapshots.is_empty() {
             self.rollback_inner().await?;
@@ -251,7 +254,7 @@ impl CheckpointManager {
 
     /// Verify all snapshots against current filesystem state.
     /// Returns (snapshot, is_clean).
-    pub async fn verify(&self) -> anyhow::Result<Vec<(&Snapshot, bool)>> {
+    pub async fn verify(&self) -> Result<Vec<(&Snapshot, bool)>, DeepseeknovaError> {
         let mut results = Vec::new();
         for snap in &self.snapshots {
             let current_hash = if snap.path.exists() {
@@ -283,7 +286,7 @@ impl CheckpointManager {
     }
 
     /// Build a diff summary: what changed between snapshots and current state.
-    pub async fn diff_summary(&self) -> anyhow::Result<String> {
+    pub async fn diff_summary(&self) -> Result<String, DeepseeknovaError> {
         if self.snapshots.is_empty() {
             return Ok("no snapshots".to_string());
         }
@@ -319,7 +322,7 @@ impl Default for CheckpointManager {
 
 /// 读取文件当前状态并计算 SHA-256，构造一条 [`Snapshot`]。
 /// 文件不存在时按空内容快照（回滚时删除现有文件）。
-async fn snapshot_state(path: &Path) -> anyhow::Result<Snapshot> {
+async fn snapshot_state(path: &Path) -> Result<Snapshot, DeepseeknovaError> {
     let (content, hash) = if path.exists() {
         let bytes = tokio::fs::read(path).await?;
         let content = String::from_utf8_lossy(&bytes).to_string();
@@ -339,7 +342,7 @@ async fn snapshot_state(path: &Path) -> anyhow::Result<Snapshot> {
 /// 把一条快照状态恢复到文件系统：文件原本不存在 → 删除现有文件；
 /// 否则原子写（临时文件 + rename）。非 UTF-8 文件内容经
 /// [`String::from_utf8_lossy`] 有损，与 [`CheckpointManager`] 的既有口径一致。
-async fn restore_state(snap: &Snapshot) -> anyhow::Result<()> {
+async fn restore_state(snap: &Snapshot) -> Result<(), DeepseeknovaError> {
     if snap.content.is_empty() {
         // File was absent before — remove it if it now exists
         if snap.path.exists() {
@@ -425,7 +428,7 @@ impl SessionCheckpointManager {
     }
 
     /// 从 JSONL 文件恢复检查点（文件不存在 → 空管理器）。
-    pub fn load_from(path: &Path) -> anyhow::Result<Self> {
+    pub fn load_from(path: &Path) -> Result<Self, DeepseeknovaError> {
         let mut manager = Self::new();
         manager.persist_path = Some(path.to_path_buf());
         let content = match std::fs::read_to_string(path) {
@@ -462,7 +465,7 @@ impl SessionCheckpointManager {
     }
 
     /// 全量重写持久化文件（JSONL，truncate + 重写）。未配置持久化时为空操作。
-    fn persist(&mut self) -> anyhow::Result<()> {
+    fn persist(&mut self) -> Result<(), DeepseeknovaError> {
         let Some(path) = &self.persist_path else {
             return Ok(());
         };
@@ -481,7 +484,7 @@ impl SessionCheckpointManager {
     }
 
     /// 超过容量上限时按 FIFO 淘汰最旧检查点（内存 + 持久化同步）。
-    fn enforce_capacity(&mut self) -> anyhow::Result<()> {
+    fn enforce_capacity(&mut self) -> Result<(), DeepseeknovaError> {
         let evicted = self.checkpoints.len().saturating_sub(self.max_checkpoints);
         if evicted > 0 {
             self.checkpoints.drain(..evicted);
@@ -495,7 +498,7 @@ impl SessionCheckpointManager {
         &mut self,
         conversation: Vec<ConversationLine>,
         label: Option<String>,
-    ) -> anyhow::Result<String> {
+    ) -> Result<String, DeepseeknovaError> {
         self.save_with_files(conversation, label, &[]).await
     }
 
@@ -505,7 +508,7 @@ impl SessionCheckpointManager {
         conversation: Vec<ConversationLine>,
         label: Option<String>,
         paths: &[&Path],
-    ) -> anyhow::Result<String> {
+    ) -> Result<String, DeepseeknovaError> {
         let mut files = Vec::new();
         for path in paths {
             files.push(snapshot_state(path).await?);
@@ -550,7 +553,7 @@ impl SessionCheckpointManager {
     pub async fn rollback(
         &mut self,
         id: Option<&str>,
-    ) -> anyhow::Result<Option<SessionCheckpoint>> {
+    ) -> Result<Option<SessionCheckpoint>, DeepseeknovaError> {
         let idx = match id {
             Some(id) => match self.checkpoints.iter().position(|c| c.id == id) {
                 Some(i) => Some(i),

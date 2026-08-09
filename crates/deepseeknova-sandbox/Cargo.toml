@@ -9,7 +9,9 @@ documentation = "https://docs.rs/deepseeknova-sandbox"
 description = "Sandbox trait and platform-specific sandbox implementations"
 
 [dependencies]
-anyhow = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 deepseeknova-core = { workspace = true }
+
+[lints]
+workspace = true

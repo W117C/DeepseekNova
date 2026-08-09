@@ -226,13 +226,19 @@ impl MeteredProvider {
 
 #[async_trait]
 impl Provider for MeteredProvider {
-    async fn generate(&self, validated: ValidatedRequest<'_>) -> anyhow::Result<Message> {
+    async fn generate(
+        &self,
+        validated: ValidatedRequest<'_>,
+    ) -> Result<Message, deepseeknova_core::DeepseeknovaError> {
         let out = self.inner.generate(validated).await?;
         self.ledger.record_unmetered(self.role, &self.model);
         Ok(out)
     }
 
-    async fn stream(&self, validated: ValidatedRequest<'_>) -> anyhow::Result<ChunkStream> {
+    async fn stream(
+        &self,
+        validated: ValidatedRequest<'_>,
+    ) -> Result<ChunkStream, deepseeknova_core::DeepseeknovaError> {
         let inner = self.inner.stream(validated).await?;
         Ok(Box::pin(MeteredStream {
             inner,
@@ -257,7 +263,7 @@ struct MeteredStream {
 }
 
 impl tokio_stream::Stream for MeteredStream {
-    type Item = anyhow::Result<Chunk>;
+    type Item = Result<Chunk, deepseeknova_core::DeepseeknovaError>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
@@ -435,7 +441,10 @@ mod tests {
         }
         #[async_trait::async_trait]
         impl crate::Provider for FakeProvider {
-            async fn generate(&self, _v: crate::ValidatedRequest<'_>) -> anyhow::Result<Message> {
+            async fn generate(
+                &self,
+                _v: crate::ValidatedRequest<'_>,
+            ) -> Result<Message, deepseeknova_core::DeepseeknovaError> {
                 Ok(Message {
                     role: Role::Assistant,
                     content: "ok".into(),
@@ -448,7 +457,8 @@ mod tests {
             async fn stream(
                 &self,
                 _v: crate::ValidatedRequest<'_>,
-            ) -> anyhow::Result<deepseeknova_core::chunk::ChunkStream> {
+            ) -> Result<deepseeknova_core::chunk::ChunkStream, deepseeknova_core::DeepseeknovaError>
+            {
                 let mut chunks = vec![Ok(Chunk::TextDelta("hi".into()))];
                 if self.with_usage {
                     chunks.push(Ok(Chunk::Usage(usage(7, 3, 0))));

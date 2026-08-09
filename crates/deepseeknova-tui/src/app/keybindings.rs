@@ -107,8 +107,21 @@ impl Keymap {
                 continue;
             };
             for (key_spec, target) in map {
-                // 解绑：null
+                // 解绑：null。保留键同样拒绝解绑——解绑等价于把该键
+                // 重绑为无操作，会让 Ctrl+C 取消/退出、Ctrl+D 退出等
+                // 核心能力失效（与重绑路径同一道 reserved 检查）。
                 if target.is_null() {
+                    if let Some(reason) = reserved_reason(key_spec) {
+                        keymap.diagnostics.push(tr.t_args(
+                            Key::KeymapReserved,
+                            &[
+                                ("ctx", ctx_name),
+                                ("key", key_spec),
+                                ("reason", tr.t(reason)),
+                            ],
+                        ));
+                        continue;
+                    }
                     if let Some(binding) = Binding::parse(key_spec) {
                         keymap.overrides.insert((context, binding), None);
                     } else {
@@ -260,6 +273,31 @@ mod tests {
             "保留键诊断带原因"
         );
         assert!(km.overrides.is_empty(), "保留键不写入覆盖层");
+    }
+
+    #[test]
+    fn parse_rejects_unbinding_reserved_keys() {
+        // 解绑路径必须与重绑路径走同一道 reserved 检查：把 Ctrl+C/D/Z
+        // 解绑会让取消/退出/提示能力失效（曾只拦重绑、放行 null）。
+        let km = Keymap::parse(
+            r#"{"bindings":[
+                {"context":"Input","bindings":{"ctrl+c":null,"ctrl+d":null,"ctrl+z":null}}
+            ]}"#,
+            Tr::new(crate::i18n::Lang::En),
+        );
+        assert!(
+            km.diagnostics
+                .iter()
+                .filter(|d| d.starts_with("reserved"))
+                .count()
+                >= 3,
+            "三个保留键解绑均出诊断: {:?}",
+            km.diagnostics
+        );
+        assert!(
+            km.overrides.is_empty(),
+            "保留键解绑不写入覆盖层（Ctrl+C 取消/退出仍生效）"
+        );
     }
 
     #[test]

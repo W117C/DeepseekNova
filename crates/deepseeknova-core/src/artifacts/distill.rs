@@ -17,7 +17,6 @@
 use crate::memory::profile::{ProfileCategory, UserProfile};
 use crate::memory::skill::{Skill, SkillFrontmatter, TaskObservation, TaskOutcome};
 use crate::memory::store::{MemoryCategory, MemoryStore};
-use anyhow::Result;
 use chrono::Utc;
 use std::sync::Arc;
 use tracing::info;
@@ -50,8 +49,11 @@ pub struct ProjectCompletion {
 /// A user style observation.
 #[derive(Debug, Clone)]
 pub struct StyleObservation {
+    /// 该观察所属的用户画像类别。
     pub category: ProfileCategory,
+    /// 观察键名（如 "language"）。
     pub key: String,
+    /// 观察值（如 "Rust"）。
     pub value: String,
 }
 
@@ -62,13 +64,17 @@ pub struct DistillationEngine {
 }
 
 impl DistillationEngine {
+    /// 用给定的记忆存储和用户画像构造蒸馏引擎。
     pub fn new(store: Arc<MemoryStore>, profile: UserProfile) -> Self {
         Self { store, profile }
     }
 
     /// Run the full distillation process.
     /// Returns a summary of what was stored.
-    pub fn distill(&mut self, completion: &ProjectCompletion) -> Result<DistillationResult> {
+    pub fn distill(
+        &mut self,
+        completion: &ProjectCompletion,
+    ) -> Result<DistillationResult, crate::DeepseeknovaError> {
         if !completion.user_confirmed {
             info!("distillation skipped — user did not confirm");
             return Ok(DistillationResult::skipped());
@@ -199,13 +205,18 @@ impl DistillationEngine {
 /// Result of the distillation process.
 #[derive(Debug, Clone)]
 pub struct DistillationResult {
+    /// 触发蒸馏的项目名称。
     pub project_name: String,
+    /// 本次写入长期记忆的条目数。
     pub memories_stored: usize,
+    /// 本次更新用户画像的次数。
     pub profile_updates: usize,
+    /// 是否识别出可抽取的技能候选。
     pub skill_created: bool,
 }
 
 impl DistillationResult {
+    /// 构造一个表示「已跳过」的空结果。
     pub fn skipped() -> Self {
         Self {
             project_name: String::new(),
@@ -215,6 +226,7 @@ impl DistillationResult {
         }
     }
 
+    /// 判断本次蒸馏是否实际写入了记忆或更新了画像。
     pub fn was_distilled(&self) -> bool {
         self.memories_stored > 0 || self.profile_updates > 0
     }

@@ -317,9 +317,14 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Provider for FixedProvider {
-        async fn generate(&self, _validated: ValidatedRequest<'_>) -> anyhow::Result<Message> {
+        async fn generate(
+            &self,
+            _validated: ValidatedRequest<'_>,
+        ) -> Result<Message, deepseeknova_core::DeepseeknovaError> {
             if self.fail {
-                anyhow::bail!("provider down");
+                return Err(deepseeknova_core::DeepseeknovaError::provider(
+                    "provider down",
+                ));
             }
             Ok(Message {
                 role: Role::Assistant,

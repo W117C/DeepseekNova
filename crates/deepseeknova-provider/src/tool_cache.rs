@@ -98,7 +98,11 @@ mod tests {
             }
         }
 
-        async fn execute(&self, _ctx: &ToolContext, _args: &str) -> anyhow::Result<String> {
+        async fn execute(
+            &self,
+            _ctx: &ToolContext,
+            _args: &str,
+        ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
             Ok("ok".into())
         }
     }

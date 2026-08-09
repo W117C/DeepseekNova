@@ -94,7 +94,7 @@ pub fn run_list(
     stage: Option<&str>,
     tag: Option<&str>,
     search: Option<&str>,
-) -> anyhow::Result<()> {
+) -> Result<(), deepseeknova_core::DeepseeknovaError> {
     let entries: Vec<(MemoryEntry, LifecycleMeta)> = if category == "all" {
         let mut v = Vec::new();
         for c in [
@@ -106,7 +106,8 @@ pub fn run_list(
         }
         v
     } else {
-        let cat = parse_category(category).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let cat = parse_category(category)
+            .map_err(|e| deepseeknova_core::DeepseeknovaError::Config(e.to_string()))?;
         engine.list_with_lifecycle(cat)?
     };
     let filtered = filter_memories(entries, &ListFilter { stage, tag, search });
@@ -131,10 +132,12 @@ pub fn run_edit(
     id: &str,
     content: &[String],
     embedder_enabled: bool,
-) -> anyhow::Result<()> {
+) -> Result<(), deepseeknova_core::DeepseeknovaError> {
     let new_content = content.join(" ");
     if new_content.trim().is_empty() {
-        anyhow::bail!("memory edit <id> <content>：内容不能为空");
+        return Err(deepseeknova_core::DeepseeknovaError::Config(
+            "memory edit <id> <content>：内容不能为空".to_string(),
+        ));
     }
     match engine.edit(id, &new_content)? {
         true => {
@@ -151,7 +154,10 @@ pub fn run_edit(
 }
 
 /// 从 `reader` 读取一行并判定确认（y/yes → true；其余 → false）。
-pub fn confirm_delete_with<R: BufRead>(id: &str, reader: &mut R) -> anyhow::Result<bool> {
+pub fn confirm_delete_with<R: BufRead>(
+    id: &str,
+    reader: &mut R,
+) -> Result<bool, deepseeknova_core::DeepseeknovaError> {
     use std::io::Write;
     print!("delete memory '{id}'? [y/N] ");
     std::io::stdout().flush()?;
@@ -162,12 +168,16 @@ pub fn confirm_delete_with<R: BufRead>(id: &str, reader: &mut R) -> anyhow::Resu
 }
 
 /// 标准输入确认（`memory delete` 的交互路径）。
-pub fn confirm_delete(id: &str) -> anyhow::Result<bool> {
+pub fn confirm_delete(id: &str) -> Result<bool, deepseeknova_core::DeepseeknovaError> {
     confirm_delete_with(id, &mut std::io::stdin().lock())
 }
 
 /// `memory delete <id>`：二次确认（--yes 跳过），删除不可逆。
-pub fn run_delete(engine: &MemoryEngine, id: &str, yes: bool) -> anyhow::Result<()> {
+pub fn run_delete(
+    engine: &MemoryEngine,
+    id: &str,
+    yes: bool,
+) -> Result<(), deepseeknova_core::DeepseeknovaError> {
     let confirmed = yes || confirm_delete(id)?;
     if !confirmed {
         println!("aborted: memory '{id}' not deleted");
@@ -213,10 +223,12 @@ pub fn run_replay(
     query: &[String],
     top_k: usize,
     rank_weight: f64,
-) -> anyhow::Result<()> {
+) -> Result<(), deepseeknova_core::DeepseeknovaError> {
     let q = query.join(" ");
     if q.trim().is_empty() {
-        anyhow::bail!("memory replay <query>：查询不能为空");
+        return Err(deepseeknova_core::DeepseeknovaError::Config(
+            "memory replay <query>：查询不能为空".to_string(),
+        ));
     }
     let hits = engine.replay(&q, top_k, rank_weight)?;
     print!("{}", render_replay(&q, &hits));
@@ -375,9 +387,10 @@ mod tests {
         // CLI 层 edit 必须触发 engine::edit 的强制重嵌：旧语义（ferris 向量）
         // 被新内容（plain → 正交向量）覆盖。
         use deepseeknova_core::memory::embedding::EmbeddingProvider;
+        use deepseeknova_core::DeepseeknovaError;
         struct Fake;
         impl EmbeddingProvider for Fake {
-            fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+            fn embed(&self, text: &str) -> Result<Vec<f32>, DeepseeknovaError> {
                 if text.contains("ferris") {
                     Ok(vec![1.0, 0.0])
                 } else {

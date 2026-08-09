@@ -26,8 +26,8 @@
 //! The frontmatter block (between `---` delimiters) is YAML.
 //! The body is the system prompt injected when the skill is activated.
 
-use anyhow::Context;
 use deepseeknova_core::registry::Skill;
+use deepseeknova_core::DeepseeknovaError;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -65,7 +65,7 @@ impl SkillLoader {
     ///
     /// Only `.md` files are considered. Files whose frontmatter fails
     /// to parse are skipped with a warning.
-    pub fn load_all(&self) -> anyhow::Result<Vec<Skill>> {
+    pub fn load_all(&self) -> Result<Vec<Skill>, DeepseeknovaError> {
         if !self.root.exists() {
             tracing::debug!(
                 "skill directory {:?} does not exist — returning empty",
@@ -113,19 +113,31 @@ impl SkillLoader {
 // ---------------------------------------------------------------------------
 
 /// Parse a single `.md` skill file.
-fn parse_skill_file(path: &Path) -> anyhow::Result<Skill> {
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("failed to read skill file: {}", path.display()))?;
+fn parse_skill_file(path: &Path) -> Result<Skill, DeepseeknovaError> {
+    let raw = std::fs::read_to_string(path).map_err(|e| {
+        DeepseeknovaError::Io(std::io::Error::new(
+            e.kind(),
+            format!("failed to read skill file {}: {e}", path.display()),
+        ))
+    })?;
 
-    let (frontmatter_yaml, body) = split_frontmatter(&raw)
-        .with_context(|| format!("invalid frontmatter in {}", path.display()))?;
+    let (frontmatter_yaml, body) = split_frontmatter(&raw).ok_or_else(|| {
+        DeepseeknovaError::Config(format!("invalid frontmatter in {}", path.display()))
+    })?;
 
-    let fm: SkillFrontmatter = serde_yml::from_str(&frontmatter_yaml)
-        .with_context(|| format!("invalid YAML frontmatter in {}", path.display()))?;
+    let fm: SkillFrontmatter = serde_yml::from_str(&frontmatter_yaml).map_err(|e| {
+        DeepseeknovaError::Config(format!(
+            "invalid YAML frontmatter in {}: {e}",
+            path.display()
+        ))
+    })?;
 
     let body = body.trim().to_string();
     if body.is_empty() {
-        anyhow::bail!("skill file {} has empty body", path.display());
+        return Err(DeepseeknovaError::Config(format!(
+            "skill file {} has empty body",
+            path.display()
+        )));
     }
 
     Ok(Skill {

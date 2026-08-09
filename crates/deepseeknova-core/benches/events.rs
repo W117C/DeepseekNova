@@ -1,6 +1,6 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use deepseeknova_core::chunk::Usage;
-use deepseeknova_core::{RunEvent, RunInput, RunOutput};
+use deepseeknova_core::{DeepseeknovaError, RunEvent, RunInput, RunOutput};
 use std::hint::black_box;
 
 fn bench_event_clone(c: &mut Criterion) {
@@ -60,7 +60,7 @@ fn bench_run_input_clone(c: &mut Criterion) {
 fn bench_stream_construction(c: &mut Criterion) {
     c.bench_function("event/stream_from_vec", |b| {
         b.iter(|| {
-            let events: Vec<anyhow::Result<RunEvent>> = (0..100)
+            let events: Vec<Result<RunEvent, DeepseeknovaError>> = (0..100)
                 .map(|i| Ok(RunEvent::TextDelta(format!("chunk_{i} "))))
                 .collect();
             let stream = tokio_stream::iter(events);

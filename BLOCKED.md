@@ -51,7 +51,9 @@
   增 `session_id`，serve 注入 durable run id / 会话 id）。
 - ~~审计日志持久化（P1-10）~~ **部分已做**：security 侧 `JsonlAuditLogger`（第一批 B1）
   + runtime 侧切 JSONL 后端（第二批 B3）；`PermissionGate` 裁决统一进审计流仍未做。
-- SECURITY.md 支持版本表过期 + GitHub 元数据（description 仍写 Desktop）。
+- ~~SECURITY.md 支持版本表过期 + GitHub 元数据（description 仍写 Desktop）~~
+  **已核实（2026-08-09**：SECURITY.md 0.5.x/0.4.x/≤0.3.x 表与 Cargo 版本一致；
+  GitHub description 已为现役文案，不含 Desktop）。
 
 ### 待领导后续裁决（非本批阻塞）
 - ~~Runtime/EventBus/ContextEngine 三选一（接线 / 标注库级 API / 删除）~~ **已按
@@ -63,7 +65,9 @@
   "当前恒 0、统计 [规划中]"、serde 契约保留，context builder 标注库级 API）。
 - API key 命名统一到哪个变量名。
 - npm 安装器承诺（cargo-dist vs 删死配置）。
-- docs/superpowers 内部任务书（移出 / 标注 / 保留）。
+- docs/superpowers 内部任务书（移出 / 标注 / 保留）——2026-08-09 已把已撤销的
+  08-07 桌面任务书/设计规范移入 `archive/` 并加归档标记，索引已更新；其余任务书
+  的移出/保留仍待领导裁决。
 - Windows 沙箱排期。
 - temperature 配置接线 vs 删除。
 

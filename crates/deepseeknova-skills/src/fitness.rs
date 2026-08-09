@@ -6,7 +6,7 @@
 //! records into non-destructive evolution suggestions (deprecate, merge,
 //! promote) that a human confirms before acting on them.
 
-use anyhow::Context;
+use deepseeknova_core::DeepseeknovaError;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -67,15 +67,17 @@ impl FitnessStore {
     ///
     /// A missing file yields an empty store; a corrupt file is logged as a
     /// warning and also yields an empty store (never fails).
-    pub fn load(path: &Path) -> anyhow::Result<Self> {
+    pub fn load(path: &Path) -> Result<Self, DeepseeknovaError> {
         let raw = match std::fs::read_to_string(path) {
             Ok(raw) => raw,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(Self::empty(path));
             }
             Err(e) => {
-                return Err(e)
-                    .with_context(|| format!("failed to read fitness file {}", path.display()));
+                return Err(DeepseeknovaError::Io(std::io::Error::new(
+                    e.kind(),
+                    format!("failed to read fitness file {}: {e}", path.display()),
+                )));
             }
         };
 
@@ -151,11 +153,15 @@ impl FitnessStore {
     /// 原子替换。已知限制：进程级并发写会丢更新（后写者覆盖整文件，写前
     /// 不 re-load 合并；单进程内由调用方串行保证）。刻意不引入文件锁依赖
     /// （不加 fs2/flock）。
-    pub fn save(&self) -> anyhow::Result<()> {
+    pub fn save(&self) -> Result<(), DeepseeknovaError> {
         if let Some(parent) = self.path.parent() {
             if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)
-                    .with_context(|| format!("failed to create {}", parent.display()))?;
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    std::io::Error::new(
+                        e.kind(),
+                        format!("failed to create {}: {e}", parent.display()),
+                    )
+                })?;
             }
         }
 
@@ -184,29 +190,49 @@ impl FitnessStore {
             use std::os::unix::fs::OpenOptionsExt;
             let mut opts = std::fs::OpenOptions::new();
             opts.write(true).create_new(true).mode(0o600);
-            let mut f = opts
-                .open(&tmp_path)
-                .with_context(|| format!("failed to create {}", tmp_path.display()))?;
-            f.write_all(json.as_bytes())
-                .with_context(|| format!("failed to write {}", tmp_path.display()))?;
+            let mut f = opts.open(&tmp_path).map_err(|e| {
+                std::io::Error::new(
+                    e.kind(),
+                    format!("failed to create {}: {e}", tmp_path.display()),
+                )
+            })?;
+            f.write_all(json.as_bytes()).map_err(|e| {
+                std::io::Error::new(
+                    e.kind(),
+                    format!("failed to write {}: {e}", tmp_path.display()),
+                )
+            })?;
         }
         #[cfg(not(unix))]
         {
-            std::fs::write(&tmp_path, &json)
-                .with_context(|| format!("failed to write {}", tmp_path.display()))?;
+            std::fs::write(&tmp_path, &json).map_err(|e| {
+                std::io::Error::new(
+                    e.kind(),
+                    format!("failed to write {}: {e}", tmp_path.display()),
+                )
+            })?;
         }
-        std::fs::rename(&tmp_path, &self.path).with_context(|| {
-            format!(
-                "failed to rename {} to {}",
-                tmp_path.display(),
-                self.path.display()
+        std::fs::rename(&tmp_path, &self.path).map_err(|e| {
+            std::io::Error::new(
+                e.kind(),
+                format!(
+                    "failed to rename {} to {}: {e}",
+                    tmp_path.display(),
+                    self.path.display()
+                ),
             )
         })?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600))
-                .with_context(|| format!("failed to chmod 0600 {}", self.path.display()))?;
+            std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600)).map_err(
+                |e| {
+                    std::io::Error::new(
+                        e.kind(),
+                        format!("failed to chmod 0600 {}: {e}", self.path.display()),
+                    )
+                },
+            )?;
         }
         Ok(())
     }

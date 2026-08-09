@@ -7,6 +7,8 @@
 //! protocol/delegate/helpers），组合根 `build_agent_with_role_providers` 与
 //! `Runtime` 保留在此，对外 API 经 `pub use` 原样再导出。
 
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 mod delegate;
 mod diagnose;
 mod helpers;
@@ -77,7 +79,10 @@ pub struct Runtime {
 
 impl Runtime {
     /// Create a Runtime with a given context provider.
-    pub fn new(config: Config, context: Arc<dyn ContextProvider>) -> anyhow::Result<Self> {
+    pub fn new(
+        config: Config,
+        context: Arc<dyn ContextProvider>,
+    ) -> Result<Self, deepseeknova_core::DeepseeknovaError> {
         let permission = build_permission_gate(&config);
 
         Ok(Self {
@@ -95,7 +100,7 @@ impl Runtime {
         &self,
         runner: &dyn Runner,
         input: RunInput,
-    ) -> anyhow::Result<RunEventStream> {
+    ) -> Result<RunEventStream, deepseeknova_core::DeepseeknovaError> {
         self.events
             .publish(deepseeknova_event::AgentEvent::ModelStarted {
                 provider: "default".to_string(),
@@ -155,7 +160,7 @@ pub fn build_agent_with_role_providers(
     gate: Option<Arc<PermissionGate>>,
     extra_tools: Vec<Arc<dyn deepseeknova_core::Tool>>,
     session_skills: Option<Arc<std::sync::Mutex<Vec<String>>>>,
-) -> anyhow::Result<deepseeknova_agent::Agent> {
+) -> Result<deepseeknova_agent::Agent, deepseeknova_core::DeepseeknovaError> {
     // 提前克隆供 P2 段使用（task/compact/review 字段在下方会被移动）。
     let step_quick = roles.step_quick.clone();
     let step_high = roles.step_high.clone();
@@ -1007,7 +1012,7 @@ pub fn build_agent_with_task_provider(
     max_steps: usize,
     gate: Option<Arc<PermissionGate>>,
     extra_tools: Vec<Arc<dyn deepseeknova_core::Tool>>,
-) -> anyhow::Result<deepseeknova_agent::Agent> {
+) -> Result<deepseeknova_agent::Agent, deepseeknova_core::DeepseeknovaError> {
     build_agent_with_role_providers(
         config,
         workspace_root,
@@ -1050,7 +1055,7 @@ pub fn build_agent(
     max_steps: usize,
     gate: Option<Arc<PermissionGate>>,
     extra_tools: Vec<Arc<dyn deepseeknova_core::Tool>>,
-) -> anyhow::Result<deepseeknova_agent::Agent> {
+) -> Result<deepseeknova_agent::Agent, deepseeknova_core::DeepseeknovaError> {
     build_agent_with_task_provider(
         config,
         workspace_root,
@@ -1133,7 +1138,8 @@ mod tests {
             async fn generate(
                 &self,
                 v: deepseeknova_provider::ValidatedRequest<'_>,
-            ) -> anyhow::Result<deepseeknova_core::Message> {
+            ) -> Result<deepseeknova_core::Message, deepseeknova_core::DeepseeknovaError>
+            {
                 let mut texts: Vec<String> = v.messages.iter().map(|m| m.content.clone()).collect();
                 self.seen.lock().unwrap().append(&mut texts);
                 Ok(deepseeknova_core::Message {
@@ -1199,6 +1205,8 @@ mod tests {
     /// 持续推进（证明 worker 已被 block_in_place 释放）。
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn recall_embed_does_not_starve_the_worker_thread() {
+        let _guard = ENV_LOCK.lock().await;
+        clear_proxy_env();
         use deepseeknova_core::Runner;
         use futures::StreamExt;
         use std::io::{Read, Write};
@@ -1452,7 +1460,8 @@ mod tests {
             async fn generate(
                 &self,
                 _v: deepseeknova_provider::ValidatedRequest<'_>,
-            ) -> anyhow::Result<deepseeknova_core::Message> {
+            ) -> Result<deepseeknova_core::Message, deepseeknova_core::DeepseeknovaError>
+            {
                 Ok(deepseeknova_core::Message {
                     role: deepseeknova_core::Role::Assistant,
                     content: r#"{"kind":"skill","title":"Fix Auth Flow","body":"Validate tokens first","tags":["auth"]}"#
@@ -1618,7 +1627,7 @@ mod tests {
             &self,
             _ctx: &deepseeknova_core::tool::ToolContext,
             _args: &str,
-        ) -> anyhow::Result<String> {
+        ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
             Ok(String::new())
         }
     }

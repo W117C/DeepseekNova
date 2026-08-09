@@ -1,6 +1,7 @@
 use crate::connection::McpConnection;
 use crate::http_client::McpHttpConnection;
 use deepseeknova_config::{Config, McpServerConfig};
+use deepseeknova_core::DeepseeknovaError;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};
@@ -24,7 +25,7 @@ impl McpServerConnection {
         method: &str,
         params: Option<serde_json::Value>,
         timeout: Duration,
-    ) -> anyhow::Result<serde_json::Value> {
+    ) -> Result<serde_json::Value, DeepseeknovaError> {
         match self {
             McpServerConnection::Stdio(conn) => conn.request(method, params, timeout).await,
             McpServerConnection::Http(conn) => conn.request(method, params, timeout).await,
@@ -92,7 +93,7 @@ pub async fn discover_and_connect(
 async fn connect_one(
     cfg: &McpServerConfig,
     timeout: Duration,
-) -> anyhow::Result<McpServerConnection> {
+) -> Result<McpServerConnection, DeepseeknovaError> {
     // Determine transport type
     if !cfg.command.is_empty() {
         // Stdio transport
@@ -114,16 +115,16 @@ async fn connect_one(
             let conn = McpHttpConnection::connect(url, timeout).await?;
             Ok(McpServerConnection::Http(conn))
         } else {
-            anyhow::bail!(
+            Err(DeepseeknovaError::Runner(format!(
                 "MCP server '{}': no command and no HTTP URL configured",
                 cfg.name
-            )
+            )))
         }
     } else {
-        anyhow::bail!(
+        Err(DeepseeknovaError::Runner(format!(
             "MCP server '{}': must have either a command or an HTTP URL",
             cfg.name
-        )
+        )))
     }
 }
 

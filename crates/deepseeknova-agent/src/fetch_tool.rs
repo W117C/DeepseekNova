@@ -1,5 +1,6 @@
 use deepseeknova_core::tool::{ParallelSafety, Tool, ToolContext};
 use deepseeknova_core::types::ToolSchema;
+use deepseeknova_core::DeepseeknovaError;
 use std::sync::Arc;
 
 /// 按需取回被截断的完整工具结果（token 节省 C1：大结果截断时完整版
@@ -41,12 +42,12 @@ impl Tool for FetchFullResultTool {
         ParallelSafety::Safe
     }
 
-    async fn execute(&self, _ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
+    async fn execute(&self, _ctx: &ToolContext, args: &str) -> Result<String, DeepseeknovaError> {
         let parsed: serde_json::Value = serde_json::from_str(args)?;
         let tool_call_id = parsed
             .get("tool_call_id")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing tool_call_id parameter"))?;
+            .ok_or_else(|| DeepseeknovaError::Tool("Missing tool_call_id parameter".to_string()))?;
 
         let mem_guard = self.memory.read().await;
         if let Some(result) = mem_guard.get_full_result(tool_call_id) {

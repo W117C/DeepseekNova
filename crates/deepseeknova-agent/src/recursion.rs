@@ -26,7 +26,7 @@
 use crate::task_spec::InputValues;
 use async_trait::async_trait;
 use deepseeknova_core::Tool;
-use deepseeknova_core::{ToolContext, ToolSchema};
+use deepseeknova_core::{DeepseeknovaError, ToolContext, ToolSchema};
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
@@ -43,7 +43,7 @@ pub trait DelegationSink: Send + Sync {
         goal: &str,
         values: &InputValues,
         depth: usize,
-    ) -> anyhow::Result<String>;
+    ) -> Result<String, DeepseeknovaError>;
 }
 
 /// 当前子代理调用深度的执行期扩展。由子代理执行循环注入每个 ToolContext
@@ -114,9 +114,13 @@ impl Tool for RecursiveDelegateTool {
         }
     }
 
-    async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
+    async fn execute(
+        &self,
+        ctx: &ToolContext,
+        args: &str,
+    ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
         if ctx.cancellation.is_cancelled() {
-            anyhow::bail!("cancelled");
+            return Err(deepseeknova_core::DeepseeknovaError::Cancelled);
         }
         let parsed: RecursiveDelegateArgs = serde_json::from_str(args)?;
         let current = ctx
@@ -190,7 +194,7 @@ mod tests {
             _goal: &str,
             _values: &InputValues,
             depth: usize,
-        ) -> anyhow::Result<String> {
+        ) -> Result<String, DeepseeknovaError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             let mut seen = self.max_seen.load(Ordering::SeqCst);
             while depth > seen {
@@ -205,7 +209,9 @@ mod tests {
                 }
             }
             if depth >= self.fail_over {
-                anyhow::bail!("boom at depth {depth} for {agent}");
+                return Err(DeepseeknovaError::Runner(format!(
+                    "boom at depth {depth} for {agent}"
+                )));
             }
             Ok(self.result.clone())
         }
@@ -464,7 +470,7 @@ mod tests {
             goal: &str,
             values: &InputValues,
             depth: usize,
-        ) -> anyhow::Result<String> {
+        ) -> Result<String, DeepseeknovaError> {
             let sink = self.0.get().expect("late sink not set");
             sink.delegate(agent, goal, values, depth).await
         }

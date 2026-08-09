@@ -69,7 +69,11 @@ impl Tool for TodoWriteTool {
         }
     }
 
-    async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
+    async fn execute(
+        &self,
+        ctx: &ToolContext,
+        args: &str,
+    ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
         // 能力门：todo 清单是会话级任务状态（记忆类写操作），与 fs/shell
         // 工具一致强制 MemoryWrite，缺失时拒绝。
         deepseeknova_security::context::enforce_capability(
@@ -80,24 +84,27 @@ impl Tool for TodoWriteTool {
         let parsed: TodoWriteArgs = serde_json::from_str(args)?;
 
         if ctx.cancellation.is_cancelled() {
-            anyhow::bail!("cancelled");
+            return Err(deepseeknova_core::DeepseeknovaError::Cancelled);
         }
 
         // Validate todos
         for (idx, todo) in parsed.todos.iter().enumerate() {
             if todo.id.is_empty() {
-                anyhow::bail!("todo item at index {idx} has an empty id");
+                return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
+                    "todo item at index {idx} has an empty id"
+                )));
             }
             if todo.content.is_empty() {
-                anyhow::bail!("todo item '{}' has empty content", todo.id);
+                return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
+                    "todo item '{}' has empty content",
+                    todo.id
+                )));
             }
             if !VALID_STATUSES.contains(&todo.status.as_str()) {
-                anyhow::bail!(
+                return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
                     "todo item '{}' has invalid status '{}'; must be one of: {:?}",
-                    todo.id,
-                    todo.status,
-                    VALID_STATUSES
-                );
+                    todo.id, todo.status, VALID_STATUSES
+                )));
             }
         }
 

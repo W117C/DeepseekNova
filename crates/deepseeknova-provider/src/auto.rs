@@ -85,9 +85,15 @@ impl ModelAutoRouter {
 }
 
 impl ModelAutoRouter {
-    async fn decide_choice(&self, messages: &[Message]) -> anyhow::Result<RouteChoice> {
-        let prompt = latest_user_text(messages, self.max_chars)
-            .ok_or_else(|| anyhow::anyhow!("no user message available for routing"))?;
+    async fn decide_choice(
+        &self,
+        messages: &[Message],
+    ) -> Result<RouteChoice, deepseeknova_core::DeepseeknovaError> {
+        let prompt = latest_user_text(messages, self.max_chars).ok_or_else(|| {
+            deepseeknova_core::DeepseeknovaError::Config(
+                "no user message available for routing".into(),
+            )
+        })?;
         let sys = Message {
             role: Role::System,
             content: ROUTE_SYSTEM_PROMPT.to_string(),
@@ -110,15 +116,26 @@ impl ModelAutoRouter {
             Some(ReasoningEffort::Disabled),
         )?;
         let routing_messages = [sys, user];
-        let validated = ValidatedRequest::new(&routing_messages, &[])
-            .map_err(|e| anyhow::anyhow!("routing messages failed replay invariant: {e:?}"))?;
+        let validated = ValidatedRequest::new(&routing_messages, &[]).map_err(|e| {
+            deepseeknova_core::DeepseeknovaError::provider(format!(
+                "routing messages failed replay invariant: {e:?}"
+            ))
+        })?;
         let reply = provider.generate(validated).await?;
         parse_choice(&reply.content)
             .or_else(|| heuristic_choice(&prompt))
-            .ok_or_else(|| anyhow::anyhow!("unable to parse route decision: {}", reply.content))
+            .ok_or_else(|| {
+                deepseeknova_core::DeepseeknovaError::provider(format!(
+                    "unable to parse route decision: {}",
+                    reply.content
+                ))
+            })
     }
 
-    fn resolve(&self, choice: &RouteChoice) -> anyhow::Result<Option<Arc<dyn Provider>>> {
+    fn resolve(
+        &self,
+        choice: &RouteChoice,
+    ) -> Result<Option<Arc<dyn Provider>>, deepseeknova_core::DeepseeknovaError> {
         let (model, effort) = match choice {
             RouteChoice::Auto => return Ok(None),
             RouteChoice::Flash(effort) => {

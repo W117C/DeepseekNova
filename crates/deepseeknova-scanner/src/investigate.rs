@@ -108,7 +108,10 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl Runner for MockRunner {
-        async fn run_stream(&self, _input: RunInput) -> anyhow::Result<RunEventStream> {
+        async fn run_stream(
+            &self,
+            _input: RunInput,
+        ) -> Result<RunEventStream, deepseeknova_core::DeepseeknovaError> {
             let out = RunOutput {
                 text: self.reply.clone(),
                 tool_calls: Vec::new(),

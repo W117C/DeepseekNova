@@ -6,18 +6,20 @@
 //! # struct DummyRunner;
 //! # #[async_trait::async_trait]
 //! # impl deepseeknova_core::runner::Runner for DummyRunner {
-//! #     async fn run_stream(&self, _input: deepseeknova_core::runner::RunInput) -> anyhow::Result<deepseeknova_core::runner::RunEventStream> {
+//! #     async fn run_stream(&self, _input: deepseeknova_core::runner::RunInput) -> Result<deepseeknova_core::runner::RunEventStream, deepseeknova_core::DeepseeknovaError> {
 //! #         unreachable!()
 //! #     }
 //! # }
 //! # #[tokio::main]
-//! # async fn main() -> anyhow::Result<()> {
+//! # async fn main() -> Result<(), deepseeknova_core::DeepseeknovaError> {
 //! # let runner = Arc::new(DummyRunner);
 //! let server = Server::new(runner);
 //! server.serve("127.0.0.1:3000").await?;
 //! # Ok(())
 //! # }
 //! ```
+
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 mod acp;
 mod sessions;
@@ -79,7 +81,7 @@ pub struct DurableRuns {
 }
 
 impl DurableRuns {
-    pub fn open(dir: PathBuf) -> anyhow::Result<Self> {
+    pub fn open(dir: PathBuf) -> Result<Self, deepseeknova_core::DeepseeknovaError> {
         fs::create_dir_all(&dir)?;
         Ok(Self {
             dir,
@@ -95,7 +97,7 @@ impl DurableRuns {
         self.dir.join(format!("{id}.json"))
     }
 
-    pub fn save(&self, record: &RunRecord) -> anyhow::Result<()> {
+    pub fn save(&self, record: &RunRecord) -> Result<(), deepseeknova_core::DeepseeknovaError> {
         let path = self.path(&record.id);
         let tmp = path.with_extension("json.tmp");
         fs::write(&tmp, serde_json::to_string_pretty(record)?)?;
@@ -103,7 +105,10 @@ impl DurableRuns {
         Ok(())
     }
 
-    pub fn load(&self, id: &str) -> anyhow::Result<Option<RunRecord>> {
+    pub fn load(
+        &self,
+        id: &str,
+    ) -> Result<Option<RunRecord>, deepseeknova_core::DeepseeknovaError> {
         match fs::read_to_string(self.path(id)) {
             Ok(text) => Ok(Some(serde_json::from_str(&text)?)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -111,7 +116,7 @@ impl DurableRuns {
         }
     }
 
-    pub fn list(&self) -> anyhow::Result<Vec<RunRecord>> {
+    pub fn list(&self) -> Result<Vec<RunRecord>, deepseeknova_core::DeepseeknovaError> {
         let mut records = Vec::new();
         for entry in fs::read_dir(&self.dir)? {
             let entry = entry?;
@@ -136,7 +141,7 @@ impl DurableRuns {
 
     /// On server startup: mark records left in `Running` as `Interrupted`.
     /// Returns the number of records touched.
-    pub fn mark_interrupted(&self) -> anyhow::Result<usize> {
+    pub fn mark_interrupted(&self) -> Result<usize, deepseeknova_core::DeepseeknovaError> {
         let _guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let mut touched = 0;
         for mut record in self.list()? {
@@ -166,7 +171,7 @@ impl DurableRuns {
     /// Atomically transition a non-running record to `Running`. This is the
     /// only path that should start a run, so two concurrent resumes cannot
     /// both pass the status check.
-    pub fn claim(&self, id: &str) -> anyhow::Result<ClaimResult> {
+    pub fn claim(&self, id: &str) -> Result<ClaimResult, deepseeknova_core::DeepseeknovaError> {
         let _guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let Some(mut record) = self.load(id)? else {
             return Ok(ClaimResult::NotFound);
@@ -325,7 +330,7 @@ impl Server {
     }
 
     /// Start the server and block until it shuts down.
-    pub async fn serve(self, addr: &str) -> anyhow::Result<()> {
+    pub async fn serve(self, addr: &str) -> Result<(), deepseeknova_core::DeepseeknovaError> {
         let listener = tokio::net::TcpListener::bind(addr).await?;
         tracing::info!("deepseeknova serve listening on {addr}");
         axum::serve(listener, self.into_router()).await?;
@@ -570,7 +575,7 @@ fn stream_input(state: Arc<Server>, input: RunInput, run_id: Option<String>) -> 
 /// `/v1/chat` 与 `/v1/runs/{id}/resume` 为 durable run id），透传进 `done`
 /// 事件，供前端据此拉取该 run 的评分卡/诊断。
 fn map_run_event(
-    event: Result<RunEvent, anyhow::Error>,
+    event: Result<RunEvent, deepseeknova_core::DeepseeknovaError>,
     done_text: &mut String,
     failed: &mut Option<String>,
     paused: &mut bool,

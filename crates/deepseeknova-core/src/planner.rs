@@ -15,7 +15,7 @@ impl Planner for SimplePlanner {
         "simple"
     }
 
-    async fn plan(&self, goal: &str) -> anyhow::Result<ExecutionGraph> {
+    async fn plan(&self, goal: &str) -> Result<ExecutionGraph, crate::DeepseeknovaError> {
         let entry = "analyze".to_string();
 
         let mut graph = ExecutionGraph::new(entry.clone());
@@ -66,7 +66,7 @@ impl Planner for TaskPlanner {
         "task"
     }
 
-    async fn plan(&self, goal: &str) -> anyhow::Result<ExecutionGraph> {
+    async fn plan(&self, goal: &str) -> Result<ExecutionGraph, crate::DeepseeknovaError> {
         let entry = "think".to_string();
         let mut graph = ExecutionGraph::new(entry.clone());
 

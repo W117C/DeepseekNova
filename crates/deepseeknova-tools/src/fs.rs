@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use deepseeknova_checkpoint::CheckpointManager;
-use deepseeknova_core::{Tool, ToolContext, ToolSchema};
+use deepseeknova_core::{DeepseeknovaError, Tool, ToolContext, ToolSchema};
 use serde::Deserialize;
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -57,7 +57,11 @@ impl Tool for ReadFileTool {
         true
     }
 
-    async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
+    async fn execute(
+        &self,
+        ctx: &ToolContext,
+        args: &str,
+    ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
         deepseeknova_security::context::enforce_capability(
             ctx,
             &self.schema().name,
@@ -67,7 +71,7 @@ impl Tool for ReadFileTool {
         let path = sanitize_path(&ctx.workspace_root, &parsed.path)?;
 
         if ctx.cancellation.is_cancelled() {
-            anyhow::bail!("cancelled");
+            return Err(deepseeknova_core::DeepseeknovaError::Cancelled);
         }
 
         // 资源限额统一：上限读 SecurityContext 的 `limits.max_file_size`
@@ -79,7 +83,10 @@ impl Tool for ReadFileTool {
             .unwrap_or(MAX_READ_SIZE);
         let meta = fs::metadata(&path).await?;
         if meta.len() > max_size {
-            anyhow::bail!("file too large: {} bytes (max {max_size})", meta.len());
+            return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
+                "file too large: {} bytes (max {max_size})",
+                meta.len()
+            )));
         }
 
         let content = fs::read_to_string(&path).await?;
@@ -94,11 +101,15 @@ impl Tool for ReadFileTool {
                 let total = lines.len();
                 let start = s.unwrap_or(1).max(1);
                 if start > total {
-                    anyhow::bail!("start_line {start} exceeds file length ({total} lines)");
+                    return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
+                        "start_line {start} exceeds file length ({total} lines)"
+                    )));
                 }
                 let end = e.unwrap_or(total).min(total); // clamp end to file length (lenient)
                 if end < start {
-                    anyhow::bail!("end_line {end} is before start_line {start}");
+                    return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
+                        "end_line {end} is before start_line {start}"
+                    )));
                 }
                 let slice: String = lines[start - 1..end]
                     .iter()
@@ -177,7 +188,11 @@ impl Tool for WriteFileTool {
         }
     }
 
-    async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
+    async fn execute(
+        &self,
+        ctx: &ToolContext,
+        args: &str,
+    ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
         deepseeknova_security::context::enforce_capability(
             ctx,
             &self.schema().name,
@@ -187,7 +202,7 @@ impl Tool for WriteFileTool {
         let path = sanitize_path(&ctx.workspace_root, &parsed.path)?;
 
         if ctx.cancellation.is_cancelled() {
-            anyhow::bail!("cancelled");
+            return Err(deepseeknova_core::DeepseeknovaError::Cancelled);
         }
 
         // Snapshot before mutation if checkpointer is configured
@@ -263,7 +278,7 @@ struct EditFileArgs {
 
 impl EditFileArgs {
     /// 归一为块列表：优先 edits；否则用顶层 search/replace 组一个单块。
-    fn blocks(&self) -> anyhow::Result<Vec<EditBlock>> {
+    fn blocks(&self) -> Result<Vec<EditBlock>, DeepseeknovaError> {
         if !self.edits.is_empty() {
             return Ok(self
                 .edits
@@ -279,7 +294,9 @@ impl EditFileArgs {
                 search: s.clone(),
                 replace: r.clone(),
             }]),
-            _ => anyhow::bail!("provide either `edits: [...]` or both `search` and `replace`"),
+            _ => Err(DeepseeknovaError::Tool(
+                "provide either `edits: [...]` or both `search` and `replace`".to_string(),
+            )),
         }
     }
 }
@@ -317,7 +334,11 @@ impl Tool for EditFileTool {
         }
     }
 
-    async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
+    async fn execute(
+        &self,
+        ctx: &ToolContext,
+        args: &str,
+    ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
         deepseeknova_security::context::enforce_capability(
             ctx,
             &self.schema().name,
@@ -328,13 +349,14 @@ impl Tool for EditFileTool {
 
         // snippet_id is now required — enforce read-then-edit contract
         let snip_id = parsed.snippet_id.as_deref().ok_or_else(|| {
-            anyhow::anyhow!(
+            DeepseeknovaError::Tool(
                 "snippet_id is required. You MUST call read_file first and pass its snippet_id to edit_file."
+                    .to_string(),
             )
         })?;
 
         if ctx.cancellation.is_cancelled() {
-            anyhow::bail!("cancelled");
+            return Err(deepseeknova_core::DeepseeknovaError::Cancelled);
         }
 
         // Snapshot before mutation if checkpointer is configured
@@ -363,21 +385,24 @@ impl Tool for EditFileTool {
         let mut working = original.clone();
         for (i, b) in blocks.iter().enumerate() {
             if b.search.is_empty() {
-                anyhow::bail!("edit block #{}: search text must not be empty", i + 1);
+                return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
+                    "edit block #{}: search text must not be empty",
+                    i + 1
+                )));
             }
             let count = working.matches(&b.search).count();
             if count == 0 {
-                anyhow::bail!(
+                return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
                     "edit block #{} not found: search text has 0 matches (must be exactly 1)",
                     i + 1
-                );
+                )));
             }
             if count > 1 {
-                anyhow::bail!(
+                return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
                     "edit block #{} ambiguous: search text has {} matches (must be exactly 1); add surrounding context to disambiguate",
                     i + 1,
                     count
-                );
+                )));
             }
             // 唯一命中：应用（replacen 只替 1 处，等价于唯一替换）
             working = working.replacen(&b.search, &b.replace, 1);
@@ -453,7 +478,11 @@ impl Tool for MoveFileTool {
         }
     }
 
-    async fn execute(&self, ctx: &ToolContext, args: &str) -> anyhow::Result<String> {
+    async fn execute(
+        &self,
+        ctx: &ToolContext,
+        args: &str,
+    ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
         deepseeknova_security::context::enforce_capability(
             ctx,
             &self.schema().name,
@@ -464,7 +493,7 @@ impl Tool for MoveFileTool {
         let dst = sanitize_path(&ctx.workspace_root, &parsed.destination)?;
 
         if ctx.cancellation.is_cancelled() {
-            anyhow::bail!("cancelled");
+            return Err(deepseeknova_core::DeepseeknovaError::Cancelled);
         }
 
         // Snapshot both source and destination before mutation
@@ -490,24 +519,26 @@ impl Tool for MoveFileTool {
 // ---------------------------------------------------------------------------
 
 /// Helper wrapper calling the centralized sanitize_path helper.
-fn sanitize_path(workspace: &Path, raw: &str) -> anyhow::Result<PathBuf> {
+fn sanitize_path(workspace: &Path, raw: &str) -> Result<PathBuf, DeepseeknovaError> {
     deepseeknova_security::path::sanitize_path(workspace, raw)
 }
 
 /// 以 O_EXCL 语义打开临时文件：预埋的 symlink（指向工作区外）因"已存在"
 /// 直接失败，杜绝 `File::create` 跟随链接把内容写到工作区外文件。
 /// 残留的旧 tmp 也会触发 `AlreadyExists`，报错引导清理而非静默覆盖。
-async fn create_temp_exclusive(tmp_path: &std::path::Path) -> anyhow::Result<tokio::fs::File> {
+async fn create_temp_exclusive(
+    tmp_path: &std::path::Path,
+) -> Result<tokio::fs::File, DeepseeknovaError> {
     tokio::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(tmp_path)
         .await
         .map_err(|e| {
-            anyhow::anyhow!(
+            DeepseeknovaError::Tool(format!(
                 "cannot create temp file {} (already exists or is a symlink): {e}",
                 tmp_path.display()
-            )
+            ))
         })
 }
 

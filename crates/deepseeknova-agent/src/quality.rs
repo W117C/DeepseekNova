@@ -166,7 +166,11 @@ mod tests {
         fn read_only(&self) -> bool {
             false
         }
-        async fn execute(&self, _ctx: &ToolContext, _args: &str) -> anyhow::Result<String> {
+        async fn execute(
+            &self,
+            _ctx: &ToolContext,
+            _args: &str,
+        ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
             *self.calls.lock().unwrap() += 1;
             Ok(self.result.clone())
         }
@@ -180,7 +184,10 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Provider for CountingReviewProvider {
-        async fn generate(&self, _v: ValidatedRequest<'_>) -> anyhow::Result<Message> {
+        async fn generate(
+            &self,
+            _v: ValidatedRequest<'_>,
+        ) -> Result<Message, deepseeknova_core::DeepseeknovaError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(Message {
                 role: Role::Assistant,
@@ -194,8 +201,11 @@ mod tests {
         async fn stream(
             &self,
             _v: ValidatedRequest<'_>,
-        ) -> anyhow::Result<deepseeknova_core::chunk::ChunkStream> {
-            anyhow::bail!("CountingReviewProvider is generate-only (review path)")
+        ) -> Result<deepseeknova_core::chunk::ChunkStream, deepseeknova_core::DeepseeknovaError>
+        {
+            return Err(deepseeknova_core::DeepseeknovaError::provider(
+                "CountingReviewProvider is generate-only (review path)",
+            ));
         }
     }
 
@@ -204,14 +214,20 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Provider for BombReviewProvider {
-        async fn generate(&self, _v: ValidatedRequest<'_>) -> anyhow::Result<Message> {
+        async fn generate(
+            &self,
+            _v: ValidatedRequest<'_>,
+        ) -> Result<Message, deepseeknova_core::DeepseeknovaError> {
             panic!("review must not be triggered without a blocking finding")
         }
         async fn stream(
             &self,
             _v: ValidatedRequest<'_>,
-        ) -> anyhow::Result<deepseeknova_core::chunk::ChunkStream> {
-            anyhow::bail!("BombReviewProvider is generate-only")
+        ) -> Result<deepseeknova_core::chunk::ChunkStream, deepseeknova_core::DeepseeknovaError>
+        {
+            return Err(deepseeknova_core::DeepseeknovaError::provider(
+                "BombReviewProvider is generate-only",
+            ));
         }
     }
 
