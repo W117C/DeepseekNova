@@ -2206,8 +2206,13 @@ fn truncate_str(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
 
+    /// 串行化修改进程 cwd 的测试：`std::env::set_current_dir` 是进程级全局
+    /// 状态，并行测试互相覆盖会导致 restore 时目标目录已被另一测试删除。
+    static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn collect_at_files_skips_noise_dirs_and_caps() {
+        let _guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let ws = tempfile::tempdir().unwrap();
         let root = ws.path();
         std::fs::create_dir_all(root.join("src")).unwrap();
@@ -2237,7 +2242,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn collect_at_files_skips_symlink_cycles() {
+        let _guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // 回归：目录 symlink 指向自身/祖先会形成环，跟随则无限递归挂起
         // 启动。`file_type().is_symlink()` 不跟随链接，必须直接跳过。
         let ws = tempfile::tempdir().unwrap();
