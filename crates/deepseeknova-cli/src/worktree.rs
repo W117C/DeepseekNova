@@ -499,6 +499,10 @@ mod tests {
     }
 
     #[test]
+    // Windows 不支持：canonicalize 产生 `\\?\` 扩展路径前缀，git worktree add
+    // 无法创建（平台能力未排期，见 BLOCKED「Windows 沙箱排期」），Unix 语义
+    // 由本测试锁定。
+    #[cfg(unix)]
     fn new_list_switch_delete_roundtrip() {
         let repo = temp_git_repo("roundtrip");
         let root = repo.path().to_path_buf();
@@ -611,6 +615,8 @@ mod tests {
     }
 
     #[test]
+    // Windows 不支持：同上（`\\?\` 扩展路径导致 git worktree add 失败）。
+    #[cfg(unix)]
     fn clean_removes_managed_worktrees_and_skips_dirty() {
         let repo = temp_git_repo("clean");
         let root = repo.path().to_path_buf();

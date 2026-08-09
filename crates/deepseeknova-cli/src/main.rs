@@ -1360,7 +1360,16 @@ fn collect_at_files() -> Vec<String> {
                 }
                 stack.push(path);
             } else if out.len() < MAX_AT_FILES {
-                out.push(path.to_string_lossy().replace("./", ""));
+                // 统一 `/` 分隔符并去掉 `./` 前缀：Windows 下 read_dir 路径形如
+                // `.\Cargo.toml`（反斜杠），直接字符串替换无法归一，调用方与
+                // 测试均按 `/` 语义消费。
+                let rel = path.strip_prefix(".").unwrap_or(&path);
+                out.push(
+                    rel.components()
+                        .map(|c| c.as_os_str().to_string_lossy())
+                        .collect::<Vec<_>>()
+                        .join("/"),
+                );
             }
         }
     }
