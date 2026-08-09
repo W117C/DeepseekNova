@@ -1922,6 +1922,10 @@ mod tests {
         use deepseeknova_core::Runner;
         use futures::StreamExt;
 
+        // 与 H4（recall_embed_does_not_starve_the_worker_thread）共享 ENV_LOCK：
+        // 本测试会移除 embed key，若并行执行会把 H4 刚装配的 key 删掉，
+        // 导致 embed 请求不发（embed request must arrive 失败）。
+        let _guard = ENV_LOCK.lock().await;
         let _env = EnvRestore(vec![
             (
                 "DEEPSEEKNOVA_EMBED_API_KEY",
