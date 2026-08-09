@@ -281,9 +281,12 @@ mod tests {
             .execute(&ctx, r#"{"pattern":"alpha","path":"src"}"#)
             .await
             .unwrap();
-        assert!(out.contains("src/a.rs"), "top-level match: {out}");
         assert!(
-            out.contains("src/sub/b.rs"),
+            out.contains("a.rs:1: fn alpha_top()"),
+            "top-level match: {out}"
+        );
+        assert!(
+            out.contains("b.rs:1: fn alpha_nested()"),
             "nested match must be found: {out}"
         );
         let _ = tokio::fs::remove_dir_all(&dir).await;
