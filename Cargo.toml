@@ -103,7 +103,7 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 tree-sitter = "0.25"
 tree-sitter-rust = "0.24"
 tree-sitter-python = "0.25"
-tree-sitter-javascript = "0.23"
+tree-sitter-javascript = "0.25"
 tree-sitter-typescript = "0.23"
 tree-sitter-go = "0.25"
 opentelemetry = { version = "0.32", default-features = false, features = ["trace"] }
