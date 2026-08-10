@@ -302,8 +302,18 @@ pub(crate) async fn run_agent_loop(
         if let Some(ref b) = budget {
             const EXPECTED_TURN_TOKENS: usize = 2048; // 一轮回复的保守预估
             let current = estimate_tokens(&snapshot) as usize;
+            // 计算记忆注入侧 token（<recalled-memory> 标签的 User 消息），
+            // 用于 max_memory_tokens 独立预算判定。
+            let memory_tokens: usize = snapshot
+                .iter()
+                .filter(|m| {
+                    m.role == deepseeknova_core::Role::User
+                        && m.content.contains("<recalled-memory>")
+                })
+                .map(|m| crate::tokens::estimate_text_tokens(&m.content) as usize)
+                .sum();
             use crate::budget::controller::BudgetDecision;
-            match b.evaluate_budget(current, EXPECTED_TURN_TOKENS) {
+            match b.evaluate_budget(current, EXPECTED_TURN_TOKENS, memory_tokens) {
                 BudgetDecision::Allow => {}
                 BudgetDecision::CompressHistory => budget_wants_compress = true,
                 BudgetDecision::Reject(why) => {

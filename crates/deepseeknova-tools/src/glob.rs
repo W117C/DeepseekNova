@@ -17,7 +17,7 @@ impl Tool for GlobTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "glob".to_string(),
-            description: "Finds files by glob.".to_string(),
+            description: "Finds files by glob pattern (e.g. \"**/*.rs\", \"src/*.ts\"). Returns matching file paths sorted by modification time. Use this to locate files by name pattern.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {

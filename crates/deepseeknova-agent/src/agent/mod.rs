@@ -1000,22 +1000,19 @@ impl Agent {
             // them and re-injecting it would duplicate it. The default prompt
             // applies whenever the caller did not configure an override.
             if !seeded {
-                // Build the system prompt content, appending the code-graph
-                // repo map (if any) in the stable prefix region — after the
-                // base prompt, before the volatile conversation — mirroring
-                // context::PromptBuilder's Repo Map format so prefix-cache
-                // semantics hold. Personalized seeds are extracted from the
-                // user query by the provider closure installed by runtime.
-                let mut content = system_prompt.clone();
-                if let Some(ref provider) = repo_map_provider {
-                    if let Some(map) = provider(&input.prompt) {
-                        if !map.is_empty() {
-                            content.push_str("\n\n---\n## Repo Map\n\n```\n");
-                            content.push_str(&map);
-                            content.push_str("\n```\n");
-                        }
-                    }
-                }
+                // 用 CacheAwarePromptBuilder 构造稳定前缀（system prompt +
+                // repo_map），消除与 context::PromptBuilder 的 repo map 拼接
+                // 重复，并获得 prefix hash 用于 cache miss 诊断。tools 传空
+                // （provider 层负责 schema 注入），project_memory 传 None
+                // （agent 主路径不注入）。
+                let repo_map_str: Option<String> = repo_map_provider
+                    .as_ref()
+                    .and_then(|p| p(&input.prompt))
+                    .filter(|m| !m.is_empty());
+                let mut cache_builder = deepseeknova_context::CacheAwarePromptBuilder::new(true);
+                let (content, prefix_hash) =
+                    cache_builder.build_prefix(&system_prompt, &[], None, repo_map_str.as_deref());
+                tracing::info!(prefix_hash = %prefix_hash, "system prompt prefix constructed");
                 memory.write().await.add_message(Message {
                     role: Role::System,
                     content,

@@ -31,7 +31,7 @@ impl Tool for TodoWriteTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "todo_write".to_string(),
-            description: "Task list; merge=true merges by id.".to_string(),
+            description: "Manages a structured task list for the current session. Use merge=false to replace the entire list, or merge=true to merge by id. Each todo has content, priority (high/medium/low), and status (pending/in_progress/completed).".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {

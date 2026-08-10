@@ -43,7 +43,7 @@ impl Tool for RememberTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "remember".to_string(),
-            description: "Persists a memory (key overwrites).".to_string(),
+            description: "Persists a key-value memory to the cross-session memory store (SQLite). Same key overwrites prior value. Memories are recalled by semantic similarity to future queries.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -113,7 +113,7 @@ impl Tool for ForgetTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "forget".to_string(),
-            description: "Deletes a memory.".to_string(),
+            description: "Deletes a memory by key from the cross-session memory store.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {"key": {"type": "string", "description": "Key."}},
@@ -170,7 +170,7 @@ impl Tool for RecallTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "recall".to_string(),
-            description: "Searches memories.".to_string(),
+            description: "Searches the cross-session memory store by semantic similarity to the query. Returns top_k matching memories with key, value, and tags.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {

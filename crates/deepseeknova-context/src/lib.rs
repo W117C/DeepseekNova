@@ -265,13 +265,13 @@ impl PromptBuilder {
 // CacheAwarePromptBuilder — DeepSeek V4 prefix cache optimization
 // ---------------------------------------------------------------------------
 ///
-/// **库级公开 API**：供嵌入方自行接线到各自 prompt 构建路径；默认 agent
-/// prompt 路径**未接入**本 builder（真实接入见规划，当前默认 prompt 由
-/// [`PromptBuilder`] 构建）。
-///
 /// DeepSeek V4 uses disk-level automatic prefix caching: identical byte-level
 /// prefixes across requests hit the cache, reducing input token cost by ~90%.
 /// This builder enforces the "stable prefix + volatile suffix" structure.
+///
+/// agent 主路径通过 [`CacheAwarePromptBuilder::build_prefix`] 构造 system
+/// 消息前缀（system prompt + repo_map），获得 prefix hash 用于 cache miss
+/// 诊断；完整 `build` 供嵌入方构造含工具描述与项目记忆的完整 messages。
 ///
 /// ```text
 /// [System Prompt — byte-level fixed]
@@ -296,22 +296,21 @@ impl CacheAwarePromptBuilder {
         }
     }
 
-    /// Build messages optimized for DeepSeek V4 prefix caching.
+    /// 只构造稳定前缀（system prompt + tools + project_memory + repo_map），
+    /// 返回 `(prefix_content, prefix_hash)`。供 agent 主路径等只需要前缀部分、
+    /// 不需要 builder 构造完整 messages 的调用方使用。
     ///
-    /// Returns (messages, prefix_hash) where prefix_hash identifies the
-    /// stable portion of the prompt. Callers can compare across requests
-    /// to detect cache-invalidating changes.
-    pub fn build(
+    /// `tools` 传空切片则跳过工具描述注入（agent 主路径由 provider 层负责工具
+    /// schema 注入，此处传 `&[]`）。`project_memory` 传 `None` 则跳过项目记忆
+    /// 注入。
+    pub fn build_prefix(
         &mut self,
         system_prompt: &str,
         tools: &[ToolSchema],
-        project_memory: &ProjectMemory,
-        repo_map: Option<&str>,   // stable: global code graph repo map
-        conversation: &[Message], // volatile: conversation history
-        user_input: &str,         // volatile: current user message
-    ) -> (Vec<Message>, String) {
+        project_memory: Option<&ProjectMemory>,
+        repo_map: Option<&str>,
+    ) -> (String, String) {
         use sha2::{Digest, Sha256};
-        let mut messages = Vec::new();
 
         // ── STABLE PREFIX ──────────────────────────────────
         let mut prefix_parts = Vec::new();
@@ -332,8 +331,10 @@ impl CacheAwarePromptBuilder {
         }
 
         // 3. Project memory (DEEPSEEKNOVA.md — stable between config changes)
-        if let Some(ref deepseeknova_md) = project_memory.deepseeknova_md {
-            prefix_parts.push(format!("## Project Context\n\n{deepseeknova_md}"));
+        if let Some(pm) = project_memory {
+            if let Some(ref deepseeknova_md) = pm.deepseeknova_md {
+                prefix_parts.push(format!("## Project Context\n\n{deepseeknova_md}"));
+            }
         }
 
         // 4. Repo map (global code graph — stable within an index generation).
@@ -364,6 +365,28 @@ impl CacheAwarePromptBuilder {
             }
         }
         self.last_prefix_hash = Some(prefix_hash.clone());
+
+        (prefix_content, prefix_hash)
+    }
+
+    /// Build messages optimized for DeepSeek V4 prefix caching.
+    ///
+    /// Returns (messages, prefix_hash) where prefix_hash identifies the
+    /// stable portion of the prompt. Callers can compare across requests
+    /// to detect cache-invalidating changes.
+    pub fn build(
+        &mut self,
+        system_prompt: &str,
+        tools: &[ToolSchema],
+        project_memory: &ProjectMemory,
+        repo_map: Option<&str>,   // stable: global code graph repo map
+        conversation: &[Message], // volatile: conversation history
+        user_input: &str,         // volatile: current user message
+    ) -> (Vec<Message>, String) {
+        let (prefix_content, prefix_hash) =
+            self.build_prefix(system_prompt, tools, Some(project_memory), repo_map);
+
+        let mut messages = Vec::new();
 
         // Push the stable prefix as system message
         messages.push(Message {
@@ -443,8 +466,7 @@ impl From<BuilderOrderError> for deepseeknova_core::DeepseeknovaError {
     }
 }
 
-/// **库级公开 API**：供嵌入方自行接线；默认 agent prompt 路径**未接入**
-/// （真实接入见规划）。
+/// **库级公开 API**：供嵌入方自行接线到更严格的前缀稳定性排序场景。
 ///
 /// Enhanced prompt builder that enforces stability ordering at the type level.
 pub struct OrderedPromptBuilder {

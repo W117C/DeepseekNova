@@ -43,13 +43,13 @@ impl Tool for ShellTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "bash".to_string(),
-            description: "Runs a command.".to_string(),
+            description: "Runs a shell command with read-only classification and sandbox isolation. Dangerous commands (injection, UNC/URL paths, git -c/--config-env) are rejected. Read-only commands may skip approval; write commands and shell combinations (chain/redirect/substitution) require permission.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "command": {
                         "type": "string",
-                        "description": "Command."
+                        "description": "Shell command. Read-only commands (e.g. `git status`, `ls`) may skip approval; write commands require permission."
                     }
                 },
                 "required": ["command"]

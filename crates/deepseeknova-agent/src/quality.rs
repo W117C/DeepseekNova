@@ -12,6 +12,9 @@ use deepseeknova_security::quality::{extract_shell_write_paths, QualityPolicy};
 use std::path::{Path, PathBuf};
 
 /// 写类工具名单（与 agent 主循环判写名单一致，见 agent.rs 写回循环）。
+/// MCP 工具（`mcp__*`）因 `read_only()` 硬编码为 `false`，一律视为写操作，
+/// 纳入 quality hook 覆盖 —— 至少 `after` 阶段的结果文本质量评估生效
+/// （私钥泄露等正则规则），避免 MCP 写类工具绕过质量闭环。
 const WRITE_TOOL_NAMES: &[&str] = &["write_file", "edit_file", "move_file", "bash"];
 
 /// 从工具调用参数中解析目标路径。
@@ -59,9 +62,12 @@ impl ToolHook for QualityHook {
     }
 
     /// 只对写类工具感兴趣（名单判定；这四个工具 `read_only() == false`，
-    /// 与 agent 主循环的判写名单一致）。
+    /// 与 agent 主循环的判写名单一致）。MCP 工具（`mcp__*`）因 `read_only()`
+    /// 硬编码为 `false`，也纳入覆盖 —— `after` 阶段的结果文本质量评估生效
+    /// （私钥泄露等正则规则），避免 MCP 写类工具绕过质量闭环。
     fn interested(&self, call: &ToolCall) -> bool {
         WRITE_TOOL_NAMES.contains(&call.function.name.as_str())
+            || call.function.name.starts_with("mcp__")
     }
 
     /// 预检：解析目标路径，命中 PathGlob deny 规则时拒绝执行。
@@ -645,6 +651,17 @@ mod tests {
         };
         for name in ["write_file", "edit_file", "move_file", "bash"] {
             assert!(hook.interested(&call(name)), "{name} must be interesting");
+        }
+        // MCP 工具（mcp__*）因 read_only() 硬编码 false，纳入 quality hook 覆盖。
+        for name in [
+            "mcp__github__write_file",
+            "mcp__fs__edit",
+            "mcp__custom__do_thing",
+        ] {
+            assert!(
+                hook.interested(&call(name)),
+                "MCP tool {name} must be interesting (read_only hardwired false)"
+            );
         }
         for name in ["read_file", "grep", "web_fetch"] {
             assert!(

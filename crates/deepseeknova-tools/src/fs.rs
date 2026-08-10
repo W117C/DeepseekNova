@@ -170,7 +170,7 @@ impl Tool for WriteFileTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "write_file".to_string(),
-            description: "Writes a file atomically.".to_string(),
+            description: "Writes a file atomically (overwrites existing content). Use this to create new files or replace entire file content. For partial edits use edit_file instead.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -460,7 +460,7 @@ impl Tool for MoveFileTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "move_file".to_string(),
-            description: "Moves/renames a file.".to_string(),
+            description: "Moves or renames a file. Works across directories. The source path is removed after successful copy to destination.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {

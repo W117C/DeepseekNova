@@ -107,8 +107,11 @@ mod schema_budget {
     /// 全量内置工具 schema 序列化后的总字符数上限。schema 属稳定前缀，
     /// 每次缓存 MISS 全额重付——加此上限防止文案慢性膨胀（支柱③）。
     /// 收紧准则：压缩后取实测值 + ~10% 余量。
+    /// 2026-08-11 上调至 6700：工具描述增强后携带安全语义（read-only 分类、
+    /// 沙箱隔离、权限要求、token 上限提示），属必要信息；已先精简冗余枚举
+    /// 重复（edge_kinds / view 模式等由 parameters schema 承载）。
     /// (delegate 工具已移至 agent crate，不再计入本预算)
-    const MAX_SCHEMA_CHARS: usize = 5000;
+    const MAX_SCHEMA_CHARS: usize = 6700;
 
     #[test]
     fn builtin_tool_schemas_stay_within_budget() {

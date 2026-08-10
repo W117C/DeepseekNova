@@ -19,7 +19,7 @@ impl Tool for GrepTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "grep".to_string(),
-            description: "Regex search; matches with path:line.".to_string(),
+            description: "Searches file contents by regex (ripgrep syntax). Returns matching lines with path:line:content. Use this to find specific text or code patterns in files.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {

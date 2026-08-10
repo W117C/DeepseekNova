@@ -214,6 +214,24 @@ impl Memory {
     /// Now tracks tool_call_ids in the Assistant message and ensures
     /// corresponding Tool messages are dropped together.
     pub fn slide_window(&mut self) {
+        // System 消息（system prompt + repo map）是 DeepSeek-V4 prefix cache
+        // 的基础，slide_window 绝不能弹掉它。先暂存开头的所有 System 消息，
+        // 处理完后续 Turn Chunk 后放回队列最前。
+        let mut saved_system: Vec<Message> = Vec::new();
+        while self
+            .messages
+            .front()
+            .is_some_and(|m| m.role == Role::System)
+        {
+            // front() 刚返回 Some(System)，pop_front() 必返回 Some；
+            // 用 if let 满足 clippy::unwrap_used。
+            if let Some(msg) = self.messages.pop_front() {
+                saved_system.push(msg);
+            } else {
+                break; // 防御性：理论上不可达
+            }
+        }
+
         let mut dropped_ids = Vec::new();
 
         while let Some(front) = self.messages.front() {
@@ -270,6 +288,11 @@ impl Memory {
         for id in dropped_ids {
             self.full_results.remove(&id);
             self.shrunk_messages.remove(&id);
+        }
+
+        // 把暂存的 System 消息放回队列最前，保持 prefix cache 稳定性。
+        for sm in saved_system.into_iter().rev() {
+            self.messages.push_front(sm);
         }
     }
 
@@ -354,5 +377,70 @@ mod tests {
         let all = m.get_all();
         assert_eq!(m.estimate_tokens(), crate::tokens::estimate_tokens(&all));
         assert_eq!(Memory::new().estimate_tokens(), 0);
+    }
+
+    /// 构造带 tool_calls 的 Assistant 消息（模拟真实工具调用回合）。
+    fn msg_with_calls(content: &str, ids: &[&str]) -> Message {
+        use deepseeknova_core::{FunctionCall, ToolCall};
+        Message {
+            role: Role::Assistant,
+            content: content.into(),
+            name: None,
+            tool_calls: Some(
+                ids.iter()
+                    .map(|id| ToolCall {
+                        id: id.to_string(),
+                        ty: "function".into(),
+                        function: FunctionCall {
+                            name: "tool".into(),
+                            arguments: "{}".into(),
+                        },
+                    })
+                    .collect(),
+            ),
+            tool_call_id: None,
+            reasoning_content: None,
+        }
+    }
+
+    /// 构造带 tool_call_id 的 Tool 结果消息。
+    fn msg_tool_result(id: &str, content: &str) -> Message {
+        Message {
+            role: Role::Tool,
+            content: content.into(),
+            name: None,
+            tool_calls: None,
+            tool_call_id: Some(id.to_string()),
+            reasoning_content: None,
+        }
+    }
+
+    /// System 消息（system prompt + repo map）经 add_message 进入 messages 队列
+    /// （agent 主路径 [mod.rs] 的真实路径），slide_window 绝不能弹掉它，
+    /// 否则破坏 DeepSeek-V4 prefix cache 并丢失身份/规则。
+    #[test]
+    fn slide_window_preserves_system_message_in_queue() {
+        let mut m = Memory::new();
+        // 模拟 agent 主路径：System 消息经 add_message 进入队列（非 pinned）
+        m.add_message(msg(Role::System, "system prompt + repo map"));
+        m.add_message(msg(Role::User, "turn1"));
+        m.add_message(msg_with_calls("resp1", &["tc1"]));
+        m.add_message(msg_tool_result("tc1", "tool1"));
+        m.add_message(msg(Role::User, "turn2"));
+        m.add_message(msg(Role::Assistant, "resp2"));
+
+        m.slide_window();
+
+        let all = m.get_all();
+        // System 消息必须保留在队列最前
+        assert_eq!(all[0].role, Role::System);
+        assert_eq!(all[0].content, "system prompt + repo map");
+        // 第一个 Turn Chunk（User+Assistant+Tool）应被滑出，turn2 应保留
+        let contents: Vec<_> = all.iter().map(|x| x.content.as_str()).collect();
+        assert!(!contents.contains(&"turn1"));
+        assert!(!contents.contains(&"resp1"));
+        assert!(!contents.contains(&"tool1"));
+        assert!(contents.contains(&"turn2"));
+        assert!(contents.contains(&"resp2"));
     }
 }
