@@ -84,7 +84,7 @@ impl ModelRouter {
     ) -> Result<(), deepseeknova_core::DeepseeknovaError> {
         if self.config.find_model(model).is_none() {
             let known: Vec<&str> = self.config.models.iter().map(|m| m.name.as_str()).collect();
-            return Err(deepseeknova_core::DeepseeknovaError::Config(format!(
+            return Err(deepseeknova_core::DeepseeknovaError::config(format!(
                 "unknown model '{model}' for pointer '{}' (known models: {})",
                 role.label(),
                 known.join(", ")
@@ -123,7 +123,7 @@ impl ModelRouter {
             .config
             .resolve_provider_for_model(model_name)
             .ok_or_else(|| {
-                deepseeknova_core::DeepseeknovaError::Config(format!(
+                deepseeknova_core::DeepseeknovaError::config(format!(
                     "no provider found for model '{model_name}'"
                 ))
             })?;
@@ -176,7 +176,7 @@ impl ModelRouter {
         effort: Option<ReasoningEffort>,
     ) -> Result<Arc<dyn Provider>, deepseeknova_core::DeepseeknovaError> {
         let pcfg = self.config.providers.first().ok_or_else(|| {
-            deepseeknova_core::DeepseeknovaError::Config("no providers configured".into())
+            deepseeknova_core::DeepseeknovaError::config("no providers configured".to_string())
         })?;
         let model_label = pcfg
             .model

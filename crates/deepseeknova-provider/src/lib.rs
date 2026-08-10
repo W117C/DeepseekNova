@@ -5,7 +5,18 @@
 //! with reasoning_effort and prompt caching.
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::dbg_macro
+    )
+)]
 
 use async_trait::async_trait;
 use deepseeknova_core::chunk::ChunkStream;
@@ -21,6 +32,28 @@ pub mod router;
 pub mod scavenge;
 pub mod tool_cache;
 pub mod types;
+
+/// 读取 API key 环境变量：默认名 `DEEPSEEKNOVA_API_KEY` 缺失时回退旧名
+/// `DEEPSEEK_API_KEY`；显式配置的其它变量名缺失时直接报错（不隐式回退，
+/// 避免拼错变量名被旧变量悄悄顶替）。
+pub(crate) fn resolve_api_key_env_value(
+    api_key_env: &str,
+) -> Result<String, deepseeknova_core::DeepseeknovaError> {
+    match std::env::var(api_key_env) {
+        Ok(k) => Ok(k),
+        Err(_) if api_key_env == "DEEPSEEKNOVA_API_KEY" => std::env::var("DEEPSEEK_API_KEY")
+            .map_err(|_| {
+                deepseeknova_core::DeepseeknovaError::config(
+                    "environment variable DEEPSEEKNOVA_API_KEY is not set \
+                     (legacy DEEPSEEK_API_KEY also unset)"
+                        .to_string(),
+                )
+            }),
+        Err(_) => Err(deepseeknova_core::DeepseeknovaError::config(format!(
+            "environment variable {api_key_env} is not set"
+        ))),
+    }
+}
 
 /// 测试共享工具：跨模块统一的环境变量串行化锁与代理清除函数。
 ///
@@ -290,7 +323,7 @@ pub mod factory {
                         .as_deref()
                         .unwrap_or("https://api.deepseek.com"),
                     cfg.model.as_deref().unwrap_or("deepseek-v4-flash"),
-                    cfg.api_key_env.as_deref().unwrap_or("DEEPSEEK_API_KEY"),
+                    cfg.api_key_env.as_deref().unwrap_or("DEEPSEEKNOVA_API_KEY"),
                     cfg.timeout_secs,
                     cfg.max_retries,
                 )?
@@ -334,7 +367,7 @@ pub mod factory {
                 Box::new(p)
             }
             other => {
-                return Err(deepseeknova_core::DeepseeknovaError::Config(format!(
+                return Err(deepseeknova_core::DeepseeknovaError::config(format!(
                     "unknown provider kind: {other}"
                 )))
             }
@@ -384,7 +417,7 @@ pub mod factory {
                 .as_deref()
                 .unwrap_or("https://api.deepseek.com/anthropic"),
             cfg.model.as_deref().unwrap_or("deepseek-v4-flash"),
-            cfg.api_key_env.as_deref().unwrap_or("DEEPSEEK_API_KEY"),
+            cfg.api_key_env.as_deref().unwrap_or("DEEPSEEKNOVA_API_KEY"),
             cfg.timeout_secs,
             cfg.max_retries,
         )?
@@ -780,5 +813,42 @@ mod deepseeknova_error_tests {
         let fatal_net: deepseeknova_core::DeepseeknovaError =
             ProviderError::Stream("permission denied".into()).into();
         assert!(!fatal_net.is_retryable(), "确定性网络错误不应可重试");
+    }
+}
+
+#[cfg(test)]
+mod api_key_env_tests {
+    use super::resolve_api_key_env_value;
+
+    #[test]
+    fn api_key_env_primary_then_legacy_fallback_then_error() {
+        let _guard = crate::test_util::ENV_LOCK.blocking_lock();
+        std::env::set_var("DEEPSEEKNOVA_API_KEY", "sk-new");
+        std::env::set_var("DEEPSEEK_API_KEY", "sk-legacy");
+
+        // 新名优先。
+        assert_eq!(
+            resolve_api_key_env_value("DEEPSEEKNOVA_API_KEY").unwrap(),
+            "sk-new"
+        );
+
+        // 新名缺失 → 回退旧名。
+        std::env::remove_var("DEEPSEEKNOVA_API_KEY");
+        assert_eq!(
+            resolve_api_key_env_value("DEEPSEEKNOVA_API_KEY").unwrap(),
+            "sk-legacy"
+        );
+
+        // 两者都缺 → 报错且指明主变量名。
+        std::env::remove_var("DEEPSEEK_API_KEY");
+        let err = resolve_api_key_env_value("DEEPSEEKNOVA_API_KEY").unwrap_err();
+        assert!(
+            err.to_string().contains("DEEPSEEKNOVA_API_KEY"),
+            "got: {err}"
+        );
+
+        // 显式配置的其它变量名缺失时不隐式回退旧名。
+        let err2 = resolve_api_key_env_value("CUSTOM_KEY").unwrap_err();
+        assert!(err2.to_string().contains("CUSTOM_KEY"), "got: {err2}");
     }
 }

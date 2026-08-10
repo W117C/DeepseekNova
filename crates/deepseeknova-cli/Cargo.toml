@@ -28,6 +28,7 @@ async-trait = { workspace = true }
 deepseeknova-runtime = { workspace = true }
 deepseeknova-scanner = { workspace = true }
 deepseeknova-security = { workspace = true }
+deepseeknova-sandbox = { workspace = true }
 deepseeknova-permission = { workspace = true }
 deepseeknova-skills = { workspace = true }
 deepseeknova-serve = { workspace = true }

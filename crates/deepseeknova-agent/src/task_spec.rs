@@ -188,7 +188,10 @@ pub enum TaskSpecError {
 /// `Result<_, TaskSpecError>` 用于返回 `Result<_, DeepseeknovaError>` 的函数。
 impl From<TaskSpecError> for deepseeknova_core::DeepseeknovaError {
     fn from(err: TaskSpecError) -> Self {
-        deepseeknova_core::DeepseeknovaError::Agent(err.to_string())
+        deepseeknova_core::DeepseeknovaError::Agent {
+            message: err.to_string(),
+            source: Some(Box::new(err)),
+        }
     }
 }
 
@@ -401,8 +404,33 @@ mod tests {
         }
         let err = outer().unwrap_err();
         assert!(
-            matches!(err, deepseeknova_core::DeepseeknovaError::Agent(_)),
+            matches!(err, deepseeknova_core::DeepseeknovaError::Agent { .. }),
             "应映射到 Agent 类别"
         );
+    }
+
+    /// 验证 `From<TaskSpecError>` 保留原始错误实例与 source 链：调用方可通过
+    /// `source().downcast_ref::<TaskSpecError>()` 恢复 `MissingRequired` /
+    /// `InvalidType` / `Parse` 等具体变体。
+    #[test]
+    fn task_spec_error_source_preserves_variant_for_downcast() {
+        fn inner() -> Result<(), TaskSpecError> {
+            Err(TaskSpecError::MissingRequired("input1".into()))
+        }
+        fn outer() -> Result<(), deepseeknova_core::DeepseeknovaError> {
+            inner()?;
+            Ok(())
+        }
+        let err = outer().unwrap_err();
+        use std::error::Error as _;
+        let src = err
+            .source()
+            .expect("Agent 变体应持有 source")
+            .downcast_ref::<TaskSpecError>()
+            .expect("source 应可 downcast 回 TaskSpecError");
+        match src {
+            TaskSpecError::MissingRequired(name) => assert_eq!(name, "input1"),
+            other => panic!("期望 MissingRequired，得到 {other:?}"),
+        }
     }
 }

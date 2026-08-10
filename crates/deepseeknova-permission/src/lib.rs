@@ -4,7 +4,18 @@
 //! Supports per-tool rules, user confirmation prompts, and session-level
 //! permission caching.
 
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::dbg_macro
+    )
+)]
 
 use deepseeknova_core::tool::Tool;
 use deepseeknova_security::audit::{AuditLogger, SecurityEvent};
@@ -411,7 +422,7 @@ impl Policy {
         match ext {
             "toml" => {
                 let policy: Policy = toml::from_str(&content).map_err(|e| {
-                    deepseeknova_core::DeepseeknovaError::Config(format!("toml parse: {e}"))
+                    deepseeknova_core::DeepseeknovaError::config(format!("toml parse: {e}"))
                 })?;
                 Ok(policy)
             }
@@ -419,7 +430,7 @@ impl Policy {
                 let policy: Policy = serde_json::from_str(&content)?;
                 Ok(policy)
             }
-            other => Err(deepseeknova_core::DeepseeknovaError::Config(format!(
+            other => Err(deepseeknova_core::DeepseeknovaError::config(format!(
                 "unsupported policy format: .{other}"
             ))),
         }
@@ -1340,7 +1351,10 @@ pub enum PermissionError {
 /// 变体的 `is_retryable()` 返回 `false`，与权限错误的确定性语义一致。
 impl From<PermissionError> for deepseeknova_core::DeepseeknovaError {
     fn from(err: PermissionError) -> Self {
-        deepseeknova_core::DeepseeknovaError::Permission(err.to_string())
+        deepseeknova_core::DeepseeknovaError::Permission {
+            message: err.to_string(),
+            source: Some(Box::new(err)),
+        }
     }
 }
 
@@ -2623,9 +2637,65 @@ mod tests {
         }
         let err = outer().unwrap_err();
         assert!(
-            matches!(err, deepseeknova_core::DeepseeknovaError::Permission(_)),
+            matches!(err, deepseeknova_core::DeepseeknovaError::Permission { .. }),
             "应映射到 Permission 类别"
         );
         assert!(!err.is_retryable(), "权限错误不应可重试");
+    }
+
+    /// 验证 `From<PermissionError>` 保留原始错误实例与 source 链：调用方可通过
+    /// `source().downcast_ref::<PermissionError>()` 恢复 `Denied` /
+    /// `RequiresApproval` / `InvalidPolicy` / `Io` 等具体变体。
+    #[test]
+    fn permission_error_source_preserves_variant_for_downcast() {
+        fn inner() -> Result<(), PermissionError> {
+            Err(PermissionError::RequiresApproval {
+                tool: "Bash".into(),
+            })
+        }
+        fn outer() -> Result<(), deepseeknova_core::DeepseeknovaError> {
+            inner()?;
+            Ok(())
+        }
+        let err = outer().unwrap_err();
+        use std::error::Error as _;
+        let src = err
+            .source()
+            .expect("Permission 变体应持有 source")
+            .downcast_ref::<PermissionError>()
+            .expect("source 应可 downcast 回 PermissionError");
+        match src {
+            PermissionError::RequiresApproval { tool } => assert_eq!(tool, "Bash"),
+            other => panic!("期望 RequiresApproval，得到 {other:?}"),
+        }
+    }
+
+    /// 验证 `From<PermissionError::Denied>` 保留 Denied 变体的 reason 字段。
+    #[test]
+    fn permission_error_denied_source_preserves_reason() {
+        fn inner() -> Result<(), PermissionError> {
+            Err(PermissionError::Denied {
+                tool: "WriteFile".into(),
+                reason: "path escapes workspace".into(),
+            })
+        }
+        fn outer() -> Result<(), deepseeknova_core::DeepseeknovaError> {
+            inner()?;
+            Ok(())
+        }
+        let err = outer().unwrap_err();
+        use std::error::Error as _;
+        let src = err
+            .source()
+            .expect("Permission 变体应持有 source")
+            .downcast_ref::<PermissionError>()
+            .expect("source 应可 downcast 回 PermissionError");
+        match src {
+            PermissionError::Denied { tool, reason } => {
+                assert_eq!(tool, "WriteFile");
+                assert_eq!(reason, "path escapes workspace");
+            }
+            other => panic!("期望 Denied，得到 {other:?}"),
+        }
     }
 }

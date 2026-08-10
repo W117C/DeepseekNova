@@ -7,7 +7,7 @@
 //! [`crate::sub_agent::DEFAULT_MAX_DEPTH`]）。根派发（`run` / `run_with_inputs`）
 //! 为 depth 1；带深度派发走 [`DelegateEngine::run_at_depth`]，超深即拒绝。
 //! 子代理工具集中的递归委派工具（`RecursiveDelegateTool`）把当前深度经
-//! [`DelegateDepth`](crate::recursion::DelegateDepth) 传回引擎，形成有界递归。
+//! [`DelegateDepth`] 传回引擎，形成有界递归。
 //! 既有预设默认不含 `delegate` 工具（工具面由运行时装配），"禁递归"由"深度
 //! 上限的有界递归"取代。
 //!
@@ -17,16 +17,16 @@
 //! 构造期注入，无法按次渲染。per-agent 模型覆盖经 `RunInput.model_override`
 //! 透传给子 Agent（自动路由跳过、运行时按 model 指针选 provider）。
 
-use crate::agent::Agent;
+use crate::agent::{Agent, ExtensionApplier};
 use crate::agent_manifest::AgentPermission;
 use crate::attribution::{
     compose_retry_feedback, run_attribution, AttributionBudget, AttributionSettings, Verdict,
     MAX_ATTRIBUTIONS_PER_RUN, MAX_ATTRIBUTION_INPUT_CHARS,
 };
-use crate::recursion::DelegationSink;
+use crate::recursion::{DelegateDepth, DelegationSink};
 use crate::sub_agent::DEFAULT_MAX_DEPTH;
 use crate::task_spec::{InputValues, TaskSpec};
-use deepseeknova_core::{DeepseeknovaError, RunEvent, RunInput, Runner};
+use deepseeknova_core::{DeepseeknovaError, RunEvent, RunInput};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
@@ -168,7 +168,9 @@ pub fn builtin_presets() -> Vec<DelegatePreset> {
 
 /// 委派引擎：持有每个预设一个配置好的 [`Agent`]，并发受信号量限制。
 pub struct DelegateEngine {
-    agents: HashMap<String, Arc<Agent>>,
+    /// 子代理注册表。`Mutex` 允许引擎创建后（`Arc` 化）再注册 agent，
+    /// 供运行时在构造期把递归委派工具（sink = 引擎自身）挂进子代理工具面。
+    agents: Arc<std::sync::Mutex<HashMap<String, Arc<Agent>>>>,
     /// 预设任务书注册表（agent 名 → (spec, config_inputs)）。未注册的子代理
     /// 按旧行为处理：prompt 即 goal 原样，不做渲染。
     specs: HashMap<String, (TaskSpec, InputValues)>,
@@ -211,7 +213,7 @@ impl DelegateEngine {
         output_cap_tokens: usize,
     ) -> Self {
         Self {
-            agents,
+            agents: Arc::new(std::sync::Mutex::new(agents)),
             specs: HashMap::new(),
             models: HashMap::new(),
             semaphore: Arc::new(Semaphore::new(max_concurrent.max(1))),
@@ -220,6 +222,15 @@ impl DelegateEngine {
             attribution: None,
             attributions_used: Arc::new(AttributionBudget::new(MAX_ATTRIBUTIONS_PER_RUN)),
         }
+    }
+
+    /// 引擎创建后注册（或覆盖）一个子代理。与构造器等价，但允许
+    /// `Arc<DelegateEngine>` 化之后装配（如递归委派工具需要 sink 引用引擎）。
+    pub fn register_agent(&self, name: String, agent: Arc<Agent>) {
+        self.agents
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(name, agent);
     }
 
     /// 设置递归深度上限（默认 [`DEFAULT_MAX_DEPTH`]）。`0` 视作 1。
@@ -251,7 +262,13 @@ impl DelegateEngine {
 
     /// 已注册的子代理名（供工具做友好错误提示）。
     pub fn agent_names(&self) -> Vec<String> {
-        let mut v: Vec<String> = self.agents.keys().cloned().collect();
+        let mut v: Vec<String> = self
+            .agents
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .cloned()
+            .collect();
         v.sort();
         v
     }
@@ -300,7 +317,7 @@ impl DelegateEngine {
         depth: usize,
     ) -> Result<String, DeepseeknovaError> {
         if depth > self.max_depth {
-            return Err(DeepseeknovaError::Runner(format!(
+            return Err(DeepseeknovaError::runner(format!(
                 "sub-agent recursion depth exceeded (max {}, depth requested: {depth})",
                 self.max_depth
             )));
@@ -383,16 +400,22 @@ impl DelegateEngine {
         depth: usize,
     ) -> Result<String, DelegateError> {
         if depth > self.max_depth {
-            return Err(DelegateError::Execute(DeepseeknovaError::Runner(format!(
+            return Err(DelegateError::Execute(DeepseeknovaError::runner(format!(
                 "sub-agent recursion depth exceeded (max {}, depth requested: {depth})",
                 self.max_depth
             ))));
         }
-        let sub = self.agents.get(agent).cloned().ok_or_else(|| {
-            DelegateError::Execute(DeepseeknovaError::Runner(format!(
-                "unknown sub-agent '{agent}'"
-            )))
-        })?;
+        let sub = self
+            .agents
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(agent)
+            .cloned()
+            .ok_or_else(|| {
+                DelegateError::Execute(DeepseeknovaError::runner(format!(
+                    "unknown sub-agent '{agent}'"
+                )))
+            })?;
 
         // 渲染任务书：本次调用值优先，config 默认值仅补缺。
         let mut prompt = goal.to_string();
@@ -411,8 +434,8 @@ impl DelegateEngine {
         }
 
         let _permit = self.semaphore.acquire().await.map_err(|_| {
-            DelegateError::Execute(DeepseeknovaError::Runner(
-                "delegate semaphore closed".into(),
+            DelegateError::Execute(DeepseeknovaError::runner(
+                "delegate semaphore closed".to_string(),
             ))
         })?;
 
@@ -424,7 +447,18 @@ impl DelegateEngine {
             images: vec![],
             model_override,
         };
-        let text = collect_final_text(sub.as_ref(), input)
+        // 每层注入真实递归深度：子代理工具读取 `DelegateDepth` 后按 depth+1
+        // 派发回本引擎（`RecursiveDelegateTool` + `DelegationSink`），深度
+        // 上限在 `run_at_depth` 守门。此前引擎路径恒为根深度 1，递归工具
+        // 每次看到的都是 depth 2，上限形同虚设。
+        let depth_ext: Arc<ExtensionApplier> = Arc::new(move |reg| {
+            reg.insert(DelegateDepth(depth));
+        });
+        let stream = sub
+            .run_stream_with_extensions(input, vec![depth_ext])
+            .await
+            .map_err(DelegateError::Execute)?;
+        let text = collect_final_text(stream)
             .await
             .map_err(DelegateError::Execute)?;
         Ok(cap_output(&text, self.output_cap_tokens))
@@ -448,8 +482,9 @@ impl DelegationSink for DelegateEngine {
 /// 返回前做**输出净化**：中和子代理产出中的权限修改指令形状
 /// （`permissions.allow` / `bypassPermissions` / `<settings-json` 等），
 /// 防止被父模型当作可执行指令——这是子代理 → 父上下文的唯一收口点。
-async fn collect_final_text(agent: &Agent, input: RunInput) -> Result<String, DeepseeknovaError> {
-    let mut stream = agent.run_stream(input).await?;
+async fn collect_final_text(
+    mut stream: deepseeknova_core::runner::RunEventStream,
+) -> Result<String, DeepseeknovaError> {
     let mut final_text = String::new();
     while let Some(ev) = stream.next().await {
         match ev? {
@@ -600,6 +635,64 @@ mod tests {
             err.to_string().contains("recursion depth exceeded"),
             "{err}"
         );
+    }
+
+    #[tokio::test]
+    async fn engine_recursion_propagates_depth_and_runs_leaf() {
+        use crate::recursion::RecursiveDelegateTool;
+        use crate::test_utils::MockProvider;
+
+        let engine = Arc::new(DelegateEngine::new(HashMap::new(), 2, 2000).with_max_depth(3));
+        engine.register_agent(
+            "leaf".into(),
+            Arc::new(
+                Agent::new(Arc::new(MockProvider::text("leaf done")), 3).with_system_prompt("leaf"),
+            ),
+        );
+        let mut coder = Agent::new(
+            Arc::new(MockProvider::tool_call(
+                "delegate",
+                r#"{"agent":"leaf","goal":"do it"}"#,
+                "",
+                "coder done",
+            )),
+            3,
+        )
+        .with_system_prompt("coder");
+        coder.register_tool(Arc::new(
+            RecursiveDelegateTool::new(3).with_sink(engine.clone()),
+        ));
+        engine.register_agent("coder".into(), Arc::new(coder));
+
+        let out = engine.run("coder", "go").await.unwrap();
+        assert!(out.contains("coder done"), "got: {out}");
+    }
+
+    #[tokio::test]
+    async fn engine_recursion_gracefully_stops_at_depth_limit() {
+        use crate::recursion::RecursiveDelegateTool;
+        use crate::test_utils::MockProvider;
+
+        // max_depth=1：coder 的 delegate 工具 next=2 > 1 → 工具返回降级错误
+        // 文本，子代理仍正常收尾（不 panic、不硬失败）。
+        let engine = Arc::new(DelegateEngine::new(HashMap::new(), 2, 2000).with_max_depth(1));
+        let mut coder = Agent::new(
+            Arc::new(MockProvider::tool_call(
+                "delegate",
+                r#"{"agent":"leaf","goal":"do it"}"#,
+                "",
+                "coder done",
+            )),
+            3,
+        )
+        .with_system_prompt("coder");
+        coder.register_tool(Arc::new(
+            RecursiveDelegateTool::new(1).with_sink(engine.clone()),
+        ));
+        engine.register_agent("coder".into(), Arc::new(coder));
+
+        let out = engine.run("coder", "go").await.unwrap();
+        assert!(out.contains("coder done"), "got: {out}");
     }
 
     #[test]

@@ -1294,15 +1294,25 @@ fn is_gh_api_payload_flag(a: &str) -> bool {
 
 /// gh auth status 的 token 展示 flag 判定。
 /// pflag 布尔 flag 接受 `--show-token=true` / `-t=true` 形态，同样会泄露
-/// token；仅显式 `=false` 时不会展示。
+/// token；仅显式 pflag false 值（`0`/`f`/`F`/`FALSE`/`false`/`False`）时不展示。
 fn is_token_display_flag(a: &str) -> bool {
     if let Some(v) = a.strip_prefix("--show-token=") {
-        return !v.eq_ignore_ascii_case("false");
+        return !is_pflag_bool_false(v);
     }
     if let Some(v) = a.strip_prefix("-t=") {
-        return !v.eq_ignore_ascii_case("false");
+        return !is_pflag_bool_false(v);
     }
     a == "--show-token" || a == "-t"
+}
+
+/// pflag 布尔 false 值判定（对齐 Go `strconv.ParseBool` 接受的 false 集合）。
+///
+/// pflag 的布尔 flag 解析底层调用 `strconv.ParseBool`，接受以下 false 值：
+/// `0`/`f`/`F`/`FALSE`/`false`/`False`。其余值（含 `no`/`off`/空串）均被
+/// pflag 拒绝并报错，命令不会执行——分类器对未知值保守返回"展示 token"
+/// （即拒绝放行），安全姿态正确。
+fn is_pflag_bool_false(v: &str) -> bool {
+    matches!(v, "0" | "f" | "F" | "FALSE" | "false" | "False")
 }
 
 /// docker 只读判定：子命令前缀白名单。

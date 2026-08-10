@@ -276,7 +276,7 @@ pub enum CompactionError {
 /// `Result<_, InvariantViolation>` 用于返回 `Result<_, DeepseeknovaError>` 的函数。
 impl From<InvariantViolation> for deepseeknova_core::DeepseeknovaError {
     fn from(err: InvariantViolation) -> Self {
-        deepseeknova_core::DeepseeknovaError::Context(err.to_string())
+        deepseeknova_core::DeepseeknovaError::Context(Box::new(err))
     }
 }
 
@@ -286,7 +286,7 @@ impl From<InvariantViolation> for deepseeknova_core::DeepseeknovaError {
 /// `Result<_, CompactionError>` 用于返回 `Result<_, DeepseeknovaError>` 的函数。
 impl From<CompactionError> for deepseeknova_core::DeepseeknovaError {
     fn from(err: CompactionError) -> Self {
-        deepseeknova_core::DeepseeknovaError::Context(err.to_string())
+        deepseeknova_core::DeepseeknovaError::Context(Box::new(err))
     }
 }
 
@@ -642,5 +642,56 @@ mod tests {
             msg.contains("orphan"),
             "应保留 InvariantViolation 的消息: {msg}"
         );
+    }
+
+    /// 验证 `From<CompactionError>` 保留原始错误实例与 source 链：调用方可通过
+    /// `source().downcast_ref::<CompactionError>()` 恢复具体变体。
+    #[test]
+    fn compaction_error_source_preserves_variant_for_downcast() {
+        fn inner() -> Result<(), CompactionError> {
+            Err(CompactionError::BudgetTooSmall)
+        }
+        fn outer() -> Result<(), deepseeknova_core::DeepseeknovaError> {
+            inner()?;
+            Ok(())
+        }
+        let err = outer().unwrap_err();
+        use std::error::Error as _;
+        let src = err
+            .source()
+            .expect("Context 变体应持有 source")
+            .downcast_ref::<CompactionError>()
+            .expect("source 应可 downcast 回 CompactionError");
+        assert!(
+            matches!(src, CompactionError::BudgetTooSmall),
+            "downcast 后应保留具体变体 BudgetTooSmall"
+        );
+    }
+
+    /// 验证 `From<InvariantViolation>` 保留 OrphanToolResult 变体的字段。
+    #[test]
+    fn invariant_violation_source_preserves_variant_for_downcast() {
+        fn inner() -> Result<(), InvariantViolation> {
+            Err(InvariantViolation::OrphanToolResult {
+                tool_call_id: "call-99".into(),
+            })
+        }
+        fn outer() -> Result<(), deepseeknova_core::DeepseeknovaError> {
+            inner()?;
+            Ok(())
+        }
+        let err = outer().unwrap_err();
+        use std::error::Error as _;
+        let src = err
+            .source()
+            .expect("Context 变体应持有 source")
+            .downcast_ref::<InvariantViolation>()
+            .expect("source 应可 downcast 回 InvariantViolation");
+        match src {
+            InvariantViolation::OrphanToolResult { tool_call_id } => {
+                assert_eq!(tool_call_id, "call-99");
+            }
+            other => panic!("期望 OrphanToolResult，得到 {other:?}"),
+        }
     }
 }

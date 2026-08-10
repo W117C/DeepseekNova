@@ -62,7 +62,7 @@ impl Tool for GrepTool {
         }
 
         let re = regex::Regex::new(&parsed.pattern)
-            .map_err(|e| DeepseeknovaError::Tool(format!("invalid regex: {e}")))?;
+            .map_err(|e| DeepseeknovaError::tool(format!("invalid regex: {e}")))?;
 
         let base = match parsed.path {
             Some(ref p) => deepseeknova_security::path::sanitize_path(&ctx.workspace_root, p)?,

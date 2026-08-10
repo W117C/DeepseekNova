@@ -44,7 +44,7 @@ fn lock_index(
 ) -> Result<std::sync::MutexGuard<'_, deepseeknova_graph::GraphIndex>, DeepseeknovaError> {
     handle
         .lock()
-        .map_err(|_| DeepseeknovaError::Tool("graph index lock poisoned".to_string()))
+        .map_err(|_| DeepseeknovaError::tool("graph index lock poisoned".to_string()))
 }
 
 pub struct SearchCodeTool;

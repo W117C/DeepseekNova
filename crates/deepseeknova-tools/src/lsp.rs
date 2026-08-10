@@ -106,7 +106,7 @@ impl Tool for LspDiagnosticsTool {
 
         let path = resolve_path(&ctx.workspace_root, &parsed.path)?;
         if !path.is_file() {
-            return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
+            return Err(deepseeknova_core::DeepseeknovaError::tool(format!(
                 "lsp_diagnostics: path is not a file: {}",
                 path.display()
             )));
@@ -115,7 +115,7 @@ impl Tool for LspDiagnosticsTool {
             Some(l) => l.to_string(),
             None => language_for(&path)
                 .ok_or_else(|| {
-                    DeepseeknovaError::Tool(format!(
+                    DeepseeknovaError::tool(format!(
                         "lsp_diagnostics: unsupported file extension for {}; \
                          pass language=rust|python|go|typescript|c|cpp",
                         path.display()
@@ -147,7 +147,7 @@ impl Tool for LspDiagnosticsTool {
                 ));
             }
             Err(e) => {
-                return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
+                return Err(deepseeknova_core::DeepseeknovaError::tool(format!(
                     "lsp_diagnostics: failed to spawn '{server_bin}': {e}"
                 )));
             }
@@ -183,7 +183,7 @@ fn resolve_path(workspace_root: &Path, raw: &str) -> Result<PathBuf, Deepseeknov
 
 fn uri_from_path(path: &Path) -> Result<String, DeepseeknovaError> {
     let url = url::Url::from_file_path(path).map_err(|_| {
-        DeepseeknovaError::Tool(format!("cannot build file URI for {}", path.display()))
+        DeepseeknovaError::tool(format!("cannot build file URI for {}", path.display()))
     })?;
     Ok(url.to_string())
 }
@@ -279,7 +279,7 @@ impl LspSession {
             }
         }
         let len = content_length.ok_or_else(|| {
-            DeepseeknovaError::Tool("LSP message missing Content-Length header".to_string())
+            DeepseeknovaError::tool("LSP message missing Content-Length header".to_string())
         })?;
         let mut body = vec![0u8; len];
         self.stdout.read_exact(&mut body).await?;
@@ -312,10 +312,10 @@ impl LspSession {
         });
         self.send(&init).await?;
         let init_result = self.respond_until_id(1, total).await?.ok_or_else(|| {
-            DeepseeknovaError::Tool("LSP server exited before initialize response".to_string())
+            DeepseeknovaError::tool("LSP server exited before initialize response".to_string())
         })?;
         if init_result.get("error").is_some() {
-            return Err(DeepseeknovaError::Tool(format!(
+            return Err(DeepseeknovaError::tool(format!(
                 "LSP initialize failed: {}",
                 init_result["error"]
             )));
@@ -401,7 +401,7 @@ impl LspSession {
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                return Err(DeepseeknovaError::Tool(format!(
+                return Err(DeepseeknovaError::tool(format!(
                     "LSP initialize timed out after {total:?}"
                 )));
             }
@@ -410,7 +410,7 @@ impl LspSession {
                 Ok(Ok(None)) => return Ok(None),
                 Ok(Err(e)) => return Err(e),
                 Err(_) => {
-                    return Err(DeepseeknovaError::Tool(format!(
+                    return Err(DeepseeknovaError::tool(format!(
                         "LSP initialize timed out after {total:?}"
                     )))
                 }
@@ -509,7 +509,7 @@ mod tests {
             }
         }
         let len = content_length
-            .ok_or_else(|| DeepseeknovaError::Tool("missing Content-Length header".to_string()))?;
+            .ok_or_else(|| DeepseeknovaError::tool("missing Content-Length header".to_string()))?;
         let mut body = vec![0u8; len];
         reader.read_exact(&mut body).await?;
         Ok(Some(serde_json::from_slice(&body)?))

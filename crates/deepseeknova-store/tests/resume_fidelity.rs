@@ -1,6 +1,14 @@
 //! 集成：schema v2 会话跨"重启"保真恢复，且恢复历史通过 DeepSeek-V4
 //! replay 校验（B2 断点续跑的正确性根基）。
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    clippy::dbg_macro
+)]
 
 use deepseeknova_context::history::validate_replay_invariant;
 use deepseeknova_core::types::{FunctionCall, ToolCall};

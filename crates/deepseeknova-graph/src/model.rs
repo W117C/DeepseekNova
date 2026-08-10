@@ -122,12 +122,12 @@ pub enum GraphError {
 /// 运算符能把 `Result<_, GraphError>` 直接用于返回 `Result<_, DeepseeknovaError>`
 /// 的函数，无需显式 `.map_err`。
 ///
-/// 当前映射保留人可读消息（`to_string()`），丢失变体级别的类型信息；未来若
-/// 需在 `DeepseeknovaError` 上做按变体 dispatch，可在 core 加 `Graph(Box<dyn
-/// std::error::Error>)` 之类的富类型变体（additive，不破坏下游 match）。
+/// 映射保留原始 `GraphError` 实例（装箱为 `Box<dyn Error>`），调用方可通过
+/// `err.source().downcast_ref::<GraphError>()` 恢复 `Parse` / `Storage` /
+/// `IndexBusy` / `EntityNotFound` 等具体变体，不再丢失类型信息与 source 链。
 impl From<GraphError> for deepseeknova_core::DeepseeknovaError {
     fn from(err: GraphError) -> Self {
-        deepseeknova_core::DeepseeknovaError::Graph(err.to_string())
+        deepseeknova_core::DeepseeknovaError::Graph(Box::new(err))
     }
 }
 
@@ -211,6 +211,41 @@ mod tests {
                 matches!(de, deepseeknova_core::DeepseeknovaError::Graph(_)),
                 "所有 GraphError 变体应映射到 Graph 类别"
             );
+        }
+    }
+
+    /// 验证 `From<GraphError>` 保留原始错误实例与 source 链：调用方可通过
+    /// `source().downcast_ref::<GraphError>()` 恢复具体变体，不再丢失类型信息。
+    #[test]
+    fn graph_error_source_preserves_variant_for_downcast() {
+        let ge = GraphError::IndexBusy;
+        let de: deepseeknova_core::DeepseeknovaError = ge.into();
+        use std::error::Error as _;
+        let src = de
+            .source()
+            .expect("Graph 变体应持有 source")
+            .downcast_ref::<GraphError>()
+            .expect("source 应可 downcast 回 GraphError");
+        assert!(
+            matches!(src, GraphError::IndexBusy),
+            "downcast 后应保留具体变体 IndexBusy"
+        );
+    }
+
+    /// 验证 `From<GraphError::EntityNotFound>` 保留 EntityNotFound 变体。
+    #[test]
+    fn graph_error_entity_not_found_preserves_through_source() {
+        let ge = GraphError::EntityNotFound("node-42".into());
+        let de: deepseeknova_core::DeepseeknovaError = ge.into();
+        use std::error::Error as _;
+        let src = de
+            .source()
+            .expect("Graph 变体应持有 source")
+            .downcast_ref::<GraphError>()
+            .expect("source 应可 downcast 回 GraphError");
+        match src {
+            GraphError::EntityNotFound(id) => assert_eq!(id, "node-42"),
+            other => panic!("期望 EntityNotFound，得到 {other:?}"),
         }
     }
 }

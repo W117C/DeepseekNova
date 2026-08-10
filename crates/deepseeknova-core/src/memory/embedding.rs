@@ -42,7 +42,7 @@ pub trait EmbeddingProvider: Send + Sync + 'static {
             tokio::task::spawn_blocking(move || self.embed(&text))
                 .await
                 .map_err(|e| {
-                    DeepseeknovaError::Runner(format!("embedding spawn_blocking task failed: {e}"))
+                    DeepseeknovaError::runner(format!("embedding spawn_blocking task failed: {e}"))
                 })?
         })
     }

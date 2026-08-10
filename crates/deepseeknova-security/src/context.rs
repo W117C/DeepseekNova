@@ -70,7 +70,7 @@ impl SecurityContext {
                 reason: format!("Capability {:?} is not granted in the current context", cap),
             };
             self.audit.record(&event);
-            return Err(DeepseeknovaError::Permission(format!(
+            return Err(DeepseeknovaError::permission(format!(
                 "Security violation: capability {:?} is not granted",
                 cap
             )));
@@ -87,7 +87,7 @@ pub fn enforce_capability(
     cap: Capability,
 ) -> Result<(), DeepseeknovaError> {
     let security = ctx.extensions.get::<SecurityContext>().ok_or_else(|| {
-        DeepseeknovaError::Permission("SecurityContext extension not found in ToolContext".into())
+        DeepseeknovaError::permission("SecurityContext extension not found in ToolContext")
     })?;
     security.require(ctx, tool_name, cap)
 }

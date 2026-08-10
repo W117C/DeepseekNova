@@ -1,6 +1,14 @@
 //! Integration tests for the HTTP serve crate — SSE streaming, error paths,
 //! and input validation using a spawned axum server.
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    clippy::dbg_macro
+)]
 
 use deepseeknova_core::runner::{RunEvent, RunEventStream, RunInput, RunOutput, Runner};
 use deepseeknova_serve::{ChatRequest, Server};

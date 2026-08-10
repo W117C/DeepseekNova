@@ -19,7 +19,18 @@
 //! # }
 //! ```
 
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::dbg_macro
+    )
+)]
 
 mod acp;
 mod sessions;
@@ -380,10 +391,10 @@ impl Server {
 /// - 无 `Origin` 头的请求（同源页面加载、curl、非浏览器客户端）不受影响；
 /// - 跨源浏览器请求（`https://evil.example` 等）的响应不含
 ///   `Access-Control-Allow-Origin`，浏览器拒绝读取 —— 关闭自审批与数据外带窗口；
-/// - loopback 来源放行（含 Tauri webview 从 `http://localhost:*` 调用，P2）。
+/// - loopback 来源放行（本地 CLI/TUI/浏览器 dev server 均可直接消费）。
 ///
-/// 更严格的做法（精确 origin 白名单 + 配置化）留作后续收紧项；若未来 webview
-/// 启用自定义 origin（如 `tauri://localhost`），需在此加入白名单（P2 事项）。
+/// 更严格的做法（精确 origin 白名单 + 配置化）留作后续收紧项；若未来引入
+/// 非 loopback 的受信客户端，需在此加入白名单。
 fn loopback_cors_layer() -> CorsLayer {
     CorsLayer::new()
         .allow_origin(AllowOrigin::predicate(
@@ -781,12 +792,10 @@ async fn resume_run(
     Ok(stream_input(state, input, Some(record.id)))
 }
 
-/// 会话 id 合法性校验：仅允许 `[A-Za-z0-9_-]`，防 URL path 拼接路径穿越。
+/// 会话 id 合法性校验：复用 `SessionStore` 的共享校验（`[A-Za-z0-9_-]`，
+/// 长度 ≤ 128），防 URL path 拼接路径穿越，与 CLI/存储层同一契约。
 fn valid_session_id(id: &str) -> bool {
-    !id.is_empty()
-        && id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    deepseeknova_store::is_valid_session_id(id)
 }
 
 /// 读取 metrics 根目录下单个文件并解析为 JSON。`metrics_dir` 未配置、

@@ -8,6 +8,7 @@ use deepseeknova_permission::PermissionGate;
 use deepseeknova_security::context::SecurityContext;
 
 use crate::helpers::derive_compaction_threshold;
+use crate::hooks::user_hooks_from_config;
 use crate::security::sandbox_writable_paths;
 
 /// 合并内置委派预设与 `config.delegate.agents` 覆盖（按 name 匹配覆盖字段，
@@ -125,11 +126,34 @@ pub(crate) fn build_delegate_engine(
 
     // 合并内置预设 + 配置覆盖 + markdown 声明。
     let presets = merged_delegate_presets_with_manifests(config, workspace_root);
+    let user_hooks = user_hooks_from_config(&config.hooks);
+    let recursion_enabled = config.delegate.allow_recursion;
 
-    let mut agents: std::collections::HashMap<String, Arc<deepseeknova_agent::Agent>> =
-        std::collections::HashMap::new();
+    // 引擎先行创建（空注册表）：递归工具需要 sink 引用引擎本身，必须在
+    // 构建子代理之前拿到 `Arc<DelegateEngine>`；子代理随后经
+    // `register_agent` 挂入（引擎内部用 Mutex 保护注册表）。
+    let mut engine = deepseeknova_agent::DelegateEngine::new(
+        std::collections::HashMap::new(),
+        config.delegate.max_concurrent,
+        config.delegate.output_cap_tokens,
+    );
+    // M5：max_depth 透传——配置上限在生产路径生效（引擎按 max_depth 守门，
+    // depth > max 拒绝；禁递归默认下根派发 depth=1 不受影响）。
+    engine = engine.with_max_depth(config.delegate.max_depth);
+    if let Some(a) = attribution {
+        engine = engine.with_attribution((*a).clone());
+    }
     for p in &presets {
-        // 禁递归：即便配置误加 "delegate" 也剔除。
+        engine.register_spec(p.name.clone(), p.spec.clone(), p.config_inputs.clone());
+        // M3：markdown 声明/TOML 预设的 per-agent 模型覆盖 → RunInput.model_override
+        //（内置/TOML 预设恒 None，无行为变化）。
+        engine.register_model(p.name.clone(), p.model.clone());
+    }
+    let engine = Arc::new(engine);
+
+    for p in &presets {
+        // 递归开启时仍把 base 工具里的 "delegate" 剔除，显式只挂
+        // `RecursiveDelegateTool`（sink = 引擎自身，深度守门一致）。
         let sub_tools: Vec<Arc<dyn Tool>> = base
             .iter()
             .filter(|t| {
@@ -144,8 +168,17 @@ pub(crate) fn build_delegate_engine(
             .with_workspace_root(workspace_root.to_path_buf())
             .with_security(security.clone())
             .with_system_prompt(composed_prompt.clone());
+        if !user_hooks.is_empty() {
+            sub = sub.with_user_hooks(user_hooks.clone());
+        }
         for t in sub_tools {
             sub.register_tool(t);
+        }
+        if recursion_enabled {
+            sub.register_tool(Arc::new(
+                deepseeknova_agent::RecursiveDelegateTool::new(config.delegate.max_depth)
+                    .with_sink(engine.clone()),
+            ));
         }
         if let Some(g) = &graph_ext {
             sub = sub.with_extension(g.clone());
@@ -172,27 +205,22 @@ pub(crate) fn build_delegate_engine(
             );
             sub = sub.with_tool_hook(Arc::new(hook));
         }
-        agents.insert(p.name.clone(), Arc::new(sub));
+        engine.register_agent(p.name.clone(), Arc::new(sub));
     }
+    engine
+}
 
-    let mut engine = deepseeknova_agent::DelegateEngine::new(
-        agents,
-        config.delegate.max_concurrent,
-        config.delegate.output_cap_tokens,
-    );
-    // M5：max_depth 透传——配置上限在生产路径生效（引擎按 max_depth 守门，
-    // depth > max 拒绝；禁递归默认下根派发 depth=1 不受影响）。
-    engine = engine.with_max_depth(config.delegate.max_depth);
-    for p in &presets {
-        engine.register_spec(p.name.clone(), p.spec.clone(), p.config_inputs.clone());
-        // M3：markdown 声明/TOML 预设的 per-agent 模型覆盖 → RunInput.model_override
-        //（内置/TOML 预设恒 None，无行为变化）。
-        engine.register_model(p.name.clone(), p.model.clone());
-    }
-    if let Some(a) = attribution {
-        engine = engine.with_attribution((*a).clone());
-    }
-    Arc::new(engine)
+/// 已注册 delegate 子代理名（内置预设 + `config.delegate.agents` 覆盖 +
+/// `.deepseeknova/agents/*.md` 声明），排序去重。供主对话 @-mention 预检
+/// 与 TUI 补全候选使用。
+pub fn delegate_agent_names(config: &Config, workspace_root: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = merged_delegate_presets_with_manifests(config, workspace_root)
+        .into_iter()
+        .map(|p| p.name)
+        .collect();
+    names.sort();
+    names.dedup();
+    names
 }
 
 /// 把 deny 规则渲染为冻结清单文本（供子代理 system prompt 注入）。
@@ -231,6 +259,10 @@ pub fn build_sub_agent_runner(
 ) -> deepseeknova_agent::SubAgentRunner {
     use deepseeknova_core::Tool;
 
+    // 用户级外部 hooks 对子代理同样生效（与主 agent 一致）：tool_before
+    // 失败即 fail-closed，tool_after/session/failure 为通知型。
+    let user_hooks = user_hooks_from_config(&config.hooks);
+
     // deny 冻结（prompt 层）：渲染一次，注入每个子代理 system prompt
     let frozen_lines: Vec<String> = render_frozen_denies(frozen_denies)
         .map(|s| s.lines().map(|l| l.to_string()).collect())
@@ -250,6 +282,9 @@ pub fn build_sub_agent_runner(
     };
 
     let mut runner = deepseeknova_agent::SubAgentRunner::new(task_provider);
+    if !user_hooks.is_empty() {
+        runner = runner.with_user_hooks(user_hooks);
+    }
     let allow_recursion = config.delegate.allow_recursion;
     let max_depth = config.delegate.max_depth.max(1);
     for p in merged_delegate_presets_with_manifests(config, workspace_root) {
@@ -331,6 +366,20 @@ pub fn build_sub_agent_runner(
 mod tests {
     use super::*;
     use crate::test_support::*;
+
+    #[test]
+    fn delegate_agent_names_lists_builtin_presets_sorted_dedup() {
+        let cfg = Config::default();
+        let names = delegate_agent_names(&cfg, std::path::Path::new("."));
+        assert!(names.contains(&"coder".to_string()));
+        assert!(names.contains(&"explorer".to_string()));
+        assert!(names.contains(&"tester".to_string()));
+        assert!(names.contains(&"reviewer".to_string()));
+        let mut sorted = names.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(names, sorted, "delegate 子代理名必须排序去重");
+    }
 
     // --- build_sub_agent_runner (coordinator Delegate wiring) ---
 
@@ -867,5 +916,140 @@ mod tests {
             rendered.contains("- bash rm -rf *"),
             "有 subject: - bash <subject>"
         );
+    }
+
+    /// 子代理路径必须与主 agent 对称挂载用户级 hooks：配置 `tool_before`
+    /// 后，SubAgentRunner 里的子代理工具调用要触发外部命令（此前未接线，
+    /// 子代理可绕过用户 hooks）。
+    #[tokio::test]
+    async fn sub_agent_runner_applies_user_hooks_to_tool_calls() {
+        use deepseeknova_agent::task_spec::InputValues;
+
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().to_path_buf();
+        std::fs::write(ws.join("target.txt"), "data").unwrap();
+        let markers = ws.join("hooks.log");
+
+        let config = Config {
+            hooks: deepseeknova_config::HooksConfig {
+                enabled: true,
+                tool_before: vec![marker_cmd("before", &markers)],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        // coder 预设：read_file 工具 + 一次工具调用后文本收尾。
+        let provider = Arc::new(deepseeknova_agent::test_utils::MockProvider::tool_call(
+            "read_file",
+            &format!(r#"{{"path":"{}"}}"#, ws.join("target.txt").display()),
+            "read",
+            "done",
+        ));
+        let runner = build_sub_agent_runner(
+            &config,
+            provider,
+            None,
+            &[],
+            None,
+            Some(deepseeknova_security::context::SecurityContext::with_audit_log(&ws)),
+            &ws,
+        );
+        let text = runner
+            .run_at_depth("coder", "read the target", &InputValues::new(), 1)
+            .await
+            .unwrap();
+        assert!(text.contains("done"), "sub-agent 应完成: {text}");
+        let log = std::fs::read_to_string(&markers).unwrap_or_default();
+        assert!(
+            log.contains("before"),
+            "子代理工具调用必须触发 tool_before hook: {log:?}"
+        );
+        drop(dir);
+    }
+
+    /// DelegateEngine 路径（主 agent 的 delegate 工具）同样挂载用户 hooks：
+    /// 引擎内子代理调用工具时执行 `tool_before` 外部命令。
+    #[tokio::test]
+    async fn delegate_engine_applies_user_hooks_to_sub_agents() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().to_path_buf();
+        std::fs::write(ws.join("target.txt"), "data").unwrap();
+        let markers = ws.join("hooks.log");
+
+        let config = Config {
+            hooks: deepseeknova_config::HooksConfig {
+                enabled: true,
+                tool_before: vec![marker_cmd("before", &markers)],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let provider = Arc::new(deepseeknova_agent::test_utils::MockProvider::tool_call(
+            "read_file",
+            &format!(r#"{{"path":"{}"}}"#, ws.join("target.txt").display()),
+            "read",
+            "done",
+        ));
+        let security = deepseeknova_security::context::SecurityContext::with_audit_log(&ws);
+        let engine =
+            build_delegate_engine(&config, provider, &ws, &security, None, None, None, None);
+        let text = engine.run("coder", "read the target").await.unwrap();
+        assert!(text.contains("done"), "engine sub-agent 应完成: {text}");
+        let log = std::fs::read_to_string(&markers).unwrap_or_default();
+        assert!(
+            log.contains("before"),
+            "engine 子代理工具调用必须触发 tool_before hook: {log:?}"
+        );
+        drop(dir);
+    }
+
+    fn tool_call_chunks(name: &str, args: &str) -> Vec<deepseeknova_core::chunk::Chunk> {
+        vec![
+            deepseeknova_core::chunk::Chunk::ToolCallStart {
+                id: "c1".into(),
+                name: name.into(),
+            },
+            deepseeknova_core::chunk::Chunk::ToolCallEnd {
+                id: "c1".into(),
+                name: name.into(),
+                arguments: args.into(),
+            },
+            deepseeknova_core::chunk::Chunk::Done,
+        ]
+    }
+
+    fn final_text_chunks(text: &str) -> Vec<deepseeknova_core::chunk::Chunk> {
+        vec![
+            deepseeknova_core::chunk::Chunk::TextDelta(text.into()),
+            deepseeknova_core::chunk::Chunk::Usage(deepseeknova_core::chunk::Usage::default()),
+            deepseeknova_core::chunk::Chunk::Done,
+        ]
+    }
+
+    /// `[delegate] allow_recursion = true` 生产装配：子代理工具面挂
+    /// `RecursiveDelegateTool`（sink = 引擎自身），深度上限生效。
+    #[tokio::test]
+    async fn delegate_engine_recursion_wired_by_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().to_path_buf();
+        let security = deepseeknova_security::context::SecurityContext::with_audit_log(&ws);
+        let provider = Arc::new(deepseeknova_agent::test_utils::MockProvider::sequential(
+            vec![
+                tool_call_chunks("delegate", r#"{"agent":"explorer","goal":"probe"}"#),
+                tool_call_chunks("delegate", r#"{"agent":"explorer","goal":"probe"}"#),
+                final_text_chunks("explorer done"),
+                final_text_chunks("coder done"),
+            ],
+        ));
+        let mut config = Config::default();
+        config.delegate.allow_recursion = true;
+        config.delegate.max_depth = 2;
+        let engine =
+            build_delegate_engine(&config, provider, &ws, &security, None, None, None, None);
+        let text = engine.run("coder", "investigate").await.unwrap();
+        assert!(text.contains("coder done"), "got: {text}");
+        drop(dir);
     }
 }

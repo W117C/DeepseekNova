@@ -54,10 +54,16 @@ broken_intra_doc_links = "deny"
 invalid_codeblock_attributes = "deny"
 
 [workspace.lints.clippy]
-# lint 门控：生产代码禁止 unwrap/expect（deny），测试代码允许（各 crate
-# 的 `#![cfg_attr(test, allow(...))]` 豁免）。基线已清理至零警告。
+# lint 门控：生产代码禁止 unwrap/expect/panic/unreachable/todo/unimplemented/dbg
+# （deny），测试代码允许（各 crate 的 `#![cfg_attr(test, allow(...))]` 豁免）。
+# 基线已清理至零警告。
 unwrap_used = "deny"
 expect_used = "deny"
+panic = "deny"
+unreachable = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
 
 [workspace.package]
 version = "0.5.0"
@@ -112,6 +118,8 @@ opentelemetry-otlp = { version = "0.32", default-features = false, features = ["
 opentelemetry-stdout = { version = "0.32", default-features = false, features = ["trace"] }
 tracing-opentelemetry = "0.33"
 tempfile = "3.14"
+proptest = "1.5"
+windows-sys = { version = "0.59", default-features = false }
 
 # Internal crates
 deepseeknova-agent = { version = "0.5.0", path = "crates/deepseeknova-agent" }

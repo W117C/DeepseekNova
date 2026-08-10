@@ -377,7 +377,7 @@ async fn run_coordinator(
 
     let validated = deepseeknova_provider::ValidatedRequest::new(&plan_messages, &[]).map_err(
         |violations| {
-            DeepseeknovaError::Runner(format!(
+            DeepseeknovaError::runner(format!(
                 "planning prompt replay invariant violated: {} violation(s) detected",
                 violations.len()
             ))
@@ -714,7 +714,7 @@ impl ThinkCallback for CoordinatorCallbacks {
                 for v in &violations {
                     tracing::error!(?v, "replay invariant violation in coordinator generate");
                 }
-                DeepseeknovaError::Runner(format!(
+                DeepseeknovaError::runner(format!(
                     "history replay invariant violated: {} violation(s)",
                     violations.len()
                 ))
@@ -734,7 +734,7 @@ impl ToolCallback for CoordinatorCallbacks {
         let tool = self
             .tools
             .get(tool_name)
-            .ok_or_else(|| DeepseeknovaError::Runner(format!("unknown tool: {tool_name}")))?;
+            .ok_or_else(|| DeepseeknovaError::runner(format!("unknown tool: {tool_name}")))?;
 
         let args_str = serde_json::to_string(args)?;
 
@@ -802,7 +802,7 @@ impl ReflectCallback for CoordinatorCallbacks {
                 for v in &violations {
                     tracing::error!(?v, "replay invariant violation in coordinator reflect");
                 }
-                DeepseeknovaError::Runner(format!(
+                DeepseeknovaError::runner(format!(
                     "history replay invariant violated: {} violation(s)",
                     violations.len()
                 ))
@@ -840,7 +840,7 @@ impl DelegateCallback for CoordinatorCallbacks {
         goal: &str,
     ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
         let runner = self.sub_agent_runner.as_ref().ok_or_else(|| {
-            DeepseeknovaError::Runner(format!(
+            DeepseeknovaError::runner(format!(
                 "Delegate action targets sub-agent '{sub_agent}' but no \
                  SubAgentRunner is configured on the coordinator"
             ))
@@ -871,7 +871,7 @@ impl DelegateCallback for CoordinatorCallbacks {
         }
 
         if text.is_empty() {
-            return Err(deepseeknova_core::DeepseeknovaError::Runner(format!(
+            return Err(deepseeknova_core::DeepseeknovaError::runner(format!(
                 "sub-agent '{sub_agent}' produced no output"
             )));
         }

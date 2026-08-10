@@ -1,6 +1,6 @@
 use deepseeknova_core::chunk::Usage;
 use deepseeknova_core::runner::{RunEvent, RunInput, Runner};
-use deepseeknova_core::{Message, Role};
+use deepseeknova_core::{DeepseeknovaError, Message, Role};
 use deepseeknova_provider::factory::ReasoningEffort;
 use deepseeknova_store::{SessionStore, StoredOutput};
 use std::collections::HashMap;
@@ -813,31 +813,34 @@ async fn handle_slash_command(
                 if target.is_empty() {
                     eprintln!("Usage: /resume <session-id>  (see /sessions)");
                 } else {
-                    match p.store.load(target) {
-                        Ok(turns) if !turns.is_empty() => {
-                            let mut hist = p.history.lock().await;
-                            hist.clear();
-                            for t in &turns {
-                                for m in &t.messages {
-                                    hist.push(m.into());
+                    match validated_session_id(target) {
+                        Ok(id) => match p.store.load(&id) {
+                            Ok(turns) if !turns.is_empty() => {
+                                let mut hist = p.history.lock().await;
+                                hist.clear();
+                                for t in &turns {
+                                    for m in &t.messages {
+                                        hist.push(m.into());
+                                    }
                                 }
+                                let restored = hist.len();
+                                drop(hist);
+                                p.session_id = id.clone();
+                                p.turn = turns.len() as u64;
+                                // 恢复时显示命名（有则显，无则略）。
+                                let title = p
+                                    .session_title(&id)
+                                    .map(|t| format!(" — '{t}'"))
+                                    .unwrap_or_default();
+                                println!(
+                                    "resumed '{id}'{title} — {restored} messages across {} turns",
+                                    turns.len()
+                                );
                             }
-                            let restored = hist.len();
-                            drop(hist);
-                            p.session_id = target.to_string();
-                            p.turn = turns.len() as u64;
-                            // 恢复时显示命名（有则显，无则略）。
-                            let title = p
-                                .session_title(target)
-                                .map(|t| format!(" — '{t}'"))
-                                .unwrap_or_default();
-                            println!(
-                                "resumed '{target}'{title} — {restored} messages across {} turns",
-                                turns.len()
-                            );
-                        }
-                        Ok(_) => eprintln!("session '{target}' is empty or does not exist"),
-                        Err(e) => eprintln!("failed to load session '{target}': {e}"),
+                            Ok(_) => eprintln!("session '{id}' is empty or does not exist"),
+                            Err(e) => eprintln!("failed to load session '{id}': {e}"),
+                        },
+                        Err(e) => eprintln!("{e}"),
                     }
                 }
             }
@@ -898,6 +901,18 @@ fn parse_effort_command(args: &str) -> Result<ReasoningEffort, String> {
     }
     ReasoningEffort::from_config_str(trimmed)
         .ok_or_else(|| format!("unknown effort level: '{trimmed}'"))
+}
+
+/// 校验用户输入可安全作为会话 id 使用（防 `/resume` 路径越界读写）。
+fn validated_session_id(input: &str) -> Result<String, DeepseeknovaError> {
+    let id = input.trim();
+    if deepseeknova_store::is_valid_session_id(id) {
+        Ok(id.to_string())
+    } else {
+        Err(DeepseeknovaError::agent(format!(
+            "invalid session id '{id}' (only letters, digits, '-' and '_' allowed)"
+        )))
+    }
 }
 
 /// Toggle thinking on/off: if currently enabled → disable; if disabled →
@@ -1264,6 +1279,22 @@ mod tests {
         assert_eq!(effort_label(ReasoningEffort::Disabled), "disabled");
         assert_eq!(effort_label(ReasoningEffort::High), "high");
         assert_eq!(effort_label(ReasoningEffort::Max), "max");
+    }
+
+    // ── validated_session_id（/resume 路径越界防护）────────────────────
+
+    #[test]
+    fn resume_session_id_rejects_path_escape() {
+        assert_eq!(
+            validated_session_id("chat-20260810-120000-001-0001").unwrap(),
+            "chat-20260810-120000-001-0001"
+        );
+        for bad in ["../outside", "a/b", "/etc/passwd", "", "..", "a b"] {
+            assert!(
+                validated_session_id(bad).is_err(),
+                "会话 id 必须拒绝不安全输入: {bad:?}"
+            );
+        }
     }
 
     // ── 会话命名（SessionTitles / rename）────────────────────────────

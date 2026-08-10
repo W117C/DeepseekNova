@@ -210,7 +210,10 @@ pub enum ManifestError {
 /// `Result<_, ManifestError>` 用于返回 `Result<_, DeepseeknovaError>` 的函数。
 impl From<ManifestError> for deepseeknova_core::DeepseeknovaError {
     fn from(err: ManifestError) -> Self {
-        deepseeknova_core::DeepseeknovaError::Agent(err.to_string())
+        deepseeknova_core::DeepseeknovaError::Agent {
+            message: err.to_string(),
+            source: Some(Box::new(err)),
+        }
     }
 }
 

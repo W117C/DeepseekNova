@@ -189,14 +189,14 @@ async fn summarize(provider: &dyn Provider, prompt: &str) -> Result<String, Deep
         reasoning_content: None,
     }];
     let validated = ValidatedRequest::new(&msgs, &[]).map_err(|violations| {
-        DeepseeknovaError::Runner(format!(
+        DeepseeknovaError::runner(format!(
             "invalid compact request: {}",
             violations.join("; ")
         ))
     })?;
     let out = provider.generate(validated).await?;
     if out.content.trim().is_empty() {
-        return Err(DeepseeknovaError::Runner(
+        return Err(DeepseeknovaError::runner(
             "empty digest from compact model".to_string(),
         ));
     }

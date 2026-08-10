@@ -209,7 +209,7 @@ mod tests {
                 }
             }
             if depth >= self.fail_over {
-                return Err(DeepseeknovaError::Runner(format!(
+                return Err(DeepseeknovaError::runner(format!(
                     "boom at depth {depth} for {agent}"
                 )));
             }

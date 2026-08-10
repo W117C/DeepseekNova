@@ -198,7 +198,7 @@ mod tests {
             let v: serde_json::Value = serde_json::from_str(args)?;
             let cmd = v["command"].as_str().unwrap_or_default();
             if self.fail_on.as_deref() == Some(cmd) {
-                return Err(deepseeknova_core::DeepseeknovaError::Tool(
+                return Err(deepseeknova_core::DeepseeknovaError::tool(
                     "command exited with code 1".to_string(),
                 ));
             }

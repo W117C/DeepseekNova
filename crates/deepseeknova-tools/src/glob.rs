@@ -66,7 +66,7 @@ impl Tool for GlobTool {
 
         let mut matches: Vec<String> = Vec::new();
         let paths = glob::glob(&pattern_str).map_err(|e| {
-            DeepseeknovaError::Tool(format!("invalid glob pattern '{pattern_str}': {e}"))
+            DeepseeknovaError::tool(format!("invalid glob pattern '{pattern_str}': {e}"))
         })?;
 
         for entry in paths {

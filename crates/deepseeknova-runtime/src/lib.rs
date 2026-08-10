@@ -7,12 +7,24 @@
 //! protocol/delegate/helpers），组合根 `build_agent_with_role_providers` 与
 //! `Runtime` 保留在此，对外 API 经 `pub use` 原样再导出。
 
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::dbg_macro
+    )
+)]
 
 mod delegate;
 mod diagnose;
 mod helpers;
 mod hooks;
+mod mention;
 mod metrics;
 mod protocol;
 mod security;
@@ -35,11 +47,12 @@ use helpers::{derive_compaction_threshold, repo_map_seeds, run_blocking_work};
 use security::sandbox_writable_paths;
 
 // ── 对外 API 再导出：被 CLI 等外部 crate 消费的装配函数保持 crate 根路径 ──
-pub use delegate::build_sub_agent_runner;
+pub use delegate::{build_sub_agent_runner, delegate_agent_names};
 pub use diagnose::{
     attach_diagnose_hook, attach_diagnose_hook_with_ingest, attach_failure_pattern_injection,
 };
 pub use hooks::{attach_quality_hook, attach_user_hooks};
+pub use mention::MentionAwareRunner;
 pub use metrics::{
     attach_metrics_hook, attach_metrics_hook_with_fitness, enforce_metrics_retention, MetricsSink,
 };

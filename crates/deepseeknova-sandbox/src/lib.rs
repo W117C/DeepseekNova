@@ -9,30 +9,30 @@
 //! |------|------|------|
 //! | macOS | Seatbelt（`sandbox-exec`） | 已实现，见 `seatbelt` 模块 |
 //! | Linux | bubblewrap（`bwrap`） | 已实现，见 `bubblewrap` 模块 |
-//! | Windows | 无（[`NoOpSandbox`]） | 见下文「Windows 沙箱现状与方案」 |
+//! | Windows | Job Object（`windows::JobSandbox`） | 已实现：进程树隔离 + 资源限制 |
 //! | 其他 | [`NoOpSandbox`] | 无隔离 |
 //!
 //! ## Windows 沙箱现状与方案
 //!
-//! **现状**：Windows 上 [`platform_sandbox`]、[`platform_sandbox_with`]、
-//! [`platform_sandbox_tiered`] 的全部分支都返回 [`NoOpSandbox`]（无隔离）。
-//! 不要误以为这些分支提供了 Windows 隔离。
+//! **现状（2026-08-10 已实现）**：Windows 上三个 `platform_sandbox*` 入口都
+//! 返回 `windows::JobSandbox`：以 `CREATE_SUSPENDED` 创建子进程 → assign
+//! 到 Job Object → 恢复主线程。Job 设置 `KILL_ON_JOB_CLOSE`（句柄释放即杀
+//! 进程树）与活动进程数上限；Job 句柄由独立线程在进程退出后释放，保证
+//! kill-on-close 不误杀仍在运行的子进程树。运行时行为由 CI 的
+//! `windows-latest` 测试矩阵验证（本 crate 测试含真实 spawn 用例）。
 //!
 //! **方案（由简到严）**：
-//! - **Job Object**（最小可行，推荐起点）：创建受限 Job 对象，把子进程
-//!   assign 进 Job（`AssignProcessToJobObject`），用 Job 限制
-//!   （`JOB_OBJECT_LIMIT_*`：进程数上限、CPU/内存配额、作业结束即杀进程树）
-//!   提供进程树隔离 + 资源限制。注意 Job Object **不直接限制网络**——整网
-//!   开关需配合 WFP（Windows Filtering Platform）过滤器或 AppContainer。
+//! - **Job Object**（已实现，最小可行）：进程树隔离 + 资源限制
+//!   （活动进程上限、kill-on-close）。注意 Job Object **不直接限制网络与
+//!   文件系统写路径**——整网开关需配合 WFP（Windows Filtering Platform）
+//!   过滤器或 AppContainer（后续项）。
 //! - **AppContainer**（更严格）：基于派生 SID 的低特权令牌 + 能力
 //!   （capability）声明，需要令牌/清单/SID 派生，复杂度显著更高，可做
 //!   只读文件系统与网络白名单，但开发与调试成本大。
 //!
-//! **实现前提（诚实约束）**：以上方案必须在 **Windows 环境**实现并验证——
-//! Job Object / 令牌 API 是 Windows 专有系统调用，交叉编译只能验证编译期
-//! 形态，无法验证运行时隔离行为。沙箱是安全边界，本 crate 在非 Windows
-//! 平台不引入 `windows-sys`，也不编写无法验证的 `cfg(windows)` 后端代码。
-//! Windows 后端的实际实现留待 Windows 环境落地。
+//! **诚实约束**：Job Object 后端在非 Windows 平台只做交叉编译检查，运行时
+//! 行为由 CI 的 windows-latest 矩阵执行测试验证；AppContainer 仍需 Windows
+//! 环境专项实现。
 //!
 //! ## 网络策略与域名白名单
 //!
@@ -50,12 +50,25 @@
 //! 是推荐档位：工作区可写 + 网络按配置（默认禁网），兼顾隔离与日常使用。
 //! 本 crate 不修改任何默认值。
 
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::dbg_macro
+    )
+)]
 
 #[cfg(target_os = "linux")]
 pub mod bubblewrap;
 #[cfg(target_os = "macos")]
 pub mod seatbelt;
+#[cfg(windows)]
+pub mod windows;
 
 /// 沙箱档位：把 agent 运行权限抽象为少量分级档位（而非自由裁量）。
 ///
@@ -138,6 +151,15 @@ pub trait Sandbox: Send + Sync {
     /// NoOpSandbox returns the input unchanged.
     fn sandbox(&self, cmd_executable: &str, cmd_args: &[String]) -> (String, Vec<String>);
 
+    /// 在沙箱约束下 spawn 一个已构造好的命令。
+    ///
+    /// 默认实现直接 `cmd.spawn()`；Windows Job Object 后端覆盖此方法，用
+    /// `CREATE_SUSPENDED` 创建进程、assign 到 Job 后再恢复主线程，保证
+    /// 进程树在 Job 约束（含 kill-on-close）内。
+    fn spawn(&self, mut cmd: tokio::process::Command) -> std::io::Result<tokio::process::Child> {
+        cmd.spawn()
+    }
+
     /// Human-readable name for logging and diagnostics.
     fn name(&self) -> &str;
 
@@ -187,8 +209,9 @@ impl Sandbox for NoOpSandbox {
 ///
 /// - macOS: `SeatbeltSandbox` (uses `sandbox-exec`)
 /// - Linux: `BubblewrapSandbox` (uses `bwrap`)
-/// - Other: `NoOpSandbox` — **Windows 无隔离**，沙箱现状与方案见
-///   [crate 根文档](crate#windows-沙箱现状与方案)。
+/// - Windows: `JobSandbox`（Job Object：进程树隔离 + 资源限制），见
+///   `windows::JobSandbox`
+/// - Other: `NoOpSandbox` — 无隔离
 pub fn platform_sandbox() -> Box<dyn Sandbox> {
     #[cfg(target_os = "macos")]
     {
@@ -198,10 +221,13 @@ pub fn platform_sandbox() -> Box<dyn Sandbox> {
     {
         Box::new(bubblewrap::BubblewrapSandbox::default())
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(windows)]
     {
-        // Windows/其他平台：无隔离。Windows 沙箱现状与方案见 crate 根文档
-        // 「Windows 沙箱现状与方案」。
+        Box::new(windows::JobSandbox::default())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        // 非 Windows 的其它平台：无隔离。
         Box::new(NoOpSandbox)
     }
 }
@@ -212,8 +238,8 @@ pub fn platform_sandbox() -> Box<dyn Sandbox> {
 ///
 /// 注意：网络为整网开关（seatbelt `(allow network*)` / bwrap
 /// `--share-net`），**不支持域名级白名单**（见 [`NetworkPolicy`]）。
-/// Windows 分支返回 [`NoOpSandbox`]，方案见
-/// [crate 根文档](crate#windows-沙箱现状与方案)。
+/// Windows 分支返回 `windows::JobSandbox`（策略参数当前仅记录：Job Object
+/// 不直接限制网络/写路径，整网与文件系统白名单仍需 WFP/AppContainer）。
 pub fn platform_sandbox_with(writable_paths: &[String], allow_network: bool) -> Box<dyn Sandbox> {
     #[cfg(target_os = "macos")]
     {
@@ -229,9 +255,19 @@ pub fn platform_sandbox_with(writable_paths: &[String], allow_network: bool) -> 
             allow_network,
         ))
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(windows)]
     {
-        // Windows/其他平台：无隔离。方案见 crate 根文档「Windows 沙箱现状与方案」。
+        if !allow_network {
+            tracing::warn!(
+                "Windows JobSandbox cannot enforce allow_network=false; \
+                 sandboxed commands still have network access"
+            );
+        }
+        let _ = (writable_paths, allow_network);
+        Box::new(windows::JobSandbox::default())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
         let _ = (writable_paths, allow_network);
         Box::new(NoOpSandbox)
     }
@@ -247,8 +283,8 @@ pub fn platform_sandbox_with(writable_paths: &[String], allow_network: bool) -> 
 /// 空档位配置退化为 [`platform_sandbox`]。
 ///
 /// 网络为整网开关，**不支持域名级白名单**（见 [`NetworkPolicy`]）。Windows
-/// 全部分支返回 [`NoOpSandbox`]，现状与方案见
-/// [crate 根文档](crate#windows-沙箱现状与方案)。
+/// 全部分支返回 `windows::JobSandbox`（网络/写路径限制见
+/// [`platform_sandbox_with`] 说明）。
 pub fn platform_sandbox_tiered(
     tier: SandboxTier,
     writable_paths: &[String],
@@ -264,9 +300,17 @@ pub fn platform_sandbox_tiered(
             {
                 Box::new(bubblewrap::BubblewrapSandbox::with_tier(tier, &[], false))
             }
-            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+            #[cfg(windows)]
             {
-                // Windows/其他平台：无隔离。方案见 crate 根文档「Windows 沙箱现状与方案」。
+                tracing::warn!(
+                    "Windows JobSandbox cannot enforce SandboxTier::ReadOnly; \
+                     network and filesystem writes are not restricted"
+                );
+                let _ = (tier, writable_paths, allow_network);
+                Box::new(windows::JobSandbox::default())
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+            {
                 let _ = (tier, writable_paths, allow_network);
                 Box::new(NoOpSandbox)
             }
@@ -289,9 +333,19 @@ pub fn platform_sandbox_tiered(
                     net,
                 ))
             }
-            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+            #[cfg(windows)]
             {
-                // Windows/其他平台：无隔离。方案见 crate 根文档「Windows 沙箱现状与方案」。
+                if !net {
+                    tracing::warn!(
+                        "Windows JobSandbox cannot enforce the network-off policy; \
+                         sandboxed commands still have network access"
+                    );
+                }
+                let _ = (tier, writable_paths, allow_network, net);
+                Box::new(windows::JobSandbox::default())
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+            {
                 let _ = (tier, writable_paths, allow_network, net);
                 Box::new(NoOpSandbox)
             }

@@ -3,7 +3,18 @@
 //! Builds and maintains the agent's contextual understanding of the
 //! workspace: file trees, project memory (DEEPSEEKNOVA.md), and session state.
 
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::dbg_macro
+    )
+)]
 
 pub mod history;
 
@@ -428,7 +439,7 @@ pub struct BuilderOrderError {
 /// `Result<_, BuilderOrderError>` 用于返回 `Result<_, DeepseeknovaError>` 的函数。
 impl From<BuilderOrderError> for deepseeknova_core::DeepseeknovaError {
     fn from(err: BuilderOrderError) -> Self {
-        deepseeknova_core::DeepseeknovaError::Context(err.to_string())
+        deepseeknova_core::DeepseeknovaError::Context(Box::new(err))
     }
 }
 

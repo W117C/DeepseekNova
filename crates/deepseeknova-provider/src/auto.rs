@@ -90,8 +90,8 @@ impl ModelAutoRouter {
         messages: &[Message],
     ) -> Result<RouteChoice, deepseeknova_core::DeepseeknovaError> {
         let prompt = latest_user_text(messages, self.max_chars).ok_or_else(|| {
-            deepseeknova_core::DeepseeknovaError::Config(
-                "no user message available for routing".into(),
+            deepseeknova_core::DeepseeknovaError::config(
+                "no user message available for routing".to_string(),
             )
         })?;
         let sys = Message {

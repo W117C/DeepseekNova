@@ -370,7 +370,7 @@ pub fn load_cases(path: &str) -> Result<Vec<EvalCase>, deepseeknova_core::Deepse
             continue;
         }
         let case: EvalCase = serde_json::from_str(line).map_err(|e| {
-            deepseeknova_core::DeepseeknovaError::Config(format!(
+            deepseeknova_core::DeepseeknovaError::config(format!(
                 "eval file {path}:{} is not a valid case: {e}",
                 idx + 1
             ))
@@ -378,7 +378,7 @@ pub fn load_cases(path: &str) -> Result<Vec<EvalCase>, deepseeknova_core::Deepse
         cases.push(case);
     }
     if cases.is_empty() {
-        return Err(deepseeknova_core::DeepseeknovaError::Config(format!(
+        return Err(deepseeknova_core::DeepseeknovaError::config(format!(
             "eval file {path} contains no cases"
         )));
     }

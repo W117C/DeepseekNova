@@ -41,9 +41,9 @@ impl McpClient {
             .conn
             .request("tools/list", None, self.timeout())
             .await
-            .map_err(|e| DeepseeknovaError::Runner(format!("tools/list failed: {e}")))?;
+            .map_err(|e| DeepseeknovaError::runner(format!("tools/list failed: {e}")))?;
         let list: ListToolsResult = serde_json::from_value(result)
-            .map_err(|e| DeepseeknovaError::Runner(format!("invalid tools/list response: {e}")))?;
+            .map_err(|e| DeepseeknovaError::runner(format!("invalid tools/list response: {e}")))?;
         Ok(list.tools)
     }
 
@@ -61,9 +61,9 @@ impl McpClient {
             .conn
             .request("tools/call", Some(params), self.timeout())
             .await
-            .map_err(|e| DeepseeknovaError::Runner(format!("tools/call failed: {e}")))?;
+            .map_err(|e| DeepseeknovaError::runner(format!("tools/call failed: {e}")))?;
         let call: CallToolResult = serde_json::from_value(result)
-            .map_err(|e| DeepseeknovaError::Runner(format!("invalid tools/call response: {e}")))?;
+            .map_err(|e| DeepseeknovaError::runner(format!("invalid tools/call response: {e}")))?;
         Ok(call)
     }
 
@@ -77,9 +77,9 @@ impl McpClient {
             .conn
             .request("resources/list", None, self.timeout())
             .await
-            .map_err(|e| DeepseeknovaError::Runner(format!("resources/list failed: {e}")))?;
+            .map_err(|e| DeepseeknovaError::runner(format!("resources/list failed: {e}")))?;
         let list: ListResourcesResult = serde_json::from_value(result).map_err(|e| {
-            DeepseeknovaError::Runner(format!("invalid resources/list response: {e}"))
+            DeepseeknovaError::runner(format!("invalid resources/list response: {e}"))
         })?;
         Ok(list.resources)
     }
@@ -91,9 +91,9 @@ impl McpClient {
             .conn
             .request("resources/read", Some(params), self.timeout())
             .await
-            .map_err(|e| DeepseeknovaError::Runner(format!("resources/read failed: {e}")))?;
+            .map_err(|e| DeepseeknovaError::runner(format!("resources/read failed: {e}")))?;
         let read: ReadResourceResult = serde_json::from_value(result).map_err(|e| {
-            DeepseeknovaError::Runner(format!("invalid resources/read response: {e}"))
+            DeepseeknovaError::runner(format!("invalid resources/read response: {e}"))
         })?;
         Ok(read)
     }
@@ -108,9 +108,9 @@ impl McpClient {
             .conn
             .request("prompts/list", None, self.timeout())
             .await
-            .map_err(|e| DeepseeknovaError::Runner(format!("prompts/list failed: {e}")))?;
+            .map_err(|e| DeepseeknovaError::runner(format!("prompts/list failed: {e}")))?;
         let list: ListPromptsResult = serde_json::from_value(result).map_err(|e| {
-            DeepseeknovaError::Runner(format!("invalid prompts/list response: {e}"))
+            DeepseeknovaError::runner(format!("invalid prompts/list response: {e}"))
         })?;
         Ok(list.prompts)
     }
@@ -130,7 +130,7 @@ impl McpClient {
         self.conn
             .request("prompts/get", Some(params), self.timeout())
             .await
-            .map_err(|e| DeepseeknovaError::Runner(format!("prompts/get failed: {e}")))
+            .map_err(|e| DeepseeknovaError::runner(format!("prompts/get failed: {e}")))
     }
 }
 

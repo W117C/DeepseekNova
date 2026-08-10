@@ -873,6 +873,18 @@ impl Runner for Agent {
         &self,
         input: RunInput,
     ) -> Result<RunEventStream, deepseeknova_core::DeepseeknovaError> {
+        self.run_stream_with_extensions(input, Vec::new()).await
+    }
+}
+
+impl Agent {
+    /// 内部扩展注入版 run：除构建期扩展外，本次运行临时注入额外扩展
+    /// （如子代理递归深度 `DelegateDepth`），不改变静态扩展集合。
+    pub(crate) async fn run_stream_with_extensions(
+        &self,
+        input: RunInput,
+        extra_extensions: Vec<Arc<ExtensionApplier>>,
+    ) -> Result<RunEventStream, deepseeknova_core::DeepseeknovaError> {
         let (tx, rx) = mpsc::channel(64);
 
         let provider = Arc::clone(&self.provider);
@@ -889,7 +901,12 @@ impl Runner for Agent {
         let permission = self.permission.clone();
         let approval = self.approval.clone();
         let ask_without_responder_deny = self.ask_without_responder_deny;
-        let extensions = self.extensions.clone();
+        let extensions: Vec<Arc<ExtensionApplier>> = self
+            .extensions
+            .iter()
+            .cloned()
+            .chain(extra_extensions)
+            .collect();
         let repo_map_provider = self.repo_map_provider.clone();
         let recall_provider = self.recall_provider.clone();
         let mid_run = self.mid_run.clone();
@@ -2858,6 +2875,79 @@ mod tests {
         );
     }
 
+    /// 审批 responder 桩：记录收到的描述（应含风险前缀）并拒绝。
+    struct CapturingResponder {
+        seen: Arc<std::sync::Mutex<Option<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl deepseeknova_core::runner::ApprovalResponder for CapturingResponder {
+        async fn request(&self, _id: &str, _title: &str, description: Option<&str>) -> bool {
+            *self.seen.lock().unwrap_or_else(|e| e.into_inner()) =
+                description.map(ToOwned::to_owned);
+            false
+        }
+    }
+
+    /// 两轮脚本：调用 bash（写命令），随后文本收尾。
+    fn call_bash_then_done() -> Vec<Vec<Chunk>> {
+        vec![
+            vec![
+                Chunk::ToolCallStart {
+                    id: "c1".into(),
+                    name: "bash".into(),
+                },
+                Chunk::ToolCallEnd {
+                    id: "c1".into(),
+                    name: "bash".into(),
+                    arguments: r#"{"command":"rm -rf /tmp/x"}"#.into(),
+                },
+                Chunk::Done,
+            ],
+            vec![
+                Chunk::TextDelta("finished".into()),
+                Chunk::Usage(Usage::default()),
+                Chunk::Done,
+            ],
+        ]
+    }
+
+    /// 风险标签端到端断言：Ask 裁决 → ApprovalRequest 描述 → responder
+    /// 收到的参数必须携带 `[风险:非只读]` 前缀（BLOCKED 点名的唯一测试缺口）。
+    #[tokio::test]
+    async fn ask_risk_prefix_reaches_approval_responder() {
+        let seen = Arc::new(std::sync::Mutex::new(None::<String>));
+        let provider = Arc::new(MockProvider::sequential(call_bash_then_done()));
+        let mut agent = Agent::new(provider, 5)
+            .with_permission_gate(ask_mode_gate())
+            .with_approval_responder(Arc::new(CapturingResponder { seen: seen.clone() }));
+        agent.register_tool(Arc::new(BashSpy { fail: false }));
+
+        let mut stream = agent
+            .run_stream(RunInput {
+                prompt: "go".into(),
+                images: vec![],
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+
+        let desc = seen
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .expect("Ask 决策必须调用审批 responder");
+        assert!(
+            desc.contains("[风险:非只读]"),
+            "responder 描述必须携带风险前缀, got: {desc}"
+        );
+        assert!(
+            desc.contains(r#"{"command":"rm -rf /tmp/x"}"#),
+            "responder 描述必须保留原始调用参数, got: {desc}"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Extension injection hook (Task 8)
     // -----------------------------------------------------------------------
@@ -3437,7 +3527,7 @@ mod tests {
             _args: &str,
         ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
             if self.fail {
-                return Err(deepseeknova_core::DeepseeknovaError::Tool(
+                return Err(deepseeknova_core::DeepseeknovaError::tool(
                     "command exited with code 1".to_string(),
                 ));
             }
@@ -3658,7 +3748,7 @@ mod tests {
             _ctx: &ToolContext,
             _args: &str,
         ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
-            return Err(deepseeknova_core::DeepseeknovaError::Tool(
+            return Err(deepseeknova_core::DeepseeknovaError::tool(
                 "boom".to_string(),
             ));
         }

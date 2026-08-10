@@ -1,4 +1,15 @@
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::dbg_macro
+    )
+)]
 
 mod audit;
 mod chat;
@@ -41,6 +52,31 @@ use tracing::info;
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::FmtSubscriber;
 
+/// 构造一个用于 `config` 命令展示的脱敏配置副本：内联 `api_key` 与常见
+/// 认证头一律替换为 `[REDACTED]`，防止凭据泄漏进终端回滚/日志。
+fn redact_config_for_display(config: &deepseeknova_config::Config) -> deepseeknova_config::Config {
+    const SENSITIVE_HEADERS: [&str; 5] = [
+        "authorization",
+        "proxy-authorization",
+        "x-api-key",
+        "cookie",
+        "set-cookie",
+    ];
+
+    let mut copy = config.clone();
+    for provider in &mut copy.providers {
+        if provider.api_key.is_some() {
+            provider.api_key = Some("[REDACTED]".to_string());
+        }
+        for header in &mut provider.headers {
+            if SENSITIVE_HEADERS.contains(&header.name.to_ascii_lowercase().as_str()) {
+                header.value = "[REDACTED]".to_string();
+            }
+        }
+    }
+    copy
+}
+
 #[tokio::main]
 async fn main() -> Result<(), DeepseeknovaError> {
     let cli = Cli::parse();
@@ -57,24 +93,37 @@ async fn main() -> Result<(), DeepseeknovaError> {
     });
 
     // `--secure-defaults` 一键档：权限门控（已默认开启）保持开启 + 沙箱启用
-    // （若 OS 支持）。Windows 无 OS 沙箱后端时 platform_sandbox* 回落
-    // NoOpSandbox，由下方 main.rs 警告 + runtime 启动横幅明示；权限门控仍
-    // 独立生效，安全姿态不因此降级。
+    // （若 OS 支持）。平台后端缺失（未知平台回落 NoOpSandbox）时由下方
+    // 运行时警告明示；权限门控仍独立生效，安全姿态不因此降级。
     if cli.secure_defaults {
         config.permissions.enabled = true;
         config.sandbox.enabled = true;
         eprintln!("secure-defaults: permission gate ON, sandbox ON");
     }
 
-    // Windows 上当前没有 OS 级沙箱后端（seatbelt/bubblewrap 均不可用），
-    // `platform_sandbox*` 会回落 NoOpSandbox。即使 [sandbox] enabled=true，
-    // shell 工具仍无隔离——这里必须运行时显式警告，而不是只写在 README。
+    // 平台后端缺失（Windows 旧版/未知平台回落 NoOpSandbox）时，即使
+    // [sandbox] enabled=true，shell 工具仍无隔离——运行时显式警告，
+    // 而不是只写在 README。Windows 现役后端为 Job Object（进程树隔离 +
+    // 资源限制），is_active()=true，不触发此警告。
+    if config.sandbox.enabled && !deepseeknova_sandbox::platform_sandbox().is_active() {
+        eprintln!(
+            "warning: no OS-level sandbox backend is available on this platform; \
+             shell commands run without sandbox isolation. Keep permission rules \
+             strict or run inside a trusted environment."
+        );
+    }
+    // Windows 现役后端为 Job Object：进程树隔离 + 资源限制，但没有网络/文件
+    // 系统写路径限制。`allow_network=false`、只读档、writable_paths 在
+    // Windows 上不生效——启动时显式提示，避免用户误以为策略已强制执行。
     #[cfg(target_os = "windows")]
-    eprintln!(
-        "warning: no OS-level sandbox backend is available on Windows; \
-         shell commands run without sandbox isolation. Keep permission rules \
-         strict or run inside a trusted environment."
-    );
+    if config.sandbox.enabled {
+        eprintln!(
+            "warning: Windows JobSandbox provides process-tree isolation and \
+             resource limits, but does NOT enforce network or filesystem-write \
+             policies (allow_network=false / read-only tiers / writable_paths). \
+             Keep permission rules strict or run inside a trusted environment."
+        );
+    }
 
     // Role-pointer routing + cost accounting. The router owns its ledger
     // (retrievable via `router.ledger()`), so no separate binding is needed.
@@ -94,10 +143,18 @@ async fn main() -> Result<(), DeepseeknovaError> {
     // suppressed while OTLP export is active (known trade-off); it must be
     // held in a named binding so spans flush on exit.
     let _telemetry_guard = if config.telemetry.enabled {
-        Some(deepseeknova_telemetry::TelemetryGuard::init(
+        let guard = deepseeknova_telemetry::TelemetryGuard::init(
             "deepseeknova",
             config.telemetry.otlp_endpoint.as_deref(),
-        )?)
+        )?;
+        if !guard.installed() {
+            eprintln!(
+                "warning: telemetry is enabled but the OpenTelemetry layer could \
+                 not be installed (a global tracing subscriber already exists); \
+                 spans will not be exported"
+            );
+        }
+        Some(guard)
     } else {
         // TUI 模式下全静默：stdout 被 ratatui 独占，任何日志都破坏画面；
         // 普通 chat 模式下 INFO 级 agent/provider 日志（step、POST 等）
@@ -616,6 +673,16 @@ async fn main() -> Result<(), DeepseeknovaError> {
                 // 也生效），请求接收端注入 TUI 显示确认浮层（y/n）。
                 let (approval_responder, approval_rx) =
                     deepseeknova_tui::approval::approval_channel();
+                // 工作区上下文与权限门：子代理 runner 与 TUI 模式切换共享
+                // 同一实例（一次性构建，工厂内 clone）。
+                let workspace_root = std::env::current_dir().unwrap_or_default();
+                let security_ctx =
+                    deepseeknova_runtime::build_security_context(&cfg, &workspace_root)?;
+                let permission_gate =
+                    deepseeknova_runtime::permission_gate_for(&cfg, &workspace_root);
+                let workspace_root_factory = workspace_root.clone();
+                let security_ctx_factory = security_ctx.clone();
+                let permission_gate_factory = permission_gate.clone();
                 let factory = move |effort: Option<ReasoningEffort>,
                                     model: Option<String>|
                       -> Result<
@@ -628,10 +695,27 @@ async fn main() -> Result<(), DeepseeknovaError> {
                         effort,
                     )?;
                     let task_provider = factory_router.provider_for(ModelRole::Task, effort)?;
+                    let compact_provider = compact_provider_for(&factory_router, &cfg)?;
                     let mut roles = deepseeknova_runtime::AgentRoleProviders::default();
-                    roles.task = Some(task_provider);
-                    roles.compact = Some(compact_provider_for(&factory_router, &cfg)?);
+                    roles.task = Some(task_provider.clone());
+                    roles.compact = Some(compact_provider.clone());
                     roles.review = review_provider_for(&factory_router, &cfg)?;
+                    let sub_runner = if cfg.delegate.enabled {
+                        Some(deepseeknova_runtime::build_sub_agent_runner(
+                            &cfg,
+                            task_provider,
+                            Some(compact_provider),
+                            permission_gate_factory
+                                .as_ref()
+                                .map(|g| g.deny_rules())
+                                .unwrap_or(&[]),
+                            permission_gate_factory.clone(),
+                            Some(security_ctx_factory.clone()),
+                            &workspace_root_factory,
+                        ))
+                    } else {
+                        None
+                    };
                     let agent = build_agent(
                         provider,
                         roles,
@@ -644,7 +728,14 @@ async fn main() -> Result<(), DeepseeknovaError> {
                     )?
                     .with_conversation_history(hist.clone())
                     .with_approval_responder(Arc::new(approval_responder.clone()));
-                    Ok(Arc::new(agent))
+                    if let Some(sub) = sub_runner {
+                        Ok(Arc::new(deepseeknova_runtime::MentionAwareRunner::new(
+                            Arc::new(agent),
+                            sub,
+                        )))
+                    } else {
+                        Ok(Arc::new(agent))
+                    }
                 };
                 let initial = factory(Some(baseline_effort), model.clone())?;
                 let mut tui = deepseeknova_tui::TuiRunner::new(initial)
@@ -666,16 +757,14 @@ async fn main() -> Result<(), DeepseeknovaError> {
                 // 权限模式切换（Ctrl+P / /mode）与工作区信任确认：gate 与 agent
                 // 持有同一实例（运行时已接 mode/trusted 初始状态）；TrustController
                 // 委托 config TrustStore（`~/.deepseeknova/trusted.toml`）。
-                let workspace_root = std::env::current_dir().unwrap_or_default();
-                if let Some(g) = deepseeknova_runtime::permission_gate_for(&config, &workspace_root)
-                {
+                if let Some(g) = &permission_gate {
                     tui = tui.with_permission_gate(g.clone());
                 }
                 tui = tui
                     .with_trust_controller(Arc::new(CliTrustController(
                         deepseeknova_config::TrustStore::load(),
                     )))
-                    .with_workspace_root(workspace_root)
+                    .with_workspace_root(workspace_root.clone())
                     .with_project_rule_count(config.permissions.rules.len());
                 // 界面语言：`[ui] lang` 配置优先，缺省回退 `DEEPSEEKNOVA_LANG` 环境
                 // 变量（TUI 内部 `Lang::from_env`），两者皆缺省为英文。
@@ -699,7 +788,14 @@ async fn main() -> Result<(), DeepseeknovaError> {
                     .unwrap_or_default();
                 tui = tui.with_workspace_info(workspace_cwd, detect_git_branch());
                 // @ 文件补全候选：工作区文件清单（GUIDE 声称"由 CLI 注入"）。
-                tui = tui.with_at_files(collect_at_files());
+                let at_candidates: Vec<String> = collect_at_files()
+                    .into_iter()
+                    .chain(deepseeknova_runtime::delegate_agent_names(
+                        &config,
+                        &workspace_root,
+                    ))
+                    .collect();
+                tui = tui.with_at_files(at_candidates);
                 tui.run().await?;
                 return Ok(());
             }
@@ -738,14 +834,38 @@ async fn main() -> Result<(), DeepseeknovaError> {
                             effort,
                         )?;
                         let task_provider = router.provider_for(ModelRole::Task, effort)?;
+                        let compact_provider = compact_provider_for(&router, cfg)?;
                         let (step_quick, step_high) =
                             step_effort_providers(&router, cfg, model_name.as_deref())?;
                         let mut roles = deepseeknova_runtime::AgentRoleProviders::default();
-                        roles.task = Some(task_provider);
-                        roles.compact = Some(compact_provider_for(&router, cfg)?);
+                        roles.task = Some(task_provider.clone());
+                        roles.compact = Some(compact_provider.clone());
                         roles.review = review_provider_for(&router, cfg)?;
                         roles.step_quick = step_quick;
                         roles.step_high = step_high;
+                        // 主对话 @-mention：delegate 启用时预建子代理 runner，
+                        // 由 MentionAwareRunner 按 prompt 选择主/子路径。
+                        let workspace_root = std::env::current_dir().unwrap_or_default();
+                        let security =
+                            deepseeknova_runtime::build_security_context(cfg, &workspace_root)?;
+                        let permission_gate =
+                            deepseeknova_runtime::permission_gate_for(cfg, &workspace_root);
+                        let sub_runner = if cfg.delegate.enabled {
+                            Some(deepseeknova_runtime::build_sub_agent_runner(
+                                cfg,
+                                task_provider,
+                                Some(compact_provider),
+                                permission_gate
+                                    .as_ref()
+                                    .map(|g| g.deny_rules())
+                                    .unwrap_or(&[]),
+                                permission_gate.clone(),
+                                Some(security),
+                                &workspace_root,
+                            ))
+                        } else {
+                            None
+                        };
                         let agent = build_agent(
                             provider,
                             roles,
@@ -769,7 +889,14 @@ async fn main() -> Result<(), DeepseeknovaError> {
                         } else {
                             agent
                         };
-                        Ok(Box::new(agent))
+                        if let Some(sub) = sub_runner {
+                            Ok(Box::new(deepseeknova_runtime::MentionAwareRunner::new(
+                                Arc::new(agent),
+                                sub,
+                            )))
+                        } else {
+                            Ok(Box::new(agent))
+                        }
                     };
 
                 let restart = chat::run_chat_repl(
@@ -939,7 +1066,7 @@ async fn main() -> Result<(), DeepseeknovaError> {
         }
 
         Some(Commands::Config) => {
-            println!("{:#?}", config);
+            println!("{:#?}", redact_config_for_display(&config));
         }
 
         // ── Memory (审查/检索/编辑/删除/回放/统计) ───────────────────────
@@ -1391,8 +1518,9 @@ fn resolve_provider_cfg<'a>(
         }
     }
     config.providers.first().ok_or_else(|| {
-        DeepseeknovaError::Config(
-            "no AI provider is configured — add a `[[providers]]` section to your config".into(),
+        DeepseeknovaError::config(
+            "no AI provider is configured — add a `[[providers]]` section to your config"
+                .to_string(),
         )
     })
 }
@@ -1819,7 +1947,7 @@ impl deepseeknova_tui::SessionController for TuiSessionController {
         let mut p = self.persist.lock().await;
         let turns = p.store.load(id)?;
         if turns.is_empty() {
-            return Err(DeepseeknovaError::Storage(format!(
+            return Err(DeepseeknovaError::storage(format!(
                 "session '{id}' is empty or does not exist"
             )));
         }
@@ -2160,7 +2288,7 @@ fn resolve_scan_root(
     };
     let norm = normalize_path(&abs);
     if !norm.starts_with(workspace) {
-        return Err(DeepseeknovaError::Config(format!(
+        return Err(DeepseeknovaError::config(format!(
             "scan path escapes the workspace root: {}",
             raw.display()
         )));
@@ -2169,7 +2297,7 @@ fn resolve_scan_root(
     if let Ok(canon) = std::fs::canonicalize(&norm) {
         let ws_canon = std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
         if !canon.starts_with(&ws_canon) {
-            return Err(DeepseeknovaError::Config(format!(
+            return Err(DeepseeknovaError::config(format!(
                 "scan path escapes the workspace root via symlink: {}",
                 raw.display()
             )));
@@ -2218,6 +2346,47 @@ mod tests {
     /// 串行化修改进程 cwd 的测试：`std::env::set_current_dir` 是进程级全局
     /// 状态，并行测试互相覆盖会导致 restore 时目标目录已被另一测试删除。
     static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn config_display_redacts_inline_keys_and_auth_headers() {
+        let mut config = deepseeknova_config::Config::default();
+        config.providers.push(deepseeknova_config::ProviderConfig {
+            name: "deepseek".into(),
+            kind: "openai".into(),
+            base_url: None,
+            model: None,
+            context_window: None,
+            api_key_env: None,
+            api_key: Some("sk-super-secret".into()),
+            timeout_secs: 120,
+            max_retries: 3,
+            headers: vec![
+                deepseeknova_config::HeaderEntry {
+                    name: "Authorization".into(),
+                    value: "Bearer sk-secret".into(),
+                },
+                deepseeknova_config::HeaderEntry {
+                    name: "X-Trace-Id".into(),
+                    value: "abc-123".into(),
+                },
+            ],
+            thinking_enabled: false,
+            reasoning_effort: None,
+            extra_body: None,
+        });
+
+        let shown = redact_config_for_display(&config);
+        let text = format!("{shown:#?}");
+        assert!(!text.contains("sk-super-secret"));
+        assert!(!text.contains("sk-secret"));
+        assert!(text.contains("[REDACTED]"));
+        assert!(text.contains("abc-123"));
+        // 原始配置对象不得被修改（只读展示语义）。
+        assert_eq!(
+            config.providers[0].api_key.as_deref(),
+            Some("sk-super-secret")
+        );
+    }
 
     #[test]
     fn collect_at_files_skips_noise_dirs_and_caps() {

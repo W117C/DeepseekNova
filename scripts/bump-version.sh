@@ -56,8 +56,25 @@ fi
 
 echo "✅ Cargo.toml 已更新: $CURRENT_VERSION → $NEW_VERSION（workspace 版本 + 内部依赖钉）"
 echo ""
+
+# ── 同步 npm 包版本 ───────────────────────────────────────────────
+# npm/deepseeknova 的 postinstall 按 package.json version 下载对应 release
+# 资产；不同步会导致发布 tag 与 npm 包版本脱节（npm publish 撞旧版本或
+# 下载错误版本资产）。
+NPM_MANIFEST="npm/deepseeknova/package.json"
+if grep -q "\"version\": \"$CURRENT_VERSION\"" "$NPM_MANIFEST"; then
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+        sed -i '' "s/\"version\": \"$CURRENT_VERSION\"/\"version\": \"$NEW_VERSION\"/" "$NPM_MANIFEST"
+    else
+        sed -i "s/\"version\": \"$CURRENT_VERSION\"/\"version\": \"$NEW_VERSION\"/" "$NPM_MANIFEST"
+    fi
+    echo "✅ $NPM_MANIFEST 已更新: $CURRENT_VERSION → $NEW_VERSION"
+else
+    echo "⚠️  $NPM_MANIFEST 中未找到 version \"$CURRENT_VERSION\"，请手动核对 npm 包版本"
+fi
+echo ""
 echo "⚠️  请手动更新 CHANGELOG.md，然后运行:"
-echo "   git add Cargo.toml CHANGELOG.md"
+echo "   git add Cargo.toml CHANGELOG.md npm/deepseeknova/package.json"
 echo "   git commit -m \"chore(release): v$NEW_VERSION\""
 echo "   git tag v$NEW_VERSION"
 echo "   git push origin main --tags"

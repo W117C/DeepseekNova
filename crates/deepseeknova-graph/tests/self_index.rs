@@ -8,7 +8,15 @@
 //!    （refresh → search/trace/repo_map/deps），可稳定进 CI。
 //!
 //! 手动运行：`cargo test -p deepseeknova-graph --test self_index -- --ignored --nocapture`
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    clippy::dbg_macro
+)]
 
 use deepseeknova_graph::{Direction, EdgeKind, GraphIndex};
 

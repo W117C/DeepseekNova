@@ -5,7 +5,18 @@
 //! Tool trait. Supports listing and calling tools, resource and prompt access,
 //! protocol-version negotiation, and SSE-framed (streamable HTTP) responses.
 
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::dbg_macro
+    )
+)]
 
 pub mod adapter;
 pub mod client;

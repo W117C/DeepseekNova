@@ -8,7 +8,6 @@ use deepseeknova_core::{DeepseeknovaError, Message, Role, Tool};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
-use std::env;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
@@ -50,9 +49,7 @@ impl AnthropicProvider {
         timeout_secs: u64,
         max_retries: u32,
     ) -> Result<Self, DeepseeknovaError> {
-        let api_key = env::var(api_key_env).map_err(|_| {
-            DeepseeknovaError::Config(format!("environment variable {api_key_env} is not set"))
-        })?;
+        let api_key = crate::resolve_api_key_env_value(api_key_env)?;
 
         let client = Client::builder()
             .timeout(Duration::from_secs(timeout_secs))

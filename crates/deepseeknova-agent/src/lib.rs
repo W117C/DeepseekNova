@@ -1,5 +1,16 @@
 #![allow(clippy::too_many_arguments, clippy::never_loop)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::dbg_macro
+    )
+)]
 //! # deepseeknova-agent
 //!
 //! Agent implementations — the brains of deepseeknova. Each agent type implements

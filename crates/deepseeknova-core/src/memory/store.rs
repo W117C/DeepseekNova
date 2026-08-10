@@ -226,7 +226,7 @@ impl MemoryStore {
             std::fs::create_dir_all(&parent).ok();
         }
         let db = rusqlite::Connection::open(&path).map_err(|e| {
-            DeepseeknovaError::Storage(format!(
+            DeepseeknovaError::storage(format!(
                 "failed to open memory database at {}: {e}",
                 path.display()
             ))
@@ -251,7 +251,7 @@ impl MemoryStore {
     /// Open an in-memory database (for tests).
     pub fn open_in_memory() -> Result<Self> {
         let db = rusqlite::Connection::open_in_memory().map_err(|e| {
-            DeepseeknovaError::Storage(format!("failed to open in-memory database: {e}"))
+            DeepseeknovaError::storage(format!("failed to open in-memory database: {e}"))
         })?;
         db.execute_batch(MEMORY_SCHEMA_SQL)?;
         ensure_schema_version(&db)?;

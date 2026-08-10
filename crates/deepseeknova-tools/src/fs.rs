@@ -83,7 +83,7 @@ impl Tool for ReadFileTool {
             .unwrap_or(MAX_READ_SIZE);
         let meta = fs::metadata(&path).await?;
         if meta.len() > max_size {
-            return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
+            return Err(deepseeknova_core::DeepseeknovaError::tool(format!(
                 "file too large: {} bytes (max {max_size})",
                 meta.len()
             )));
@@ -101,13 +101,13 @@ impl Tool for ReadFileTool {
                 let total = lines.len();
                 let start = s.unwrap_or(1).max(1);
                 if start > total {
-                    return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
+                    return Err(deepseeknova_core::DeepseeknovaError::tool(format!(
                         "start_line {start} exceeds file length ({total} lines)"
                     )));
                 }
                 let end = e.unwrap_or(total).min(total); // clamp end to file length (lenient)
                 if end < start {
-                    return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
+                    return Err(deepseeknova_core::DeepseeknovaError::tool(format!(
                         "end_line {end} is before start_line {start}"
                     )));
                 }
@@ -294,7 +294,7 @@ impl EditFileArgs {
                 search: s.clone(),
                 replace: r.clone(),
             }]),
-            _ => Err(DeepseeknovaError::Tool(
+            _ => Err(DeepseeknovaError::tool(
                 "provide either `edits: [...]` or both `search` and `replace`".to_string(),
             )),
         }
@@ -349,7 +349,7 @@ impl Tool for EditFileTool {
 
         // snippet_id is now required — enforce read-then-edit contract
         let snip_id = parsed.snippet_id.as_deref().ok_or_else(|| {
-            DeepseeknovaError::Tool(
+            DeepseeknovaError::tool(
                 "snippet_id is required. You MUST call read_file first and pass its snippet_id to edit_file."
                     .to_string(),
             )
@@ -385,20 +385,20 @@ impl Tool for EditFileTool {
         let mut working = original.clone();
         for (i, b) in blocks.iter().enumerate() {
             if b.search.is_empty() {
-                return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
+                return Err(deepseeknova_core::DeepseeknovaError::tool(format!(
                     "edit block #{}: search text must not be empty",
                     i + 1
                 )));
             }
             let count = working.matches(&b.search).count();
             if count == 0 {
-                return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
+                return Err(deepseeknova_core::DeepseeknovaError::tool(format!(
                     "edit block #{} not found: search text has 0 matches (must be exactly 1)",
                     i + 1
                 )));
             }
             if count > 1 {
-                return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
+                return Err(deepseeknova_core::DeepseeknovaError::tool(format!(
                     "edit block #{} ambiguous: search text has {} matches (must be exactly 1); add surrounding context to disambiguate",
                     i + 1,
                     count
@@ -535,7 +535,7 @@ async fn create_temp_exclusive(
         .open(tmp_path)
         .await
         .map_err(|e| {
-            DeepseeknovaError::Tool(format!(
+            DeepseeknovaError::tool(format!(
                 "cannot create temp file {} (already exists or is a symlink): {e}",
                 tmp_path.display()
             ))

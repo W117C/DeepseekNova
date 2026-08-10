@@ -2,7 +2,15 @@
 //!
 //! 与 `self_index.rs`（对真实仓库建索引、`#[ignore]`）互补：本文件在
 //! 临时目录上建小型多文件项目，覆盖公开 API 的完整链路且可稳定进 CI。
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    clippy::dbg_macro
+)]
 
 use deepseeknova_graph::{Direction, EdgeKind, GraphIndex};
 use tempfile::tempdir;

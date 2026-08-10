@@ -87,7 +87,7 @@ impl Tool for RememberTool {
         let existed = tokio::task::spawn_blocking(move || h.remember(&key, &value, parsed.tags))
             .await
             .map_err(|e| {
-                DeepseeknovaError::Tool(format!("memory remember blocking task failed: {e}"))
+                DeepseeknovaError::tool(format!("memory remember blocking task failed: {e}"))
             })??;
         Ok(if existed {
             format!("updated memory '{}'", sanitized_key)
@@ -217,7 +217,7 @@ impl Tool for RecallTool {
         })
         .await
         .map_err(|e| {
-            DeepseeknovaError::Tool(format!("memory recall blocking task failed: {e}"))
+            DeepseeknovaError::tool(format!("memory recall blocking task failed: {e}"))
         })??;
         if results.is_empty() {
             return Ok(format!("no matches for '{}'", query));

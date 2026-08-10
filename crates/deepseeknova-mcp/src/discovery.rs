@@ -115,13 +115,13 @@ async fn connect_one(
             let conn = McpHttpConnection::connect(url, timeout).await?;
             Ok(McpServerConnection::Http(conn))
         } else {
-            Err(DeepseeknovaError::Runner(format!(
+            Err(DeepseeknovaError::runner(format!(
                 "MCP server '{}': no command and no HTTP URL configured",
                 cfg.name
             )))
         }
     } else {
-        Err(DeepseeknovaError::Runner(format!(
+        Err(DeepseeknovaError::runner(format!(
             "MCP server '{}': must have either a command or an HTTP URL",
             cfg.name
         )))

@@ -463,7 +463,7 @@ Phase 5: 沉淀 (Distill) ← 这是大多数 Agent 缺失的
 │  Layer 1: 沙箱执行 (Sandbox)                     │
 │  macOS: Seatbelt (sandbox-exec)                  │
 │  Linux: bubblewrap (bwrap)                       │
-│  Windows: NoOpSandbox (无隔离，待实现)              │
+│  Windows: JobSandbox（进程树隔离 + 资源限制）        │
 │  三档：ReadOnly / WorkspaceWrite / FullAccess    │
 ├─────────────────────────────────────────────────┤
 │  Layer 2: 权限门控 (Permission)                    │
@@ -508,7 +508,7 @@ Dangerous——在 `PermissionGate` 层硬拒（`CheckVerdict::hard_deny`），
 | P3 | 项目后置产出 | ✅ 已完成（artifacts 库 + `artifacts wiki/cards` CLI） |
 | P4 | Agent 工作规范 | ✅ 部分完成（dna-spec skill 已落地；system prompt 接入待定） |
 | P5 | Agent Federation 协议 | ⏳ 待实现（跨实例通信，需先出协议设计） |
-| P6 | Windows 沙箱隔离 | ⏳ 待实现（Job Object / AppContainer） |
+| P6 | Windows 沙箱隔离 | ✅ 已实现（Job Object 进程树隔离 + 资源限制；网络/文件系统写路径限制仍待 WFP/AppContainer） |
 
 ---
 
@@ -570,5 +570,8 @@ Dangerous——在 `PermissionGate` 层硬拒（`CheckVerdict::hard_deny`），
   `GET /v1/runs` 列表、`POST /v1/runs/{id}/resume` 重跑；服务重启把遗留
   running 标为 interrupted；resume 通过 `DurableRuns::claim` 原子迁移状态防
   并发重复执行；SSE 客户端断开不取消任务，run 继续跑完并正确落盘。
-- **Windows 运行时警告**：无 OS 级沙箱后端时 CLI 启动即打印显式警告
-  （macOS Seatbelt / Linux bubblewrap 之外平台回落 NoOpSandbox）。
+- **沙箱后端缺失警告**：`[sandbox] enabled=true` 且平台后端不可用时 CLI 启动
+  即打印显式警告（未知平台回落 NoOpSandbox）。Windows 现役 JobSandbox（Job
+  Object：进程树隔离 + 资源限制），因 Job Object 不限制网络/文件系统写路径，
+  Windows 启用沙箱时另打印策略边界警告（`allow_network=false` / 只读档 /
+  `writable_paths` 不生效）。

@@ -34,7 +34,7 @@ pub fn parse_audit_target(
     args: &[String],
 ) -> Result<AuditTarget, deepseeknova_core::DeepseeknovaError> {
     if args.is_empty() {
-        return Err(deepseeknova_core::DeepseeknovaError::Config(
+        return Err(deepseeknova_core::DeepseeknovaError::config(
             "audit 需要一条 shell 命令，或 <tool> <json-args>".to_string(),
         ));
     }

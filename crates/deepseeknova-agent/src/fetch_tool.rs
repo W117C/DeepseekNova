@@ -47,7 +47,7 @@ impl Tool for FetchFullResultTool {
         let tool_call_id = parsed
             .get("tool_call_id")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| DeepseeknovaError::Tool("Missing tool_call_id parameter".to_string()))?;
+            .ok_or_else(|| DeepseeknovaError::tool("Missing tool_call_id parameter".to_string()))?;
 
         let mem_guard = self.memory.read().await;
         if let Some(result) = mem_guard.get_full_result(tool_call_id) {

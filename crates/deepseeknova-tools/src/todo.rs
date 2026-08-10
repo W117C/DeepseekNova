@@ -90,18 +90,18 @@ impl Tool for TodoWriteTool {
         // Validate todos
         for (idx, todo) in parsed.todos.iter().enumerate() {
             if todo.id.is_empty() {
-                return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
+                return Err(deepseeknova_core::DeepseeknovaError::tool(format!(
                     "todo item at index {idx} has an empty id"
                 )));
             }
             if todo.content.is_empty() {
-                return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
+                return Err(deepseeknova_core::DeepseeknovaError::tool(format!(
                     "todo item '{}' has empty content",
                     todo.id
                 )));
             }
             if !VALID_STATUSES.contains(&todo.status.as_str()) {
-                return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
+                return Err(deepseeknova_core::DeepseeknovaError::tool(format!(
                     "todo item '{}' has invalid status '{}'; must be one of: {:?}",
                     todo.id, todo.status, VALID_STATUSES
                 )));

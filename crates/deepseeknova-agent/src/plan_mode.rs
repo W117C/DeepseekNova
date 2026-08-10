@@ -125,7 +125,7 @@ async fn run_plan_mode(
     let validated = match validated {
         Ok(v) => v,
         Err(e) => {
-            return Err(DeepseeknovaError::Runner(format!(
+            return Err(DeepseeknovaError::runner(format!(
                 "validation failed: {e:?}"
             )))
         }

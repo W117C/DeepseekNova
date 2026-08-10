@@ -5,7 +5,18 @@
 //! docs. Each tool implements the `Tool` trait with security-aware execution.
 //! (delegate tool moved to `deepseeknova-agent::DelegateTool`.)
 
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::dbg_macro
+    )
+)]
 
 pub mod docs_tools;
 pub mod fs;
@@ -113,7 +124,7 @@ mod schema_budget {
                         .unwrap_or(0)
             })
             .sum();
-        println!("BUILTIN_SCHEMA_TOTAL_CHARS = {total}");
+        eprintln!("BUILTIN_SCHEMA_TOTAL_CHARS = {total}");
         assert!(
             total <= MAX_SCHEMA_CHARS,
             "schema total {total} exceeds budget {MAX_SCHEMA_CHARS}"
