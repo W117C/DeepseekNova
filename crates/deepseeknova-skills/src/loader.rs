@@ -125,7 +125,7 @@ fn parse_skill_file(path: &Path) -> Result<Skill, DeepseeknovaError> {
         DeepseeknovaError::Config(format!("invalid frontmatter in {}", path.display()))
     })?;
 
-    let fm: SkillFrontmatter = serde_yml::from_str(&frontmatter_yaml).map_err(|e| {
+    let fm: SkillFrontmatter = serde_norway::from_str(&frontmatter_yaml).map_err(|e| {
         DeepseeknovaError::Config(format!(
             "invalid YAML frontmatter in {}: {e}",
             path.display()
@@ -195,7 +195,8 @@ mod tests {
     #[test]
     fn parse_skill_with_tools() {
         let raw = "---\nname: reviewer\ndescription: Code review\ntools_allowed:\n  - read_file\n  - grep\n---\n\nBe thorough.";
-        let fm: SkillFrontmatter = serde_yml::from_str(&split_frontmatter(raw).unwrap().0).unwrap();
+        let fm: SkillFrontmatter =
+            serde_norway::from_str(&split_frontmatter(raw).unwrap().0).unwrap();
         assert_eq!(fm.name, "reviewer");
         assert_eq!(fm.tools_allowed, vec!["read_file", "grep"]);
     }
@@ -203,7 +204,8 @@ mod tests {
     #[test]
     fn parse_skill_with_model() {
         let raw = "---\nname: planner\ndescription: Plan tasks\nmodel: claude-opus-4-8\n---\n\nPlan carefully.";
-        let fm: SkillFrontmatter = serde_yml::from_str(&split_frontmatter(raw).unwrap().0).unwrap();
+        let fm: SkillFrontmatter =
+            serde_norway::from_str(&split_frontmatter(raw).unwrap().0).unwrap();
         assert_eq!(fm.model.unwrap(), "claude-opus-4-8");
     }
 

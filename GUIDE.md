@@ -1254,18 +1254,13 @@ DEEPSEEKNOVA_THEME=light  deepseeknova-cli chat --tui   # 印刷星图浅色档�
 
 ## System Prompts
 
-主 agent 内置一套英文默认系统提示词（`deepseeknova_agent::DEFAULT_SYSTEM_PROMPT`），
-核心设计：把 DeepSeek-V4-Flash 当作**低成本高频决策引擎**，而不是一次性回答机器；
-所有任务按显式循环执行：**Observe → Plan → Tool → Verify → Reflect → Next Action**；
-每轮一个动作、先工具后长文、能查不猜、完成前必须验证与反思、成本敏感。
+主 agent 内置一套英文、provider-neutral 的默认执行契约（`deepseeknova_agent::DEFAULT_SYSTEM_PROMPT`）。它要求 Agent 基于可观察的仓库和工具证据完成工作：修改前理解相关代码、规则与测试；遵守 sandbox、权限和安全边界；最小化变更并保留无关用户改动；按风险运行验证；如实报告结果、失败和未验证项。
 
 - 默认启用：`[agent]` 未配置 `system_prompt` 时自动注入内置默认提示词。
-- 覆盖：配置 `system_prompt = "..."` 即完全替换默认值。
-- 追加：运行时（如启用代码图）会在默认/自定义提示词后追加英文检索策略提示。
-- 全链路统一：规划器（plan_mode / coordinator）、子代理预设（explorer / coder /
-  tester / reviewer）、审查（review）、压缩（compaction）、安全调查（scanner）、
-  观察压缩与验证回炉文案均与六阶段循环术语一致；机器输出契约
-  （JSON 结构、章节名、工具清单）保持不变。
+- 主 Agent 覆盖：配置 `system_prompt = "..."` 即完全替换默认值，不会隐式拼接基线。
+- 子代理覆盖：`[delegate.agents].system_prompt` 只替换角色专用说明；共享执行基线始终保留，随后再追加冻结 deny 规则和参数化任务规则。
+- 追加：运行时（如启用代码图）会在默认/自定义主提示词后追加检索策略；repo map 保持在稳定 system 前缀，记忆召回作为易变 User 消息注入。
+- 专用契约：规划、审查、压缩、安全调查和其他结构化辅助请求保留各自的输出约束，不由通用执行基线替代。
 - 设计文档：`PROMPT_DESIGN.md`；后端完整性报告：`BACKEND_AUDIT.md`。
 
 ## MCP Integration

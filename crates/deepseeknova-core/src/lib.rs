@@ -36,6 +36,8 @@ pub mod artifacts;
 pub mod chunk;
 /// 全局错误类型 DeepseeknovaError。
 pub mod error;
+/// 可持久化执行账本的事件、投影与存储契约。
+pub mod execution;
 /// 图执行器及其回调 trait。
 pub mod executor;
 /// 执行图 DAG：节点、动作、边、重试策略。
@@ -61,6 +63,7 @@ pub mod types;
 
 pub use chunk::*;
 pub use error::*;
+pub use execution::*;
 pub use graph::*;
 pub use protocol::*;
 pub use registry::*;

@@ -52,9 +52,8 @@ unsound = "all"
 # Review quarterly — remove items when upstream upgrades resolve them.
 # Each entry below has a comment explaining why it's ignored.
 ignore = [
-    # RUSTSEC-2025-0068: serde_yml 0.0.13 — direct dep of deepseeknova-skills,
-    # used for skill frontmatter parsing; revisit when an upstream fix lands.
-    "RUSTSEC-2025-0068",
+    # (empty) — RUSTSEC-2025-0068 (serde_yml) removed 2026-08-10 after
+    # migrating to serde_norway (maintained fork).
 ]
 
 [sources]

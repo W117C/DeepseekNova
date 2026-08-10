@@ -64,7 +64,7 @@ pub use delegate_tool::*;
 pub use memory::*;
 pub use mention::*;
 pub use plan_mode::*;
-pub use prompts::DEFAULT_SYSTEM_PROMPT;
+pub use prompts::{compose_sub_agent_prompt, DEFAULT_SYSTEM_PROMPT};
 pub use recursion::*;
 pub use sub_agent::*;
 pub use task_spec::*;

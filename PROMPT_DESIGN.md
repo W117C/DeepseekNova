@@ -1,40 +1,56 @@
-# PROMPT_DESIGN — 全链路系统提示词统一设计
+# PROMPT_DESIGN — 系统提示词分层设计
 
-日期：2026-08-01 ｜ 原则：DeepSeek-V4-Flash 是低成本高频决策引擎；一切提示词共享
-Observe → Plan → Tool → Verify → Reflect → Next Action 六阶段词汇；提示词用英文；
-机器契约（JSON 结构、章节名、工具清单、回复格式）一律不变，只统一角色定位与协议措辞。
+日期：2026-08-10 ｜ 原则：主 Agent 与委托子代理共享一份稳定、provider-neutral 的执行基线；角色提示词、运行时检索上下文与结构化机器契约按职责分层追加。提示词正文用英文；JSON 结构、章节名、工具清单和回复格式等机器契约保持不变。
 
-## 主提示词（任务 2 已落地）
+## 共享执行基线
 
 `crates/deepseeknova-agent/src/prompts.rs::DEFAULT_SYSTEM_PROMPT`
 
-结构：Identity → Operating Principle（决策引擎）→ The Loop（六阶段协议）→
-Action Discipline → Tool & Retrieval Rules → Verification & Reflection →
-Cost & Context Care。工具 schema 不写入，由 `context::PromptBuilder` 运行时注入。
-接入：`Agent` 无配置时默认注入（agent.rs run_stream）；`with_appended_system_prompt`
-在无配置时 = 默认 + 追加；config 覆盖仍优先。
+基线用于未配置 `[agent].system_prompt` 的主 Agent，并通过
+`compose_sub_agent_prompt` 应用于每个委托子代理。它提供以下稳定约束：
 
-## 子提示词改动清单
+- 基于仓库、配置与工具结果建立事实，不把猜测表述为事实；
+- 修改前理解相关文件、调用方、测试、项目规则与成功条件；
+- 复用既有模式，最小化改动，保留无关的用户变更；
+- 遵守 sandbox、权限、审批、deny 规则、路径边界与秘密保护要求；
+- 常规小决策自主处理；仅在会实质改变工作范围或涉及破坏性、不可逆外部操作时暂停；
+- 变更后按风险执行针对性验证，并如实说明失败、跳过项与不确定性；
+- 进度信息简洁且以证据为准，最终输出先给出结果；
+- 只在任务真正独立且收益大于协调成本时委托子代理。
 
-| # | 位置 | 现状 | 改动 | 保留契约 |
-|---|---|---|---|---|
-| 1 | plan_mode.rs DEFAULT_PLANNING_SYSTEM_PROMPT | 泛化规划助理 | 定位为 Plan 阶段；输出契约显式化 | 5 个章节名不变 |
-| 2 | coordinator.rs PLANNER_SYSTEM_PROMPT | 泛化规划助理 | 首行点明 Plan 阶段 | JSON nodes/edges、action 类型、示例逐字保留 |
-| ~~3~~ | ~~coordinator.rs PLANNER_SYSTEM_PROMPT_GOAL~~ | ~~Goal Mode 规划~~ | ~~首行点明 Plan 阶段~~ | ~~同上~~（2026-08-08 已随 goal_mode 死代码删除，见 AUDIT M2b） |
-| 4 | delegate.rs 4 预设 | 角色一行无阶段定位 | 每个预设标注所在阶段（explorer=Observe、coder=Tool、tester=Verify、reviewer=Reflect）+ 输出契约 | 工具清单与角色名不变 |
-| 5 | review.rs render_review_prompt | 泛化审查者 | 定位 Reflect 阶段 | `# Task`/`# Completion claim`/`# Diff`、JSON verdict 指令不变 |
-| 6 | compaction.rs render_l3_prompt | 泛化压缩 | 定位为循环的记忆压缩阶段 | 7 个 `##` 章节名逐字保留 |
-| 7 | scanner investigate.rs build_prompt | 泛化安全审查 | 定位 Verify 阶段 | `true_positive`/`note` JSON 指令、Rule/File/excerpt 占位符不变 |
-| 8 | runtime GRAPH_RETRIEVAL_HINT | 中文检索策略 | 英文化，语义不变 | 检索优先级（图工具 > grep/整读）与三个工具名 |
-| 9 | agent.rs compress_observation | 内联英文压缩提示词 | 提取为 render_compression_prompt，定位 Observe 阶段 | 保留事实/路径/退出码/数字的指令、纯摘要输出 |
-| 10 | agent.rs verify 失败回炉文案 | 内联固定文案 | 提取为 verify_failure_message（语义已符合循环，仅固化+测试） | `[verification failed]` 标记与「修复后重跑验证」语义 |
+基线不包含 provider、模型、推理参数、固定工具名或逐步编排假设。它不限制并行工具调用，也不要求所有任务使用固定阶段循环。工具 schema 由运行时注入，动态召回内容不进入稳定系统前缀。
 
-## 为什么这样统一（决策记录）
+## 主 Agent 组装
 
-- 六阶段词汇统一后，主 agent 与子代理/规划器/审查器在同一协议语言下协作，模型在
-  delegate/verify/review 之间切换时不需要重新理解角色。
-- 机器契约逐字保留：planner 的 action 类型、review/scanner 的 JSON 回复、compaction
-  的 7 章节是解析器与测试的硬依赖，改词不改结构。
-- 英文：与既有 LLM 提示词（delegate/review/compaction/planner）一致，token 省、跨模型稳定；
-  中文只保留在面向人的注释与文档。
-- verify 失败回炉文案未改语义（本就是「修复 → 重跑验证」循环），仅提取为可测函数。
+主 Agent 的默认选择和覆盖语义由 `Agent::run_stream` 与 runtime 装配共同保证：
+
+1. `[agent].system_prompt` 未配置时，首次会话注入 `DEFAULT_SYSTEM_PROMPT`。
+2. 显式配置 `[agent].system_prompt` 时，配置文本完整替换主 Agent 默认值，不隐式拼接基线。
+3. `Agent::with_appended_system_prompt` 在默认或显式主提示词后追加稳定运行时内容；代码图检索策略与失败模式反馈因此不会单独成为整个 system prompt。
+4. repo map 仍在新会话时追加到 system 前缀；记忆召回继续作为易变的 User 消息注入，避免破坏前缀缓存。
+
+## 委托子代理组装
+
+委托子代理采用“共享基线 + 角色专用提示词”的组合：
+
+1. `DelegatePreset.system_prompt` 和 `[delegate.agents].system_prompt` 表示角色说明，而不是完整执行契约。
+2. `compose_sub_agent_prompt` 总是先放置共享基线，再放置非空的 `## Delegated Role` 段。
+3. 父级冻结 deny 规则和参数化任务书的 `## RULES` 块继续追加在组合提示词之后；任务目标仍位于 User 消息。
+4. 直接 `DelegateEngine` 路径和 coordinator 使用的 `SubAgentRunner` 路径都使用这一顺序，防止配置覆盖绕过执行和安全基线。
+
+## 专用提示词边界
+
+以下提示词保留独立职责，不继承通用执行基线，以避免破坏解析与协议契约：
+
+| 位置 | 保留原因 |
+|---|---|
+| `plan_mode.rs::DEFAULT_PLANNING_SYSTEM_PROMPT` | 只读规划输出及其章节约束 |
+| `coordinator.rs::PLANNER_SYSTEM_PROMPT` | 执行图 JSON nodes/edges 和 action 类型契约 |
+| `review.rs` | 审查输入与 verdict 输出契约 |
+| `compaction.rs` 与观察压缩 | 固定摘要章节与压缩语义 |
+| `scanner/investigate.rs` | 安全调查的 JSON 输出字段 |
+| attribution、reflection、verify 辅助请求 | 短生命周期的窄任务契约 |
+
+## 验证边界
+
+测试应持续证明：未配置主 Agent 使用默认值；显式主覆盖不会泄漏默认文本；图检索和失败模式提示追加在主提示词之后；子代理最终 system 消息严格按“基线 → 角色 → 冻结 deny → 渲染 RULES”排列；两条委托执行路径对 TOML 角色覆盖保持一致。

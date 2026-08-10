@@ -92,7 +92,7 @@ impl KnowledgeCard {
         let yaml = &content[3..3 + end];
         let body = content[3 + end + 3..].trim();
 
-        let frontmatter: KnowledgeCardFrontmatter = serde_yml::from_str(yaml).ok()?;
+        let frontmatter: KnowledgeCardFrontmatter = serde_norway::from_str(yaml).ok()?;
 
         // Parse body sections
         let context = extract_section(body, "Context").unwrap_or_default();

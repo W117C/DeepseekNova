@@ -61,11 +61,11 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 - **Token 追踪** — 单请求级输入/输出/推理/缓存 token 实时统计，精确成本计算
 - **预算控制** — 单会话 Token 上限，超额自动停止
 
-### 🧭 决策引擎式系统提示词
-- 内置英文默认系统提示词：把 DeepSeek-V4-Flash 当作低成本高频决策引擎，按
-  Observe → Plan → Tool → Verify → Reflect → Next Action 循环工作
-- 未配置 `system_prompt` 时自动启用，配置后完全覆盖；规划器/子代理/审查/压缩/
-  安全调查等全链路提示词使用同一套循环术语，机器契约不变
+### 🧭 系统提示词
+- 内置英文、provider-neutral 的默认执行契约：以可观察证据驱动工程任务，先理解再修改，遵守权限与安全边界，保留无关改动，并按风险选择验证
+- `[agent].system_prompt` 未配置时自动启用；配置后完全覆盖主 Agent 默认值
+- 委托子代理始终继承共享执行基线；`[delegate.agents].system_prompt` 仅替换其角色专用说明
+- 运行时会在默认或自定义主提示词后追加代码图检索、repo map 与失败模式等上下文；规划、审查、压缩和安全调查维持各自的专用机器契约
 
 ### 🔒 安全沙箱 + 权限门控
 - **沙箱执行** — macOS Seatbelt / Linux bubblewrap 隔离

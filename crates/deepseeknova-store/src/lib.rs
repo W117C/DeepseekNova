@@ -10,6 +10,9 @@ use deepseeknova_core::{DeepseeknovaError, Message, Role, RunInput};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+mod execution_ledger;
+pub use execution_ledger::SqliteExecutionLedger;
+
 // ---------------------------------------------------------------------------
 // SessionStore — JSONL-based session persistence
 // ---------------------------------------------------------------------------

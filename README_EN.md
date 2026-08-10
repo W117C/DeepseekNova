@@ -61,6 +61,8 @@ A Rust-from-scratch AI agent framework — not a wrapper. Built specifically for
 - **Worktree parallel sessions** — `deepseeknova-cli worktree new|list|switch|delete|clean` isolates parallel sessions via `git worktree`; each session writes its runtime state (graph/memory/audit/metrics) under its own workspace root, so sessions never interfere
 - **Protocol execution engine (`[protocol]`)** — DNA five-phase gating (Understand→Plan→Execute→Verify→Distill) with built-in gates (plan-before-execute / verify-evidence / distill-on-complex / drift-detection), `hard|soft|off` levels, off by default with zero overhead; evidence-anchored verification (blocking on configured-but-unverified, `unverified` diagnose outcome); adversarial review sub-agent on trigger conditions
 - **Skill self-evolution** — usage/success tracking (fitness), deprecate / merge / promote suggestions, deprecated filtering
+- **Provider-neutral execution contract** — the built-in English default grounds work in observed state, requires understanding before edits, preserves unrelated changes, respects permission/security boundaries, and scales verification to risk; `[agent].system_prompt` fully replaces this default for the primary agent, while delegated agents always retain the shared baseline plus a replaceable role prompt
+- **Dynamic prompt context** — graph retrieval guidance, repo maps, and failure-pattern feedback append after the default or an explicit primary prompt; planners, reviewers, compaction, and security investigation retain their specialized output contracts
 - **Failure-pattern feedback** — failed sessions clustered into a redacted store, top-3 patterns auto-injected into the next session's first system prompt
 
 ## 🏗️ Architecture

@@ -24,10 +24,10 @@ jobs:
           tool: cargo-audit
       - name: Run audit
         # Ignored advisories — see deny.toml [advisories].ignore for per-item rationale.
-        # 清单与 deny.toml 保持一致；ratatui 0.30 已消除 lru/paste 两项豁免。
+        # 清单与 deny.toml 保持一致；RUSTSEC-2025-0068 (serde_yml) 已于
+        # 2026-08-10 迁移到 serde_norway 后移除。
         run: |
-          cargo-audit audit \
-            --ignore RUSTSEC-2025-0068
+          cargo-audit audit
 
   deny:
     name: cargo deny

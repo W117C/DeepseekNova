@@ -67,7 +67,7 @@ pub struct Skill {
 impl Skill {
     /// Serialize to Markdown with YAML frontmatter.
     pub fn to_markdown(&self) -> String {
-        let yaml = serde_yml::to_string(&self.frontmatter).unwrap_or_default();
+        let yaml = serde_norway::to_string(&self.frontmatter).unwrap_or_default();
         format!("---\n{yaml}---\n\n{}\n", self.body)
     }
 
@@ -81,7 +81,7 @@ impl Skill {
         let yaml_part = &content[3..3 + end];
         let body = content[3 + end + 3..].trim().to_string();
 
-        let frontmatter: SkillFrontmatter = serde_yml::from_str(yaml_part).ok()?;
+        let frontmatter: SkillFrontmatter = serde_norway::from_str(yaml_part).ok()?;
         Some(Self { frontmatter, body })
     }
 }
@@ -240,19 +240,19 @@ fn meta_from_markdown(content: &str) -> SkillMeta {
     let Some(yaml_part) = frontmatter_yaml(content) else {
         return meta;
     };
-    let Ok(v) = serde_yml::from_str::<serde_yml::Value>(yaml_part) else {
+    let Ok(v) = serde_norway::from_str::<serde_norway::Value>(yaml_part) else {
         return meta;
     };
     let Some(map) = v.as_mapping() else {
         return meta;
     };
     if let Some(s) = map.get("source") {
-        if let Ok(src) = serde_yml::from_value::<SkillSource>(s.clone()) {
+        if let Ok(src) = serde_norway::from_value::<SkillSource>(s.clone()) {
             meta.source = src;
         }
     }
     if let Some(s) = map.get("state") {
-        if let Ok(st) = serde_yml::from_value::<SkillState>(s.clone()) {
+        if let Ok(st) = serde_norway::from_value::<SkillState>(s.clone()) {
             meta.state = st;
         }
     }
@@ -279,15 +279,15 @@ fn meta_from_markdown(content: &str) -> SkillMeta {
 /// `SkillFrontmatter` 结构不含这些键，`Skill::from_markdown` 解析时忽略未知键，
 /// 故用户手写文件与旧文件格式不受影响。
 fn skill_markdown_with_meta(skill: &Skill, meta: &SkillMeta) -> String {
-    let mut map: serde_yml::Mapping =
-        serde_yml::from_str(&serde_yml::to_string(&skill.frontmatter).unwrap_or_default())
+    let mut map: serde_norway::Mapping =
+        serde_norway::from_str(&serde_norway::to_string(&skill.frontmatter).unwrap_or_default())
             .unwrap_or_default();
-    if let serde_yml::Value::Mapping(m) = serde_yml::to_value(meta).unwrap_or_default() {
+    if let serde_norway::Value::Mapping(m) = serde_norway::to_value(meta).unwrap_or_default() {
         for (k, v) in m {
             map.insert(k, v);
         }
     }
-    let yaml = serde_yml::to_string(&serde_yml::Value::Mapping(map)).unwrap_or_default();
+    let yaml = serde_norway::to_string(&serde_norway::Value::Mapping(map)).unwrap_or_default();
     format!("---\n{yaml}---\n\n{}\n", skill.body)
 }
 

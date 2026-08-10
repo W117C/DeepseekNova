@@ -987,8 +987,8 @@ impl Runner for Agent {
                 // repo map (if any) in the stable prefix region — after the
                 // base prompt, before the volatile conversation — mirroring
                 // context::PromptBuilder's Repo Map format so prefix-cache
-                // semantics hold.
-                // TODO(graph): personalized seeds from user input
+                // semantics hold. Personalized seeds are extracted from the
+                // user query by the provider closure installed by runtime.
                 let mut content = system_prompt.clone();
                 if let Some(ref provider) = repo_map_provider {
                     if let Some(map) = provider(&input.prompt) {
@@ -2169,24 +2169,27 @@ mod tests {
     }
 
     #[test]
-    fn default_system_prompt_defines_decision_engine_loop() {
+    fn default_system_prompt_defines_provider_neutral_execution_contract() {
         assert!(
-            DEFAULT_SYSTEM_PROMPT.contains("decision engine"),
-            "default prompt must encode the decision-engine principle"
+            DEFAULT_SYSTEM_PROMPT.contains("Read before writing"),
+            "default prompt must require reading before edits"
         );
-        for phase in [
-            "Observe",
-            "Plan",
-            "Tool",
-            "Verify",
-            "Reflect",
-            "Next Action",
-        ] {
-            assert!(
-                DEFAULT_SYSTEM_PROMPT.contains(phase),
-                "default prompt must define the {phase} phase"
-            );
-        }
+        assert!(
+            DEFAULT_SYSTEM_PROMPT.contains("permission"),
+            "default prompt must acknowledge permission boundaries"
+        );
+        assert!(
+            DEFAULT_SYSTEM_PROMPT.contains("Keep unrelated user changes intact"),
+            "default prompt must preserve unrelated changes"
+        );
+        assert!(
+            !DEFAULT_SYSTEM_PROMPT.contains("DeepSeek-V4"),
+            "default prompt must not be tied to a provider model"
+        );
+        assert!(
+            !DEFAULT_SYSTEM_PROMPT.contains("one action per turn"),
+            "default prompt must not prohibit valid parallel tool use"
+        );
     }
 
     #[tokio::test]

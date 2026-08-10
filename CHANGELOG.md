@@ -117,6 +117,30 @@ All notable changes to DeepseekNova will be documented in this file.
   ✗ 未连接（原因）；Skills 面板启动一次性扫描技能目录并列出 name — description。
   两处不再是「运行 /mcp /skills」的空占位。
 
+### Added（提示词基线与执行账本契约，2026-08-10）
+
+- **子代理执行契约基线（`compose_sub_agent_prompt`）**：新增
+  `deepseeknova_agent::prompts::compose_sub_agent_prompt`，把
+  `DEFAULT_SYSTEM_PROMPT`（"# DeepseekNova Agent — Execution Contract"）作为
+  基线追加在子代理角色提示词之前，确保子代理也遵守执行契约（Read before
+  writing / 权限 / 证据优先 / 不破坏无关改动等）。`build_delegate_engine` 与
+  `SubAgentRunner` 路径已切换至 composed prompt；空角色提示词退化为纯基线。
+  回归测试断言基线出现在角色提示词之前。
+- **执行账本契约（库级 API，未接入生产路径）**：`deepseeknova-core` 新增
+  `execution` 模块（`ExecutionLedger` trait / `ExecutionEventEnvelope` /
+  `RunProjection` 状态机 / `ExecutionMode` 三档 Off/RecordOnly/Authoritative），
+  `deepseeknova-store` 新增 `SqliteExecutionLedger`（事务化 append +
+  projection 持久化 + sequence 守门）。当前为库级 API，agent/runtime/serve
+  尚未消费；为后续持久化恢复驱动预留，与 event crate 标注库级 API 同先例。
+
+### Changed（依赖迁移，2026-08-10）
+
+- **serde_yml → serde_norway**：迁移 YAML 序列化依赖从 `serde_yml 0.0.13`
+  （unsound + unmaintained，RUSTSEC-2025-0068）到 `serde_norway 0.9.42`
+  （serde_yaml 的 maintained fork）。API 1:1 兼容，13 处代码命中（core +
+  skills）机械替换。`deny.toml` 移除 `RUSTSEC-2025-0068` ignore，CI
+  `security.yml` 同步移除 `--ignore`。Cargo.lock 确认 serde_yml 已移除。
+
 ## [0.5.0] — 2026-08-08
 
 ### ⚠ Breaking

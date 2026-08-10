@@ -138,10 +138,12 @@ pub(crate) fn build_delegate_engine(
             })
             .cloned()
             .collect();
+        let composed_prompt =
+            deepseeknova_agent::prompts::compose_sub_agent_prompt(&p.system_prompt);
         let mut sub = deepseeknova_agent::Agent::new(Arc::clone(&provider), p.spec.max_steps)
             .with_workspace_root(workspace_root.to_path_buf())
             .with_security(security.clone())
-            .with_system_prompt(p.system_prompt.clone());
+            .with_system_prompt(composed_prompt.clone());
         for t in sub_tools {
             sub.register_tool(t);
         }
@@ -158,7 +160,7 @@ pub(crate) fn build_delegate_engine(
             if let Some(frozen) = render_frozen_denies(gate.deny_rules()) {
                 sub = sub.with_system_prompt(format!(
                     "{}\n\n## 禁止操作（父级冻结，不可执行）\n{frozen}",
-                    p.system_prompt
+                    composed_prompt
                 ));
             }
         }
@@ -722,10 +724,21 @@ mod tests {
             .unwrap();
         while stream.next().await.is_some() {}
         let runner_texts = runner_seen.lock().unwrap().join("\n");
-        assert!(
-            runner_texts.contains("TOML_OVERRIDE_EXPLORER_PROMPT"),
-            "SubAgentRunner 路径必须使用同一 TOML 覆盖: {runner_texts}"
-        );
+        for (label, texts) in [("engine", engine_texts), ("runner", runner_texts)] {
+            assert!(
+                texts.contains("# DeepseekNova Agent — Execution Contract"),
+                "{label} path must retain the shared execution baseline: {texts}"
+            );
+            assert!(
+                texts.contains("TOML_OVERRIDE_EXPLORER_PROMPT"),
+                "{label} path must retain the TOML role override: {texts}"
+            );
+            assert!(
+                texts.find("# DeepseekNova Agent — Execution Contract")
+                    < texts.find("TOML_OVERRIDE_EXPLORER_PROMPT"),
+                "{label} path must place the baseline before its role prompt: {texts}"
+            );
+        }
     }
 
     /// 新增（非内置）TOML 预设同样注册进引擎：`merged_delegate_presets` 的

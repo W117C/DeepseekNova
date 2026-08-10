@@ -525,7 +525,7 @@ impl SubAgentRunner {
             .lock()
             .unwrap_or_else(recover_poisoned)
             .clone();
-        let mut system_prompt = config.system_prompt.clone();
+        let mut system_prompt = crate::prompts::compose_sub_agent_prompt(&config.system_prompt);
         if !config.frozen_denies.is_empty() {
             system_prompt.push_str("\n\n## 禁止操作（父级冻结，不可执行）\n");
             system_prompt.push_str(&config.frozen_denies.join("\n"));
@@ -1304,6 +1304,92 @@ mod tests {
         let config = SubAgentConfig::new("test", "prompt").with_tools(tools);
         assert_eq!(config.tools.len(), 1);
         assert_eq!(config.tools[0].schema().name, "dummy");
+    }
+
+    #[tokio::test]
+    async fn system_prompt_orders_baseline_role_denies_and_rendered_rules() {
+        use deepseeknova_core::chunk::Chunk;
+        use std::sync::Mutex;
+
+        struct SystemCaptureProvider {
+            seen: Arc<Mutex<Vec<Message>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl Provider for SystemCaptureProvider {
+            async fn generate(
+                &self,
+                _validated: deepseeknova_provider::ValidatedRequest<'_>,
+            ) -> Result<Message, DeepseeknovaError> {
+                Ok(Message {
+                    role: Role::Assistant,
+                    content: "done".into(),
+                    name: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                })
+            }
+
+            async fn stream(
+                &self,
+                validated: deepseeknova_provider::ValidatedRequest<'_>,
+            ) -> Result<deepseeknova_core::chunk::ChunkStream, DeepseeknovaError> {
+                *self.seen.lock().unwrap() = validated.messages.to_vec();
+                Ok(Box::pin(tokio_stream::iter(vec![
+                    Ok(Chunk::TextDelta("done".into())),
+                    Ok(Chunk::Done),
+                ])))
+            }
+        }
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let spec = TaskSpec {
+            name: "reviewer".into(),
+            task: String::new(),
+            rules: vec!["RENDERED_RULE_MARKER".into()],
+            inputs: Vec::new(),
+            tools: Vec::new(),
+            max_steps: 2,
+        };
+        let mut runner =
+            SubAgentRunner::new(Arc::new(SystemCaptureProvider { seen: seen.clone() }));
+        runner.register(
+            SubAgentConfig::new("reviewer", "ROLE_PROMPT_MARKER")
+                .with_task_spec(spec)
+                .with_frozen_denies(vec!["DENY_MARKER".into()]),
+        );
+        let runner = runner.with_default("reviewer");
+
+        let mut stream = runner
+            .run_stream(RunInput {
+                prompt: "review the change".into(),
+                images: Vec::new(),
+                model_override: None,
+            })
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+
+        let system = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|message| message.role == Role::System)
+            .expect("sub-agent must receive a system prompt")
+            .content
+            .clone();
+        let baseline = system
+            .find("# DeepseekNova Agent — Execution Contract")
+            .expect("shared baseline missing");
+        let role = system
+            .find("ROLE_PROMPT_MARKER")
+            .expect("role prompt missing");
+        let deny = system.find("DENY_MARKER").expect("frozen deny missing");
+        let rules = system
+            .find("RENDERED_RULE_MARKER")
+            .expect("rendered rules missing");
+        assert!(baseline < role && role < deny && deny < rules, "{system}");
     }
 
     // --- Input parsing tests ---
