@@ -86,10 +86,12 @@ pub enum KeyAction {
 /// 会话管理控制器（由 CLI 用 ChatPersistence 实现，TUI 不依赖 CLI 类型）。
 #[async_trait]
 pub trait SessionController: Send + Sync {
+    /// 新建一个会话（清空当前会话上下文）。
     async fn new_session(&self) -> Result<(), deepseeknova_core::DeepseeknovaError>;
     /// 已保存会话（含首句预览，供侧边栏区分会话），最新优先。
     async fn list_sessions(&self)
         -> Result<Vec<SessionMeta>, deepseeknova_core::DeepseeknovaError>;
+    /// 返回当前会话 id（无会话时 `None`）。
     async fn current_session(&self) -> Option<String>;
     /// 重命名会话 title（`/rename <title>` 作用于当前会话）。
     async fn rename(
@@ -97,10 +99,12 @@ pub trait SessionController: Send + Sync {
         id: &str,
         title: &str,
     ) -> Result<(), deepseeknova_core::DeepseeknovaError>;
+    /// 按 id 恢复已保存会话，返回会话内容行。
     async fn resume(
         &self,
         id: &str,
     ) -> Result<Vec<ResumedLine>, deepseeknova_core::DeepseeknovaError>;
+    /// 记录一轮对话（prompt + 输出文本 + 模型）到持久化。
     async fn record_turn(
         &self,
         prompt: &str,
@@ -113,7 +117,9 @@ pub trait SessionController: Send + Sync {
 /// 渲染时 title 优先；无 title 回退 id（preview 空时）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionMeta {
+    /// 会话 id。
     pub id: String,
+    /// 首句预览（供侧边栏区分会话）。
     pub preview: String,
     /// 用户命名（`/rename`）；`None` 表示未命名，回退显示 id。
     pub title: Option<String>,
@@ -124,22 +130,31 @@ pub struct SessionMeta {
 /// 恢复会话中的一条消息。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResumedLine {
+    /// 消息角色。
     pub role: ResumedRole,
+    /// 消息文本。
     pub text: String,
 }
 
+/// 恢复会话中一条消息的角色。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResumedRole {
+    /// 用户消息。
     User,
+    /// 助手消息。
     Assistant,
+    /// 系统消息。
     System,
 }
 
 /// 撤销控制器（由 CLI 用 CheckpointManager 实现）。
 #[async_trait]
 pub trait UndoController: Send + Sync {
+    /// 列出可撤销的检查点标识（最新优先）。
     async fn list(&self) -> Result<Vec<String>, deepseeknova_core::DeepseeknovaError>;
+    /// 回退最近一个检查点，返回其标识（无可回退时 `None`）。
     async fn rollback_one(&self) -> Result<Option<String>, deepseeknova_core::DeepseeknovaError>;
+    /// 回退全部检查点，返回回退数量。
     async fn rollback_all(&self) -> Result<usize, deepseeknova_core::DeepseeknovaError>;
 }
 
@@ -197,21 +212,27 @@ pub struct TrustPrompt {
 /// `/mcp` 展示的一个已启用 MCP server。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpServerInfo {
+    /// server 名称。
     pub name: String,
+    /// 启动命令。
     pub command: String,
+    /// 启动参数。
     pub args: Vec<String>,
 }
 
 /// 连接探测结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum McpStatus {
+    /// 连接成功。
     Connected,
+    /// 连接断开（`String` 为失败原因）。
     Disconnected(String),
 }
 
 /// `/mcp` 实时连接探测器。
 #[async_trait]
 pub trait McpProbe: Send + Sync {
+    /// 探测给定 servers，返回与入参一一对应的连接状态。
     async fn probe(&self, servers: &[McpServerInfo]) -> Vec<McpStatus>;
 }
 

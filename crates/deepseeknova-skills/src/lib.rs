@@ -21,7 +21,18 @@
 //!     .collect();
 //! ```
 
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::dbg_macro
+    )
+)]
 
 mod loader;
 
@@ -68,6 +79,8 @@ pub struct SkillTool {
 }
 
 impl SkillTool {
+    /// Wrap a [`Skill`] so it can be exposed as a tool. The skill's name,
+    /// description and system prompt are read on invocation.
     pub fn new(skill: Skill) -> Self {
         Self { skill }
     }

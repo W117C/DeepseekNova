@@ -641,13 +641,13 @@ async fn edit_external(
     let status = match result {
         Ok(s) => s,
         Err(e) => {
-            return Err(deepseeknova_core::DeepseeknovaError::Runner(format!(
+            return Err(deepseeknova_core::DeepseeknovaError::runner(format!(
                 "failed to launch editor {editor}: {e}"
             )))
         }
     };
     if !status.success() {
-        return Err(deepseeknova_core::DeepseeknovaError::Runner(format!(
+        return Err(deepseeknova_core::DeepseeknovaError::runner(format!(
             "editor exited with code {:?}",
             status.code()
         )));

@@ -32,6 +32,7 @@ fn handle(ctx: &ToolContext) -> Option<DelegateHandle> {
     ctx.extensions.get::<DelegateHandle>().cloned()
 }
 
+/// `delegate` 工具实现：把子任务委派给引擎中已注册的命名子代理。
 pub struct DelegateTool;
 
 #[derive(Deserialize)]

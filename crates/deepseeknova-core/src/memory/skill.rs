@@ -395,8 +395,8 @@ impl SkillManager {
     ) -> Result<()> {
         let title = title.trim();
         if title.is_empty() {
-            return Err(DeepseeknovaError::Config(
-                "distilled skill title is empty".into(),
+            return Err(DeepseeknovaError::config(
+                "distilled skill title is empty".to_string(),
             ));
         }
         let now = chrono::Utc::now().to_rfc3339();
@@ -405,7 +405,7 @@ impl SkillManager {
         // Unicode 字母数字（含 CJK，中文标题蒸馏产物很常见）与 `-`，其余
         // 映射为 `-`；纯标点/空白标题仍会产出空 slug 并拒绝。
         if title.contains('/') || title.contains('\\') || title.contains("..") {
-            return Err(DeepseeknovaError::Config(format!(
+            return Err(DeepseeknovaError::config(format!(
                 "distilled skill title contains path separators: {title:?}"
             )));
         }
@@ -423,13 +423,13 @@ impl SkillManager {
             .trim_matches('-')
             .to_string();
         if name.is_empty() {
-            return Err(DeepseeknovaError::Config(format!(
+            return Err(DeepseeknovaError::config(format!(
                 "distilled skill title produced an empty slug: {title:?}"
             )));
         }
         // 标点类标题可能缩成 "." / ".."（如 `。.`），会生成隐藏/危险文件名。
         if name == "." || name == ".." {
-            return Err(DeepseeknovaError::Config(format!(
+            return Err(DeepseeknovaError::config(format!(
                 "distilled skill title produced a dot-only slug: {title:?}"
             )));
         }
@@ -454,7 +454,7 @@ impl SkillManager {
         // 期望行为，允许覆盖。检查先于写盘，避免失败时留下孤儿文件。
         if let Some(existing) = self.skills.get(&name) {
             if existing.meta.source != SkillSource::Distill {
-                return Err(DeepseeknovaError::Config(format!(
+                return Err(DeepseeknovaError::config(format!(
                     "distilled skill name '{name}' collides with user skill (source={:?})",
                     existing.meta.source
                 )));

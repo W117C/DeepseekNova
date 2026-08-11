@@ -8,8 +8,9 @@
 - ~~**桌面端后续页（P3/P4）**~~（2026-08-08 已撤销：同 Tauri 壳，桌面端移除）。
 - ~~**界面文案语言**~~（2026-08-07 已拍板：**双语 i18n 框架，英文默认 + 中文可选**，TUI 词表已落地，见 PRODUCT.md 与 roadmap 记忆）。
 - **Logo/应用图标**：无现存资产，实现期先用文字标。
-- **风险标签接线端到端测试**：`responder.request` 收到带 `[风险:…]` 前缀描述
-  的 agent 集成断言未补（本轮有纯函数 + 权限分类 + TUI 渲染测试覆盖）。
+- ~~**风险标签接线端到端测试**~~（2026-08-10 已做：`ask_risk_prefix_reaches_
+  approval_responder` 集成测试断言 responder 收到 `[风险:非只读]` 前缀 +
+  原始参数）。
 - ~~`crates/deepseeknova-tui/src/repro_tmp.rs`~~（2026-08-07 已清：临时复现测试，
   文件头注明“用完即删”，已移入废纸篓并移除 `mod repro_tmp;`）
 - ~~`.impeccable/mocks/obs-comp-d-combined-agnes-v2.png`~~（2026-08-07 已清：
@@ -32,25 +33,32 @@
   改回 allow。~~（P0-6）~~ **已做（2026-08-07 第二批 B3**：`ask_without_responder`
   默认 deny + `with_ask_without_responder_deny` builder + 两条回归测试）。
 - **i18n**：双语框架，英文默认 + 中文可选，TUI 词表已落地。~~（第三批受阻 402）~~
-  **已做（2026-08-08 第四批**：`crates/deepseeknova-tui/src/i18n/` 236 键词表 +
+  **已做（2026-08-08 第四批；2026-08-10 体检复查为 257 键）**：
+  `crates/deepseeknova-tui/src/i18n/` 257 键词表 +
   Lang/Tr/interpolate + 190 处迁移，162 测试；`[ui] lang` / `DEEPSEEKNOVA_LANG`
   接线）。~~（2026-08-07 曾因 API 402 中断，重启后复用备份完成）~~
 - ~~**Tauri 桌面壳降为 P2**~~（2026-08-08 已撤销：桌面端整体移除，见本文件"观测台
   前端 UI + TUI 演进轮"节标注）。
 
 ### 调研核实的 P0 发布阻塞（未裁决，按路线图待做）
-- 版本 bump 重发 crates.io（scanner/graph/metrics 三 crate 缺 description 不可发布）。
-- ~~API key 环境变量约定失效（代码读 `DEEPSEEK_API_KEY`，README 推荐
-  `DEEPSEEKNOVA_API_KEY`）~~ **已做（2026-08-07 第二批 B2 文档侧**：README/README_EN
-  统一到代码默认 `DEEPSEEK_API_KEY`；命名最终裁决仍在"待领导裁决"）。
-- README 截图空占位。
+- ~~版本 bump 重发 crates.io（scanner/graph/metrics 三 crate 缺 description 不可发布）~~
+  **已核实（2026-08-10 体检**：22 个 crate 的 Cargo.toml 均已有 `description`；
+  发布前置条件不再被该条目阻塞）。
+- ~~API key 环境变量命名~~ **已裁决（2026-08-10**：`DEEPSEEKNOVA_API_KEY` 为
+  默认变量名，`DEEPSEEK_API_KEY` 仅作兼容回退（新名优先）；provider 默认值、
+  README/README_EN 已同步，并补主/旧名回退测试）。
+- ~~README 截图空占位~~ **已实现（2026-08-10**：`docs/screenshots/` 新增真实
+  TUI 截图（欢迎界面 + 对话），生成脚本 `scripts/tui-screenshot.py`
+  （mock provider + PTY + pyte/Pillow）；README/README_EN 已嵌入）。
 - ~~`/dev/tcp` 只读分类器漏网（P0-4）~~ **已做（第一批 B1**：Dangerous 硬拒 + 回归测试）。
 - ~~serve CORS `allow_origin(Any)`（P0-5）~~ **已做（2026-08-07 第二批 B2**：收窄为
   loopback-only + 恶意 Origin 回归测试）。
 - ~~done SSE 事件缺 session_id（P1-4）~~ **已做（2026-08-07 第二批 B2**：`WireEvent::Done`
   增 `session_id`，serve 注入 durable run id / 会话 id）。
-- ~~审计日志持久化（P1-10）~~ **部分已做**：security 侧 `JsonlAuditLogger`（第一批 B1）
-  + runtime 侧切 JSONL 后端（第二批 B3）；`PermissionGate` 裁决统一进审计流仍未做。
+- ~~审计日志持久化（P1-10）~~ **已做**：security 侧 `JsonlAuditLogger`（第一批 B1）
+  + runtime 侧切 JSONL 后端（第二批 B3）；`PermissionGate` 裁决统一进审计流
+  （M1，2026-08-10 体检确认**已落地**：`with_audit_logger` + 生产装配 +
+  JSONL 落盘回归测试）。
 - ~~SECURITY.md 支持版本表过期 + GitHub 元数据（description 仍写 Desktop）~~
   **已核实（2026-08-09**：SECURITY.md 0.5.x/0.4.x/≤0.3.x 表与 Cargo 版本一致；
   GitHub description 已为现役文案，不含 Desktop）。
@@ -63,13 +71,25 @@
   （2026-08-08 P2-6**：README/README_EN 改如实表述（API 级前缀缓存真实 +
   会话级命中率标注 [规划中]），core `session_cache_hit_tokens` 字段 doc 标注
   "当前恒 0、统计 [规划中]"、serde 契约保留，context builder 标注库级 API）。
-- API key 命名统一到哪个变量名。
-- npm 安装器承诺（cargo-dist vs 删死配置）。
-- docs/superpowers 内部任务书（移出 / 标注 / 保留）——2026-08-09 已把已撤销的
-  08-07 桌面任务书/设计规范移入 `archive/` 并加归档标记，索引已更新；其余任务书
-  的移出/保留仍待领导裁决。
-- Windows 沙箱排期。
-- temperature 配置接线 vs 删除。
+- ~~API key 命名统一到哪个变量名~~（2026-08-10 已裁决，见上）。
+- ~~npm 安装器承诺（cargo-dist vs 删死配置）~~ **已实现（2026-08-10**：
+  `npm/deepseeknova` 包（postinstall 从 GitHub Releases 下载平台二进制 +
+  SHA-256 校验 + 解压，`bin` 转发）；release.yml 增 `npm-publish` 任务
+  （配 NPM_TOKEN 后自动发布）；README/README_EN 安装节已补 npm 通道）。
+- ~~docs/superpowers 内部任务书（移出 / 标注 / 保留）~~ **已裁决（2026-08-10**：
+  保留在仓库并标注内部存档（目录 README 已写明非用户文档）；已撤销的
+  08-07 桌面任务书/设计规范已于 2026-08-09 移入 `archive/`；首发公开前是否
+  整体移出交由发布流程决定，不再阻塞开发）。
+- ~~Windows 沙箱排期~~ **已实现（2026-08-10**：`windows::JobSandbox`（Job
+  Object：`CREATE_SUSPENDED` → assign → 恢复主线程；kill-on-close + 活动
+  进程数/内存上限，句柄由独立线程在进程退出后释放）。`platform_sandbox*`
+  三个入口 Windows 分支均返回该后端；网络/文件系统写路径限制仍需
+  WFP/AppContainer（后续项），见 sandbox crate 根文档。2026-08-11 复查修复
+  了 `cfg` 兜底未排除 Windows 导致的 E0308；本地交叉编译受 libsqlite3-sys
+  需 Windows C 工具链限制，编译/运行验证以 CI windows-latest 为准）。
+- ~~temperature 配置接线 vs 删除~~ **已做（2026-08-10 体检确认**：
+  `[[models]].temperature` 经 provider router `provider_for_model` →
+  `create_provider_with_model_temperature` 写入请求体；未配置时不序列化。
 - ~~执行账本（execution ledger）接线排期~~ **已裁决（2026-08-10 ADR）**：
   保留为库级 API，加复查触发条件。裁决理由：(1) 当前无恢复驱动需求
   （DESIGN P5/P6 是优先级，崩溃恢复不在其中）；(2) RecordOnly 价值有限

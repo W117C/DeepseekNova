@@ -105,17 +105,15 @@ impl McpConnection {
         }
 
         let mut child = cmd.spawn().map_err(|e| {
-            DeepseeknovaError::Runner(format!("failed to spawn MCP server: {command}: {e}"))
+            DeepseeknovaError::runner(format!("failed to spawn MCP server: {command}: {e}"))
         })?;
 
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| DeepseeknovaError::Runner("no stdin on MCP child process".into()))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| DeepseeknovaError::Runner("no stdout on MCP child process".into()))?;
+        let stdin = child.stdin.take().ok_or_else(|| {
+            DeepseeknovaError::runner("no stdin on MCP child process".to_string())
+        })?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            DeepseeknovaError::runner("no stdout on MCP child process".to_string())
+        })?;
 
         let conn = Self::from_streams(
             stdin,
@@ -238,8 +236,8 @@ impl McpConnection {
             // Drain pending on disconnect
             let mut map = pending_r.write().await;
             for (_, p) in map.drain() {
-                let _ = p.response_tx.send(Err(DeepseeknovaError::Runner(
-                    "MCP connection closed".into(),
+                let _ = p.response_tx.send(Err(DeepseeknovaError::runner(
+                    "MCP connection closed".to_string(),
                 )));
             }
         });
@@ -284,10 +282,10 @@ impl McpConnection {
         let init_result = self
             .negotiate_initialize(request_timeout)
             .await
-            .map_err(|e| DeepseeknovaError::Runner(format!("MCP initialize failed: {e}")))?;
+            .map_err(|e| DeepseeknovaError::runner(format!("MCP initialize failed: {e}")))?;
 
         let init: InitializeResult = serde_json::from_value(init_result).map_err(|e| {
-            DeepseeknovaError::Runner(format!("failed to parse MCP initialize result: {e}"))
+            DeepseeknovaError::runner(format!("failed to parse MCP initialize result: {e}"))
         })?;
 
         // Store server info
@@ -348,7 +346,7 @@ impl McpConnection {
                             continue;
                         }
                     }
-                    return Err(DeepseeknovaError::Runner(format!(
+                    return Err(DeepseeknovaError::runner(format!(
                         "MCP: no mutually supported protocol version (client {:?}, server {supported:?})",
                         protocol::SUPPORTED_PROTOCOL_VERSIONS
                     )));
@@ -357,7 +355,7 @@ impl McpConnection {
                     .get("message")
                     .and_then(|m| m.as_str())
                     .unwrap_or("unknown error");
-                return Err(DeepseeknovaError::Runner(format!("MCP error: {msg}")));
+                return Err(DeepseeknovaError::runner(format!("MCP error: {msg}")));
             }
 
             return Ok(resp.get("result").cloned().unwrap_or(Value::Null));
@@ -394,9 +392,9 @@ impl McpConnection {
             self.write_tx
                 .send(format!("{req_str}\n"))
                 .await
-                .map_err(|_| DeepseeknovaError::Runner("MCP write channel closed".into()))?;
+                .map_err(|_| DeepseeknovaError::runner("MCP write channel closed".to_string()))?;
             rx.await.map_err(|_| {
-                DeepseeknovaError::Runner(format!("MCP request cancelled for {method}"))
+                DeepseeknovaError::runner(format!("MCP request cancelled for {method}"))
             })?
         })
         .await;
@@ -411,7 +409,7 @@ impl McpConnection {
             }
             Err(_) => {
                 self.pending.write().await.remove(&id);
-                Err(DeepseeknovaError::Runner(format!(
+                Err(DeepseeknovaError::runner(format!(
                     "MCP request '{method}' timed out after {timeout_dur:?}"
                 )))
             }
@@ -432,7 +430,7 @@ impl McpConnection {
                 .get("message")
                 .and_then(|m| m.as_str())
                 .unwrap_or("unknown error");
-            return Err(DeepseeknovaError::Runner(format!("MCP error: {msg}")));
+            return Err(DeepseeknovaError::runner(format!("MCP error: {msg}")));
         }
         Ok(resp.get("result").cloned().unwrap_or(Value::Null))
     }

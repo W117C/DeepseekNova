@@ -176,15 +176,20 @@ impl Provider for MockProvider {
 // MockRunner — controllable Runner for downstream tests
 // ---------------------------------------------------------------------------
 
+/// A controllable [`Runner`](deepseeknova_core::runner::Runner) that replays a
+/// fixed list of `RunEvent`s instead of driving a real model.
 pub struct MockRunner {
     events: Vec<deepseeknova_core::RunEvent>,
 }
 
 impl MockRunner {
+    /// Create a runner that replays the given events verbatim.
     pub fn new(events: Vec<deepseeknova_core::RunEvent>) -> Self {
         Self { events }
     }
 
+    /// Create a runner that emits a single text delta followed by `Done` with
+    /// the given text.
     pub fn text(text: &str) -> Self {
         Self {
             events: vec![

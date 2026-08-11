@@ -54,7 +54,7 @@
   （ModelRouter→请求体）、anthropic reasoning_effort 门控、telemetry 死代码删除；
   60 测试。
 - **i18n 双语框架（重启成功）**：上轮 402 中断后重启，词表 100% 复用备份
-  （keys.rs 236 键 + mod.rs），190 处中文迁入词表，162 测试；**全程每 3-5 文件
+  （keys.rs 当时 236 键 + mod.rs；截至 2026-08-10 为 257 键），190 处中文迁入词表，162 测试；**全程每 3-5 文件
   保持可编译**（吸取上轮半成品教训）。词表结构即 Tauri 壳 P2 契约（桌面脚手架已
   随 c10fec3 移除，Tauri 壳仍为 P2 计划项，词表契约暂未消费）。
 - **验证**：`make check` EXIT=0（复检发现 i18n/mod.rs doc 交叉引用私有项警告，
@@ -87,9 +87,11 @@
   @-mention（mention.rs，词边界感知防邮箱误拆）；放开禁递归（recursion.rs，
   深度上限默认 3，DelegationSink/DelegateDepth/RecursiveDelegateTool，超深
   优雅降级）；per-agent 模型/权限（ModelResolver + AgentPermission 交集）。
-  303+1+4 测试。**待父级串联**：runtime 硬剔除 `"delegate"` 工具需按
-  allow_recursion 装配 RecursiveDelegateTool；config 接入 agents 目录/深度/
-  per-agent 配置；主对话 @-mention 入口拦截。
+  303+1+4 测试。**父级串联已闭环（2026-08-10）**：`build_delegate_engine`
+  按 `allow_recursion` 装配 `RecursiveDelegateTool`（sink = 引擎自身）并注入
+  每层真实深度；config 接入 agents 目录/深度/per-agent 配置；主对话
+  @-mention 入口（`MentionAwareRunner` + CLI REPL/TUI 装配），见 REVIEW.md
+  后续轮。
 - **P1-9 会话 UX**：`/rename` 会话命名（titles.json，title 优先回退 id）；
   会话级 checkpoint `/checkpoint save|list|rollback`（SessionCheckpointManager，
   对话快照 + 回退重写 agent history；save_with_files API 预留文件部分）。

@@ -40,6 +40,7 @@ pub const DEFAULT_MAX_DEPTH: usize = 3;
 /// per-agent 模型解析：把声明模型名解析为 provider 实例。由上层
 /// （runtime / CLI）基于 provider 工厂实现；未装配时声明模型回退默认 provider。
 pub trait ModelResolver: Send + Sync {
+    /// 把声明模型名解析为 provider；返回 `None` 表示回退默认 provider。
     fn resolve(&self, name: &str) -> Option<Arc<dyn Provider>>;
 }
 
@@ -60,7 +61,9 @@ pub trait ModelResolver: Send + Sync {
 /// 执行参数一致。
 #[derive(Clone)]
 pub struct SubAgentConfig {
+    /// 子代理名（委派目标标识）。
     pub name: String,
+    /// 角色系统提示。
     pub system_prompt: String,
     /// 任务书（渲染用：task/rules/inputs；tools/max_steps 仅作描述）。
     pub spec: TaskSpec,
@@ -92,6 +95,7 @@ impl fmt::Debug for SubAgentConfig {
 }
 
 impl SubAgentConfig {
+    /// 以名字 + 系统提示构造配置（其余参数取默认：无工具、10 步、默认权限）。
     pub fn new(name: impl Into<String>, system_prompt: impl Into<String>) -> Self {
         let name = name.into();
         Self {
@@ -107,12 +111,14 @@ impl SubAgentConfig {
         }
     }
 
+    /// 设置执行用工具集（同时同步 spec.tools 名字白名单）。
     pub fn with_tools(mut self, tools: Vec<Arc<dyn Tool>>) -> Self {
         self.spec.tools = tools.iter().map(|t| t.schema().name.clone()).collect();
         self.tools = tools;
         self
     }
 
+    /// 设置执行步数上限（`0` 视作默认 10；同步 spec.max_steps 描述）。
     pub fn with_max_steps(mut self, steps: usize) -> Self {
         self.spec.max_steps = if steps == 0 { 10 } else { steps };
         self.max_steps = self.spec.max_steps;
@@ -209,6 +215,7 @@ pub struct SubAgentRunner {
 }
 
 impl SubAgentRunner {
+    /// 以默认 provider 构造 runner（其余设置经 builder 装配）。
     pub fn new(provider: Arc<dyn Provider>) -> Self {
         Self {
             provider,
@@ -230,6 +237,13 @@ impl SubAgentRunner {
     /// Register a sub-agent configuration.
     pub fn register(&mut self, config: SubAgentConfig) {
         self.sub_agents.insert(config.name.clone(), config);
+    }
+
+    /// 已注册子代理名（排序稳定），供上层 @-mention 入口做已知名预检。
+    pub fn agent_names(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.sub_agents.keys().cloned().collect();
+        v.sort();
+        v
     }
 
     /// Set the default sub-agent name used when no explicit sub-agent
@@ -371,16 +385,15 @@ impl SubAgentRunner {
         if let Some(ref n) = name {
             self.sub_agents
                 .get(n)
-                .ok_or_else(|| DeepseeknovaError::Agent(format!("unknown sub-agent: '{n}'")))
+                .ok_or_else(|| DeepseeknovaError::agent(format!("unknown sub-agent: '{n}'")))
         } else if let Some(ref default) = self.default_sub_agent {
             self.sub_agents.get(default).ok_or_else(|| {
-                DeepseeknovaError::Agent(format!("default sub-agent '{default}' not registered"))
+                DeepseeknovaError::agent(format!("default sub-agent '{default}' not registered"))
             })
         } else {
-            Err(DeepseeknovaError::Agent(
+            Err(DeepseeknovaError::agent(
                 "no sub-agent specified and no default configured. \
-                 Use 'sub_agent:<name>' in the prompt or register a default."
-                    .to_string(),
+                 Use 'sub_agent:<name>' in the prompt or register a default.",
             ))
         }
     }
@@ -421,7 +434,7 @@ impl SubAgentRunner {
             }
         }
         if text.is_empty() {
-            return Err(DeepseeknovaError::Runner(format!(
+            return Err(DeepseeknovaError::runner(format!(
                 "sub-agent '{agent}' produced no output"
             )));
         }
@@ -438,7 +451,7 @@ impl SubAgentRunner {
     ) -> Result<RunEventStream, DeepseeknovaError> {
         // 深度上限：超深拒绝（递归守门；根派发 depth 1）。
         if depth > self.max_depth {
-            return Err(DeepseeknovaError::Runner(format!(
+            return Err(DeepseeknovaError::runner(format!(
                 "sub-agent recursion depth exceeded (max {}, depth requested: {depth})",
                 self.max_depth
             )));
@@ -770,7 +783,7 @@ async fn run_sub_agent_loop(
                 for v in &violations {
                     tracing::error!(?v, "replay invariant violation in sub-agent");
                 }
-                DeepseeknovaError::Runner(format!(
+                DeepseeknovaError::runner(format!(
                     "history replay invariant violated in sub-agent: {} violation(s)",
                     violations.len()
                 ))
@@ -1183,7 +1196,7 @@ async fn run_sub_agent_loop(
     }
 
     warn!("sub-agent reached max steps ({max_steps})");
-    Err(DeepseeknovaError::Runner(format!(
+    Err(DeepseeknovaError::runner(format!(
         "sub-agent reached max steps ({max_steps}) without completing the task"
     )))
 }
@@ -1222,7 +1235,7 @@ async fn compact_with_provider(
 
     let validated =
         deepseeknova_provider::ValidatedRequest::new(&summary_msgs, &[]).map_err(|v| {
-            DeepseeknovaError::Runner(format!(
+            DeepseeknovaError::runner(format!(
                 "invariant violation in sub-agent summarize: {:?}",
                 v
             ))

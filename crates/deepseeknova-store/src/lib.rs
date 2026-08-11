@@ -4,7 +4,18 @@
 //! for replay, debugging, and analytics.
 //! Supports rotation and compaction.
 
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::dbg_macro
+    )
+)]
 
 use deepseeknova_core::{DeepseeknovaError, Message, Role, RunInput};
 use serde::{Deserialize, Serialize};
@@ -37,35 +48,51 @@ pub struct StoredTurn {
     pub workspace: Option<String>,
 }
 
+/// The user's input captured for a turn.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredInput {
+    /// The user's prompt text.
     pub prompt: String,
+    /// Optional image attachments (paths or data URIs).
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub images: Vec<String>,
+    /// Optional model override chosen for this turn.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_override: Option<String>,
 }
 
+/// The agent's final output for a turn.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredOutput {
+    /// Collected text output.
     pub text: String,
+    /// Tool calls issued during this turn.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub tool_calls: Vec<StoredToolCall>,
 }
 
+/// A single tool invocation recorded in a stored output.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredToolCall {
+    /// Tool name.
     pub name: String,
+    /// Serialized tool arguments.
     pub arguments: String,
+    /// Tool result payload, if one was produced.
     pub result: Option<String>,
 }
 
+/// A serialized message recorded for a turn.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredMessage {
+    /// Role name: `system`, `user`, `assistant`, or `tool`.
     pub role: String,
+    /// Message text content.
     pub content: String,
+    /// Optional message name (e.g. for system/tool messages).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// For tool results, the id of the tool call this result answers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     /// Assistant tool calls (schema v2). `serde(default)` keeps old files readable.
@@ -229,14 +256,24 @@ impl SessionStore {
     /// 相对 [`SessionStore::list_summaries`] 的轻量替代：TUI 侧边栏每 2s 刷新
     /// 会话列表，全量读每个文件只为拿首句不划算。
     pub fn preview_first_prompt(&self, session_id: &str, max_chars: usize) -> String {
+        use std::io::BufRead;
+
         let path = self.session_path(session_id);
-        let Ok(content) = std::fs::read_to_string(&path) else {
+        let Ok(file) = std::fs::File::open(&path) else {
             return String::new();
         };
-        let Some(first) = content.lines().find(|l| !l.trim().is_empty()) else {
-            return String::new();
-        };
-        let Ok(turn) = serde_json::from_str::<StoredTurn>(first) else {
+        let mut reader = std::io::BufReader::new(file);
+        let mut first = String::new();
+        loop {
+            first.clear();
+            if reader.read_line(&mut first).unwrap_or(0) == 0 {
+                return String::new();
+            }
+            if !first.trim().is_empty() {
+                break;
+            }
+        }
+        let Ok(turn) = serde_json::from_str::<StoredTurn>(first.trim()) else {
             return String::new();
         };
         let prompt = turn.input.prompt.replace(['\n', '\r'], "");
@@ -247,12 +284,24 @@ impl SessionStore {
     /// [`Self::list_summaries`]（TUI 侧边栏按工作区分组用）。空/损坏/不存在
     /// 返回 `None`（旧格式会话无 workspace 字段）。
     pub fn session_workspace(&self, session_id: &str) -> Option<String> {
+        use std::io::BufRead;
+
         let path = self.session_path(session_id);
-        let Ok(content) = std::fs::read_to_string(&path) else {
+        let Ok(file) = std::fs::File::open(&path) else {
             return None;
         };
-        let first = content.lines().find(|l| !l.trim().is_empty())?;
-        let turn: StoredTurn = serde_json::from_str(first).ok()?;
+        let mut reader = std::io::BufReader::new(file);
+        let mut first = String::new();
+        loop {
+            first.clear();
+            if reader.read_line(&mut first).unwrap_or(0) == 0 {
+                return None;
+            }
+            if !first.trim().is_empty() {
+                break;
+            }
+        }
+        let turn: StoredTurn = serde_json::from_str(first.trim()).ok()?;
         turn.workspace
     }
 
@@ -339,13 +388,34 @@ pub struct SessionSummary {
     pub workspace: Option<String>,
 }
 
-/// Generate a fresh chat session id of the form `chat-YYYYMMDD-HHMMSS` (UTC).
+/// Generate a fresh chat session id of the form
+/// `chat-YYYYMMDD-HHMMSS-mmm-ssss` (UTC + millis + 进程内序号)。
 ///
 /// The timestamp layout is lexicographically ordered, so sorting session ids
 /// as strings yields chronological order — callers pick the newest session
 /// with a plain `max()` without touching the filesystem.
+///
+/// 毫秒与序号段保证同一秒内的连续创建（CLI/TUI 同入口、不同入口并发）也
+/// 不会产生重复 id，避免两个会话写进同一个 JSONL 文件。
 pub fn new_session_id() -> String {
-    format!("chat-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S"))
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let now = chrono::Utc::now();
+    let millis = now.timestamp_millis().rem_euclid(1000) as u64;
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed) % 10_000;
+    format!("chat-{}-{millis:03}-{seq:04}", now.format("%Y%m%d-%H%M%S"))
+}
+
+/// 校验会话 id 是否可安全作为文件名使用：仅 ASCII 字母数字与 `-`/`_`，
+/// 长度 1..=128。外部输入（如 CLI `/resume` 参数）必须先过本函数再进
+/// [`SessionStore`]，防止 `../` 或绝对路径越界读写。
+pub fn is_valid_session_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 // ---------------------------------------------------------------------------
@@ -668,9 +738,26 @@ mod tests {
     fn new_session_id_has_expected_shape() {
         let id = new_session_id();
         assert!(id.starts_with("chat-"), "unexpected prefix: {id}");
-        // chat- (5) + YYYYMMDD (8) + - (1) + HHMMSS (6) = 20 chars.
-        assert_eq!(id.len(), 20, "unexpected length: {id}");
+        // chat- (5) + YYYYMMDD (8) + - (1) + HHMMSS (6) + -mmm (4) + -ssss (5) = 29 chars.
+        assert_eq!(id.len(), 29, "unexpected length: {id}");
         assert!(id[5..].chars().all(|c| c.is_ascii_digit() || c == '-'));
+    }
+
+    #[test]
+    fn new_session_ids_are_unique_within_a_second() {
+        let ids: std::collections::HashSet<String> = (0..100).map(|_| new_session_id()).collect();
+        assert_eq!(ids.len(), 100, "同进程连续创建不得产生重复会话 id");
+    }
+
+    #[test]
+    fn session_id_validation_rejects_path_escape_and_allows_safe_ids() {
+        assert!(is_valid_session_id("chat-20260810-120000-001-0001"));
+        assert!(is_valid_session_id("chat-a"));
+        assert!(!is_valid_session_id("../outside"));
+        assert!(!is_valid_session_id("a/b"));
+        assert!(!is_valid_session_id(""));
+        assert!(!is_valid_session_id(&"x".repeat(129)));
+        assert!(!is_valid_session_id("chat 空格"));
     }
 
     #[test]

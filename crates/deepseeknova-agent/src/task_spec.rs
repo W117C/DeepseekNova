@@ -14,6 +14,7 @@ use std::fmt;
 /// 委派任务书：可参数化、带约束的任务定义。
 #[derive(Debug, Clone)]
 pub struct TaskSpec {
+    /// 任务书名（委派目标标识）。
     pub name: String,
     /// 任务指令主体，支持 `${{ inputs.<name> }}` 占位符。
     pub task: String,
@@ -111,8 +112,11 @@ impl TaskSpec {
 /// 输入声明。
 #[derive(Debug, Clone)]
 pub struct InputSpec {
+    /// 输入名（`${{ inputs.<name> }}` 占位符引用的键）。
     pub name: String,
+    /// 值类型（只校验不转换）。
     pub ty: InputType,
+    /// 是否必填（缺值且无 default 时渲染报错）。
     pub required: bool,
     /// 缺值时兜底。`required=false` 且无 default 时以空串填充。
     pub default: Option<String>,
@@ -121,8 +125,11 @@ pub struct InputSpec {
 /// 输入值类型。只做合法性校验，不转换类型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputType {
+    /// 字符串。
     String,
+    /// 数字（合法数字字符串）。
     Number,
+    /// 布尔（`true`/`false`）。
     Boolean,
 }
 
@@ -131,6 +138,7 @@ pub enum InputType {
 pub struct InputValues(HashMap<String, String>);
 
 impl InputValues {
+    /// 构造空参数值集合。
     pub fn new() -> Self {
         Self::default()
     }
@@ -174,10 +182,13 @@ pub struct RenderedTask {
 /// 任务书渲染错误。
 #[derive(Debug, thiserror::Error)]
 pub enum TaskSpecError {
+    /// 必填输入缺值且无 default。
     #[error("missing required input '{0}' (no value and no default)")]
     MissingRequired(String),
+    /// 任务文本引用了未声明的输入。
     #[error("task references undeclared input '{0}'")]
     UnknownInput(String),
+    /// 提供值类型非法。
     #[error("input '{0}' is not a valid {1}")]
     InvalidType(String, InputTypeName),
 }
@@ -188,15 +199,21 @@ pub enum TaskSpecError {
 /// `Result<_, TaskSpecError>` 用于返回 `Result<_, DeepseeknovaError>` 的函数。
 impl From<TaskSpecError> for deepseeknova_core::DeepseeknovaError {
     fn from(err: TaskSpecError) -> Self {
-        deepseeknova_core::DeepseeknovaError::Agent(err.to_string())
+        deepseeknova_core::DeepseeknovaError::Agent {
+            message: err.to_string(),
+            source: Some(Box::new(err)),
+        }
     }
 }
 
 /// [`TaskSpecError::InvalidType`] 中可显示的输入类型名。
 #[derive(Debug, Clone, Copy)]
 pub enum InputTypeName {
+    /// 字符串。
     String,
+    /// 数字。
     Number,
+    /// 布尔。
     Boolean,
 }
 
@@ -401,8 +418,33 @@ mod tests {
         }
         let err = outer().unwrap_err();
         assert!(
-            matches!(err, deepseeknova_core::DeepseeknovaError::Agent(_)),
+            matches!(err, deepseeknova_core::DeepseeknovaError::Agent { .. }),
             "应映射到 Agent 类别"
         );
+    }
+
+    /// 验证 `From<TaskSpecError>` 保留原始错误实例与 source 链：调用方可通过
+    /// `source().downcast_ref::<TaskSpecError>()` 恢复 `MissingRequired` /
+    /// `InvalidType` / `Parse` 等具体变体。
+    #[test]
+    fn task_spec_error_source_preserves_variant_for_downcast() {
+        fn inner() -> Result<(), TaskSpecError> {
+            Err(TaskSpecError::MissingRequired("input1".into()))
+        }
+        fn outer() -> Result<(), deepseeknova_core::DeepseeknovaError> {
+            inner()?;
+            Ok(())
+        }
+        let err = outer().unwrap_err();
+        use std::error::Error as _;
+        let src = err
+            .source()
+            .expect("Agent 变体应持有 source")
+            .downcast_ref::<TaskSpecError>()
+            .expect("source 应可 downcast 回 TaskSpecError");
+        match src {
+            TaskSpecError::MissingRequired(name) => assert_eq!(name, "input1"),
+            other => panic!("期望 MissingRequired，得到 {other:?}"),
+        }
     }
 }

@@ -77,9 +77,12 @@ struct PlanEdge {
 /// never in the text stream — cache-neutral by design.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReasoningLanguage {
+    /// Let the provider choose the reasoning language (default).
     #[default]
     Auto,
+    /// Prefer Chinese reasoning output.
     Zh,
+    /// Prefer English reasoning output.
     En,
 }
 
@@ -183,6 +186,9 @@ fn build_planning_prompt(goal: &str, read_only_tools: &[&dyn Tool]) -> Vec<Messa
 // CoordinatorRunner — two-model (Planner + Executor)
 // ---------------------------------------------------------------------------
 
+/// Two-model coordinator runner: a planner model produces an
+/// [`ExecutionGraph`] which an executor model then runs, with optional
+/// sub-agent delegation.
 pub struct CoordinatorRunner {
     /// Strong reasoning model used for planning.
     planner_provider: Arc<dyn Provider>,
@@ -212,6 +218,7 @@ pub struct CoordinatorRunner {
 }
 
 impl CoordinatorRunner {
+    /// Construct with distinct planner and executor providers.
     pub fn new(planner_provider: Arc<dyn Provider>, executor_provider: Arc<dyn Provider>) -> Self {
         Self {
             planner_provider,
@@ -377,7 +384,7 @@ async fn run_coordinator(
 
     let validated = deepseeknova_provider::ValidatedRequest::new(&plan_messages, &[]).map_err(
         |violations| {
-            DeepseeknovaError::Runner(format!(
+            DeepseeknovaError::runner(format!(
                 "planning prompt replay invariant violated: {} violation(s) detected",
                 violations.len()
             ))
@@ -714,7 +721,7 @@ impl ThinkCallback for CoordinatorCallbacks {
                 for v in &violations {
                     tracing::error!(?v, "replay invariant violation in coordinator generate");
                 }
-                DeepseeknovaError::Runner(format!(
+                DeepseeknovaError::runner(format!(
                     "history replay invariant violated: {} violation(s)",
                     violations.len()
                 ))
@@ -734,7 +741,7 @@ impl ToolCallback for CoordinatorCallbacks {
         let tool = self
             .tools
             .get(tool_name)
-            .ok_or_else(|| DeepseeknovaError::Runner(format!("unknown tool: {tool_name}")))?;
+            .ok_or_else(|| DeepseeknovaError::runner(format!("unknown tool: {tool_name}")))?;
 
         let args_str = serde_json::to_string(args)?;
 
@@ -802,7 +809,7 @@ impl ReflectCallback for CoordinatorCallbacks {
                 for v in &violations {
                     tracing::error!(?v, "replay invariant violation in coordinator reflect");
                 }
-                DeepseeknovaError::Runner(format!(
+                DeepseeknovaError::runner(format!(
                     "history replay invariant violated: {} violation(s)",
                     violations.len()
                 ))
@@ -840,7 +847,7 @@ impl DelegateCallback for CoordinatorCallbacks {
         goal: &str,
     ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
         let runner = self.sub_agent_runner.as_ref().ok_or_else(|| {
-            DeepseeknovaError::Runner(format!(
+            DeepseeknovaError::runner(format!(
                 "Delegate action targets sub-agent '{sub_agent}' but no \
                  SubAgentRunner is configured on the coordinator"
             ))
@@ -871,7 +878,7 @@ impl DelegateCallback for CoordinatorCallbacks {
         }
 
         if text.is_empty() {
-            return Err(deepseeknova_core::DeepseeknovaError::Runner(format!(
+            return Err(deepseeknova_core::DeepseeknovaError::runner(format!(
                 "sub-agent '{sub_agent}' produced no output"
             )));
         }

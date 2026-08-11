@@ -107,7 +107,9 @@ pub async fn run_setup_wizard(local: bool) -> Result<(), deepseeknova_core::Deep
         PathBuf::from("deepseeknova.toml")
     } else {
         let home = dirs::home_dir().ok_or_else(|| {
-            deepseeknova_core::DeepseeknovaError::Config("cannot determine home directory".into())
+            deepseeknova_core::DeepseeknovaError::config(
+                "cannot determine home directory".to_string(),
+            )
         })?;
         std::fs::create_dir_all(home.join(".deepseeknova"))?;
         home.join(".deepseeknova").join("config.toml")

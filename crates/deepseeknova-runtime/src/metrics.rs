@@ -6,10 +6,119 @@ use std::sync::Arc;
 
 use deepseeknova_config::Config;
 
+/// Cache 命中率告警阈值（30%）。DeepSeek-V4 prefix cache 在稳定前缀下应能达
+/// 到 80%+；低于 30% 通常意味着 system prompt / tools 顺序 / repo map 在
+/// 请求间发生了非预期变动，或 slide_window 误弹了 System 消息。
+const CACHE_HIT_WARN_THRESHOLD: f64 = 0.30;
+
+/// 触发告警的最小可评估 prompt token 数。低于此值（如单元测试的几十 token）
+/// 不评估命中率，避免噪声告警。
+const CACHE_HIT_MIN_EVAL_TOKENS: u64 = 1_000;
+
+/// Cache 命中率告警判定结果（纯函数返回，便于单测）。
+#[derive(Debug, Clone, PartialEq)]
+struct CacheHitEvaluation {
+    /// 总命中率（0.0..=1.0）。
+    rate: f64,
+    /// 可评估 token 总数（cache_hit + cache_miss）。
+    evaluable_tokens: u64,
+    /// 命中率最低的 (model, role_label, rate)；无行可评估时为 None。
+    worst: Option<(String, String, f64)>,
+}
+
+/// 评估 [`deepseeknova_metrics::SessionReport`] 的 prefix cache 命中率，返回应告警时的判定结果。
+///
+/// 跳过路径（返回 `None`）：
+/// - 无任何 metered_calls（全部为未计量调用，无 usage 数据）；
+/// - `cache_hit_tokens + cache_miss_tokens == 0`（provider 未上报缓存统计，
+///   不能据此判 0% 命中）；
+/// - 可评估 token 总数 < [`CACHE_HIT_MIN_EVAL_TOKENS`]（小样本噪声）；
+/// - 命中率 ≥ [`CACHE_HIT_WARN_THRESHOLD`]（正常）。
+fn evaluate_cache_hit(report: &deepseeknova_metrics::SessionReport) -> Option<CacheHitEvaluation> {
+    let mut total_hit: u64 = 0;
+    let mut total_miss: u64 = 0;
+    let mut any_metered: bool = false;
+    // 命中率最低的行（hit+miss>0 才参与），用于告警定位。
+    let mut worst: Option<(String, String, f64)> = None; // (model, role_label, rate)
+    for row in &report.cost.rows {
+        if row.bucket.metered_calls > 0 {
+            any_metered = true;
+        }
+        total_hit += row.bucket.cache_hit_tokens;
+        total_miss += row.bucket.cache_miss_tokens;
+        let denom = row.bucket.cache_hit_tokens + row.bucket.cache_miss_tokens;
+        if denom > 0 {
+            let rate = row.bucket.cache_hit_tokens as f64 / denom as f64;
+            let candidate = (row.model.clone(), row.role.label().to_string(), rate);
+            match &worst {
+                None => worst = Some(candidate),
+                Some((_, _, w)) if rate < *w => worst = Some(candidate),
+                _ => {}
+            }
+        }
+    }
+    if !any_metered {
+        return None;
+    }
+    let evaluable = total_hit + total_miss;
+    if evaluable == 0 {
+        // provider 未上报缓存统计（cache_hit/miss 均为 0），不能判 0% 命中。
+        return None;
+    }
+    if evaluable < CACHE_HIT_MIN_EVAL_TOKENS {
+        return None;
+    }
+    let rate = total_hit as f64 / evaluable as f64;
+    if rate >= CACHE_HIT_WARN_THRESHOLD {
+        return None;
+    }
+    Some(CacheHitEvaluation {
+        rate,
+        evaluable_tokens: evaluable,
+        worst,
+    })
+}
+
+/// 会话结束时按 [`deepseeknova_metrics::SessionReport`] 成本面评估 prefix cache 命中率，低于
+/// [`CACHE_HIT_WARN_THRESHOLD`] 时发出 `tracing::warn!`，附带总命中率、
+/// 总可评估 token 数与命中率最低的 (role, model) 行，便于定位是哪条路由
+/// 的前缀在抖动。
+///
+/// 跳过路径（不告警）：见 [`evaluate_cache_hit`]。
+pub(crate) fn warn_on_low_cache_hit(report: &deepseeknova_metrics::SessionReport) {
+    let Some(eval) = evaluate_cache_hit(report) else {
+        return;
+    };
+    match &eval.worst {
+        Some((model, role, w_rate)) => {
+            tracing::warn!(
+                cache_hit_rate = format!("{:.1}%", eval.rate * 100.0),
+                evaluable_tokens = eval.evaluable_tokens,
+                threshold = format!("{:.0}%", CACHE_HIT_WARN_THRESHOLD * 100.0),
+                worst_model = model,
+                worst_role = role,
+                worst_rate = format!("{:.1}%", w_rate * 100.0),
+                "low prefix-cache hit rate — check system prompt stability, tool schema order, repo map injection, and slide_window System preservation"
+            );
+        }
+        None => {
+            tracing::warn!(
+                cache_hit_rate = format!("{:.1}%", eval.rate * 100.0),
+                evaluable_tokens = eval.evaluable_tokens,
+                threshold = format!("{:.0}%", CACHE_HIT_WARN_THRESHOLD * 100.0),
+                "low prefix-cache hit rate — check system prompt stability, tool schema order, repo map injection, and slide_window System preservation"
+            );
+        }
+    }
+}
+
 /// 会话效能落盘所需的成本面数据与输出目录。
 pub struct MetricsSink {
+    /// 成本台账（usage 计量与累计）。
     pub ledger: Arc<deepseeknova_provider::cost::CostLedger>,
+    /// 模型单价表（用于成本折算）。
     pub prices: deepseeknova_provider::cost::PriceTable,
+    /// 报告输出目录（JSON 报告 + 评分卡落盘）。
     pub dir: PathBuf,
 }
 
@@ -157,6 +266,10 @@ pub fn attach_metrics_hook_with_fitness(
             stats: stats.clone(),
             cost: sink.ledger.report(&sink.prices),
         };
+        // P2-2 指标反馈闭环：落盘前评估 prefix cache 命中率，低命中时 warn
+        // 提示前缀稳定性问题（system prompt 抖动 / tools 顺序变化 / slide_window
+        // 误弹 System 消息等）。报告已含完整 cost.rows，无需额外获取。
+        warn_on_low_cache_hit(&report);
         if let Err(e) = deepseeknova_metrics::write_report(&report, &sink.dir) {
             tracing::warn!("metrics report write failed: {e}");
             return;
@@ -847,5 +960,237 @@ mod tests {
             "大写 .JSON 应参与裁剪（z 被删）"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── P2-2 cache hit 反馈闭环 ──────────────────────────────────────────
+
+    /// 构造仅含一行 cost 数据的 SessionReport（metered_calls=1）。
+    fn cache_report(hit: u64, miss: u64) -> deepseeknova_metrics::SessionReport {
+        use deepseeknova_provider::cost::{CostReport, CostRow, ModelRole, UsageBucket};
+        deepseeknova_metrics::SessionReport {
+            session_id: "t".into(),
+            stats: deepseeknova_metrics::SessionStats::default(),
+            cost: CostReport {
+                rows: vec![CostRow {
+                    model: "big".into(),
+                    role: ModelRole::Main,
+                    bucket: UsageBucket {
+                        prompt_tokens: hit + miss,
+                        completion_tokens: 0,
+                        reasoning_tokens: 0,
+                        cache_hit_tokens: hit,
+                        cache_miss_tokens: miss,
+                        metered_calls: 1,
+                        unmetered_calls: 0,
+                    },
+                    cost_usd: None,
+                }],
+                total_usd: None,
+                unmetered_calls: 0,
+            },
+        }
+    }
+
+    /// 构造含两行 cost 数据的 SessionReport（不同 model + 不同命中率）。
+    fn cache_report_two_rows(
+        m1: &str,
+        hit1: u64,
+        miss1: u64,
+        m2: &str,
+        hit2: u64,
+        miss2: u64,
+    ) -> deepseeknova_metrics::SessionReport {
+        use deepseeknova_provider::cost::{CostReport, CostRow, ModelRole, UsageBucket};
+        deepseeknova_metrics::SessionReport {
+            session_id: "t".into(),
+            stats: deepseeknova_metrics::SessionStats::default(),
+            cost: CostReport {
+                rows: vec![
+                    CostRow {
+                        model: m1.into(),
+                        role: ModelRole::Main,
+                        bucket: UsageBucket {
+                            prompt_tokens: hit1 + miss1,
+                            completion_tokens: 0,
+                            reasoning_tokens: 0,
+                            cache_hit_tokens: hit1,
+                            cache_miss_tokens: miss1,
+                            metered_calls: 1,
+                            unmetered_calls: 0,
+                        },
+                        cost_usd: None,
+                    },
+                    CostRow {
+                        model: m2.into(),
+                        role: ModelRole::Task,
+                        bucket: UsageBucket {
+                            prompt_tokens: hit2 + miss2,
+                            completion_tokens: 0,
+                            reasoning_tokens: 0,
+                            cache_hit_tokens: hit2,
+                            cache_miss_tokens: miss2,
+                            metered_calls: 1,
+                            unmetered_calls: 0,
+                        },
+                        cost_usd: None,
+                    },
+                ],
+                total_usd: None,
+                unmetered_calls: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn cache_hit_empty_report_returns_none() {
+        // 空 cost.rows → 无 metered_calls → None。
+        let report = deepseeknova_metrics::SessionReport {
+            session_id: "t".into(),
+            stats: deepseeknova_metrics::SessionStats::default(),
+            cost: deepseeknova_provider::cost::CostReport::default(),
+        };
+        assert!(evaluate_cache_hit(&report).is_none());
+    }
+
+    #[test]
+    fn cache_hit_only_unmetered_returns_none() {
+        // metered_calls=0（全部未计量）→ None。
+        use deepseeknova_provider::cost::{CostReport, CostRow, ModelRole, UsageBucket};
+        let report = deepseeknova_metrics::SessionReport {
+            session_id: "t".into(),
+            stats: deepseeknova_metrics::SessionStats::default(),
+            cost: CostReport {
+                rows: vec![CostRow {
+                    model: "big".into(),
+                    role: ModelRole::Main,
+                    bucket: UsageBucket {
+                        metered_calls: 0,
+                        unmetered_calls: 5,
+                        ..Default::default()
+                    },
+                    cost_usd: None,
+                }],
+                total_usd: None,
+                unmetered_calls: 5,
+            },
+        };
+        assert!(evaluate_cache_hit(&report).is_none());
+    }
+
+    #[test]
+    fn cache_hit_provider_not_reporting_returns_none() {
+        // metered_calls=1 但 cache_hit/miss 均为 0（provider 未上报缓存统计）
+        // → 不能判 0% 命中 → None。
+        use deepseeknova_provider::cost::{CostReport, CostRow, ModelRole, UsageBucket};
+        let report = deepseeknova_metrics::SessionReport {
+            session_id: "t".into(),
+            stats: deepseeknova_metrics::SessionStats::default(),
+            cost: CostReport {
+                rows: vec![CostRow {
+                    model: "big".into(),
+                    role: ModelRole::Main,
+                    bucket: UsageBucket {
+                        prompt_tokens: 5_000,
+                        metered_calls: 1,
+                        ..Default::default()
+                    },
+                    cost_usd: None,
+                }],
+                total_usd: None,
+                unmetered_calls: 0,
+            },
+        };
+        assert!(evaluate_cache_hit(&report).is_none());
+    }
+
+    #[test]
+    fn cache_hit_below_min_tokens_returns_none() {
+        // 可评估 token < 1000（小样本噪声）→ None。
+        // hit=50, miss=50 → 50% 命中率但总量 100 < 1000。
+        let report = cache_report(50, 50);
+        assert!(evaluate_cache_hit(&report).is_none());
+    }
+
+    #[test]
+    fn cache_hit_high_rate_returns_none() {
+        // 命中率 80%（>= 30% 阈值）→ None。
+        // hit=4000, miss=1000 → 80%，总量 5000 >= 1000。
+        let report = cache_report(4_000, 1_000);
+        assert!(evaluate_cache_hit(&report).is_none());
+    }
+
+    #[test]
+    fn cache_hit_at_threshold_returns_none() {
+        // 边界：恰好 30%（>= 阈值）→ None。
+        // hit=300, miss=700 → 30%，总量 1000 >= 1000。
+        let report = cache_report(300, 700);
+        assert!(evaluate_cache_hit(&report).is_none());
+    }
+
+    #[test]
+    fn cache_hit_just_below_threshold_warns() {
+        // 边界：略低于 30% → Some。
+        // hit=299, miss=701 → 29.9%，总量 1000 >= 1000。
+        let report = cache_report(299, 701);
+        let eval = evaluate_cache_hit(&report).expect("29.9% should warn");
+        assert!(eval.rate < CACHE_HIT_WARN_THRESHOLD);
+        assert_eq!(eval.evaluable_tokens, 1000);
+        // worst 行存在且与唯一行匹配。
+        let (model, role, w_rate) = eval.worst.expect("worst row present");
+        assert_eq!(model, "big");
+        assert_eq!(role, "main");
+        assert!((w_rate - 0.299).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cache_hit_zero_percent_warns() {
+        // 0% 命中率（hit=0, miss=5000）→ Some。
+        let report = cache_report(0, 5_000);
+        let eval = evaluate_cache_hit(&report).expect("0% should warn");
+        assert_eq!(eval.rate, 0.0);
+        assert_eq!(eval.evaluable_tokens, 5_000);
+        let (model, role, w_rate) = eval.worst.expect("worst row present");
+        assert_eq!(model, "big");
+        assert_eq!(role, "main");
+        assert_eq!(w_rate, 0.0);
+    }
+
+    #[test]
+    fn cache_hit_mixed_rows_picks_worst() {
+        // 两行：big 90% 命中（hit=4500, miss=500 → 90%）、
+        // small 10% 命中（hit=100, miss=900 → 10%）。
+        // 总量 6000 >= 1000，总命中 = 4600/6000 ≈ 76.7%（>= 30% 不告警）。
+        // 验证：聚合后正常 → None。
+        let report = cache_report_two_rows("big", 4_500, 500, "small", 100, 900);
+        assert!(evaluate_cache_hit(&report).is_none(), "聚合 76.7% 不应告警");
+    }
+
+    #[test]
+    fn cache_hit_mixed_rows_low_aggregate_warns_with_worst() {
+        // 两行：big 10% 命中（hit=100, miss=900 → 10%）、
+        // small 20% 命中（hit=200, miss=800 → 20%）。
+        // 总量 2000 >= 1000，总命中 = 300/2000 = 15%（< 30% 告警）。
+        // worst 应为 big（10% < 20%）。
+        let report = cache_report_two_rows("big", 100, 900, "small", 200, 800);
+        let eval = evaluate_cache_hit(&report).expect("15% aggregate should warn");
+        assert!((eval.rate - 0.15).abs() < 1e-9);
+        assert_eq!(eval.evaluable_tokens, 2_000);
+        let (model, role, w_rate) = eval.worst.expect("worst row present");
+        assert_eq!(model, "big");
+        assert_eq!(role, "main");
+        assert!((w_rate - 0.10).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cache_hit_warn_helper_does_not_panic_on_empty() {
+        // warn_on_low_cache_hit 在所有跳过路径上必须不 panic。
+        let empty = deepseeknova_metrics::SessionReport {
+            session_id: "t".into(),
+            stats: deepseeknova_metrics::SessionStats::default(),
+            cost: deepseeknova_provider::cost::CostReport::default(),
+        };
+        warn_on_low_cache_hit(&empty);
+        warn_on_low_cache_hit(&cache_report(50, 50)); // 小样本
+        warn_on_low_cache_hit(&cache_report(4_000, 1_000)); // 高命中
     }
 }

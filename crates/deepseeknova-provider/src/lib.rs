@@ -5,22 +5,62 @@
 //! with reasoning_effort and prompt caching.
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::dbg_macro
+    )
+)]
 
 use async_trait::async_trait;
 use deepseeknova_core::chunk::ChunkStream;
 use deepseeknova_core::Message;
 
+/// Anthropic Messages API provider: streaming, tool calling, and DeepSeek
+/// extended-thinking / reasoning-effort support.
 pub mod anthropic;
 pub mod auto;
 pub mod cost;
 pub mod embeddings;
+/// OpenAI-compatible chat-completions provider with streaming, tool calling,
+/// and DeepSeek thinking-mode passthrough.
 pub mod openai;
 pub mod retry;
 pub mod router;
+/// Streaming JSON scavenger that reassembles complete JSON objects from a
+/// partial token stream (used to parse model replies mid-stream).
 pub mod scavenge;
 pub mod tool_cache;
+/// Owned wire request/response types shared by the provider backends.
 pub mod types;
+
+/// 读取 API key 环境变量：默认名 `DEEPSEEKNOVA_API_KEY` 缺失时回退旧名
+/// `DEEPSEEK_API_KEY`；显式配置的其它变量名缺失时直接报错（不隐式回退，
+/// 避免拼错变量名被旧变量悄悄顶替）。
+pub(crate) fn resolve_api_key_env_value(
+    api_key_env: &str,
+) -> Result<String, deepseeknova_core::DeepseeknovaError> {
+    match std::env::var(api_key_env) {
+        Ok(k) => Ok(k),
+        Err(_) if api_key_env == "DEEPSEEKNOVA_API_KEY" => std::env::var("DEEPSEEK_API_KEY")
+            .map_err(|_| {
+                deepseeknova_core::DeepseeknovaError::config(
+                    "environment variable DEEPSEEKNOVA_API_KEY is not set \
+                     (legacy DEEPSEEK_API_KEY also unset)"
+                        .to_string(),
+                )
+            }),
+        Err(_) => Err(deepseeknova_core::DeepseeknovaError::config(format!(
+            "environment variable {api_key_env} is not set"
+        ))),
+    }
+}
 
 /// 测试共享工具：跨模块统一的环境变量串行化锁与代理清除函数。
 ///
@@ -65,7 +105,10 @@ mod test_util {
 /// [vi]: deepseeknova_context::history::validate_replay_invariant
 #[allow(clippy::manual_non_exhaustive)]
 pub struct ValidatedRequest<'a> {
+    /// The conversation history, guaranteed to satisfy the DeepSeek V4 replay
+    /// invariant.
     pub messages: &'a [Message],
+    /// Tool schemas offered to the provider for the call.
     pub tools: &'a [&'a dyn deepseeknova_core::Tool],
     // A private zero-sized field so the outer world cannot destructure or
     // reconstruct this token without calling ::new() (which runs the check).
@@ -104,31 +147,47 @@ impl<'a> ValidatedRequest<'a> {
 // ProviderError
 // ---------------------------------------------------------------------------
 
+/// Errors returned by LLM providers. Carries the retryability category so a
+/// caller can decide whether to retry without text-matching messages.
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
+    /// A non-2xx HTTP response; retryable for status 429 / 5xx.
     #[error("HTTP {status}: {body}")]
-    Http { status: u16, body: String },
+    Http {
+        /// HTTP status code returned by the provider.
+        status: u16,
+        /// Raw response body for diagnostics.
+        body: String,
+    },
 
+    /// The underlying HTTP request failed (network / transport).
     #[error("request failed: {0}")]
     Request(#[from] reqwest::Error),
 
+    /// The response contained no choices to return.
     #[error("no choices returned")]
     NoChoices,
 
+    /// The response stream failed mid-flight.
     #[error("stream error: {0}")]
     Stream(String),
 
+    /// The request exceeded its configured timeout.
     #[error("timeout after {0:?}")]
     Timeout(std::time::Duration),
 
+    /// The provider rate-limited the request.
     #[error("rate limited — retry after {retry_after:?}")]
     RateLimited {
+        /// Server-provided retry-after hint, when available.
         retry_after: Option<std::time::Duration>,
     },
 
+    /// Authentication failed (invalid or missing API key).
     #[error("authentication failed: {0}")]
     Auth(String),
 
+    /// The request itself was malformed or rejected by the provider.
     #[error("invalid request: {0}")]
     InvalidRequest(String),
 }
@@ -176,6 +235,9 @@ impl From<ProviderError> for deepseeknova_core::DeepseeknovaError {
 // Provider trait — now with streaming
 // ---------------------------------------------------------------------------
 
+/// A unified LLM backend: non-streaming [`Provider::generate`] and streaming
+/// [`Provider::stream`]. All methods accept only a [`ValidatedRequest`], so the
+/// DeepSeek V4 replay invariant is enforced by construction.
 #[async_trait]
 pub trait Provider: Send + Sync {
     /// Non-streaming generate — returns a complete Message.
@@ -290,7 +352,7 @@ pub mod factory {
                         .as_deref()
                         .unwrap_or("https://api.deepseek.com"),
                     cfg.model.as_deref().unwrap_or("deepseek-v4-flash"),
-                    cfg.api_key_env.as_deref().unwrap_or("DEEPSEEK_API_KEY"),
+                    cfg.api_key_env.as_deref().unwrap_or("DEEPSEEKNOVA_API_KEY"),
                     cfg.timeout_secs,
                     cfg.max_retries,
                 )?
@@ -334,7 +396,7 @@ pub mod factory {
                 Box::new(p)
             }
             other => {
-                return Err(deepseeknova_core::DeepseeknovaError::Config(format!(
+                return Err(deepseeknova_core::DeepseeknovaError::config(format!(
                     "unknown provider kind: {other}"
                 )))
             }
@@ -384,7 +446,7 @@ pub mod factory {
                 .as_deref()
                 .unwrap_or("https://api.deepseek.com/anthropic"),
             cfg.model.as_deref().unwrap_or("deepseek-v4-flash"),
-            cfg.api_key_env.as_deref().unwrap_or("DEEPSEEK_API_KEY"),
+            cfg.api_key_env.as_deref().unwrap_or("DEEPSEEKNOVA_API_KEY"),
             cfg.timeout_secs,
             cfg.max_retries,
         )?
@@ -409,8 +471,11 @@ pub mod factory {
     /// 3. Provider factory default (config file)
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum ReasoningEffort {
+        /// Reasoning disabled (DeepSeek thinking mode off).
         Disabled,
+        /// High reasoning effort ("high").
         High,
+        /// Maximum reasoning effort ("max").
         Max,
     }
 
@@ -451,10 +516,13 @@ pub mod factory {
     }
 
     impl ReasoningEffortResolver {
+        /// Create a resolver with the given config-level factory default.
         pub fn new(factory_default: Option<ReasoningEffort>) -> Self {
             Self { factory_default }
         }
 
+        /// Resolve the effective effort by priority: explicit > task
+        /// classification > factory default, falling back to `High`.
         pub fn resolve(
             &self,
             explicit: Option<ReasoningEffort>,
@@ -780,5 +848,42 @@ mod deepseeknova_error_tests {
         let fatal_net: deepseeknova_core::DeepseeknovaError =
             ProviderError::Stream("permission denied".into()).into();
         assert!(!fatal_net.is_retryable(), "确定性网络错误不应可重试");
+    }
+}
+
+#[cfg(test)]
+mod api_key_env_tests {
+    use super::resolve_api_key_env_value;
+
+    #[test]
+    fn api_key_env_primary_then_legacy_fallback_then_error() {
+        let _guard = crate::test_util::ENV_LOCK.blocking_lock();
+        std::env::set_var("DEEPSEEKNOVA_API_KEY", "sk-new");
+        std::env::set_var("DEEPSEEK_API_KEY", "sk-legacy");
+
+        // 新名优先。
+        assert_eq!(
+            resolve_api_key_env_value("DEEPSEEKNOVA_API_KEY").unwrap(),
+            "sk-new"
+        );
+
+        // 新名缺失 → 回退旧名。
+        std::env::remove_var("DEEPSEEKNOVA_API_KEY");
+        assert_eq!(
+            resolve_api_key_env_value("DEEPSEEKNOVA_API_KEY").unwrap(),
+            "sk-legacy"
+        );
+
+        // 两者都缺 → 报错且指明主变量名。
+        std::env::remove_var("DEEPSEEK_API_KEY");
+        let err = resolve_api_key_env_value("DEEPSEEKNOVA_API_KEY").unwrap_err();
+        assert!(
+            err.to_string().contains("DEEPSEEKNOVA_API_KEY"),
+            "got: {err}"
+        );
+
+        // 显式配置的其它变量名缺失时不隐式回退旧名。
+        let err2 = resolve_api_key_env_value("CUSTOM_KEY").unwrap_err();
+        assert!(err2.to_string().contains("CUSTOM_KEY"), "got: {err2}");
     }
 }

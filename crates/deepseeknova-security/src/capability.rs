@@ -1,11 +1,19 @@
+/// 能力枚举：需要被安全上下文显式授予方可执行的特权操作。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Capability {
+    /// 读取文件。
     FileRead,
+    /// 写入/修改文件。
     FileWrite,
+    /// 执行 shell 命令。
     CommandExecute,
+    /// 访问网络（HTTP/WebFetch 等）。
     NetworkAccess,
+    /// 调用 MCP 工具。
     McpInvoke,
+    /// 读取记忆存储。
     MemoryRead,
+    /// 写入记忆存储。
     MemoryWrite,
 }
 

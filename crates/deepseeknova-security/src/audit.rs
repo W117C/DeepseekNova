@@ -2,21 +2,32 @@ use crate::capability::Capability;
 use serde_json::json;
 use std::path::PathBuf;
 
+/// 一次安全判定事件：记录判定结果、原因与关联的工具调用信息。
 #[derive(Debug, Clone)]
 pub struct SecurityEvent {
+    /// 事件类型（如 `capability_violation`）。
     pub event_type: String,
+    /// 触发事件的工具调用 id。
     pub call_id: String,
+    /// 触发事件的工具真实名。
     pub tool_name: String,
+    /// 触发事件的能力，若事件与某能力相关。
     pub capability: Option<Capability>,
+    /// 涉及的文件路径，若事件与路径相关。
     pub path: Option<String>,
+    /// 是否放行（`false` = 拒绝）。
     pub allowed: bool,
+    /// 判定原因说明。
     pub reason: String,
 }
 
+/// 审计日志器：接收并记录安全事件。
 pub trait AuditLogger: Send + Sync + std::fmt::Debug {
+    /// 记录一次安全事件。
     fn record(&self, event: &SecurityEvent);
 }
 
+/// 仅通过 `tracing` 输出的审计日志器（`security_event` 结构化字段）。
 #[derive(Debug, Clone, Copy)]
 pub struct TracingAuditLogger;
 

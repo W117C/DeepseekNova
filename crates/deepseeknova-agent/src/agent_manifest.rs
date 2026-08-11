@@ -72,6 +72,7 @@ impl AgentGateMode {
         }
     }
 
+    /// 反序列化为声明层字符串（`inherit` / `none` / `fail_closed`）。
     pub fn as_str(&self) -> &'static str {
         match self {
             AgentGateMode::Inherit => "inherit",
@@ -85,16 +86,25 @@ impl AgentGateMode {
 /// [`Self::to_capability`] 对接 security crate 的执行层门禁。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AgentCapability {
+    /// 读文件/读目录。
     FileRead,
+    /// 写/编辑文件。
     FileWrite,
+    /// 执行 shell 命令。
     CommandExecute,
+    /// 网络访问（fetch/web）。
     NetworkAccess,
+    /// 调用 MCP 工具。
     McpInvoke,
+    /// 读取记忆/上下文。
     MemoryRead,
+    /// 写入记忆/技能。
     MemoryWrite,
 }
 
 impl AgentCapability {
+    /// 从声明文本解析：`read` / `write` / `execute` / `network` / `mcp` /
+    /// `memory_read` / `memory_write` 及常见别名（大小写不敏感）。
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "read" | "file_read" | "fileread" => Some(AgentCapability::FileRead),
@@ -112,6 +122,8 @@ impl AgentCapability {
         }
     }
 
+    /// 反序列化为声明层字符串（`read` / `write` / `execute` / `network` /
+    /// `mcp` / `memory_read` / `memory_write`）。
     pub fn as_str(&self) -> &'static str {
         match self {
             AgentCapability::FileRead => "read",
@@ -124,6 +136,7 @@ impl AgentCapability {
         }
     }
 
+    /// 转换为 security crate 的执行层门禁 [`Capability`]。
     pub fn to_capability(&self) -> Capability {
         match self {
             AgentCapability::FileRead => Capability::FileRead,
@@ -140,12 +153,14 @@ impl AgentCapability {
 /// per-agent 权限声明：门模式 + 能力白名单。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AgentPermission {
+    /// 权限门模式（inherit / none / fail_closed）。
     pub gate: AgentGateMode,
     /// 能力白名单；空 = 继承完整能力集（不做裁剪）。
     pub capabilities: Vec<AgentCapability>,
 }
 
 impl AgentPermission {
+    /// 空权限声明（默认门模式 + 空能力白名单）。
     pub fn new() -> Self {
         Self::default()
     }
@@ -154,6 +169,7 @@ impl AgentPermission {
 /// 单个 markdown 前端文件解析出的子代理声明。
 #[derive(Debug, Clone)]
 pub struct AgentManifest {
+    /// 子代理名（合法标识符，@-mention 可寻址）。
     pub name: String,
     /// 工具/调用方展示用的一句话描述。
     pub description: String,
@@ -172,33 +188,47 @@ pub struct AgentManifest {
 /// 头块解析失败 / 校验失败。
 #[derive(Debug, thiserror::Error)]
 pub enum ManifestError {
+    /// 文件顶部缺少 `---` 头块起始标记。
     #[error(
         "file is not a markdown agent manifest: expected a `---` front-matter block at the top"
     )]
     NoFrontmatter,
+    /// 头块缺少闭合的 `---`。
     #[error("front-matter block is not closed (missing closing `---`)")]
     UnclosedFrontmatter,
+    /// 头块缺少必填字段（如 `name`）。
     #[error("front-matter is missing required field `{0}`")]
     MissingField(&'static str),
+    /// agent 名不合法（须匹配 `[A-Za-z0-9][A-Za-z0-9_-]*`）。
     #[error("`{0}` is not a valid agent name (use [A-Za-z0-9][A-Za-z0-9_-]*)")]
     InvalidName(String),
+    /// 声明了未知 capability。
     #[error("unknown capability `{0}` (valid: read, write, execute, network, mcp, memory_read, memory_write)")]
     InvalidCapability(String),
+    /// 声明了未知 gate 模式。
     #[error("unknown gate `{0}` (valid: inherit, none, fail_closed)")]
     InvalidGate(String),
+    /// `max_turns` / `max_steps` 不是正整数。
     #[error("`max_turns` must be a positive integer, got `{0}`")]
     InvalidMaxTurns(String),
+    /// 多个 manifest 文件声明了同名 agent。
     #[error("duplicate agent name `{0}` across manifest files")]
     DuplicateName(String),
+    /// 读取 manifest 文件失败。
     #[error("failed to read `{path}`: {source}")]
     Io {
+        /// 出错的 manifest 文件路径。
         path: PathBuf,
+        /// 底层 IO 错误。
         #[source]
         source: std::io::Error,
     },
+    /// 解析 manifest 失败（内层错误见 `source`）。
     #[error("failed to parse manifest `{path}`: {source}")]
     Parse {
+        /// 出错的 manifest 文件路径。
         path: PathBuf,
+        /// 内层解析错误。
         #[source]
         source: Box<ManifestError>,
     },
@@ -210,7 +240,10 @@ pub enum ManifestError {
 /// `Result<_, ManifestError>` 用于返回 `Result<_, DeepseeknovaError>` 的函数。
 impl From<ManifestError> for deepseeknova_core::DeepseeknovaError {
     fn from(err: ManifestError) -> Self {
-        deepseeknova_core::DeepseeknovaError::Agent(err.to_string())
+        deepseeknova_core::DeepseeknovaError::Agent {
+            message: err.to_string(),
+            source: Some(Box::new(err)),
+        }
     }
 }
 

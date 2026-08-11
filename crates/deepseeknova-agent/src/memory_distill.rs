@@ -15,8 +15,11 @@ use tracing::warn;
 pub struct DistilledKnowledge {
     /// "skill"（怎么做得好）或 "lesson"（该避免什么）。
     pub kind: String,
+    /// 知识标题（一句话概括）。
     pub title: String,
+    /// 可操作的正文内容。
     pub body: String,
+    /// 检索用标签。
     pub tags: Vec<String>,
 }
 

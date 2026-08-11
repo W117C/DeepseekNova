@@ -28,6 +28,7 @@ fn handle(ctx: &ToolContext) -> Option<MemoryHandle> {
 // RememberTool
 // ---------------------------------------------------------------------------
 
+/// 把一条 key-value 记忆持久化到跨会话记忆库（`remember`），同 key 覆盖旧值。
 pub struct RememberTool;
 
 #[derive(Deserialize)]
@@ -43,7 +44,7 @@ impl Tool for RememberTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "remember".to_string(),
-            description: "Persists a memory (key overwrites).".to_string(),
+            description: "Persists a key-value memory to the cross-session memory store (SQLite). Same key overwrites prior value. Memories are recalled by semantic similarity to future queries.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -87,7 +88,7 @@ impl Tool for RememberTool {
         let existed = tokio::task::spawn_blocking(move || h.remember(&key, &value, parsed.tags))
             .await
             .map_err(|e| {
-                DeepseeknovaError::Tool(format!("memory remember blocking task failed: {e}"))
+                DeepseeknovaError::tool(format!("memory remember blocking task failed: {e}"))
             })??;
         Ok(if existed {
             format!("updated memory '{}'", sanitized_key)
@@ -101,6 +102,7 @@ impl Tool for RememberTool {
 // ForgetTool
 // ---------------------------------------------------------------------------
 
+/// 从跨会话记忆库删除指定 key 的记忆（`forget`）。
 pub struct ForgetTool;
 
 #[derive(Deserialize)]
@@ -113,7 +115,7 @@ impl Tool for ForgetTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "forget".to_string(),
-            description: "Deletes a memory.".to_string(),
+            description: "Deletes a memory by key from the cross-session memory store.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {"key": {"type": "string", "description": "Key."}},
@@ -152,6 +154,7 @@ impl Tool for ForgetTool {
 // RecallTool
 // ---------------------------------------------------------------------------
 
+/// 按语义相似度召回历史记忆，返回排序后的 top-k 条目（`recall`）。
 pub struct RecallTool;
 
 #[derive(Deserialize)]
@@ -170,7 +173,7 @@ impl Tool for RecallTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "recall".to_string(),
-            description: "Searches memories.".to_string(),
+            description: "Searches the cross-session memory store by semantic similarity to the query. Returns top_k matching memories with key, value, and tags.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -217,7 +220,7 @@ impl Tool for RecallTool {
         })
         .await
         .map_err(|e| {
-            DeepseeknovaError::Tool(format!("memory recall blocking task failed: {e}"))
+            DeepseeknovaError::tool(format!("memory recall blocking task failed: {e}"))
         })??;
         if results.is_empty() {
             return Ok(format!("no matches for '{}'", query));

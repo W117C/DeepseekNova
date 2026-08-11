@@ -1,12 +1,19 @@
 use std::time::Duration;
 
+/// 资源限制：约束工具执行消耗的各类配额。
 #[derive(Debug, Clone)]
 pub struct ResourceLimits {
+    /// 单次任务最多处理/涉及的文件数。
     pub max_files: usize,
+    /// 单个文件的最大字节数。
     pub max_file_size: u64,
+    /// 单次任务累计读取字节数上限。
     pub max_total_read_bytes: u64,
+    /// 单次任务最长执行时长。
     pub max_execution_time: Duration,
+    /// 单次输出最大字节数。
     pub max_output_bytes: u64,
+    /// 单次任务最多工具调用次数。
     pub max_tool_calls: usize,
 }
 

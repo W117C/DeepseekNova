@@ -7,6 +7,8 @@ use serde_json::json;
 // TodoWriteTool — structured task tracking
 // ---------------------------------------------------------------------------
 
+/// Manages the session's structured task list: replaces the whole list or
+/// merges by id, with pending/in_progress/completed/cancelled statuses.
 pub struct TodoWriteTool;
 
 /// The valid status values for a todo item.
@@ -31,7 +33,7 @@ impl Tool for TodoWriteTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "todo_write".to_string(),
-            description: "Task list; merge=true merges by id.".to_string(),
+            description: "Manages a structured task list for the current session. Use merge=false to replace the entire list, or merge=true to merge by id. Each todo has content, priority (high/medium/low), and status (pending/in_progress/completed).".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -90,18 +92,18 @@ impl Tool for TodoWriteTool {
         // Validate todos
         for (idx, todo) in parsed.todos.iter().enumerate() {
             if todo.id.is_empty() {
-                return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
+                return Err(deepseeknova_core::DeepseeknovaError::tool(format!(
                     "todo item at index {idx} has an empty id"
                 )));
             }
             if todo.content.is_empty() {
-                return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
+                return Err(deepseeknova_core::DeepseeknovaError::tool(format!(
                     "todo item '{}' has empty content",
                     todo.id
                 )));
             }
             if !VALID_STATUSES.contains(&todo.status.as_str()) {
-                return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
+                return Err(deepseeknova_core::DeepseeknovaError::tool(format!(
                     "todo item '{}' has invalid status '{}'; must be one of: {:?}",
                     todo.id, todo.status, VALID_STATUSES
                 )));

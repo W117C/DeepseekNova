@@ -55,10 +55,15 @@ impl ModelRole {
 /// Accumulated token counts for one (role, model) pair.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UsageBucket {
+    /// Total prompt tokens (including those served from the context cache).
     pub prompt_tokens: u64,
+    /// Total completion (output) tokens billed.
     pub completion_tokens: u64,
+    /// Tokens spent on the model's internal reasoning.
     pub reasoning_tokens: u64,
+    /// Prompt tokens served from the DeepSeek context cache.
     pub cache_hit_tokens: u64,
+    /// Prompt tokens that missed the context cache.
     pub cache_miss_tokens: u64,
     /// Calls that reported a usage chunk.
     pub metered_calls: u64,
@@ -70,7 +75,9 @@ pub struct UsageBucket {
 /// Optional USD prices for one model, in $/1M tokens.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ModelPrices {
+    /// Price per 1M prompt tokens, in USD.
     pub input_per_mtok: Option<f64>,
+    /// Price per 1M completion tokens, in USD.
     pub output_per_mtok: Option<f64>,
     /// Falls back to `input_per_mtok` when unset.
     pub cache_hit_per_mtok: Option<f64>,
@@ -82,8 +89,11 @@ pub type PriceTable = HashMap<String, ModelPrices>;
 /// One line of a [`CostReport`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CostRow {
+    /// Model name this row accounts for.
     pub model: String,
+    /// Pipeline role the tokens were attributed to.
     pub role: ModelRole,
+    /// Accumulated token counts for this (model, role) pair.
     pub bucket: UsageBucket,
     /// USD estimate; `None` when input or output price is missing.
     pub cost_usd: Option<f64>,
@@ -92,6 +102,7 @@ pub struct CostRow {
 /// Aggregated accounting snapshot.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CostReport {
+    /// One aggregated row per (model, role) pair.
     pub rows: Vec<CostRow>,
     /// Sum over rows that have an estimate; `None` when no row has one.
     pub total_usd: Option<f64>,
@@ -106,6 +117,7 @@ pub struct CostLedger {
 }
 
 impl CostLedger {
+    /// Create an empty ledger.
     pub fn new() -> Self {
         Self::default()
     }
@@ -209,6 +221,8 @@ pub struct MeteredProvider {
 }
 
 impl MeteredProvider {
+    /// Wrap `inner` so every call it makes is accounted under the given
+    /// `(role, model)` into the shared `ledger`.
     pub fn new(
         inner: Arc<dyn Provider>,
         role: ModelRole,

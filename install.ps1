@@ -3,8 +3,8 @@
 # Usage:
 #   irm https://raw.githubusercontent.com/W117C/DeepseekNova/main/install.ps1 | iex
 #   powershell -ExecutionPolicy Bypass -File install.ps1
-#   powershell -ExecutionPolicy Bypass -File install.ps1 -Version 0.4.0
-#   powershell -ExecutionPolicy Bypass -File install.ps1 -Version 0.4.0 -InstallDir C:\tools
+#   powershell -ExecutionPolicy Bypass -File install.ps1 -Version 0.5.0
+#   powershell -ExecutionPolicy Bypass -File install.ps1 -Version 0.5.0 -InstallDir C:\tools
 #
 # Downloads the release binary for x86_64 Windows, verifies its SHA-256 against
 # the release's checksums.txt, then installs it to $HOME\.deepseeknova\bin.

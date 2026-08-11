@@ -12,8 +12,11 @@ use crate::agent_manifest::is_valid_agent_name;
 /// 一个 @ 引用的命中位置。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mention {
+    /// 被引用的 agent 名（不含 `@`）。
     pub name: String,
+    /// 引用起始字节偏移（`@` 所在位置）。
     pub start: usize,
+    /// 引用结束字节偏移（不含，名尾后一字节）。
     pub end: usize,
 }
 
@@ -105,6 +108,7 @@ pub fn resolve_mention(text: &str, known: &[String]) -> Result<Option<Mention>, 
 /// @-mention 消歧失败。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum MentionError {
+    /// 引用命中多个已知子代理，需精确指定唯一一个。
     #[error("ambiguous @-mention: matches multiple sub-agents {0:?} — reference exactly one")]
     Ambiguous(Vec<String>),
 }
@@ -115,7 +119,10 @@ pub enum MentionError {
 /// `Result<_, MentionError>` 用于返回 `Result<_, DeepseeknovaError>` 的函数。
 impl From<MentionError> for deepseeknova_core::DeepseeknovaError {
     fn from(err: MentionError) -> Self {
-        deepseeknova_core::DeepseeknovaError::Agent(err.to_string())
+        deepseeknova_core::DeepseeknovaError::Agent {
+            message: err.to_string(),
+            source: Some(Box::new(err)),
+        }
     }
 }
 

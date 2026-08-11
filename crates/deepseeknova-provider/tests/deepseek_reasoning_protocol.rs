@@ -3,7 +3,15 @@
 //!
 //! 运行：DEEPSEEK_API_KEY=xxx cargo test --test deepseek_reasoning_protocol -- --ignored --nocapture
 //! 验证：cargo test --test deepseek_reasoning_protocol  (ignored，不跑；只编译)
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    clippy::dbg_macro
+)]
 
 #[tokio::test]
 #[ignore]

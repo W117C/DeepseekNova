@@ -66,12 +66,16 @@ crates/
 ├── deepseeknova-store/        # 存储层
 ├── deepseeknova-security/     # 安全审计、路径检查、策略、质量规则（QualityPolicy）、失败模式库（failure_pattern）、shell 只读分类（readonly）、子代理输出净化（sanitize）
 ├── deepseeknova-scanner/      # 安全扫描（deepsec 式静态规则 + AI 调查 + 报表）
-├── deepseeknova-sandbox/      # 沙箱（bubblewrap、seatbelt）
+├── deepseeknova-sandbox/      # 沙箱（bubblewrap、seatbelt、Windows Job Object）
 ├── deepseeknova-skills/       # 技能加载（含 fitness 生命周期：使用/成功记录、进化建议、deprecated 过滤）
 ├── deepseeknova-telemetry/    # 遥测
 ├── deepseeknova-serve/        # HTTP 服务（含会话诊断/评分卡端点）
 ├── deepseeknova-tui/          # TUI
 ```
+
+> 另有 `npm/deepseeknova` npm 安装包（postinstall 从 GitHub Releases 下载
+> 平台二进制 + SHA-256 校验，版本经 bump 脚本同步）与 `scripts/tui-screenshot.py`
+> （README 截图生成脚本）。
 
 > 桌面端前端工程（`crates/deepseeknova-desktop`）已于 2026-08-08 整体移除
 > （非 cargo 脚手架，不在 22 crate 清单内；历史可经 git 追溯，先例
@@ -88,6 +92,8 @@ make test           # cargo test --all
 make fmt            # 格式化代码
 make clippy-fix     # clippy 自动修复
 make audit          # 安全审计（先检查 cargo-deny，再执行 cargo deny --all-features check）
+make test-count     # 在 Linux 上运行 cargo test --all，按 passed 总数同步 README 测试数（非 Linux 拒绝覆盖）
+make test-count-check  # 校验 README 测试数与 Linux CI 的 passed 总数一致（CI 已接入；非 Linux 本地跳过比对）
 ```
 
 > **云端安全审查不可用时的回退验收路径**：交付/推送前若云端安全审查（如 L3 深度安全审查）因外部资源不可用（如积分耗尽）暂时无法执行，先以项目内既有手段留存验收证据：运行 `make check` 与 `make audit`，记录两者结果与待补审查项，待服务恢复后补跑云端审查，不因此新增脚本、修改 CI 或引入新工具。注意 `make audit` 配方会先检查 `cargo-deny` 是否安装，然后直接执行 `cargo deny --all-features check`（与 CI `.github/workflows/security.yml` 的 cargo deny 任务对齐；本地缺 cargo-deny 时目标会打印安装提示并退出）。CI 侧另有带 RUSTSEC ignore 清单的 cargo-audit 任务，推送后由 security.yml 自动覆盖，ignore 理由见 `deny.toml` 的 `[advisories].ignore`。
@@ -110,7 +116,7 @@ make audit          # 安全审计（先检查 cargo-deny，再执行 cargo deny
 
 最小调试入口：
 
-- **CLI**：日志经 `tracing` 输出到终端（固定 INFO 级，见 `crates/deepseeknova-cli/src/main.rs`，不读 `RUST_LOG`；启用 `[telemetry] enabled=true` 时改装 OTLP 管线、日志经 OTLP 导出，终端不再打印 INFO 文本，属刻意权衡）；运行时派生数据在工作区 `.deepseeknova/`（`graph.db` 代码图索引、`memory.db` 记忆库）；配置层级为 `~/.deepseeknova/config.toml`（用户）+ `./deepseeknova.toml`（项目）；release 产物在 `target/release/deepseeknova-cli`。任务质量闭环（ToolHook 链 + 写后策略评估 + 诊断/评分卡）由 `[quality] enabled`（默认 true）控制，见 GUIDE.md；评分卡与诊断报告落盘于工作区 `.deepseeknova/metrics/`。聚焦测试：`cargo test -p <crate> <测试名过滤词>`
+- **CLI**：日志经 `tracing` 输出到终端（不读 `RUST_LOG`；TUI 模式 OFF、非 TUI chat 为 WARN、其余命令 INFO，见 `crates/deepseeknova-cli/src/main.rs`；启用 `[telemetry] enabled=true` 时改装 OTLP 管线、日志经 OTLP 导出，终端不再打印 INFO 文本，属刻意权衡）；运行时派生数据在工作区 `.deepseeknova/`（`graph.db` 代码图索引、`memory.db` 记忆库）；配置层级为 `~/.deepseeknova/config.toml`（用户）+ `./deepseeknova.toml`（项目）；release 产物在 `target/release/deepseeknova-cli`。任务质量闭环（ToolHook 链 + 写后策略评估 + 诊断/评分卡）由 `[quality] enabled`（默认 true）控制，见 GUIDE.md；评分卡与诊断报告落盘于工作区 `.deepseeknova/metrics/`。聚焦测试：`cargo test -p <crate> <测试名过滤词>`
 
 ---
 
@@ -243,6 +249,21 @@ make audit          # 安全审计（先检查 cargo-deny，再执行 cargo deny
   必须显式 `.map_err(DeepseeknovaError::from)?` 或归类到具体变体
   （如 `.map_err(|e| DeepseeknovaError::Tool(e.to_string()))?`）；不要假设
   `?` 会自动多步转换
+- [GitHub Actions job 级 if 引用 secrets]：`secrets` context 在 job 级 `if`
+  中不可用，表达式求值报 `Unrecognized named-value: 'secrets'`，tag 发布
+  workflow 必失败（release.yml npm-publish 曾中招）
+- [如何避免]：token 经 job 级 `env` 透传，用 step 级 `if: env.X != ''` 门控；
+  不要把 `secrets` 写进 job/step 的 `if` 表达式
+- [cfg 兜底分支未排除新增平台]：新增 `#[cfg(windows)]` 分支后，既有
+  `#[cfg(not(any(macos, linux)))]` 兜底在 Windows 仍编译，两个块并存导致
+  E0308（Windows JobSandbox 后端曾无法构建）
+- [如何避免]：新增平台分支时同步把该平台加进所有兜底 `not(any(...))` 条件；
+  用 `rustc --target <平台>` 交叉编译定向复现
+- [发布产物版本双源不同步]：`npm/deepseeknova/package.json` 写死版本，bump
+  脚本只改 Cargo.toml，发布 tag 与 npm 包版本脱节（npm publish 撞旧版本或
+  下载错误资产）
+- [如何避免]：bump 脚本同步改写 npm 包 manifest；CI 发布前用 tag 派生
+  `npm version --no-git-tag-version`
 
 ---
 

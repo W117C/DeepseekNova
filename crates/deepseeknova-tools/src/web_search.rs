@@ -31,6 +31,9 @@ pub fn web_search_tools(cfg: &deepseeknova_config::ToolsConfig) -> Vec<Arc<dyn T
     }
 }
 
+/// Searches the web via a configured provider (duckduckgo/tavily/bing/searxng)
+/// and returns ranked results (title, URL, snippet), re-checking domain and
+/// SSRF safety at every redirect hop.
 pub struct WebSearchTool {
     cfg: WebSearchConfig,
     /// 进程级/工具级一次构造的共享客户端：不自动跟随重定向，每个跳点
@@ -48,7 +51,7 @@ impl WebSearchTool {
             // 不自动跟随重定向：每个跳点都要重新做域名/SSRF 校验（同 web_fetch）。
             .redirect(reqwest::redirect::Policy::none())
             .build()
-            .map_err(|e| DeepseeknovaError::Tool(format!("failed to build HTTP client: {e}")))?;
+            .map_err(|e| DeepseeknovaError::tool(format!("failed to build HTTP client: {e}")))?;
         Ok(Self { cfg, client })
     }
 }
@@ -107,7 +110,7 @@ impl Tool for WebSearchTool {
         )?;
         let parsed: WebSearchArgs = serde_json::from_str(args)?;
         if parsed.query.trim().is_empty() {
-            return Err(deepseeknova_core::DeepseeknovaError::Tool(
+            return Err(deepseeknova_core::DeepseeknovaError::tool(
                 "web_search: query must not be empty".to_string(),
             ));
         }
@@ -142,14 +145,14 @@ impl Tool for WebSearchTool {
                     .send()
                     .await
                     .map_err(|e| {
-                        DeepseeknovaError::Tool(format!("tavily search request failed: {e}"))
+                        DeepseeknovaError::tool(format!("tavily search request failed: {e}"))
                     })?;
                 let status = resp.status();
                 let text = resp.text().await.map_err(|e| {
-                    DeepseeknovaError::Tool(format!("tavily search response read failed: {e}"))
+                    DeepseeknovaError::tool(format!("tavily search response read failed: {e}"))
                 })?;
                 if !status.is_success() {
-                    return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
+                    return Err(deepseeknova_core::DeepseeknovaError::tool(format!(
                         "tavily search failed (HTTP {status}): {}",
                         truncate(&text, 300)
                     )));
@@ -177,7 +180,7 @@ impl Tool for WebSearchTool {
                 )
                 .await?;
                 if !status.is_success() {
-                    return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
+                    return Err(deepseeknova_core::DeepseeknovaError::tool(format!(
                         "bing search failed (HTTP {status}): {}",
                         truncate(&text, 300)
                     )));
@@ -186,7 +189,7 @@ impl Tool for WebSearchTool {
             }
             "searxng" => {
                 let base = self.cfg.base_url.as_deref().ok_or_else(|| {
-                    DeepseeknovaError::Tool("web_search: searxng requires base_url".to_string())
+                    DeepseeknovaError::tool("web_search: searxng requires base_url".to_string())
                 })?;
                 let url = format!(
                     "{}/search?q={}&format=json",
@@ -195,7 +198,7 @@ impl Tool for WebSearchTool {
                 );
                 let (status, text) = search_get(ctx, client, &url, &[]).await?;
                 if !status.is_success() {
-                    return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
+                    return Err(deepseeknova_core::DeepseeknovaError::tool(format!(
                         "searxng search failed (HTTP {status}): {}",
                         truncate(&text, 300)
                     )));
@@ -209,7 +212,7 @@ impl Tool for WebSearchTool {
                 );
                 let (status, text) = search_get(ctx, client, &url, &[]).await?;
                 if !status.is_success() {
-                    return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
+                    return Err(deepseeknova_core::DeepseeknovaError::tool(format!(
                         "duckduckgo search failed (HTTP {status}): {}",
                         truncate(&text, 300)
                     )));
@@ -217,7 +220,7 @@ impl Tool for WebSearchTool {
                 parse_ddg(&text)?
             }
             other => {
-                return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
+                return Err(deepseeknova_core::DeepseeknovaError::tool(format!(
                     "unknown web_search provider '{other}' \
                      (supported: ddg, tavily, bing, searxng)"
                 )))
@@ -245,7 +248,7 @@ impl Tool for WebSearchTool {
 fn env_api_key(env_override: Option<&str>, default_env: &str) -> Result<String, DeepseeknovaError> {
     let name = env_override.unwrap_or(default_env);
     std::env::var(name).map_err(|_| {
-        DeepseeknovaError::Tool(format!(
+        DeepseeknovaError::tool(format!(
             "web_search: provider requires API key; set environment variable {name} \
              or configure [tools.web_search] api_key_env"
         ))
@@ -258,10 +261,10 @@ fn check_domain_allowed(ctx: &ToolContext, url: &str) -> Result<(), Deepseeknova
         .get::<deepseeknova_security::context::SecurityContext>()
     {
         let parsed = url::Url::parse(url)
-            .map_err(|e| DeepseeknovaError::Tool(format!("invalid search URL: {e}")))?;
+            .map_err(|e| DeepseeknovaError::tool(format!("invalid search URL: {e}")))?;
         if let Some(host) = parsed.host_str() {
             if !sec.policy.is_domain_allowed(host) {
-                return Err(DeepseeknovaError::Tool(format!(
+                return Err(DeepseeknovaError::tool(format!(
                     "Security violation: domain '{host}' is blocked by security policy"
                 )));
             }
@@ -283,10 +286,10 @@ async fn search_get(
     for _ in 0..=MAX_SEARCH_REDIRECTS {
         check_domain_allowed(ctx, &current)?;
         let parsed = url::Url::parse(&current)
-            .map_err(|e| DeepseeknovaError::Tool(format!("invalid search URL '{current}': {e}")))?;
+            .map_err(|e| DeepseeknovaError::tool(format!("invalid search URL '{current}': {e}")))?;
         let host = parsed
             .host_str()
-            .ok_or_else(|| DeepseeknovaError::Tool(format!("search URL has no host: {current}")))?;
+            .ok_or_else(|| DeepseeknovaError::tool(format!("search URL has no host: {current}")))?;
         crate::web_fetch::validate_host_ssrf(host).await?;
 
         let mut req = client.get(&current);
@@ -294,7 +297,7 @@ async fn search_get(
             req = req.header(*name, *value);
         }
         let resp = req.send().await.map_err(|e| {
-            DeepseeknovaError::Tool(format!("search request to '{current}' failed: {e}"))
+            DeepseeknovaError::tool(format!("search request to '{current}' failed: {e}"))
         })?;
         let status = resp.status();
         if status.is_redirection() {
@@ -303,24 +306,24 @@ async fn search_get(
                 .get(reqwest::header::LOCATION)
                 .and_then(|v| v.to_str().ok())
                 .ok_or_else(|| {
-                    DeepseeknovaError::Tool(format!(
+                    DeepseeknovaError::tool(format!(
                         "search redirect (HTTP {status}) missing Location header"
                     ))
                 })?;
             current = parsed
                 .join(location)
                 .map_err(|e| {
-                    DeepseeknovaError::Tool(format!("invalid redirect location '{location}': {e}"))
+                    DeepseeknovaError::tool(format!("invalid redirect location '{location}': {e}"))
                 })?
                 .to_string();
             continue;
         }
         let text = resp.text().await.map_err(|e| {
-            DeepseeknovaError::Tool(format!("failed to read search response body: {e}"))
+            DeepseeknovaError::tool(format!("failed to read search response body: {e}"))
         })?;
         return Ok((status, text));
     }
-    Err(DeepseeknovaError::Tool(format!(
+    Err(DeepseeknovaError::tool(format!(
         "search endpoint exceeded max redirects ({MAX_SEARCH_REDIRECTS})"
     )))
 }

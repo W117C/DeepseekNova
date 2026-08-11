@@ -20,9 +20,13 @@ use tracing::info;
 /// A snippet record — tracks a file read for edit validation.
 #[derive(Debug, Clone)]
 pub struct Snippet {
+    /// Unique snippet identifier returned to the model.
     pub id: String,
+    /// Absolute file path the snippet was created from.
     pub path: String,
+    /// SHA-256 hex hash of the file content at read time.
     pub content_hash: String,
+    /// First ~100 characters of the content, for human-readable previews.
     pub content_preview: String,
 }
 
@@ -34,6 +38,7 @@ pub struct SnippetTracker {
 }
 
 impl SnippetTracker {
+    /// Create an empty snippet tracker.
     pub fn new() -> Self {
         Self::default()
     }
@@ -97,6 +102,8 @@ pub fn hash_content(content: &str) -> String {
 use std::sync::OnceLock;
 static SNIPPET_TRACKER: OnceLock<Arc<Mutex<SnippetTracker>>> = OnceLock::new();
 
+/// Returns the process-wide singleton snippet tracker, initializing it on
+/// first use.
 pub fn global_tracker() -> &'static Arc<Mutex<SnippetTracker>> {
     SNIPPET_TRACKER.get_or_init(|| Arc::new(Mutex::new(SnippetTracker::new())))
 }

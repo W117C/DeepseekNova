@@ -1,0 +1,32 @@
+{
+  "name": "deepseeknova",
+  "version": "0.5.0",
+  "description": "DeepseekNova CLI — Rust AI agent framework (installs the platform binary from GitHub Releases)",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/W117C/DeepseekNova.git"
+  },
+  "bin": {
+    "deepseeknova": "bin/deepseeknova.js"
+  },
+  "scripts": {
+    "postinstall": "node install.js",
+    "check": "node --check install.js && node --check bin/deepseeknova.js"
+  },
+  "files": [
+    "bin",
+    "install.js",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=16"
+  },
+  "keywords": [
+    "deepseek",
+    "agent",
+    "cli",
+    "ai",
+    "deepseeknova"
+  ]
+}

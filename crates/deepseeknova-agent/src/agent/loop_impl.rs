@@ -271,7 +271,7 @@ pub(crate) async fn run_agent_loop(
                 "agent exceeded max_execution_time ({:?})",
                 security.limits.max_execution_time
             );
-            return Err(DeepseeknovaError::Runner(format!(
+            return Err(DeepseeknovaError::runner(format!(
                 "exceeded max execution time ({:?})",
                 security.limits.max_execution_time
             )));
@@ -281,7 +281,7 @@ pub(crate) async fn run_agent_loop(
                 "agent exceeded max_tool_calls ({})",
                 security.limits.max_tool_calls
             );
-            return Err(DeepseeknovaError::Runner(format!(
+            return Err(DeepseeknovaError::runner(format!(
                 "exceeded max tool calls ({})",
                 security.limits.max_tool_calls
             )));
@@ -302,8 +302,18 @@ pub(crate) async fn run_agent_loop(
         if let Some(ref b) = budget {
             const EXPECTED_TURN_TOKENS: usize = 2048; // 一轮回复的保守预估
             let current = estimate_tokens(&snapshot) as usize;
+            // 计算记忆注入侧 token（<recalled-memory> 标签的 User 消息），
+            // 用于 max_memory_tokens 独立预算判定。
+            let memory_tokens: usize = snapshot
+                .iter()
+                .filter(|m| {
+                    m.role == deepseeknova_core::Role::User
+                        && m.content.contains("<recalled-memory>")
+                })
+                .map(|m| crate::tokens::estimate_text_tokens(&m.content) as usize)
+                .sum();
             use crate::budget::controller::BudgetDecision;
-            match b.evaluate_budget(current, EXPECTED_TURN_TOKENS) {
+            match b.evaluate_budget(current, EXPECTED_TURN_TOKENS, memory_tokens) {
                 BudgetDecision::Allow => {}
                 BudgetDecision::CompressHistory => budget_wants_compress = true,
                 BudgetDecision::Reject(why) => {
@@ -983,7 +993,7 @@ pub(crate) async fn run_agent_loop(
                     .ok();
                     return Ok(());
                 }
-                return Err(DeepseeknovaError::Runner(format!(
+                return Err(DeepseeknovaError::runner(format!(
                     "reached max steps ({max_steps}) without completing the task"
                 )));
             }
@@ -1022,7 +1032,7 @@ pub(crate) async fn run_agent_loop(
         .ok();
         return Ok(());
     }
-    Err(DeepseeknovaError::Runner(format!(
+    Err(DeepseeknovaError::runner(format!(
         "reached max steps ({max_steps}) without completing the task"
     )))
 }
@@ -1126,7 +1136,7 @@ async fn stream_and_process_turn(
             for v in &violations {
                 tracing::error!(?v, "replay invariant violation before provider call");
             }
-            DeepseeknovaError::Runner(format!(
+            DeepseeknovaError::runner(format!(
                 "history replay invariant violated: {} violation(s) detected",
                 violations.len()
             ))
@@ -1356,7 +1366,7 @@ async fn stream_and_process_turn(
                                 // 明确的 fail-closed 说明。
                                 let (approved, deny_reason) = if let Some(responder) = approval {
                                     let approval_id = format!("approval_{}", uuid::Uuid::new_v4());
-                                    // 风险标签同时进 RunEvent 描述（serve/桌面）
+                                    // 风险标签同时进 RunEvent 描述（serve/HTTP）
                                     // 与 responder 描述（TUI 审批浮层直接消费）。
                                     let mut request_desc = call.arguments.clone();
                                     if let Some(risk) = approval_risk_prefix(

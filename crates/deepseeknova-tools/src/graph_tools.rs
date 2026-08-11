@@ -44,9 +44,10 @@ fn lock_index(
 ) -> Result<std::sync::MutexGuard<'_, deepseeknova_graph::GraphIndex>, DeepseeknovaError> {
     handle
         .lock()
-        .map_err(|_| DeepseeknovaError::Tool("graph index lock poisoned".to_string()))
+        .map_err(|_| DeepseeknovaError::tool("graph index lock poisoned".to_string()))
 }
 
+/// 按符号名或关键字在代码图中检索函数/结构体/trait 等实体（`search_code`）。
 pub struct SearchCodeTool;
 
 #[derive(Deserialize)]
@@ -63,7 +64,7 @@ impl Tool for SearchCodeTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "search_code".to_string(),
-            description: "Finds code entities by symbol.".to_string(),
+            description: "Searches the code graph for functions, structs, traits, etc. by symbol name or keyword. Returns matched entities with path and kind. Use this instead of grep when you need semantic code structure.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -149,6 +150,7 @@ impl Tool for SearchCodeTool {
     }
 }
 
+/// 沿调用方向（callers/callees/both）最多 3 跳遍历代码图邻居（`traverse_graph`）。
 pub struct TraverseGraphTool;
 
 #[derive(Deserialize)]
@@ -167,7 +169,7 @@ impl Tool for TraverseGraphTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "traverse_graph".to_string(),
-            description: "Traverses graph neighbors.".to_string(),
+            description: "Traverses code graph neighbors of an entity (callers/callees/both) up to 3 hops. Use this to understand call relationships and impact radius.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -279,6 +281,8 @@ impl Tool for TraverseGraphTool {
     }
 }
 
+/// 按名字取回单个代码实体：skeleton 视图给签名与文档注释，full 视图给带行号的
+/// 源码片段（有 token 上限，完整源码请用 `read_file`）（`retrieve_entity`）。
 pub struct RetrieveEntityTool;
 
 #[derive(Deserialize)]
@@ -293,7 +297,7 @@ impl Tool for RetrieveEntityTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "retrieve_entity".to_string(),
-            description: "skeleton=doc+signatures; full=source lines.".to_string(),
+            description: "Retrieves a code entity from the code graph. view=skeleton gives doc comments + signatures (compact); view=full gives source lines with line numbers (token-capped; use read_file for complete source).".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -356,7 +360,24 @@ impl Tool for RetrieveEntityTool {
                 })
                 .map(|(i, line)| format!("{:>5} | {}", i + 1, line))
                 .collect();
-            return Ok(format!("{rel_path}:{start}-{end}\n{}", lines.join("\n")));
+            let full_text = format!("{rel_path}:{start}-{end}\n{}", lines.join("\n"));
+
+            // token 上限：避免超大函数源码全量注入 prompt 挤占上下文。
+            // 超限时头尾截断，提示用 read_file 按行范围读取完整源码。
+            const FULL_VIEW_TOKEN_CAP: usize = 4000;
+            let estimated = deepseeknova_core::tokens::estimate_text_tokens(&full_text) as usize;
+            if estimated <= FULL_VIEW_TOKEN_CAP {
+                return Ok(full_text);
+            }
+            let char_budget = deepseeknova_core::tokens::chars_for_tokens(FULL_VIEW_TOKEN_CAP);
+            let head: String = full_text.chars().take(char_budget / 2).collect();
+            let tail_chars: Vec<char> = full_text.chars().rev().take(char_budget / 2).collect();
+            let tail: String = tail_chars.into_iter().rev().collect();
+            let total_chars = full_text.chars().count();
+            let omitted = total_chars - head.chars().count() - tail.chars().count();
+            return Ok(format!(
+                "{head}\n\n... [{omitted} chars omitted, ~{estimated} tokens total; use read_file with line range {start}-{end} for full source] ...\n\n{tail}"
+            ));
         }
 
         match idx.skeleton(&parsed.entity) {
@@ -390,6 +411,7 @@ fn direction_label(dir: Direction) -> &'static str {
     }
 }
 
+/// 追踪多跳调用链，含动态分派解析到具体实现（`trace_code`）。
 pub struct TraceCodeTool;
 
 #[derive(Deserialize)]
@@ -501,6 +523,7 @@ impl Tool for TraceCodeTool {
     }
 }
 
+/// 估算重构影响半径：找出哪些代码会到达目标实体（`impact_code`）。
 pub struct ImpactCodeTool;
 
 #[derive(Deserialize)]
@@ -606,6 +629,7 @@ impl Tool for ImpactCodeTool {
     }
 }
 
+/// 把多个实体渲染为按文件分组的带行号源码（`explore_code`）。
 pub struct ExploreCodeTool;
 
 #[derive(Deserialize)]
@@ -760,6 +784,7 @@ fn indent(text: &str, spaces: usize) -> String {
         .join("\n")
 }
 
+/// 检视某文件的 import 与外部依赖；不传实体时给出工作区外部依赖汇总（`deps_code`）。
 pub struct DepsCodeTool;
 
 #[derive(Deserialize)]

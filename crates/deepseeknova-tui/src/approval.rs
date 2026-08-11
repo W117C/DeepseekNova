@@ -14,9 +14,13 @@ use tokio::sync::{mpsc, oneshot};
 /// 一条待审批请求（发送侧 → UI 侧）。
 #[derive(Debug)]
 pub struct ApprovalRequest {
+    /// 请求 id（与 agent 侧回调一致）。
     pub id: String,
+    /// 请求标题（如 `run shell`）。
     pub title: String,
+    /// 可选详细描述（如命令正文）。
     pub description: Option<String>,
+    /// 裁决回传通道：UI 侧经 oneshot 把允许/拒绝发回阻塞中的 agent。
     pub reply: oneshot::Sender<bool>,
 }
 
@@ -27,6 +31,7 @@ pub struct TuiApprovalResponder {
 }
 
 impl TuiApprovalResponder {
+    /// 以给定的请求发送通道构造 responder。
     pub fn new(tx: mpsc::Sender<ApprovalRequest>) -> Self {
         Self { tx }
     }

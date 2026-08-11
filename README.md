@@ -24,7 +24,8 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 [![Rust](https://img.shields.io/badge/rust-stable%201.97-orange.svg)](https://www.rust-lang.org)
 [![Crates](https://img.shields.io/badge/crates-22-green.svg)](#-22-个-crate)
-[![Tests](https://img.shields.io/badge/tests-1689-brightgreen.svg)](#-技术栈)
+<!-- 测试数由 scripts/sync-test-count.py 维护（权威口径：Linux CI 的 cargo test --all passed 总数）：Linux 上 make test-count 刷新，CI 用 make test-count-check 校验 -->
+[![Tests](https://img.shields.io/badge/tests-1828-brightgreen.svg)](#-技术栈)
 
 </div>
 
@@ -32,7 +33,13 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 
 ## 📸 截图
 
-> 截图待补 —— 可运行 `deepseeknova-cli chat --tui` 体验终端 UI（需先配置 `DEEPSEEK_API_KEY`）。
+![TUI 欢迎界面](docs/screenshots/tui-welcome.png)
+
+![TUI 对话](docs/screenshots/tui-chat.png)
+
+> 截图由 [scripts/tui-screenshot.py](scripts/tui-screenshot.py) 在本机真实运行
+> TUI 生成（mock provider + PTY 采集）；也可运行 `deepseeknova-cli chat --tui`
+> 亲自体验（需先配置 `DEEPSEEKNOVA_API_KEY`）。
 
 ---
 
@@ -77,7 +84,10 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 - **安全层** — 路径/命令/域名策略、资源限额、审计日志、敏感文件质量规则
   （no-commit-secret / no-forbidden-path）
 
-> ⚠️ **Windows 安全边界**：当前沙箱隔离仅支持 macOS (Seatbelt) 和 Linux (bubblewrap)。Windows 平台执行 Shell 工具时使用 `NoOpSandbox`（无隔离），后续计划通过 Job Object / AppContainer 补齐。在 Windows 平台上，请谨慎配置 `allowed_commands` 和路径策略。
+> ⚠️ **Windows 安全边界**：Windows 使用 Job Object 沙箱（进程树隔离 + 活动
+> 进程/内存限制）。Job Object **不限制网络与文件系统写路径**——`allow_network
+> = false`、只读档和 `writable_paths` 策略在 Windows 上不生效。在 Windows
+> 平台上，请谨慎配置 `allowed_commands` 和路径策略。
 
 ### 🎪 多 Agent 委派
 - **delegate 子代理** — explorer / coder / tester / reviewer 四类预设，受限工具集 + 信号量并发控制 + 结果封顶回传
@@ -165,7 +175,7 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 | `deepseeknova-mcp` | MCP 协议客户端（stdio / HTTP） |
 | `deepseeknova-metrics` | 会话级效能度量 + 评分卡（四维 + protocol/composite）落盘 |
 | `deepseeknova-graph` | 代码图检索引擎（tree-sitter + SQLite FTS5 + PageRank + repo map） |
-| `deepseeknova-sandbox` | 沙箱 trait + macOS Seatbelt / Linux bubblewrap |
+| `deepseeknova-sandbox` | 沙箱 trait + macOS Seatbelt / Linux bubblewrap / Windows Job Object |
 | `deepseeknova-permission` | Allow / Ask / Deny 权限门控 |
 | `deepseeknova-security` | 路径限制、资源限额、审计日志、质量规则、失败模式库 |
 | `deepseeknova-scanner` | deepsec 式安全扫描：规则匹配 + 可选 AI 调查（`scan` 子命令） |
@@ -216,6 +226,16 @@ irm https://raw.githubusercontent.com/W117C/DeepseekNova/main/install.ps1 | iex
 
 > 💡 当前最新发布为 **v0.5.0**，assets 覆盖全部 5 个平台（macOS Intel / macOS ARM / Linux x86_64 / Linux ARM64 / Windows x86_64）。
 
+#### npm 安装
+
+```bash
+npm install -g deepseeknova
+deepseeknova --help
+```
+
+包内 `postinstall` 从 GitHub Releases 下载当前平台二进制并校验 SHA-256，
+`deepseeknova` 命令直接转发到原生 CLI。
+
 已安装 Rust 工具链？也可用 [cargo-binstall](https://github.com/cargo-bins/cargo-binstall) 直接从 GitHub Releases 拉取预编译二进制：
 
 ```bash
@@ -235,14 +255,14 @@ cargo build --release -p deepseeknova-cli
 
 ```bash
 deepseeknova-cli setup          # 向导写入 ~/.deepseeknova/config.toml
-export DEEPSEEK_API_KEY="sk-..." # 再设置 API key（向导会提示变量名）
+export DEEPSEEKNOVA_API_KEY="sk-..." # 再设置 API key（向导会提示变量名）
 ```
 
 也可以手写配置（推荐用环境变量注入密钥，避免将 API key 写入配置文件）：
 
 ```bash
 # 推荐方式：通过环境变量
-export DEEPSEEK_API_KEY="your-api-key"
+export DEEPSEEKNOVA_API_KEY="your-api-key"
 ```
 
 ```toml
@@ -254,13 +274,14 @@ name = "deepseek"
 kind = "openai-compatible"
 base_url = "https://api.deepseek.com/v1"
 # 从环境变量读取，不硬编码到配置文件
-api_key_env = "DEEPSEEK_API_KEY"
+api_key_env = "DEEPSEEKNOVA_API_KEY"
 model = "deepseek-chat"
 ```
 
-> 💡 `DEEPSEEK_API_KEY` 是代码默认读取的环境变量名（`api_key_env` 未配置时），
-> 也支持 `api_key` 字段直接写入，但 **不推荐**——容易误提交到版本控制。
-> 其他 provider（如 Anthropic）默认读 `ANTHROPIC_API_KEY`。
+> 💡 `DEEPSEEKNOVA_API_KEY` 是代码默认读取的环境变量名（`api_key_env` 未配置
+> 时），并兼容旧名 `DEEPSEEK_API_KEY`（新名优先，旧名仅作回退）。也支持
+> `api_key` 字段直接写入，但 **不推荐**——容易误提交到版本控制。其他
+> provider（如 Anthropic）默认读 `ANTHROPIC_API_KEY`。
 
 ### 使用
 
@@ -304,7 +325,7 @@ running 任务自动标记 interrupted，可重新拉起）。
 | 后端 | Rust + SQLite FTS5 + tokio + axum |
 | 前端 | TUI (ratatui) · CLI (clap) · HTTP API (axum + SSE) |
 | 追踪 | OpenTelemetry (OTLP) |
-| 测试 | 1689 tests · cargo-llvm-cov · CI 三平台 |
+| 测试 | 1828 tests · cargo-llvm-cov · CI 三平台 |
 
 ## 📄 License
 

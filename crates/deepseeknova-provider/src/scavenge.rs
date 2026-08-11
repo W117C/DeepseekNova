@@ -1,5 +1,9 @@
 use serde_json::Value;
 
+/// State machine that scavenges complete JSON objects out of a streaming text
+/// feed. Feed it chunks with [`ScavengeStateMachine::process_chunk`]; it
+/// buffers only the characters inside the outermost `{...}` pair and returns
+/// each fully-balanced, parseable JSON value as soon as it is closed.
 pub struct ScavengeStateMachine {
     brace_count: i32,
     in_string: bool,
@@ -14,6 +18,7 @@ impl Default for ScavengeStateMachine {
 }
 
 impl ScavengeStateMachine {
+    /// Create an empty scavenger.
     pub fn new() -> Self {
         Self {
             brace_count: 0,

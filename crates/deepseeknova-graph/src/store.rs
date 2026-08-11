@@ -13,8 +13,11 @@ use std::time::UNIX_EPOCH;
 /// 邻居遍历方向。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
+    /// 入边方向：谁引用了/调用了目标（src → 目标）。
     Callers,
+    /// 出边方向：目标引用了/调用了谁（目标 → dst）。
     Callees,
+    /// 双向：入边与出边都展开。
     Both,
 }
 
@@ -27,7 +30,9 @@ const MAX_PATHS: usize = 100;
 /// 追踪结果：路径按调用方向排列（callers 为「源 → … → 目标」）。
 #[derive(Debug, Default)]
 pub struct TraceResult {
+    /// 找到的路径（每条为完整节点链）。
     pub paths: Vec<Vec<Node>>,
+    /// 是否因最大跳数或路径数上限而截断。
     pub truncated: bool,
 }
 
@@ -126,9 +131,13 @@ impl<'a> TraceExpander<'a> {
 /// refresh 统计报告。
 #[derive(Debug, Clone, Default)]
 pub struct RefreshReport {
+    /// 本次扫描到的文件总数。
     pub files_indexed: usize,
+    /// 实际重新解析的文件数（内容变更）。
     pub files_reparsed: usize,
+    /// refresh 后库中节点总数。
     pub nodes: usize,
+    /// refresh 后库中边总数。
     pub edges: usize,
 }
 
@@ -190,9 +199,13 @@ pub struct Store {
 /// `score == bm25 + cosine`。
 #[derive(Debug, Clone)]
 pub struct HybridHit {
+    /// 命中的节点。
     pub node: Node,
+    /// 归一化词法分量（`weight * 归一化 BM25`，对总分的加性贡献）。
     pub bm25: f64,
+    /// 语义分量（`(1 - weight) * max(余弦, 0)`，对总分的加性贡献）。
     pub cosine: f64,
+    /// 融合总分（`score == bm25 + cosine`）。
     pub score: f64,
 }
 

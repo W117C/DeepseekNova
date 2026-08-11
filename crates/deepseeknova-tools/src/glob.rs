@@ -3,6 +3,8 @@ use deepseeknova_core::{DeepseeknovaError, Tool, ToolContext, ToolSchema};
 use serde::Deserialize;
 use serde_json::json;
 
+/// Finds files by glob pattern (e.g. `"**/*.rs"`), returning matching paths
+/// sorted by name; only paths resolving inside the workspace are returned.
 pub struct GlobTool;
 
 #[derive(Deserialize)]
@@ -17,7 +19,7 @@ impl Tool for GlobTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "glob".to_string(),
-            description: "Finds files by glob.".to_string(),
+            description: "Finds files by glob pattern (e.g. \"**/*.rs\", \"src/*.ts\"). Returns matching file paths sorted by modification time. Use this to locate files by name pattern.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -66,7 +68,7 @@ impl Tool for GlobTool {
 
         let mut matches: Vec<String> = Vec::new();
         let paths = glob::glob(&pattern_str).map_err(|e| {
-            DeepseeknovaError::Tool(format!("invalid glob pattern '{pattern_str}': {e}"))
+            DeepseeknovaError::tool(format!("invalid glob pattern '{pattern_str}': {e}"))
         })?;
 
         for entry in paths {

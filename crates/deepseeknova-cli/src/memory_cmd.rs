@@ -107,7 +107,7 @@ pub fn run_list(
         v
     } else {
         let cat = parse_category(category)
-            .map_err(|e| deepseeknova_core::DeepseeknovaError::Config(e.to_string()))?;
+            .map_err(|e| deepseeknova_core::DeepseeknovaError::config(e.to_string()))?;
         engine.list_with_lifecycle(cat)?
     };
     let filtered = filter_memories(entries, &ListFilter { stage, tag, search });
@@ -135,7 +135,7 @@ pub fn run_edit(
 ) -> Result<(), deepseeknova_core::DeepseeknovaError> {
     let new_content = content.join(" ");
     if new_content.trim().is_empty() {
-        return Err(deepseeknova_core::DeepseeknovaError::Config(
+        return Err(deepseeknova_core::DeepseeknovaError::config(
             "memory edit <id> <content>：内容不能为空".to_string(),
         ));
     }
@@ -226,7 +226,7 @@ pub fn run_replay(
 ) -> Result<(), deepseeknova_core::DeepseeknovaError> {
     let q = query.join(" ");
     if q.trim().is_empty() {
-        return Err(deepseeknova_core::DeepseeknovaError::Config(
+        return Err(deepseeknova_core::DeepseeknovaError::config(
             "memory replay <query>：查询不能为空".to_string(),
         ));
     }

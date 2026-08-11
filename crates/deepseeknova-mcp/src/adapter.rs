@@ -83,7 +83,7 @@ impl Tool for McpToolAdapter {
             .join("\n");
 
         if result.is_error {
-            return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
+            return Err(deepseeknova_core::DeepseeknovaError::tool(format!(
                 "MCP tool error: {text}"
             )));
         }

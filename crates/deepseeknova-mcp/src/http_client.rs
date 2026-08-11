@@ -40,7 +40,9 @@ enum SendError {
 impl From<SendError> for DeepseeknovaError {
     fn from(e: SendError) -> Self {
         match e {
-            SendError::SessionExpired => DeepseeknovaError::Runner("MCP session expired".into()),
+            SendError::SessionExpired => {
+                DeepseeknovaError::runner("MCP session expired".to_string())
+            }
             SendError::Other(err) => err,
         }
     }
@@ -97,7 +99,7 @@ impl McpHttpConnection {
         let client = reqwest::Client::builder()
             .timeout(request_timeout)
             .build()
-            .map_err(|e| DeepseeknovaError::Runner(format!("failed to build HTTP client: {e}")))?;
+            .map_err(|e| DeepseeknovaError::runner(format!("failed to build HTTP client: {e}")))?;
 
         // Try to discover a legacy SSE POST endpoint first. Servers without
         // one are streamable HTTP endpoints served at the URL itself.
@@ -155,9 +157,9 @@ impl McpHttpConnection {
         let init_result = self
             .negotiate_initialize(request_timeout)
             .await
-            .map_err(|e| DeepseeknovaError::Runner(format!("MCP initialize failed: {e}")))?;
+            .map_err(|e| DeepseeknovaError::runner(format!("MCP initialize failed: {e}")))?;
         let init: InitializeResult = serde_json::from_value(init_result).map_err(|e| {
-            DeepseeknovaError::Runner(format!("failed to parse MCP initialize result: {e}"))
+            DeepseeknovaError::runner(format!("failed to parse MCP initialize result: {e}"))
         })?;
         *self.server_info.write().await = init.server_info;
         *self.server_capabilities.write().await = init.capabilities;
@@ -212,7 +214,7 @@ impl McpHttpConnection {
                             continue;
                         }
                     }
-                    return Err(DeepseeknovaError::Runner(format!(
+                    return Err(DeepseeknovaError::runner(format!(
                         "MCP: no mutually supported protocol version (client {:?}, server {supported:?})",
                         protocol::SUPPORTED_PROTOCOL_VERSIONS
                     )));
@@ -221,7 +223,7 @@ impl McpHttpConnection {
                     .get("message")
                     .and_then(|m| m.as_str())
                     .unwrap_or("unknown error");
-                return Err(DeepseeknovaError::Runner(format!("MCP error: {msg}")));
+                return Err(DeepseeknovaError::runner(format!("MCP error: {msg}")));
             }
 
             return Ok(resp.get("result").cloned().unwrap_or(Value::Null));
@@ -256,8 +258,9 @@ impl McpHttpConnection {
                 self.send_full(method, params, timeout_dur)
                     .await
                     .map_err(|e| match e {
-                        SendError::SessionExpired => DeepseeknovaError::Runner(
-                            "MCP session expired: reconnect did not restore the session".into(),
+                        SendError::SessionExpired => DeepseeknovaError::runner(
+                            "MCP session expired: reconnect did not restore the session"
+                                .to_string(),
                         ),
                         SendError::Other(err) => err,
                     })?
@@ -270,7 +273,7 @@ impl McpHttpConnection {
                 .get("message")
                 .and_then(|m| m.as_str())
                 .unwrap_or("unknown error");
-            return Err(DeepseeknovaError::Runner(format!("MCP error: {msg}")));
+            return Err(DeepseeknovaError::runner(format!("MCP error: {msg}")));
         }
         Ok(resp.get("result").cloned().unwrap_or(Value::Null))
     }
@@ -295,7 +298,7 @@ impl McpHttpConnection {
         info!("MCP session expired; re-running initialize");
         self.handshake(self.request_timeout)
             .await
-            .map_err(|e| DeepseeknovaError::Runner(format!("MCP session reconnect failed: {e}")))?;
+            .map_err(|e| DeepseeknovaError::runner(format!("MCP session reconnect failed: {e}")))?;
         self.reconnect_generation.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -334,7 +337,7 @@ impl McpHttpConnection {
         }
 
         let resp = builder.send().await.map_err(|e| {
-            SendError::Other(DeepseeknovaError::Runner(format!(
+            SendError::Other(DeepseeknovaError::runner(format!(
                 "MCP HTTP POST failed: {e}"
             )))
         })?;
@@ -372,8 +375,8 @@ impl McpHttpConnection {
             if session_header.is_some() {
                 expired = true;
             } else {
-                return Err(SendError::Other(DeepseeknovaError::Runner(
-                    "MCP HTTP error 404: not found".into(),
+                return Err(SendError::Other(DeepseeknovaError::runner(
+                    "MCP HTTP error 404: not found".to_string(),
                 )));
             }
         }
@@ -389,20 +392,20 @@ impl McpHttpConnection {
             } else {
                 body.clone()
             };
-            return Err(SendError::Other(DeepseeknovaError::Runner(format!(
+            return Err(SendError::Other(DeepseeknovaError::runner(format!(
                 "MCP HTTP error {status}: {short_body}"
             ))));
         }
 
         let val: Value = if content_type.contains("text/event-stream") {
             parse_sse_response(&body, id).ok_or_else(|| {
-                SendError::Other(DeepseeknovaError::Runner(format!(
+                SendError::Other(DeepseeknovaError::runner(format!(
                     "MCP SSE response: no event matched request id {id}"
                 )))
             })?
         } else {
             serde_json::from_str(&body).map_err(|e| {
-                SendError::Other(DeepseeknovaError::Runner(format!(
+                SendError::Other(DeepseeknovaError::runner(format!(
                     "failed to parse MCP HTTP response: {e}"
                 )))
             })?
@@ -436,7 +439,7 @@ impl McpHttpConnection {
         }
 
         let resp = builder.send().await.map_err(|e| {
-            DeepseeknovaError::Runner(format!("MCP HTTP notification POST failed: {e}"))
+            DeepseeknovaError::runner(format!("MCP HTTP notification POST failed: {e}"))
         })?;
         let status = resp.status();
         if status != StatusCode::OK
@@ -462,12 +465,12 @@ async fn discover_post_url(
         .send()
         .await
         .map_err(|e| {
-            DeepseeknovaError::Runner(format!("failed to connect to MCP SSE endpoint: {e}"))
+            DeepseeknovaError::runner(format!("failed to connect to MCP SSE endpoint: {e}"))
         })?;
 
     if !response.status().is_success() {
         let status = response.status();
-        return Err(DeepseeknovaError::Runner(format!(
+        return Err(DeepseeknovaError::runner(format!(
             "MCP SSE connection failed: HTTP {status}"
         )));
     }
@@ -477,24 +480,24 @@ async fn discover_post_url(
         let mut buffer = String::new();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| {
-                DeepseeknovaError::Runner(format!("failed to read MCP SSE stream: {e}"))
+                DeepseeknovaError::runner(format!("failed to read MCP SSE stream: {e}"))
             })?;
             buffer.push_str(&String::from_utf8_lossy(&chunk));
             if buffer.len() > 1 << 20 {
-                return Err(DeepseeknovaError::Runner(
-                    "MCP SSE: endpoint event too large".into(),
+                return Err(DeepseeknovaError::runner(
+                    "MCP SSE: endpoint event too large".to_string(),
                 ));
             }
             if let Some(url) = parse_sse_endpoint(&buffer) {
                 return Ok(url);
             }
         }
-        Err(DeepseeknovaError::Runner(
-            "MCP SSE: no 'endpoint' event found in response".into(),
+        Err(DeepseeknovaError::runner(
+            "MCP SSE: no 'endpoint' event found in response".to_string(),
         ))
     })
     .await
-    .map_err(|_| DeepseeknovaError::Runner("MCP SSE discovery timed out".into()))?
+    .map_err(|_| DeepseeknovaError::runner("MCP SSE discovery timed out".to_string()))?
 }
 
 /// Parse the legacy SSE `endpoint` event (an HTTP URL) from a stream chunk.

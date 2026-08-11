@@ -3,7 +3,18 @@
 //! Builds and maintains the agent's contextual understanding of the
 //! workspace: file trees, project memory (DEEPSEEKNOVA.md), and session state.
 
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::dbg_macro
+    )
+)]
 
 pub mod history;
 
@@ -18,10 +29,16 @@ use std::path::{Path, PathBuf};
 // ContextProvider trait — Runtime depends on this, not a concrete engine
 // ---------------------------------------------------------------------------
 
+/// Provides access to the runtime's contextual state: workspace index,
+/// working memory, and project memory. The runtime depends on this trait
+/// rather than on a concrete engine.
 #[async_trait::async_trait]
 pub trait ContextProvider: Send + Sync {
+    /// Returns the scanned workspace index.
     fn workspace(&self) -> &WorkspaceIndex;
+    /// Returns the session-scoped working memory.
     fn working_memory(&self) -> &WorkingMemory;
+    /// Returns the project-scoped memory loaded from the workspace.
     fn project_memory(&self) -> &ProjectMemory;
 }
 
@@ -29,8 +46,12 @@ pub trait ContextProvider: Send + Sync {
 // WorkspaceIndex — scan real filesystem
 // ---------------------------------------------------------------------------
 
+/// The scanned state of the workspace filesystem: the root path and the
+/// resulting file tree, produced by [`WorkspaceIndex::scan`].
 pub struct WorkspaceIndex {
+    /// Workspace root directory.
     pub root: PathBuf,
+    /// Tree of files and directories discovered under the root.
     pub file_tree: FileTree,
 }
 
@@ -160,14 +181,20 @@ fn simple_glob_match(pattern: &str, name: &str) -> bool {
 }
 
 #[derive(Debug, Clone)]
+/// The set of files and directories discovered by a workspace scan.
 pub struct FileTree {
+    /// Flat list of entries (files and directories) under the scanned root.
     pub entries: Vec<FileEntry>,
 }
 
 #[derive(Debug, Clone)]
+/// A single file or directory found during a workspace scan.
 pub struct FileEntry {
+    /// Path relative to the scan root.
     pub path: PathBuf,
+    /// Whether this entry is a directory.
     pub is_dir: bool,
+    /// File size in bytes (0 for directories).
     pub size: u64,
 }
 
@@ -175,6 +202,8 @@ pub struct FileEntry {
 // PromptBuilder — injects tools into messages
 // ---------------------------------------------------------------------------
 
+/// Builds a message sequence for the provider by injecting tool schemas,
+/// project context, and the repo map into the system prompt.
 pub struct PromptBuilder;
 
 impl PromptBuilder {
@@ -254,13 +283,13 @@ impl PromptBuilder {
 // CacheAwarePromptBuilder — DeepSeek V4 prefix cache optimization
 // ---------------------------------------------------------------------------
 ///
-/// **库级公开 API**：供嵌入方自行接线到各自 prompt 构建路径；默认 agent
-/// prompt 路径**未接入**本 builder（真实接入见规划，当前默认 prompt 由
-/// [`PromptBuilder`] 构建）。
-///
 /// DeepSeek V4 uses disk-level automatic prefix caching: identical byte-level
 /// prefixes across requests hit the cache, reducing input token cost by ~90%.
 /// This builder enforces the "stable prefix + volatile suffix" structure.
+///
+/// agent 主路径通过 [`CacheAwarePromptBuilder::build_prefix`] 构造 system
+/// 消息前缀（system prompt + repo_map），获得 prefix hash 用于 cache miss
+/// 诊断；完整 `build` 供嵌入方构造含工具描述与项目记忆的完整 messages。
 ///
 /// ```text
 /// [System Prompt — byte-level fixed]
@@ -278,6 +307,9 @@ pub struct CacheAwarePromptBuilder {
 }
 
 impl CacheAwarePromptBuilder {
+    /// Create a new builder. When `warn_on_cache_miss` is true, a tracing
+    /// warning is emitted whenever the computed prefix hash changes between
+    /// calls (the next request will miss the prefix cache).
     pub fn new(warn_on_cache_miss: bool) -> Self {
         Self {
             last_prefix_hash: None,
@@ -285,22 +317,21 @@ impl CacheAwarePromptBuilder {
         }
     }
 
-    /// Build messages optimized for DeepSeek V4 prefix caching.
+    /// 只构造稳定前缀（system prompt + tools + project_memory + repo_map），
+    /// 返回 `(prefix_content, prefix_hash)`。供 agent 主路径等只需要前缀部分、
+    /// 不需要 builder 构造完整 messages 的调用方使用。
     ///
-    /// Returns (messages, prefix_hash) where prefix_hash identifies the
-    /// stable portion of the prompt. Callers can compare across requests
-    /// to detect cache-invalidating changes.
-    pub fn build(
+    /// `tools` 传空切片则跳过工具描述注入（agent 主路径由 provider 层负责工具
+    /// schema 注入，此处传 `&[]`）。`project_memory` 传 `None` 则跳过项目记忆
+    /// 注入。
+    pub fn build_prefix(
         &mut self,
         system_prompt: &str,
         tools: &[ToolSchema],
-        project_memory: &ProjectMemory,
-        repo_map: Option<&str>,   // stable: global code graph repo map
-        conversation: &[Message], // volatile: conversation history
-        user_input: &str,         // volatile: current user message
-    ) -> (Vec<Message>, String) {
+        project_memory: Option<&ProjectMemory>,
+        repo_map: Option<&str>,
+    ) -> (String, String) {
         use sha2::{Digest, Sha256};
-        let mut messages = Vec::new();
 
         // ── STABLE PREFIX ──────────────────────────────────
         let mut prefix_parts = Vec::new();
@@ -321,8 +352,10 @@ impl CacheAwarePromptBuilder {
         }
 
         // 3. Project memory (DEEPSEEKNOVA.md — stable between config changes)
-        if let Some(ref deepseeknova_md) = project_memory.deepseeknova_md {
-            prefix_parts.push(format!("## Project Context\n\n{deepseeknova_md}"));
+        if let Some(pm) = project_memory {
+            if let Some(ref deepseeknova_md) = pm.deepseeknova_md {
+                prefix_parts.push(format!("## Project Context\n\n{deepseeknova_md}"));
+            }
         }
 
         // 4. Repo map (global code graph — stable within an index generation).
@@ -353,6 +386,28 @@ impl CacheAwarePromptBuilder {
             }
         }
         self.last_prefix_hash = Some(prefix_hash.clone());
+
+        (prefix_content, prefix_hash)
+    }
+
+    /// Build messages optimized for DeepSeek V4 prefix caching.
+    ///
+    /// Returns (messages, prefix_hash) where prefix_hash identifies the
+    /// stable portion of the prompt. Callers can compare across requests
+    /// to detect cache-invalidating changes.
+    pub fn build(
+        &mut self,
+        system_prompt: &str,
+        tools: &[ToolSchema],
+        project_memory: &ProjectMemory,
+        repo_map: Option<&str>,   // stable: global code graph repo map
+        conversation: &[Message], // volatile: conversation history
+        user_input: &str,         // volatile: current user message
+    ) -> (Vec<Message>, String) {
+        let (prefix_content, prefix_hash) =
+            self.build_prefix(system_prompt, tools, Some(project_memory), repo_map);
+
+        let mut messages = Vec::new();
 
         // Push the stable prefix as system message
         messages.push(Message {
@@ -410,7 +465,9 @@ pub enum SectionStability {
 
 /// A section of the prompt with its stability classification.
 pub struct PromptSection {
+    /// The stability classification of this section.
     pub stability: SectionStability,
+    /// The raw bytes of this section's content.
     pub bytes: Vec<u8>,
 }
 
@@ -418,7 +475,9 @@ pub struct PromptSection {
 #[derive(Debug, thiserror::Error)]
 #[error("inserting {attempted:?} section after {last:?} — would break cache prefix ordering")]
 pub struct BuilderOrderError {
+    /// The stability level that was attempted to be inserted.
     pub attempted: SectionStability,
+    /// The stability level of the most recently inserted section.
     pub last: SectionStability,
 }
 
@@ -428,12 +487,11 @@ pub struct BuilderOrderError {
 /// `Result<_, BuilderOrderError>` 用于返回 `Result<_, DeepseeknovaError>` 的函数。
 impl From<BuilderOrderError> for deepseeknova_core::DeepseeknovaError {
     fn from(err: BuilderOrderError) -> Self {
-        deepseeknova_core::DeepseeknovaError::Context(err.to_string())
+        deepseeknova_core::DeepseeknovaError::Context(Box::new(err))
     }
 }
 
-/// **库级公开 API**：供嵌入方自行接线；默认 agent prompt 路径**未接入**
-/// （真实接入见规划）。
+/// **库级公开 API**：供嵌入方自行接线到更严格的前缀稳定性排序场景。
 ///
 /// Enhanced prompt builder that enforces stability ordering at the type level.
 pub struct OrderedPromptBuilder {
@@ -441,6 +499,7 @@ pub struct OrderedPromptBuilder {
 }
 
 impl OrderedPromptBuilder {
+    /// Create an empty builder with no sections.
     pub fn new() -> Self {
         Self {
             sections: Vec::new(),
@@ -529,12 +588,15 @@ pub enum CacheStabilityReport {
     Stable,
     /// Prefix changed — next request will be a cache miss.
     Changed {
+        /// Length of the previously checked prefix.
         previous_len: usize,
+        /// Length of the current prefix.
         current_len: usize,
     },
 }
 
 impl PromptCacheStabilityTracker {
+    /// Create a tracker with no previous prefix recorded.
     pub fn new() -> Self {
         Self {
             last_prefix_hash: None,
@@ -558,6 +620,7 @@ impl PromptCacheStabilityTracker {
         report
     }
 
+    /// Length of the most recently checked prefix.
     pub fn last_prefix_len(&self) -> usize {
         self.last_prefix_len
     }
@@ -711,13 +774,19 @@ mod cache_tests {
 // Memory — three tiers
 // ---------------------------------------------------------------------------
 
+/// The session's in-memory conversation state: message history, the optional
+/// compaction digest, and pinned messages that survive clearing.
 pub struct WorkingMemory {
+    /// Conversation messages in chronological order.
     pub conversation: VecDeque<Message>,
+    /// Optional digest of a previously compacted prefix of the conversation.
     pub compaction_digest: Option<String>,
+    /// Messages pinned to survive `clear` (system prompt, first turn, …).
     pub pinned: Vec<Message>,
 }
 
 impl WorkingMemory {
+    /// Create an empty working memory.
     pub fn new() -> Self {
         Self {
             conversation: VecDeque::new(),
@@ -726,19 +795,24 @@ impl WorkingMemory {
         }
     }
 
+    /// Append a message to the conversation history.
     pub fn add_message(&mut self, message: Message) {
         self.conversation.push_back(message);
     }
 
+    /// Clone the full conversation history as a `Vec<Message>`.
     pub fn get_all(&self) -> Vec<Message> {
         self.conversation.iter().cloned().collect()
     }
 
+    /// Clear the conversation history and the compaction digest. Pinned
+    /// messages are kept.
     pub fn clear(&mut self) {
         self.conversation.clear();
         self.compaction_digest = None;
     }
 
+    /// Remove the last `count` messages from the conversation.
     pub fn rewind(&mut self, count: usize) {
         for _ in 0..count {
             self.conversation.pop_back();
@@ -757,13 +831,19 @@ impl Default for WorkingMemory {
     }
 }
 
+/// Project-level memory loaded from the workspace: persistent memory entries,
+/// the optional DEEPSEEKNOVA.md content, and custom slash commands.
 pub struct ProjectMemory {
+    /// Persistent memory entries keyed by name, loaded from `.deepseeknova/memory`.
     pub auto_memory: HashMap<String, MemoryEntry>,
+    /// Content of DEEPSEEKNOVA.md at the workspace root, if present.
     pub deepseeknova_md: Option<String>,
+    /// Custom slash commands loaded from `.deepseeknova/commands`.
     pub custom_commands: Vec<Command>,
 }
 
 impl ProjectMemory {
+    /// Create an empty project memory. Populate it with the `load_*` methods.
     pub fn new() -> Self {
         Self {
             auto_memory: HashMap::new(),
@@ -899,25 +979,39 @@ impl Default for ProjectMemory {
 }
 
 #[derive(Debug, Clone)]
+/// A single persistent memory entry with optional frontmatter metadata.
 pub struct MemoryEntry {
+    /// Entry name (file stem when loaded from disk).
     pub name: String,
+    /// Human-readable description from frontmatter.
     pub description: String,
+    /// Full markdown body of the entry.
     pub content: String,
+    /// Frontmatter metadata (type, created, updated).
     pub metadata: MemoryMetadata,
 }
 
 #[derive(Debug, Clone)]
+/// Frontmatter metadata attached to a [`MemoryEntry`].
 pub struct MemoryMetadata {
+    /// The kind of memory this entry represents.
     pub memory_type: MemoryType,
+    /// When the entry was created.
     pub created: DateTime<Utc>,
+    /// When the entry was last updated.
     pub updated: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// The kind of a persistent memory entry.
 pub enum MemoryType {
+    /// Memory explicitly provided by the user.
     User,
+    /// Memory derived from user feedback.
     Feedback,
+    /// Memory associated with the current project.
     Project,
+    /// Reference material that is not project-specific.
     Reference,
 }
 
@@ -925,14 +1019,23 @@ pub enum MemoryType {
 // ContextEngine — concrete implementation
 // ---------------------------------------------------------------------------
 
+/// Concrete [`ContextProvider`]: owns the workspace index, prompt builder,
+/// working memory, and project memory for one session.
 pub struct ContextEngine {
+    /// The scanned workspace index.
     pub workspace: WorkspaceIndex,
+    /// Builder used to assemble provider messages.
     pub prompt_builder: PromptBuilder,
+    /// Session-scoped conversation memory.
     pub working_memory: WorkingMemory,
+    /// Project-scoped memory loaded from the workspace.
     pub project_memory: ProjectMemory,
 }
 
 impl ContextEngine {
+    /// Create a context engine for the given workspace root: scans the
+    /// workspace and loads project memory (DEEPSEEKNOVA.md, memory files,
+    /// custom commands).
     pub fn new(root: PathBuf) -> Result<Self, DeepseeknovaError> {
         let workspace = WorkspaceIndex::scan(&root)?;
         let mut project_memory = ProjectMemory::new();

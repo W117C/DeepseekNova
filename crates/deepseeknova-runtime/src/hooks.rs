@@ -49,7 +49,7 @@ pub fn attach_user_hooks(
 }
 
 /// 把配置命令映射为运行时规格（过滤 `disabled`、转换超时）。
-fn user_hooks_from_config(
+pub(crate) fn user_hooks_from_config(
     cfg: &deepseeknova_config::HooksConfig,
 ) -> deepseeknova_core::tool_hook::UserHooks {
     fn map(

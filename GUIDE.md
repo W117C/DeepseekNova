@@ -331,9 +331,14 @@ name = "path"
 value = "src/lib.rs"
 ```
 
+`[delegate] enabled = true` 时，CLI REPL 与 TUI 的主对话支持 `@agent_name`
+直接唤起子代理：`@coder 修复这个 bug` 会把该轮交给 coder 子代理执行，其余
+输入仍走主 agent；同时引用多个已知子代理会提示消歧（不静默降级）。
+
 > `allow_recursion = true` 开启后，coordinator 子代理可再派子代理，深度受
-> `max_depth` 约束、超深优雅降级。主 agent 的 delegate 工具路径递归仍待
-> 后续轮（深度传播需 Agent 主循环注入）。
+> `max_depth` 约束、超深优雅降级；`DelegateEngine` 路径（主 agent 的
+> delegate 工具）同样受 `allow_recursion` 控制——递归工具 sink 指向引擎
+> 自身，每层真实深度注入 `ToolContext`，超深优雅降级（2026-08-10 贯通）。
 
 ### 失败归因重试（`[attribution]`）
 
@@ -1324,7 +1329,8 @@ When `[sandbox] enabled = true`, shell commands run in an OS-level sandbox
 
 - **macOS**: Seatbelt (Apple Sandbox)
 - **Linux**: bubblewrap (bwrap)
-- **Windows**: `NoOpSandbox`（无隔离，待实现 Job Object / AppContainer）
+- **Windows**: `JobSandbox`（Job Object：进程树隔离 + 活动进程/内存限制；
+  网络与文件系统写路径白名单仍需 WFP/AppContainer，后续项）
 
 Read-only tools (`read_file`, `grep`, `glob`, `ls`) are unaffected by sandbox settings.
 

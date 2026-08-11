@@ -39,7 +39,7 @@ pub fn secure_resolve(root: &Path, input: &Path) -> Result<PathBuf, Deepseeknova
             workspace = ?root.display(),
             reason = "escapes workspace root via raw memory check"
         );
-        return Err(DeepseeknovaError::Permission(format!(
+        return Err(DeepseeknovaError::permission(format!(
             "path escapes workspace root (normalization check): {:?}",
             input
         )));
@@ -79,7 +79,7 @@ pub fn secure_resolve(root: &Path, input: &Path) -> Result<PathBuf, Deepseeknova
                 workspace = ?canonical_root.display(),
                 reason = "escapes workspace root via symlink"
             );
-            return Err(DeepseeknovaError::Permission(format!(
+            return Err(DeepseeknovaError::permission(format!(
                 "path escapes workspace root via symlink: {:?}",
                 input
             )));
@@ -93,12 +93,10 @@ pub fn secure_resolve(root: &Path, input: &Path) -> Result<PathBuf, Deepseeknova
 /// and ensure the path stays within the workspace root.
 pub fn sanitize_path(workspace: &Path, raw: &str) -> Result<PathBuf, DeepseeknovaError> {
     if raw.is_empty() {
-        return Err(DeepseeknovaError::Permission("empty path".to_string()));
+        return Err(DeepseeknovaError::permission("empty path"));
     }
     if raw.contains('\0') {
-        return Err(DeepseeknovaError::Permission(
-            "path contains null byte".to_string(),
-        ));
+        return Err(DeepseeknovaError::permission("path contains null byte"));
     }
     secure_resolve(workspace, Path::new(raw))
 }

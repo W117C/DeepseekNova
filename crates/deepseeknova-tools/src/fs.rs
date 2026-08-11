@@ -13,6 +13,8 @@ use tokio::sync::Mutex;
 // ReadFileTool
 // ---------------------------------------------------------------------------
 
+/// Reads a file's contents (optionally a 1-based line range). Returns the
+/// contents directly, or an error if the file is missing or exceeds limits.
 pub struct ReadFileTool;
 
 const MAX_READ_SIZE: u64 = 1024 * 1024; // 1 MB
@@ -83,7 +85,7 @@ impl Tool for ReadFileTool {
             .unwrap_or(MAX_READ_SIZE);
         let meta = fs::metadata(&path).await?;
         if meta.len() > max_size {
-            return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
+            return Err(deepseeknova_core::DeepseeknovaError::tool(format!(
                 "file too large: {} bytes (max {max_size})",
                 meta.len()
             )));
@@ -101,13 +103,13 @@ impl Tool for ReadFileTool {
                 let total = lines.len();
                 let start = s.unwrap_or(1).max(1);
                 if start > total {
-                    return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
+                    return Err(deepseeknova_core::DeepseeknovaError::tool(format!(
                         "start_line {start} exceeds file length ({total} lines)"
                     )));
                 }
                 let end = e.unwrap_or(total).min(total); // clamp end to file length (lenient)
                 if end < start {
-                    return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
+                    return Err(deepseeknova_core::DeepseeknovaError::tool(format!(
                         "end_line {end} is before start_line {start}"
                     )));
                 }
@@ -140,12 +142,15 @@ impl Tool for ReadFileTool {
 // WriteFileTool — atomic write via temp file + rename, with checkpoint support
 // ---------------------------------------------------------------------------
 
+/// Writes a file atomically (temp file + rename), optionally snapshotting the
+/// target with a checkpoint manager so the write can be rolled back.
 #[derive(Default)]
 pub struct WriteFileTool {
     checkpointer: Option<Arc<Mutex<CheckpointManager>>>,
 }
 
 impl WriteFileTool {
+    /// Create a `WriteFileTool` without checkpoint support.
     pub fn new() -> Self {
         Self::default()
     }
@@ -170,7 +175,7 @@ impl Tool for WriteFileTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "write_file".to_string(),
-            description: "Writes a file atomically.".to_string(),
+            description: "Writes a file atomically (overwrites existing content). Use this to create new files or replace entire file content. For partial edits use edit_file instead.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -236,12 +241,15 @@ impl Tool for WriteFileTool {
 // EditFileTool — SEARCH/REPLACE block exact match, with checkpoint support
 // ---------------------------------------------------------------------------
 
+/// Applies SEARCH/REPLACE edit blocks to a file, requiring exact unique
+/// matches; optionally snapshots the target with a checkpoint manager.
 #[derive(Default)]
 pub struct EditFileTool {
     checkpointer: Option<Arc<Mutex<CheckpointManager>>>,
 }
 
 impl EditFileTool {
+    /// Create an `EditFileTool` without checkpoint support.
     pub fn new() -> Self {
         Self::default()
     }
@@ -294,7 +302,7 @@ impl EditFileArgs {
                 search: s.clone(),
                 replace: r.clone(),
             }]),
-            _ => Err(DeepseeknovaError::Tool(
+            _ => Err(DeepseeknovaError::tool(
                 "provide either `edits: [...]` or both `search` and `replace`".to_string(),
             )),
         }
@@ -349,7 +357,7 @@ impl Tool for EditFileTool {
 
         // snippet_id is now required — enforce read-then-edit contract
         let snip_id = parsed.snippet_id.as_deref().ok_or_else(|| {
-            DeepseeknovaError::Tool(
+            DeepseeknovaError::tool(
                 "snippet_id is required. You MUST call read_file first and pass its snippet_id to edit_file."
                     .to_string(),
             )
@@ -385,20 +393,20 @@ impl Tool for EditFileTool {
         let mut working = original.clone();
         for (i, b) in blocks.iter().enumerate() {
             if b.search.is_empty() {
-                return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
+                return Err(deepseeknova_core::DeepseeknovaError::tool(format!(
                     "edit block #{}: search text must not be empty",
                     i + 1
                 )));
             }
             let count = working.matches(&b.search).count();
             if count == 0 {
-                return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
+                return Err(deepseeknova_core::DeepseeknovaError::tool(format!(
                     "edit block #{} not found: search text has 0 matches (must be exactly 1)",
                     i + 1
                 )));
             }
             if count > 1 {
-                return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
+                return Err(deepseeknova_core::DeepseeknovaError::tool(format!(
                     "edit block #{} ambiguous: search text has {} matches (must be exactly 1); add surrounding context to disambiguate",
                     i + 1,
                     count
@@ -431,12 +439,15 @@ impl Tool for EditFileTool {
 // MoveFileTool — rename / move, with checkpoint support
 // ---------------------------------------------------------------------------
 
+/// Renames / moves a file (optionally across directories), snapshotting the
+/// target with a checkpoint manager when attached.
 #[derive(Default)]
 pub struct MoveFileTool {
     checkpointer: Option<Arc<Mutex<CheckpointManager>>>,
 }
 
 impl MoveFileTool {
+    /// Create a `MoveFileTool` without checkpoint support.
     pub fn new() -> Self {
         Self::default()
     }
@@ -460,7 +471,7 @@ impl Tool for MoveFileTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "move_file".to_string(),
-            description: "Moves/renames a file.".to_string(),
+            description: "Moves or renames a file. Works across directories. The source path is removed after successful copy to destination.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -535,7 +546,7 @@ async fn create_temp_exclusive(
         .open(tmp_path)
         .await
         .map_err(|e| {
-            DeepseeknovaError::Tool(format!(
+            DeepseeknovaError::tool(format!(
                 "cannot create temp file {} (already exists or is a symlink): {e}",
                 tmp_path.display()
             ))

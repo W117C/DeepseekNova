@@ -631,7 +631,7 @@ mod tests {
         drop(client_reader);
         server_task
             .await
-            .map_err(|e| deepseeknova_core::DeepseeknovaError::Runner(e.to_string()))??;
+            .map_err(|e| deepseeknova_core::DeepseeknovaError::runner(e.to_string()))??;
         Ok(())
     }
 

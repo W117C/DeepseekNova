@@ -41,31 +41,53 @@ pub enum Key {
     DisplayModeRaw,
 
     // ── 侧边栏 Tab 标签（app::focus）──────────────────────
+    /// 侧边栏 Tab：会话。
     TabSessions,
+    /// 侧边栏 Tab：工具活动。
     TabTools,
+    /// 侧边栏 Tab：MCP 连接。
     TabMcp,
+    /// 侧边栏 Tab：成本。
     TabCost,
+    /// 侧边栏 Tab：技能。
     TabSkills,
 
     // ── 鼠标捕获（app::focus）─────────────────────────────
+    /// 鼠标捕获：已开启。
     MouseCaptureOn,
+    /// 鼠标捕获：已关闭。
     MouseCaptureOff,
 
     // ── 命令注册表描述（commands）─────────────────────────
+    /// /help 命令描述。
     CmdHelpDesc,
+    /// /clear 命令描述。
     CmdClearDesc,
+    /// /new 命令描述。
     CmdNewDesc,
+    /// /sessions 命令描述。
     CmdSessionsDesc,
+    /// /resume 命令描述。
     CmdResumeDesc,
+    /// /model 命令描述。
     CmdModelDesc,
+    /// /cost 命令描述。
     CmdCostDesc,
+    /// /scorecard 命令描述。
     CmdScorecardDesc,
+    /// /skills 命令描述。
     CmdSkillsDesc,
+    /// /mcp 命令描述。
     CmdMcpDesc,
+    /// /undo 命令描述。
     CmdUndoDesc,
+    /// /raw 命令描述。
     CmdRawDesc,
+    /// /fold 命令描述。
     CmdFoldDesc,
+    /// /copy 命令描述。
     CmdCopyDesc,
+    /// /quit 命令描述。
     CmdQuitDesc,
     /// /workspace 命令描述。
     CmdWorkspaceDesc,
@@ -101,16 +123,27 @@ pub enum Key {
     CmdCheckpointDesc,
 
     // ── /help 浮层（commands::builtin）────────────────────
+    /// 帮助：命令面板热键。
     HelpKeyCmdPalette,
+    /// 帮助：导航热键。
     HelpKeyNav,
+    /// 帮助：回车键。
     HelpKeyEnter,
+    /// 帮助：y/n 裁决键。
     HelpKeyY,
+    /// 帮助：翻页键。
     HelpKeyPage,
+    /// 帮助：输入历史键。
     HelpKeyHistory,
+    /// 帮助：Shift+Enter 换行。
     HelpKeyShiftEnter,
+    /// 帮助：光标移动键。
     HelpKeyCursor,
+    /// 帮助：编辑键。
     HelpKeyEdit,
+    /// 帮助：Ctrl+U/W 删除。
     HelpKeyCtrlUW,
+    /// 帮助：Ctrl+C 取消。
     HelpKeyCtrlC,
     /// 帮助：焦点/面板切换。
     HelpKeyFocus,
@@ -120,6 +153,7 @@ pub enum Key {
     HelpKeyEsc,
     /// 帮助：F1/Ctrl+L/Ctrl+X Ctrl+E。
     HelpKeyShortcuts,
+    /// 帮助页脚。
     HelpFooter,
 
     // ── 内建命令反馈（commands::builtin）──────────────────
@@ -481,11 +515,17 @@ pub enum Key {
     ResumeHint,
 
     // ── 评分卡维度标签（model::scorecard 数据展示）────────
+    /// 评分卡维度：治理。
     ScorecardDimGovernance,
+    /// 评分卡维度：验证。
     ScorecardDimVerification,
+    /// 评分卡维度：反思。
     ScorecardDimReflection,
+    /// 评分卡维度：评审。
     ScorecardDimReview,
+    /// 评分卡维度：协议。
     ScorecardDimProtocol,
+    /// 评分卡维度：综合。
     ScorecardDimComposite,
 
     // ── 键位定制诊断（app::keybindings）───────────────────

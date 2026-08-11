@@ -44,12 +44,12 @@ fn git_in(dir: &Path, args: &[&str]) -> Result<GitOut, deepseeknova_core::Deepse
         .output()
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                deepseeknova_core::DeepseeknovaError::Runner(format!(
+                deepseeknova_core::DeepseeknovaError::runner(format!(
                     "`git` was not found in PATH — worktree management requires git (cwd: {})",
                     dir.display()
                 ))
             } else {
-                deepseeknova_core::DeepseeknovaError::Runner(format!(
+                deepseeknova_core::DeepseeknovaError::runner(format!(
                     "failed to run `git` in {}: {e}",
                     dir.display()
                 ))
@@ -73,12 +73,12 @@ fn git_ok(dir: &Path, args: &[&str]) -> Result<String, deepseeknova_core::Deepse
             .unwrap_or_else(|| "signal".to_string());
         let stderr = out.stderr.trim();
         if stderr.is_empty() {
-            return Err(deepseeknova_core::DeepseeknovaError::Runner(format!(
+            return Err(deepseeknova_core::DeepseeknovaError::runner(format!(
                 "git {} failed (exit {code})",
                 args.first().unwrap_or(&"")
             )));
         } else {
-            return Err(deepseeknova_core::DeepseeknovaError::Runner(format!(
+            return Err(deepseeknova_core::DeepseeknovaError::runner(format!(
                 "git {} failed (exit {code}): {stderr}",
                 args.first().unwrap_or(&"")
             )));
@@ -93,7 +93,7 @@ fn require_git_repo(cwd: &Path) -> Result<(), deepseeknova_core::DeepseeknovaErr
     let out = git_in(cwd, &["rev-parse", "--is-inside-work-tree"])?;
     if !out.status.success() {
         let stderr = out.stderr.trim();
-        return Err(deepseeknova_core::DeepseeknovaError::Runner(format!(
+        return Err(deepseeknova_core::DeepseeknovaError::runner(format!(
             "not a git repository (or any parent directory): {} — run `git init` first{}",
             cwd.display(),
             if stderr.is_empty() {
@@ -118,7 +118,7 @@ fn main_worktree_root(cwd: &Path) -> Result<PathBuf, deepseeknova_core::Deepseek
         cwd.join(common_path)
     };
     abs.parent().map(|p| p.to_path_buf()).ok_or_else(|| {
-        deepseeknova_core::DeepseeknovaError::Config(format!(
+        deepseeknova_core::DeepseeknovaError::config(format!(
             "cannot locate main worktree root from {}",
             cwd.display()
         ))
@@ -138,22 +138,22 @@ fn worktrees_base(cwd: &Path) -> Result<PathBuf, deepseeknova_core::Deepseeknova
 /// `check-ref-format` 另行校验）。
 fn validate_name(name: &str) -> Result<(), deepseeknova_core::DeepseeknovaError> {
     if name.is_empty() {
-        return Err(deepseeknova_core::DeepseeknovaError::Config(
+        return Err(deepseeknova_core::DeepseeknovaError::config(
             "worktree name must not be empty".to_string(),
         ));
     }
     if name == "." || name == ".." {
-        return Err(deepseeknova_core::DeepseeknovaError::Config(
+        return Err(deepseeknova_core::DeepseeknovaError::config(
             "worktree name must not be `.` or `..`".to_string(),
         ));
     }
     if name.contains(['/', '\\']) {
-        return Err(deepseeknova_core::DeepseeknovaError::Config(format!(
+        return Err(deepseeknova_core::DeepseeknovaError::config(format!(
             "worktree name must not contain path separators: `{name}`"
         )));
     }
     if name.chars().any(char::is_whitespace) {
-        return Err(deepseeknova_core::DeepseeknovaError::Config(format!(
+        return Err(deepseeknova_core::DeepseeknovaError::config(format!(
             "worktree name must not contain whitespace: `{name}`"
         )));
     }
@@ -167,7 +167,7 @@ fn validate_branch_name(
 ) -> Result<(), deepseeknova_core::DeepseeknovaError> {
     let out = git_in(cwd, &["check-ref-format", &format!("refs/heads/{name}")])?;
     if !out.status.success() {
-        return Err(deepseeknova_core::DeepseeknovaError::Config(format!(
+        return Err(deepseeknova_core::DeepseeknovaError::config(format!(
             "invalid worktree name `{name}`: not a valid git branch name"
         )));
     }
@@ -244,7 +244,7 @@ pub fn run_new(
 
     let dest = worktrees_base(cwd)?.join(&name);
     if dest.exists() {
-        return Err(deepseeknova_core::DeepseeknovaError::Config(format!(
+        return Err(deepseeknova_core::DeepseeknovaError::config(format!(
             "worktree `{name}` already exists at {}",
             dest.display()
         )));
@@ -261,11 +261,11 @@ pub fn run_new(
             .unwrap_or_else(|| "signal".to_string());
         let stderr = out.stderr.trim();
         if stderr.is_empty() {
-            return Err(deepseeknova_core::DeepseeknovaError::Runner(format!(
+            return Err(deepseeknova_core::DeepseeknovaError::runner(format!(
                 "git worktree add failed (exit {code})"
             )));
         } else {
-            return Err(deepseeknova_core::DeepseeknovaError::Runner(format!(
+            return Err(deepseeknova_core::DeepseeknovaError::runner(format!(
                 "git worktree add failed (exit {code}): {stderr}"
             )));
         }
@@ -326,14 +326,14 @@ pub fn run_switch(cwd: &Path, name: &str) -> Result<String, deepseeknova_core::D
     validate_name(name)?;
     let dest = worktrees_base(cwd)?.join(name);
     if !dest.is_dir() {
-        return Err(deepseeknova_core::DeepseeknovaError::Config(format!(
+        return Err(deepseeknova_core::DeepseeknovaError::config(format!(
             "worktree `{name}` not found at {}",
             dest.display()
         )));
     }
     let out = git_in(&dest, &["rev-parse", "--is-inside-work-tree"])?;
     if !out.status.success() {
-        return Err(deepseeknova_core::DeepseeknovaError::Runner(format!(
+        return Err(deepseeknova_core::DeepseeknovaError::runner(format!(
             "`{}` exists but is not a git worktree",
             dest.display()
         )));
@@ -357,7 +357,7 @@ pub fn run_delete(
     validate_name(name)?;
     let dest = worktrees_base(cwd)?.join(name);
     if !dest.is_dir() {
-        return Err(deepseeknova_core::DeepseeknovaError::Config(format!(
+        return Err(deepseeknova_core::DeepseeknovaError::config(format!(
             "worktree `{name}` not found at {}",
             dest.display()
         )));
@@ -365,7 +365,7 @@ pub fn run_delete(
 
     let out = git_in(&dest, &["status", "--porcelain"])?;
     if !out.status.success() {
-        return Err(deepseeknova_core::DeepseeknovaError::Runner(format!(
+        return Err(deepseeknova_core::DeepseeknovaError::runner(format!(
             "cannot inspect worktree `{name}` ({}): {}",
             dest.display(),
             out.stderr.trim()
@@ -373,7 +373,7 @@ pub fn run_delete(
     }
     if !out.stdout.trim().is_empty() && !force {
         let count = out.stdout.lines().count();
-        return Err(deepseeknova_core::DeepseeknovaError::Runner(format!(
+        return Err(deepseeknova_core::DeepseeknovaError::runner(format!(
             "worktree `{name}` has {count} uncommitted change(s) — commit or stash them first, \
              or pass --force to discard"
         )));
@@ -388,7 +388,7 @@ pub fn run_delete(
     let out = git_in(cwd, &args)?;
     if !out.status.success() {
         let stderr = out.stderr.trim();
-        return Err(deepseeknova_core::DeepseeknovaError::Runner(format!(
+        return Err(deepseeknova_core::DeepseeknovaError::runner(format!(
             "git worktree remove failed (exit {}): {}",
             out.status
                 .code()

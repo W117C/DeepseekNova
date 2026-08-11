@@ -13,8 +13,11 @@ use tracing::warn;
 /// 一次反思的结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reflection {
+    /// 失败根因分析。
     pub root_cause: String,
+    /// 修复计划（回炉 retry 消息中追加）。
     pub fix_plan: String,
+    /// 可沉淀的教训。
     pub lesson: String,
 }
 

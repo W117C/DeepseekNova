@@ -1,4 +1,13 @@
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+//! 安全路径分类与权限边界集成测试（readonly 分类、路径逃逸、写操作拦截）。
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    clippy::dbg_macro
+)]
 
 use deepseeknova_core::{Tool, ToolContext};
 use deepseeknova_security::capability::Capability;
@@ -53,10 +62,10 @@ fn test_secure_resolve_scenarios() {
     }
 
     // Case 6: Broken symlink escape should be blocked
-    let broken_link = root.join("broken_symlink");
-    let broken_target = Path::new("/nonexistent_directory/file");
     #[cfg(unix)]
     {
+        let broken_link = root.join("broken_symlink");
+        let broken_target = Path::new("/nonexistent_directory/file");
         if std::os::unix::fs::symlink(broken_target, &broken_link).is_ok() {
             let res = secure_resolve(&root, Path::new("broken_symlink/file"));
             assert!(

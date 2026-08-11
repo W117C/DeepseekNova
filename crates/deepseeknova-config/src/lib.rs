@@ -7,7 +7,19 @@
 //!   4. Environment variables       (DEEPSEEKNOVA_*)
 //!   5. CLI flags                   (applied by caller)
 
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![warn(missing_docs)]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::dbg_macro
+    )
+)]
 
 use deepseeknova_core::DeepseeknovaError;
 use serde::{Deserialize, Serialize};
@@ -20,6 +32,7 @@ use std::path::{Path, PathBuf};
 // Top-level Config
 // ---------------------------------------------------------------------------
 
+/// 顶层配置根，聚合所有子模块配置段。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     /// Default model name to use when none is specified.
@@ -136,6 +149,7 @@ pub struct Config {
 // Provider
 // ---------------------------------------------------------------------------
 
+/// LLM 提供商配置（OpenAI 兼容、Anthropic、本地等）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
     /// Unique name for this provider (e.g. "deepseek", "openai").
@@ -203,9 +217,12 @@ fn default_max_retries() -> u32 {
     3
 }
 
+/// 自定义 HTTP 头字段键值对。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HeaderEntry {
+    /// 头名称。
     pub name: String,
+    /// 头值。
     pub value: String,
 }
 
@@ -213,6 +230,7 @@ pub struct HeaderEntry {
 // Model
 // ---------------------------------------------------------------------------
 
+/// 命名模型条目及其参数。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelConfig {
     /// Model identifier (e.g. "deepseek-v4-flash", "claude-sonnet-5-20251001").
@@ -322,6 +340,7 @@ impl ModelPointersConfig {
 // Tools
 // ---------------------------------------------------------------------------
 
+/// 工具集配置段。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ToolsConfig {
     /// Tool-specific overrides. Key = tool name.
@@ -337,13 +356,18 @@ pub struct ToolsConfig {
     pub lsp: LspConfig,
 }
 
+/// 单个工具的覆盖配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolOverride {
+    /// 工具名称。
     pub name: String,
+    /// 是否禁用该工具。
     #[serde(default)]
     pub disabled: bool,
+    /// 执行超时（秒）。
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// 文件大小上限（字节）。
     #[serde(default)]
     pub max_file_size: Option<u64>,
 }
@@ -438,6 +462,7 @@ impl Default for LspConfig {
 // Graph (code index)
 // ---------------------------------------------------------------------------
 
+/// 代码图索引配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphConfig {
     /// 主开关。false 时不构建索引、不注入 repo map，行为等同现状。
@@ -472,6 +497,7 @@ impl Default for GraphConfig {
 // Memory (closed-loop learning)
 // ---------------------------------------------------------------------------
 
+/// 记忆库配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryConfig {
     /// 主开关。false = 零开销，行为等同现状。
@@ -675,6 +701,7 @@ impl Default for MemoryConfig {
 // Delegate (multi-agent sub-agents)
 // ---------------------------------------------------------------------------
 
+/// 多代理子代理委派配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DelegateConfig {
     /// 主开关。false = 不注册 delegate 工具，行为等同现状。
@@ -708,13 +735,18 @@ pub struct DelegateConfig {
     pub agents_dir: Option<PathBuf>,
 }
 
+/// 子代理预设覆盖（按 name 匹配内置预设覆盖其字段）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DelegateAgentOverride {
+    /// 预设名称。
     pub name: String,
+    /// 系统提示词覆盖。
     #[serde(default)]
     pub system_prompt: Option<String>,
+    /// 工具白名单覆盖。
     #[serde(default)]
     pub tools: Option<Vec<String>>,
+    /// 最大工具调用轮数。
     #[serde(default)]
     pub max_steps: Option<usize>,
     /// 参数化任务书默认值（`${{ inputs.<name> }}` 占位符），调用方传值优先。
@@ -726,7 +758,9 @@ pub struct DelegateAgentOverride {
 /// 单个参数化输入覆盖（名称 + 默认值）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InputOverride {
+    /// 输入参数名称。
     pub name: String,
+    /// 输入参数默认值。
     pub value: String,
 }
 
@@ -758,6 +792,7 @@ impl Default for DelegateConfig {
 // Agent
 // ---------------------------------------------------------------------------
 
+/// Agent 运行时配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
     /// System prompt override.
@@ -892,6 +927,7 @@ impl Default for AgentConfig {
 // Permissions
 // ---------------------------------------------------------------------------
 
+/// 权限系统配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PermissionsConfig {
     /// Master switch. When false, the permission gate is not consulted during
@@ -946,12 +982,16 @@ impl Default for PermissionsConfig {
     }
 }
 
+/// 写工具的权限裁决模式。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum PermissionMode {
+    /// 命中时询问用户（默认）。
     #[default]
     Ask,
+    /// 命中时放行。
     Allow,
+    /// 命中时拒绝。
     Deny,
 }
 
@@ -968,9 +1008,12 @@ pub enum PermissionMode {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ModePreset {
+    /// 最安全模式，写工具默认 Ask；只读放行。
     #[default]
     Plan,
+    /// 文件编辑放行，shell 写形态仍 Ask。
     AcceptEdits,
+    /// 写工具全部放行（用户显式选择信任）。
     Auto,
 }
 
@@ -991,6 +1034,7 @@ pub enum AskFallback {
     Allow,
 }
 
+/// 权限规则条目。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PermissionRule {
     /// Tool name to match (e.g. "bash", "read_file", "*").
@@ -1076,7 +1120,7 @@ impl TrustStore {
             std::fs::create_dir_all(parent)?;
         }
         let content = toml::to_string_pretty(self).map_err(|e| {
-            DeepseeknovaError::Config(format!("failed to serialize config to TOML: {e}"))
+            DeepseeknovaError::config(format!("failed to serialize config to TOML: {e}"))
         })?;
         std::fs::write(path, content)?;
         Ok(())
@@ -1109,6 +1153,7 @@ fn lexical(p: &Path) -> PathBuf {
 // Sandbox
 // ---------------------------------------------------------------------------
 
+/// 沙箱配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxConfig {
     /// Enable sandboxing for shell commands.
@@ -1236,16 +1281,22 @@ pub struct SecurityConfig {
 /// library default.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ResourceLimitsConfig {
+    /// 最大文件数。
     #[serde(default)]
     pub max_files: Option<usize>,
+    /// 单文件大小上限（字节）。
     #[serde(default)]
     pub max_file_size: Option<u64>,
+    /// 读取总字节上限。
     #[serde(default)]
     pub max_total_read_bytes: Option<u64>,
+    /// 执行时间上限（秒）。
     #[serde(default)]
     pub max_execution_time_secs: Option<u64>,
+    /// 输出字节上限。
     #[serde(default)]
     pub max_output_bytes: Option<u64>,
+    /// 工具调用次数上限。
     #[serde(default)]
     pub max_tool_calls: Option<usize>,
 }
@@ -1254,6 +1305,7 @@ pub struct ResourceLimitsConfig {
 // MCP Server
 // ---------------------------------------------------------------------------
 
+/// MCP 服务器配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServerConfig {
     /// Logical name for this MCP server.
@@ -1275,9 +1327,12 @@ pub struct McpServerConfig {
     pub enabled: bool,
 }
 
+/// 环境变量键值对。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnvEntry {
+    /// 变量名。
     pub name: String,
+    /// 变量值。
     pub value: String,
 }
 
@@ -1574,6 +1629,7 @@ impl Default for VerifyConfig {
 // Checkpoint（写前快照 + 回滚，A1）
 // ---------------------------------------------------------------------------
 
+/// 检查点配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckpointConfig {
     /// 写类工具执行前是否快照（默认 true）。
@@ -1748,7 +1804,7 @@ impl Config {
             ))
         })?;
         let config: Config = toml::from_str(&content).map_err(|e| {
-            DeepseeknovaError::Config(format!("failed to parse TOML {}: {e}", path.display()))
+            DeepseeknovaError::config(format!("failed to parse TOML {}: {e}", path.display()))
         })?;
         Ok(config)
     }
@@ -1888,7 +1944,7 @@ impl Config {
         for (role, ptr) in self.model_pointers.entries() {
             if let Some(model) = ptr {
                 if !names.contains(&model.as_str()) {
-                    return Err(DeepseeknovaError::Config(format!(
+                    return Err(DeepseeknovaError::config(format!(
                         "model_pointers.{role} points to unknown model '{model}' \
                          (known models: {})",
                         names.join(", ")
@@ -1904,7 +1960,7 @@ impl Config {
             ] {
                 if let Some(p) = price {
                     if !p.is_finite() || p < 0.0 {
-                        return Err(DeepseeknovaError::Config(format!(
+                        return Err(DeepseeknovaError::config(format!(
                             "models.{}.{field} must be a finite value >= 0, got {p}",
                             m.name
                         )));
@@ -1914,7 +1970,7 @@ impl Config {
         }
         if let Some(cost) = self.budget.max_total_cost_usd {
             if !cost.is_finite() || cost < 0.0 {
-                return Err(DeepseeknovaError::Config(format!(
+                return Err(DeepseeknovaError::config(format!(
                     "budget.max_total_cost_usd must be a finite value >= 0, got {cost}"
                 )));
             }

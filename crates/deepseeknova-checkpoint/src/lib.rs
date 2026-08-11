@@ -9,7 +9,19 @@
 //! （只写新增快照），仅在淘汰 / 回滚 / 清空导致内存与文件失去对齐时
 //! 才全量重写。
 
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![warn(missing_docs)]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::dbg_macro
+    )
+)]
 
 use deepseeknova_core::DeepseeknovaError;
 use serde::{Deserialize, Serialize};
@@ -25,9 +37,13 @@ use std::path::{Path, PathBuf};
 /// A snapshot of a file's content identified by its SHA-256 hash.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Snapshot {
+    /// 被快照的文件路径。
     pub path: PathBuf,
+    /// 文件内容（UTF-8 有损转换）。
     pub content: String,
+    /// 内容的 SHA-256 哈希（十六进制）。
     pub hash: String,
+    /// 快照创建时间。
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -54,6 +70,7 @@ pub struct CheckpointManager {
 }
 
 impl CheckpointManager {
+    /// 创建一个无持久化的空检查点管理器。
     pub fn new() -> Self {
         Self {
             snapshots: Vec::new(),
@@ -369,15 +386,20 @@ async fn restore_state(snap: &Snapshot) -> Result<(), DeepseeknovaError> {
 /// 会话级检查点里的一条对话消息角色。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConversationRole {
+    /// 用户消息。
     User,
+    /// 助手消息。
     Assistant,
+    /// 系统消息。
     System,
 }
 
 /// 会话级检查点中的一行对话（角色 + 文本）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConversationLine {
+    /// 消息角色。
     pub role: ConversationRole,
+    /// 消息文本。
     pub text: String,
 }
 
@@ -398,11 +420,15 @@ impl ConversationLine {
 /// （[`SessionCheckpointManager::save_with_files`]）预留。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionCheckpoint {
+    /// 检查点 id（`ck-YYYYMMDD-HHMMSS`）。
     pub id: String,
+    /// 创建时间。
     pub created_at: chrono::DateTime<chrono::Utc>,
     /// 用户可选标签（`/checkpoint save <label>`）。
     pub label: Option<String>,
+    /// 对话快照。
     pub conversation: Vec<ConversationLine>,
+    /// 文件快照（可选，用于联合回退）。
     pub files: Vec<Snapshot>,
 }
 
@@ -419,6 +445,7 @@ pub struct SessionCheckpointManager {
 }
 
 impl SessionCheckpointManager {
+    /// 创建一个无持久化的空会话检查点管理器。
     pub fn new() -> Self {
         Self {
             checkpoints: Vec::new(),
@@ -609,10 +636,15 @@ impl Default for SessionCheckpointManager {
 /// 检查点列表元信息（TUI `/checkpoint list` 展示用）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckpointMeta {
+    /// 检查点 id。
     pub id: String,
+    /// 创建时间。
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// 用户标签（可选）。
     pub label: Option<String>,
+    /// 对话消息数。
     pub message_count: usize,
+    /// 文件快照数。
     pub file_count: usize,
 }
 
@@ -625,17 +657,11 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-    fn temp_dir() -> PathBuf {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        static COUNTER: AtomicU32 = AtomicU32::new(0);
-        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "deepseeknova-ck-test-{}-{}",
-            std::process::id(),
-            id
-        ));
-        let _ = std::fs::create_dir_all(&dir);
-        dir
+    /// 创建一个测试专用临时目录，由 `tempfile::TempDir` 持有并在 drop 时
+    /// 自动清理（即使 panic 也会清理），避免手动 `remove_dir_all` 的泄漏
+    /// 风险与并行测试撞名问题（见 AGENTS.md §5 错误档案）。
+    fn temp_dir() -> tempfile::TempDir {
+        tempfile::tempdir().expect("failed to create temp dir")
     }
 
     fn write_file(path: &Path, content: &str) {
@@ -646,7 +672,7 @@ mod tests {
     #[tokio::test]
     async fn snapshot_and_rollback() {
         let dir = temp_dir();
-        let file = dir.join("test.txt");
+        let file = dir.path().join("test.txt");
         write_file(&file, "original content");
 
         let mut ck = CheckpointManager::new();
@@ -663,14 +689,12 @@ mod tests {
         let restored = std::fs::read_to_string(&file).unwrap();
         assert_eq!(restored, "original content");
         assert!(ck.is_empty());
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn snapshot_absent_file_rollback_deletes() {
         let dir = temp_dir();
-        let file = dir.join("absent.txt");
+        let file = dir.path().join("absent.txt");
 
         let mut ck = CheckpointManager::new();
         ck.snapshot_file(&file).await.unwrap();
@@ -682,15 +706,13 @@ mod tests {
         // Rollback should delete it
         ck.rollback().await.unwrap();
         assert!(!file.exists());
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn rollback_all_restores_everything() {
         let dir = temp_dir();
-        let f1 = dir.join("a.txt");
-        let f2 = dir.join("b.txt");
+        let f1 = dir.path().join("a.txt");
+        let f2 = dir.path().join("b.txt");
         write_file(&f1, "A");
         write_file(&f2, "B");
 
@@ -708,14 +730,12 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&f1).unwrap(), "A");
         assert_eq!(std::fs::read_to_string(&f2).unwrap(), "B");
         assert!(ck.is_empty());
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn verify_detects_modifications() {
         let dir = temp_dir();
-        let file = dir.join("v.txt");
+        let file = dir.path().join("v.txt");
         write_file(&file, "data");
 
         let mut ck = CheckpointManager::new();
@@ -729,8 +749,6 @@ mod tests {
         write_file(&file, "modified data");
         let results = ck.verify().await.unwrap();
         assert!(!results[0].1);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -764,22 +782,20 @@ mod tests {
     #[tokio::test]
     async fn snapshot_multiple_files() {
         let dir = temp_dir();
-        let f1 = dir.join("x.txt");
-        let f2 = dir.join("y.txt");
+        let f1 = dir.path().join("x.txt");
+        let f2 = dir.path().join("y.txt");
         write_file(&f1, "x");
         write_file(&f2, "y");
 
         let mut ck = CheckpointManager::new();
         ck.snapshot_files(&[&f1, &f2]).await.unwrap();
         assert_eq!(ck.len(), 2);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn diff_summary_after_verify() {
         let dir = temp_dir();
-        let f = dir.join("diff.txt");
+        let f = dir.path().join("diff.txt");
         write_file(&f, "original");
 
         let mut ck = CheckpointManager::new();
@@ -790,16 +806,14 @@ mod tests {
         let summary = ck.diff_summary().await.unwrap();
         assert!(summary.contains("modified"));
         assert!(summary.contains("diff.txt"));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn persistence_roundtrip_across_instances() {
         let dir = temp_dir();
-        let file = dir.join("persist.txt");
+        let file = dir.path().join("persist.txt");
         write_file(&file, "v1");
-        let ck_path = dir.join("checkpoints.jsonl");
+        let ck_path = dir.path().join("checkpoints.jsonl");
 
         {
             let mut ck = CheckpointManager::new().with_persistence(ck_path.clone());
@@ -817,22 +831,19 @@ mod tests {
         // 回滚后持久化文件同步为空。
         let ck3 = CheckpointManager::load_from(&ck_path).unwrap();
         assert!(ck3.is_empty());
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn persistence_survives_clear() {
         let dir = temp_dir();
-        let file = dir.join("c.txt");
+        let file = dir.path().join("c.txt");
         write_file(&file, "x");
-        let ck_path = dir.join("checkpoints.jsonl");
+        let ck_path = dir.path().join("checkpoints.jsonl");
         let mut ck = CheckpointManager::new().with_persistence(ck_path.clone());
         ck.snapshot_file(&file).await.unwrap();
         ck.clear();
         let reloaded = CheckpointManager::load_from(&ck_path).unwrap();
         assert!(reloaded.is_empty());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ── 容量上限 ─────────────────────────────────────────────────────
@@ -848,9 +859,9 @@ mod tests {
     #[tokio::test]
     async fn capacity_evicts_oldest_fifo() {
         let dir = temp_dir();
-        let f1 = dir.join("a.txt");
-        let f2 = dir.join("b.txt");
-        let f3 = dir.join("c.txt");
+        let f1 = dir.path().join("a.txt");
+        let f2 = dir.path().join("b.txt");
+        let f3 = dir.path().join("c.txt");
         write_file(&f1, "1");
         write_file(&f2, "2");
         write_file(&f3, "3");
@@ -871,34 +882,30 @@ mod tests {
         let (p, _) = ck.rollback().await.unwrap().unwrap();
         assert_eq!(p, f2);
         assert!(ck.is_empty());
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn capacity_zero_evicts_immediately() {
         let dir = temp_dir();
-        let file = dir.join("z.txt");
+        let file = dir.path().join("z.txt");
         write_file(&file, "x");
         let mut ck = CheckpointManager::new().with_max_snapshots(0);
         ck.snapshot_file(&file).await.unwrap();
         assert!(ck.is_empty());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn snapshot_dir_counts_files_and_respects_capacity() {
         let dir = temp_dir();
-        let sub = dir.join("sub");
+        let sub = dir.path().join("sub");
         std::fs::create_dir_all(&sub).unwrap();
         for i in 0..3 {
             write_file(&sub.join(format!("f{i}.txt")), "data");
         }
         let mut ck = CheckpointManager::new().with_max_snapshots(2);
-        let n = ck.snapshot_dir(&dir).await.unwrap();
+        let n = ck.snapshot_dir(dir.path()).await.unwrap();
         assert_eq!(n, 3, "应返回实际快照的文件数，而非扣除淘汰后的差值");
         assert_eq!(ck.len(), 2, "超限应淘汰最旧");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ── 增量持久化 ───────────────────────────────────────────────────
@@ -906,10 +913,10 @@ mod tests {
     #[tokio::test]
     async fn persistence_incremental_appends_and_reloads_complete() {
         let dir = temp_dir();
-        let ck_path = dir.join("inc.jsonl");
-        let f1 = dir.join("a.txt");
-        let f2 = dir.join("b.txt");
-        let f3 = dir.join("c.txt");
+        let ck_path = dir.path().join("inc.jsonl");
+        let f1 = dir.path().join("a.txt");
+        let f2 = dir.path().join("b.txt");
+        let f3 = dir.path().join("c.txt");
         write_file(&f1, "A");
         write_file(&f2, "B");
         write_file(&f3, "C");
@@ -938,18 +945,16 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&f1).unwrap(), "A");
         assert_eq!(std::fs::read_to_string(&f2).unwrap(), "B");
         assert_eq!(std::fs::read_to_string(&f3).unwrap(), "C");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn persistence_eviction_keeps_file_consistent() {
         let dir = temp_dir();
-        let ck_path = dir.join("evict.jsonl");
-        let f1 = dir.join("a.txt");
-        let f2 = dir.join("b.txt");
-        let f3 = dir.join("c.txt");
-        let f4 = dir.join("d.txt");
+        let ck_path = dir.path().join("evict.jsonl");
+        let f1 = dir.path().join("a.txt");
+        let f2 = dir.path().join("b.txt");
+        let f3 = dir.path().join("c.txt");
+        let f4 = dir.path().join("d.txt");
         write_file(&f1, "1");
         write_file(&f2, "2");
         write_file(&f3, "3");
@@ -970,14 +975,13 @@ mod tests {
         assert_eq!(ck2.len(), 3);
         let paths: Vec<PathBuf> = ck2.all_snapshots().iter().map(|s| s.path.clone()).collect();
         assert_eq!(paths, vec![f2.clone(), f3.clone(), f4.clone()]);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn persistence_rollback_then_reappend_has_no_duplicates() {
         let dir = temp_dir();
-        let ck_path = dir.join("cycle.jsonl");
-        let file = dir.join("x.txt");
+        let ck_path = dir.path().join("cycle.jsonl");
+        let file = dir.path().join("x.txt");
         write_file(&file, "v1");
 
         let mut ck = CheckpointManager::new().with_persistence(ck_path.clone());
@@ -992,7 +996,6 @@ mod tests {
         assert_eq!(content.lines().count(), 1, "回滚后再快照不应产生重复行");
         let ck2 = CheckpointManager::load_from(&ck_path).unwrap();
         assert_eq!(ck2.len(), 1);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ── 旧格式兼容 ───────────────────────────────────────────────────
@@ -1002,7 +1005,7 @@ mod tests {
         // Snapshot 序列化契约未变；手写一条既有格式 JSONL，验证 load_from
         // 仍能读取并保持回滚语义，防止未来格式漂移破坏旧文件。
         let dir = temp_dir();
-        let ck_path = dir.join("old.jsonl");
+        let ck_path = dir.path().join("old.jsonl");
         let snap = Snapshot {
             path: PathBuf::from("legacy.txt"),
             content: "legacy".into(),
@@ -1019,7 +1022,6 @@ mod tests {
         assert_eq!(ck.len(), 1);
         assert_eq!(ck.snapshots()[0].path, PathBuf::from("legacy.txt"));
         assert_eq!(ck.snapshots()[0].hash, "deadbeef0123456789");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ── 会话级检查点（SessionCheckpointManager）──────────────────────
@@ -1035,7 +1037,7 @@ mod tests {
     #[tokio::test]
     async fn session_checkpoint_save_list_rollback_roundtrip() {
         let dir = temp_dir();
-        let ck_path = dir.join("session-ck.jsonl");
+        let ck_path = dir.path().join("session-ck.jsonl");
         let mut ck = SessionCheckpointManager::new().with_persistence(ck_path.clone());
 
         let id = ck
@@ -1060,14 +1062,12 @@ mod tests {
         assert!(SessionCheckpointManager::load_from(&ck_path)
             .unwrap()
             .is_empty());
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn session_checkpoint_persists_across_instances() {
         let dir = temp_dir();
-        let ck_path = dir.join("session-persist.jsonl");
+        let ck_path = dir.path().join("session-persist.jsonl");
         {
             let mut ck = SessionCheckpointManager::new().with_persistence(ck_path.clone());
             ck.save(sample_conversation(), None).await.unwrap();
@@ -1082,12 +1082,10 @@ mod tests {
         assert_eq!(ck2.len(), 2, "检查点应跨进程存活");
         let rolled = ck2.rollback(None).await.unwrap().unwrap();
         assert_eq!(rolled.conversation.len(), 1, "最新（第二条）先回退");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn session_checkpoint_rollback_by_id() {
-        let dir = temp_dir();
         let mut ck = SessionCheckpointManager::new();
         let id_a = ck.save(sample_conversation(), None).await.unwrap();
         let id_b = ck
@@ -1104,13 +1102,12 @@ mod tests {
         assert_eq!(ck.checkpoints()[0].id, id_b);
         // 未知 id → Ok(None)。
         assert!(ck.rollback(Some("ck-unknown")).await.unwrap().is_none());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn session_checkpoint_capacity_evicts_fifo() {
         let dir = temp_dir();
-        let ck_path = dir.join("session-cap.jsonl");
+        let ck_path = dir.path().join("session-cap.jsonl");
         let mut ck = SessionCheckpointManager::new()
             .with_persistence(ck_path.clone())
             .with_max_checkpoints(2);
@@ -1129,13 +1126,12 @@ mod tests {
         // 持久化文件一致。
         let reloaded = SessionCheckpointManager::load_from(&ck_path).unwrap();
         assert_eq!(reloaded.len(), 2);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn session_checkpoint_with_files_rolls_back_files() {
         let dir = temp_dir();
-        let file = dir.join("doc.txt");
+        let file = dir.path().join("doc.txt");
         write_file(&file, "v1");
         let mut ck = SessionCheckpointManager::new();
         ck.save_with_files(sample_conversation(), None, &[&file])
@@ -1149,7 +1145,6 @@ mod tests {
             "v1",
             "文件随检查点恢复"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

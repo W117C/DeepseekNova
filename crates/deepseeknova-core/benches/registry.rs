@@ -1,3 +1,4 @@
+//! Criterion bench：RegistryHub 注册/查找与工具解析基线。
 use criterion::{criterion_group, criterion_main, Criterion};
 use deepseeknova_core::registry::RegistryHub;
 use deepseeknova_core::{Tool, ToolContext, ToolSchema};

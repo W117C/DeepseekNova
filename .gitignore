@@ -15,6 +15,10 @@ node_modules/
 CLAUDE.md
 .vscode/
 
+# Python 脚本残留（scripts/ 下维护脚本如 sync-test-count.py 的字节码）
+__pycache__/
+*.py[cod]
+
 # Project-local runtime state is ignored,
 # but the bundled default skills ship with the repo.
 .deepseeknova/*

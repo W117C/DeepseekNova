@@ -3,6 +3,8 @@ use deepseeknova_core::{DeepseeknovaError, Tool, ToolContext, ToolSchema};
 use serde::Deserialize;
 use serde_json::json;
 
+/// Recursively searches files for a regex pattern, aggregating matches under
+/// a byte budget and enforcing the workspace read capability.
 pub struct GrepTool;
 
 #[derive(Deserialize)]
@@ -19,7 +21,7 @@ impl Tool for GrepTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "grep".to_string(),
-            description: "Regex search; matches with path:line.".to_string(),
+            description: "Searches file contents by regex (ripgrep syntax). Returns matching lines with path:line:content. Use this to find specific text or code patterns in files.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -62,7 +64,7 @@ impl Tool for GrepTool {
         }
 
         let re = regex::Regex::new(&parsed.pattern)
-            .map_err(|e| DeepseeknovaError::Tool(format!("invalid regex: {e}")))?;
+            .map_err(|e| DeepseeknovaError::tool(format!("invalid regex: {e}")))?;
 
         let base = match parsed.path {
             Some(ref p) => deepseeknova_security::path::sanitize_path(&ctx.workspace_root, p)?,

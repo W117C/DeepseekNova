@@ -122,11 +122,11 @@ fn parse_skill_file(path: &Path) -> Result<Skill, DeepseeknovaError> {
     })?;
 
     let (frontmatter_yaml, body) = split_frontmatter(&raw).ok_or_else(|| {
-        DeepseeknovaError::Config(format!("invalid frontmatter in {}", path.display()))
+        DeepseeknovaError::config(format!("invalid frontmatter in {}", path.display()))
     })?;
 
     let fm: SkillFrontmatter = serde_norway::from_str(&frontmatter_yaml).map_err(|e| {
-        DeepseeknovaError::Config(format!(
+        DeepseeknovaError::config(format!(
             "invalid YAML frontmatter in {}: {e}",
             path.display()
         ))
@@ -134,7 +134,7 @@ fn parse_skill_file(path: &Path) -> Result<Skill, DeepseeknovaError> {
 
     let body = body.trim().to_string();
     if body.is_empty() {
-        return Err(DeepseeknovaError::Config(format!(
+        return Err(DeepseeknovaError::config(format!(
             "skill file {} has empty body",
             path.display()
         )));

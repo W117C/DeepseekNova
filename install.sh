@@ -4,8 +4,8 @@
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/W117C/DeepseekNova/main/install.sh | sh
 #   sh install.sh                          # latest GitHub release
-#   sh install.sh 0.4.0                    # explicit version (v-prefix optional)
-#   INSTALL_DIR=/custom/dir sh install.sh 0.4.0   # custom install dir
+#   sh install.sh 0.5.0                    # explicit version (v-prefix optional)
+#   INSTALL_DIR=/custom/dir sh install.sh 0.5.0   # custom install dir
 #
 # Downloads the release binary for the current platform, verifies its SHA-256
 # against the release's checksums.txt, then installs it to INSTALL_DIR.

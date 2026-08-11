@@ -20,6 +20,8 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_MAX_CHARS: usize = 6000;
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 
+/// 通过 Context7 公开 API 检索第三方库最新文档（`context7_docs`）；端点固定
+/// `context7.com`，支持按库名 + 主题搜索并返回上下文片段。
 pub struct Context7DocsTool {
     base_url: String,
     /// 工具级一次构造的共享客户端（不自动跟随重定向）。
@@ -34,10 +36,12 @@ fn build_shared_client() -> Result<reqwest::Client, DeepseeknovaError> {
         .redirect(reqwest::redirect::Policy::none())
         .user_agent(format!("deepseeknova-tools/{}", env!("CARGO_PKG_VERSION")))
         .build()
-        .map_err(|e| DeepseeknovaError::Tool(format!("failed to build HTTP client: {e}")))
+        .map_err(|e| DeepseeknovaError::tool(format!("failed to build HTTP client: {e}")))
 }
 
 impl Context7DocsTool {
+    /// 使用生产端点 `https://context7.com` 构造工具；HTTP 客户端构建失败返回
+    /// `Err` 向上传播（L2：不 `expect` panic 宿主）。
     pub fn new() -> Result<Self, DeepseeknovaError> {
         Ok(Self {
             base_url: DEFAULT_BASE_URL.to_string(),
@@ -68,9 +72,9 @@ struct Context7DocsArgs {
 /// 构造搜索库的 URL：`/api/v2/libs/search?libraryName=<名>&query=<主题>`。
 fn search_url(base: &str, library: &str, query: &str) -> Result<url::Url, DeepseeknovaError> {
     let mut u = url::Url::parse(base)
-        .map_err(|e| DeepseeknovaError::Tool(format!("invalid base URL '{base}': {e}")))?
+        .map_err(|e| DeepseeknovaError::tool(format!("invalid base URL '{base}': {e}")))?
         .join(SEARCH_PATH)
-        .map_err(|e| DeepseeknovaError::Tool(format!("failed to join search path: {e}")))?;
+        .map_err(|e| DeepseeknovaError::tool(format!("failed to join search path: {e}")))?;
     u.query_pairs_mut()
         .append_pair("libraryName", library)
         .append_pair("query", query);
@@ -80,9 +84,9 @@ fn search_url(base: &str, library: &str, query: &str) -> Result<url::Url, Deepse
 /// 构造拉文档片段的 URL：`/api/v2/context?libraryId=<id>&query=<主题>&type=txt`。
 fn context_url(base: &str, library_id: &str, query: &str) -> Result<url::Url, DeepseeknovaError> {
     let mut u = url::Url::parse(base)
-        .map_err(|e| DeepseeknovaError::Tool(format!("invalid base URL '{base}': {e}")))?
+        .map_err(|e| DeepseeknovaError::tool(format!("invalid base URL '{base}': {e}")))?
         .join(CONTEXT_PATH)
-        .map_err(|e| DeepseeknovaError::Tool(format!("failed to join context path: {e}")))?;
+        .map_err(|e| DeepseeknovaError::tool(format!("failed to join context path: {e}")))?;
     u.query_pairs_mut()
         .append_pair("libraryId", library_id)
         .append_pair("query", query)
@@ -119,10 +123,10 @@ fn truncate_text(text: &str, max_chars: usize) -> String {
 /// 域名固定：生产只允许 `context7.com`；测试构建额外允许本地地址。
 fn validate_base_url(base: &str) -> Result<(), DeepseeknovaError> {
     let u = url::Url::parse(base)
-        .map_err(|e| DeepseeknovaError::Tool(format!("invalid base URL '{base}': {e}")))?;
+        .map_err(|e| DeepseeknovaError::tool(format!("invalid base URL '{base}': {e}")))?;
     let host = u
         .host_str()
-        .ok_or_else(|| DeepseeknovaError::Tool("base URL has no host".to_string()))?;
+        .ok_or_else(|| DeepseeknovaError::tool("base URL has no host".to_string()))?;
     if host == "context7.com" {
         return Ok(());
     }
@@ -130,7 +134,7 @@ fn validate_base_url(base: &str) -> Result<(), DeepseeknovaError> {
     if host == "127.0.0.1" || host == "localhost" {
         return Ok(());
     }
-    Err(DeepseeknovaError::Tool(format!(
+    Err(DeepseeknovaError::tool(format!(
         "blocked base URL host '{host}'; only context7.com is allowed"
     )))
 }

@@ -33,7 +33,18 @@
 //! | `agent.plan` | `plan.steps`, `plan.model` | Plan generation |
 //! | `agent.compact` | `memory.tokens_before`, `memory.tokens_after` | Memory compaction |
 
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::dbg_macro
+    )
+)]
 
 use deepseeknova_core::DeepseeknovaError;
 use opentelemetry::trace::TracerProvider as _;
@@ -52,6 +63,9 @@ use tracing_subscriber::Registry;
 #[must_use = "telemetry shuts down when dropped — hold this guard for the program lifetime"]
 pub struct TelemetryGuard {
     tracer_provider: Option<SdkTracerProvider>,
+    /// 全局 subscriber 是否真正安装成功（`false` 表示 OTLP/stdout 层未生效，
+    /// 调用方不应误以为遥测已导出）。
+    installed: bool,
 }
 
 impl TelemetryGuard {
@@ -70,7 +84,7 @@ impl TelemetryGuard {
             .with_endpoint(endpoint)
             .build()
             .map_err(|e| {
-                DeepseeknovaError::Config(format!("failed to create OTLP span exporter: {e}"))
+                DeepseeknovaError::config(format!("failed to create OTLP span exporter: {e}"))
             })?;
 
         let tracer_provider = SdkTracerProvider::builder()
@@ -89,21 +103,21 @@ impl TelemetryGuard {
         // Install the layer globally. If a subscriber is already set, we add our layer.
         // If no subscriber exists, we create one with the OTel layer + a minimal fmt layer.
         let subscriber = Registry::default().with(otel_layer);
-        match tracing::subscriber::set_global_default(subscriber) {
-            Ok(()) => {}
+        let installed = match tracing::subscriber::set_global_default(subscriber) {
+            Ok(()) => true,
             Err(e) => {
                 tracing::warn!(
                     error = %e,
                     "global subscriber already set — OpenTelemetry layer not installed; \
                      telemetry calls from this point will not be exported"
                 );
-                // Still return a valid guard so the caller doesn't crash.
-                // The tracer_provider is dropped immediately since we can't install it.
+                false
             }
-        }
+        };
 
         Ok(Self {
             tracer_provider: Some(tracer_provider),
+            installed,
         })
     }
 
@@ -127,19 +141,29 @@ impl TelemetryGuard {
         let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
 
         let subscriber = Registry::default().with(otel_layer);
-        match tracing::subscriber::set_global_default(subscriber) {
-            Ok(()) => {}
+        let installed = match tracing::subscriber::set_global_default(subscriber) {
+            Ok(()) => true,
             Err(e) => {
                 tracing::warn!(
                     error = %e,
                     "global subscriber already set — OpenTelemetry stdout layer not installed"
                 );
+                false
             }
-        }
+        };
 
         Ok(Self {
             tracer_provider: Some(tracer_provider),
+            installed,
         })
+    }
+
+    /// 遥测层是否真正安装并生效。
+    ///
+    /// `false` 表示进程已有全局 tracing subscriber、OTLP/stdout 层未能挂载，
+    /// 此时调用方不应把 `init` 的 `Ok` 误认为导出已生效。
+    pub fn installed(&self) -> bool {
+        self.installed
     }
 }
 

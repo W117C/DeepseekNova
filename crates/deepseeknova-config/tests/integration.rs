@@ -1,6 +1,14 @@
 //! Integration tests for the Config system — TOML roundtrip, layered merge,
 //! and environment variable overrides.
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    clippy::dbg_macro
+)]
 
 use deepseeknova_config::*;
 use tempfile::TempDir;

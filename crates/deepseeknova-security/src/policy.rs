@@ -1,14 +1,22 @@
 use std::path::{Path, PathBuf};
 
+/// 安全策略：路径、命令与域名的放行/拒绝列表。
+///
+/// 空列表 = 未配置 = 全放（fail-open），见 [`SecurityPolicy::is_configured`]。
 #[derive(Debug, Clone, Default)]
 pub struct SecurityPolicy {
+    /// 允许访问的路径前缀列表（空 = 不做路径白名单限制）。
     pub allowed_paths: Vec<PathBuf>,
+    /// 拒绝访问的路径前缀列表（优先级高于白名单）。
     pub denied_paths: Vec<PathBuf>,
+    /// 允许执行的命令前缀列表（空 = 不限制）。
     pub allowed_commands: Vec<String>,
+    /// 允许访问的域名列表（空 = 不限制）。
     pub allowed_domains: Vec<String>,
 }
 
 impl SecurityPolicy {
+    /// 创建空策略（全放，见 [`Self::is_configured`]）。
     pub fn new() -> Self {
         Self::default()
     }
@@ -26,6 +34,7 @@ impl SecurityPolicy {
             || !self.allowed_domains.is_empty()
     }
 
+    /// 路径是否允许：先查拒绝列表（命中即拒），再按白名单前缀匹配。
     pub fn is_path_allowed(&self, path: &Path) -> bool {
         // Denied paths take precedence
         for denied in &self.denied_paths {
@@ -51,6 +60,7 @@ impl SecurityPolicy {
         true
     }
 
+    /// 命令是否允许：空列表全放；否则须命中某个允许前缀且不含注入。
     pub fn is_command_allowed(&self, command: &str) -> bool {
         if self.allowed_commands.is_empty() {
             return true;

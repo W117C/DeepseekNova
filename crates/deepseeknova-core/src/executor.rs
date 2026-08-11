@@ -180,10 +180,9 @@ impl GraphExecutor {
             if wave.len() == 1 {
                 // Single node — execute inline
                 let node_id = &wave[0];
-                let node = graph
-                    .nodes
-                    .get(node_id)
-                    .ok_or_else(|| crate::DeepseeknovaError::Runner("node must exist".into()))?;
+                let node = graph.nodes.get(node_id).ok_or_else(|| {
+                    crate::DeepseeknovaError::runner("node must exist".to_string())
+                })?;
 
                 if should_skip_node(node, graph, &outputs) {
                     debug!("node {node_id} skipped: no incoming edge condition satisfied");
@@ -208,7 +207,9 @@ impl GraphExecutor {
                     let node = graph
                         .nodes
                         .get(node_id)
-                        .ok_or_else(|| crate::DeepseeknovaError::Runner("node must exist".into()))?
+                        .ok_or_else(|| {
+                            crate::DeepseeknovaError::runner("node must exist".to_string())
+                        })?
                         .clone();
                     let outputs_snapshot = outputs.clone();
                     let this = Arc::clone(&self);
@@ -278,7 +279,7 @@ impl GraphExecutor {
                     {
                         Ok(Ok(output)) => Ok(output),
                         Ok(Err(e)) => Err(e),
-                        Err(_) => Err(crate::DeepseeknovaError::Runner(format!(
+                        Err(_) => Err(crate::DeepseeknovaError::runner(format!(
                             "node {} timed out after {d:?}",
                             node.id
                         ))),
@@ -394,7 +395,7 @@ impl GraphExecutor {
                         let text = d.delegate(sub_agent, goal).await?;
                         Ok(NodeOutput::Text(text))
                     } else {
-                        Err(crate::DeepseeknovaError::Runner(format!(
+                        Err(crate::DeepseeknovaError::runner(format!(
                             "Delegate action (sub_agent='{sub_agent}') requires a \
                              DelegateCallback, but none was configured on GraphExecutor"
                         )))
@@ -440,7 +441,7 @@ impl GraphExecutor {
                         match joined {
                             Ok((idx, result)) => results[idx] = Some(result),
                             Err(e) => {
-                                return Err(crate::DeepseeknovaError::Runner(format!(
+                                return Err(crate::DeepseeknovaError::runner(format!(
                                     "parallel node join error: {e}"
                                 )))
                             }
@@ -451,7 +452,7 @@ impl GraphExecutor {
                     for (i, result) in results.into_iter().enumerate() {
                         let child = &nodes[i];
                         let output = result.unwrap_or_else(|| {
-                            Err(crate::DeepseeknovaError::Runner(format!(
+                            Err(crate::DeepseeknovaError::runner(format!(
                                 "parallel node '{}' produced no result",
                                 child.id
                             )))
@@ -470,7 +471,7 @@ impl GraphExecutor {
                     // 下游 Failure/Retry 条件边可观测（Bugbot 审查 MEDIUM 修复；
                     // 部分失败仍以文本合并返回，保留中间产物）。
                     if all_failed {
-                        return Err(crate::DeepseeknovaError::Runner(format!(
+                        return Err(crate::DeepseeknovaError::runner(format!(
                             "all {} parallel children failed:\n{combined}",
                             nodes.len()
                         )));
@@ -527,8 +528,8 @@ fn topological_sort(graph: &ExecutionGraph) -> Result<Vec<NodeId>, crate::Deepse
     }
 
     if sorted.len() != graph.nodes.len() {
-        return Err(crate::DeepseeknovaError::Runner(
-            "graph contains a cycle".into(),
+        return Err(crate::DeepseeknovaError::runner(
+            "graph contains a cycle".to_string(),
         ));
     }
 

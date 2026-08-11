@@ -8,7 +8,6 @@ use deepseeknova_core::{DeepseeknovaError, Message, Role, Tool};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
-use std::env;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
@@ -18,6 +17,9 @@ use tracing::info;
 // AnthropicProvider — Anthropic Messages API
 // ---------------------------------------------------------------------------
 
+/// [`Provider`] implementation speaking the Anthropic Messages API, used for
+/// Claude backends and DeepSeek's Anthropic-compatible endpoint (extended
+/// thinking, reasoning effort, prompt caching, streaming, tool calling).
 pub struct AnthropicProvider {
     client: Client,
     base_url: String,
@@ -43,6 +45,13 @@ pub struct AnthropicProvider {
 }
 
 impl AnthropicProvider {
+    /// Build a new provider for `base_url` / `model`. The API key is resolved
+    /// from the `api_key_env` environment variable at construction time.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeepseeknovaError`] if the API key environment variable is
+    /// unset or the HTTP client cannot be constructed.
     pub fn new(
         base_url: &str,
         model: &str,
@@ -50,9 +59,7 @@ impl AnthropicProvider {
         timeout_secs: u64,
         max_retries: u32,
     ) -> Result<Self, DeepseeknovaError> {
-        let api_key = env::var(api_key_env).map_err(|_| {
-            DeepseeknovaError::Config(format!("environment variable {api_key_env} is not set"))
-        })?;
+        let api_key = crate::resolve_api_key_env_value(api_key_env)?;
 
         let client = Client::builder()
             .timeout(Duration::from_secs(timeout_secs))
@@ -402,7 +409,6 @@ struct AnthropicResponse {
     #[serde(default)]
     content: Vec<AnthropicContent>,
     #[serde(default)]
-    #[allow(dead_code)]
     usage: Option<AnthropicUsage>,
 }
 

@@ -27,6 +27,7 @@ use std::time::Duration;
 
 /// 嵌入 API key 首选环境变量，缺失时回落通用 OpenAI key。
 pub const EMBED_API_KEY_ENV: &str = "DEEPSEEKNOVA_EMBED_API_KEY";
+/// 嵌入 API key 回落变量：`EMBED_API_KEY_ENV` 缺失时读取通用 OpenAI key。
 pub const FALLBACK_API_KEY_ENV: &str = "OPENAI_API_KEY";
 
 /// 同步 [`EmbeddingProvider::embed`] 的共享执行 runtime：进程级懒加载多线程
@@ -41,7 +42,7 @@ fn shared_sync_runtime() -> Result<&'static tokio::runtime::Runtime, Deepseeknov
                 .build()
         });
     RT.as_ref().map_err(|e| {
-        DeepseeknovaError::Runner(format!(
+        DeepseeknovaError::runner(format!(
             "failed to build shared embedding sync runtime: {e}"
         ))
     })
@@ -85,20 +86,20 @@ impl RemoteEmbedder {
     /// 环境变量有 key（DEEPSEEKNOVA_EMBED_API_KEY，回落 OPENAI_API_KEY）。
     pub fn from_memory_config(config: &MemoryConfig) -> Result<Self, DeepseeknovaError> {
         if config.embedder != "remote" {
-            return Err(DeepseeknovaError::Config(format!(
+            return Err(DeepseeknovaError::config(format!(
                 "[memory] embedder must be \"remote\" (current: {:?})",
                 config.embedder
             )));
         }
         if config.embed_model.trim().is_empty() {
-            return Err(DeepseeknovaError::Config(
-                "[memory] embed_model is required when embedder=remote".into(),
+            return Err(DeepseeknovaError::config(
+                "[memory] embed_model is required when embedder=remote".to_string(),
             ));
         }
         let api_key = env::var(EMBED_API_KEY_ENV)
             .or_else(|_| env::var(FALLBACK_API_KEY_ENV))
             .map_err(|_| {
-                DeepseeknovaError::Config(format!(
+                DeepseeknovaError::config(format!(
                     "embed API key missing: set {EMBED_API_KEY_ENV} or {FALLBACK_API_KEY_ENV}"
                 ))
             })?;

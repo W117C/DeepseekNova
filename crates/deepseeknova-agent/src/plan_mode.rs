@@ -27,6 +27,7 @@ pub struct PlanModeRunner {
 }
 
 impl PlanModeRunner {
+    /// Create a plan-mode runner backed by the given provider.
     pub fn new(provider: Arc<dyn Provider>) -> Self {
         Self {
             provider,
@@ -125,7 +126,7 @@ async fn run_plan_mode(
     let validated = match validated {
         Ok(v) => v,
         Err(e) => {
-            return Err(DeepseeknovaError::Runner(format!(
+            return Err(DeepseeknovaError::runner(format!(
                 "validation failed: {e:?}"
             )))
         }

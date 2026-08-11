@@ -20,6 +20,47 @@ All notable changes to DeepseekNova will be documented in this file.
   `{ message, retryable }`，`is_retryable()` 不再依赖消息文本匹配，IO 仅
   瞬时错误种类（TimedOut/ConnectionRefused 等）可重试。
 
+### Fixed（2026-08-10 全面体检轮）
+
+- **`config` 命令凭据脱敏**：内联 `api_key` 与常见认证头（authorization /
+  proxy-authorization / x-api-key / cookie / set-cookie）展示时替换为
+  `[REDACTED]`，避免密钥明文进终端。
+- **子代理路径挂载用户 hooks**：`SubAgentRunner` 与 `DelegateEngine` 内的
+  子代理工具调用现在与主 agent 对称触发 `tool_before`/`tool_after` 等用户级
+  hooks（此前子代理可绕过 hooks，已补两条端到端回归测试）。
+- **会话 id 唯一性**：`store::new_session_id` 由秒级改为
+  `chat-YYYYMMDD-HHMMSS-mmm-ssss`（毫秒 + 进程内序号），同一秒连续新建
+  会话不再写入同一 JSONL；`/resume` 增加 `is_valid_session_id` 白名单校验，
+  封堵 `../`/绝对路径越界读写。
+- **TUI 会话预览只读首行**：`preview_first_prompt` / `session_workspace`
+  改为 `BufReader` 只读首行，不再把整个会话文件读进内存。
+- **风险标签端到端测试补齐**：Ask 决策 → ApprovalRequest → responder 收到
+  `[风险:…]` 前缀的整链断言（BLOCKED 点名缺的测试项）。
+- **主对话 @-mention 接线**：`[delegate] enabled=true` 时 CLI REPL 与 TUI
+  支持 `@agent_name` 直接唤起子代理（`MentionAwareRunner` 选择主/子路径，
+  歧义引用显式报错），补 3 条派发/回退/消歧测试。
+- **DelegateEngine 递归贯通**：`allow_recursion=true` 时引擎子代理挂
+  `RecursiveDelegateTool`（sink = 引擎自身），每层真实深度注入工具上下文，
+  深度上限在 `run_at_depth` 守门、超深优雅降级；补引擎递归与运行时装配测试。
+- **API key 环境变量命名裁决**：默认变量名统一为 `DEEPSEEKNOVA_API_KEY`，
+  旧名 `DEEPSEEK_API_KEY` 仅作兼容回退（新名优先），provider/README/README_EN
+  同步，补主/旧名回退测试。
+- **npm 安装包落地**：新增 `npm/deepseeknova` 包——postinstall 从 GitHub
+  Releases 下载当前平台二进制、校验 SHA-256、解压到 `vendor/`，`bin` 转发；
+  release.yml 增 `npm-publish` 任务（配 NPM_TOKEN 后随 tag 自动发布）。
+- **Windows Job Object 沙箱后端**：`windows::JobSandbox` 实现（挂起创建 →
+  挂入 Job → 恢复主线程，kill-on-close + 活动进程/内存限制，句柄由独立线程
+  在进程退出后释放）；`platform_sandbox*` Windows 分支切换为新后端，CLI
+  平台缺失警告改为按实际 `is_active()` 判定。
+- **README 真实截图**：`docs/screenshots/tui-welcome.png` /
+  `tui-chat.png` 由 `scripts/tui-screenshot.py` 真实运行 TUI 生成
+  （mock provider + PTY + pyte/Pillow），README/README_EN 已嵌入。
+- **telemetry 静默失败语义**：`TelemetryGuard::init` 在全局 subscriber 已
+  存在时只 warn 仍返回 Ok，新增 `installed()` 让调用方能识别导出层是否生效。
+- **文档/账本同步**：README 测试数更新为 1729、CHANGELOG i18n 键数更新为
+  257、PRODUCT 信息层级演进标记已落地、BLOCKED 对账（description/
+  PermissionGate 审计/temperature 接线/M3）、清理桌面端过期注释。
+
 ### Fixed（审计批次 2026-08-08，AUDIT-2026-08-08.md）
 
 - **权限门拒绝持久化审计（M1）**：`PermissionGate` 新增 `with_audit_logger`
@@ -565,7 +606,7 @@ All notable changes to DeepseekNova will be documented in this file.
 ### Added（并行优化第四批，2026-08-08）
 
 - **i18n 双语框架（TUI）**：新增 `crates/deepseeknova-tui/src/i18n/`（零外部依赖）——
-  `Key` 枚举 236 键 + `Lang`/`Tr`/`interpolate`，英文默认 + 中文可选（fail-safe
+  `Key` 枚举 257 键 + `Lang`/`Tr`/`interpolate`，英文默认 + 中文可选（fail-safe
   缺键回退英文）。约 190 处用户可见中文文案迁入词表；`AppState.tr` 注入、
   `Command.desc` 改 `&'static Key`、命令面板按语言匹配、评分卡维名与审批风险标签
   保持数据契约（中文 JSON）不变、映射词表键做双语显示。语言选择：

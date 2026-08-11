@@ -1,4 +1,13 @@
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+//! 上下文记忆集成测试（工作区记忆检索、prefix cache 稳定性）。
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    clippy::dbg_macro
+)]
 
 use deepseeknova_context::*;
 use deepseeknova_core::types::{Message, Role, ToolSchema};

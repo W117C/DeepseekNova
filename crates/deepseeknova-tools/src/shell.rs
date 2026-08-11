@@ -43,13 +43,13 @@ impl Tool for ShellTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "bash".to_string(),
-            description: "Runs a command.".to_string(),
+            description: "Runs a shell command with read-only classification and sandbox isolation. Dangerous commands (injection, UNC/URL paths, git -c/--config-env) are rejected. Read-only commands may skip approval; write commands and shell combinations (chain/redirect/substitution) require permission.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "command": {
                         "type": "string",
-                        "description": "Command."
+                        "description": "Shell command. Read-only commands (e.g. `git status`, `ls`) may skip approval; write commands require permission."
                     }
                 },
                 "required": ["command"]
@@ -75,7 +75,7 @@ impl Tool for ShellTool {
         if deepseeknova_security::readonly::classify_readonly(&parsed.command)
             == deepseeknova_security::readonly::ReadOnlyKind::Dangerous
         {
-            return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
+            return Err(deepseeknova_core::DeepseeknovaError::tool(format!(
                 "Security violation: command rejected by read-only classifier: {}",
                 parsed.command
             )));
@@ -87,7 +87,7 @@ impl Tool for ShellTool {
 
         if let Some(sec) = sec {
             if !sec.policy.is_command_allowed(&parsed.command) {
-                return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
+                return Err(deepseeknova_core::DeepseeknovaError::tool(format!(
                     "Security violation: command '{}' is blocked by security policy",
                     parsed.command
                 )));
@@ -109,7 +109,7 @@ impl Tool for ShellTool {
 
         // Fail-closed：必须隔离的平台沙箱后端缺失时拒绝执行，绝不静默降级。
         if self.sandbox.requires_isolation() && !self.sandbox.backend_available() {
-            return Err(deepseeknova_core::DeepseeknovaError::Tool(format!(
+            return Err(deepseeknova_core::DeepseeknovaError::tool(format!(
                 "sandbox backend '{}' unavailable (sandbox-exec/bwrap not found); \
                  refusing to run command without isolation. Install the backend or \
                  set [sandbox] enabled=false.",
@@ -129,7 +129,9 @@ impl Tool for ShellTool {
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
 
-        let child = cmd.spawn()?;
+        // Windows JobSandbox 覆盖 spawn：CREATE_SUSPENDED → 挂入 Job →
+        // 恢复主线程；其余平台走默认 spawn。
+        let child = self.sandbox.spawn(cmd)?;
 
         let result = timeout(exec_timeout, child.wait_with_output()).await;
 
@@ -149,11 +151,11 @@ impl Tool for ShellTool {
                     if !stderr.is_empty() {
                         msg.push_str(&format!("\nSTDERR:\n{stderr}"));
                     }
-                    Err(DeepseeknovaError::Tool(cap_output(msg, max_output)))
+                    Err(DeepseeknovaError::tool(cap_output(msg, max_output)))
                 }
             }
-            Ok(Err(e)) => Err(DeepseeknovaError::Tool(format!("command failed: {e}"))),
-            Err(_elapsed) => Err(DeepseeknovaError::Tool(format!(
+            Ok(Err(e)) => Err(DeepseeknovaError::tool(format!("command failed: {e}"))),
+            Err(_elapsed) => Err(DeepseeknovaError::tool(format!(
                 "command timed out after {:?}",
                 exec_timeout
             ))),
@@ -184,7 +186,9 @@ fn platform_shell() -> (&'static str, &'static str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use deepseeknova_sandbox::Sandbox;
+    #[cfg(unix)]
     use deepseeknova_security::context::SecurityContext;
 
     // --- cap_output ---
