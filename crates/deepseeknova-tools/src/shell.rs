@@ -186,7 +186,9 @@ fn platform_shell() -> (&'static str, &'static str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use deepseeknova_sandbox::Sandbox;
+    #[cfg(unix)]
     use deepseeknova_security::context::SecurityContext;
 
     // --- cap_output ---

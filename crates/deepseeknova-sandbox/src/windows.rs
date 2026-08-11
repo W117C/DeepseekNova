@@ -239,13 +239,13 @@ mod tests {
         assert_eq!(args, vec!["/C", "echo hi"]);
     }
 
-    #[test]
-    fn job_sandbox_spawns_command_in_job() {
+    #[tokio::test]
+    async fn job_sandbox_spawns_command_in_job() {
         let sb = JobSandbox::default();
         let mut cmd = Command::new("cmd");
         cmd.args(["/C", "echo job-ok"]);
         let child = sb.spawn(cmd).expect("spawn under job object");
-        let out = child.wait_with_output().expect("wait for child");
+        let out = child.wait_with_output().await.expect("wait for child");
         assert!(
             String::from_utf8_lossy(&out.stdout).contains("job-ok"),
             "got stdout: {:?}",

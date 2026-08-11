@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
-"""按 `cargo test --all` 的 passed 总数同步 README 测试数（徽章 + 表格）。
+"""按 Linux CI 的 `cargo test --all` passed 总数同步 README 测试数（徽章 + 表格）。
 
 用法：
   scripts/sync-test-count.py              # 运行 cargo test --all 并更新 README
   scripts/sync-test-count.py --check      # 只校验 README 数字，不写入（CI 用）
   scripts/sync-test-count.py --log FILE   # 复用已保存的 cargo test 日志
   scripts/sync-test-count.py --dry-run    # 显示将要写入的变更，不落盘
+
+权威口径：README 测试数 = Linux CI 上 `cargo test --all` 的 passed 总数
+（`deepseeknova-sandbox` 含 Linux 专属测试，本地 macOS/Windows 运行结果
+可能少于此值）。因此非 Linux 平台默认拒绝覆盖，仅提示。
 """
 import argparse
+import platform
 import re
 import subprocess
 import sys
@@ -111,9 +116,23 @@ def main():
 
     if args.log:
         passed = parse_log(Path(args.log).read_text())
+        print(f"cargo test --all passed 总数：{passed}")
+    elif platform.system() != "Linux":
+        print(
+            "README 测试数的权威口径为 Linux CI 的 cargo test --all passed 总数；"
+            f"当前平台为 {platform.system()}，本地运行结果可能不同"
+            "（deepseeknova-sandbox 含 Linux 专属测试）。"
+        )
+        if args.check:
+            print("已跳过本地比对；请在 Linux 上运行，或传入 CI 测试日志 --log FILE。")
+            return
+        raise SystemExit(
+            "拒绝在非 Linux 平台覆盖 README 测试数；请改用 CI 测试日志："
+            "scripts/sync-test-count.py --log FILE"
+        )
     else:
         passed = run_cargo_tests()
-    print(f"cargo test --all passed 总数：{passed}")
+        print(f"cargo test --all passed 总数：{passed}")
 
     if args.check:
         problems = check_count(passed)

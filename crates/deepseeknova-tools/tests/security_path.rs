@@ -62,10 +62,10 @@ fn test_secure_resolve_scenarios() {
     }
 
     // Case 6: Broken symlink escape should be blocked
-    let broken_link = root.join("broken_symlink");
-    let broken_target = Path::new("/nonexistent_directory/file");
     #[cfg(unix)]
     {
+        let broken_link = root.join("broken_symlink");
+        let broken_target = Path::new("/nonexistent_directory/file");
         if std::os::unix::fs::symlink(broken_target, &broken_link).is_ok() {
             let res = secure_resolve(&root, Path::new("broken_symlink/file"));
             assert!(
