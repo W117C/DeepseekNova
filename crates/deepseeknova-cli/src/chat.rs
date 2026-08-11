@@ -719,32 +719,36 @@ async fn handle_slash_command(
 
         // ── Skills ────────────────────────────────────────────
         "skills" => {
-            // Try to load skills from standard paths
-            let paths = [".deepseeknova/skills", ".agents/skills"];
-            let mut found = false;
-            for path_str in &paths {
-                let loader = deepseeknova_skills::SkillLoader::new(path_str);
-                match loader.load_all() {
-                    Ok(skills) if !skills.is_empty() => {
-                        if !found {
-                            println!("Available skills:");
-                            found = true;
-                        }
-                        for skill in &skills {
-                            println!("  • {} — {}", skill.name, skill.description);
-                            if !skill.tools_allowed.is_empty() {
-                                println!("    tools: {}", skill.tools_allowed.join(", "));
-                            }
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        eprintln!("error loading skills from {path_str}: {e}");
+            use deepseeknova_core::registry::SkillScope;
+            use deepseeknova_skills::SkillResolver;
+            // 三层来源：builtin / user / project，同名高优先级覆盖。
+            let user_skills = dirs::home_dir()
+                .map(|h| h.join(".deepseeknova/skills"))
+                .unwrap_or_default();
+            let resolver = SkillResolver::new()
+                .add_preloaded(
+                    SkillScope::Builtin,
+                    deepseeknova_skills::load_builtin_skills(),
+                )
+                .add_source(SkillScope::User, user_skills)
+                .add_source(SkillScope::Project, ".deepseeknova/skills")
+                .add_source(SkillScope::Project, ".agents/skills");
+            let skills = resolver.resolve();
+            if skills.is_empty() {
+                println!("No skills found. Create .md files in .deepseeknova/skills/");
+            } else {
+                println!("Available skills:");
+                for skill in &skills {
+                    println!(
+                        "  • [{}] {} — {}",
+                        skill.scope.label(),
+                        skill.name,
+                        skill.description
+                    );
+                    if !skill.tools_allowed.is_empty() {
+                        println!("    tools: {}", skill.tools_allowed.join(", "));
                     }
                 }
-            }
-            if !found {
-                println!("No skills found. Create .md files in .deepseeknova/skills/");
             }
         }
 

@@ -860,6 +860,7 @@ dependencies = [
  "deepseeknova-security",
  "deepseeknova-skills",
  "deepseeknova-tools",
+ "dirs",
  "futures",
  "serde_json",
  "tempfile",
@@ -937,6 +938,7 @@ version = "0.5.0"
 dependencies = [
  "async-trait",
  "deepseeknova-core",
+ "indexmap",
  "serde",
  "serde_json",
  "serde_norway",

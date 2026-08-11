@@ -604,40 +604,44 @@ struct SkillsCmd;
 impl CommandHandler for SkillsCmd {
     async fn run(&self, ctx: &mut CommandCtx<'_>, _args: &str) -> CommandOutcome {
         let tr = ctx.app.tr;
-        let mut found = false;
+        use deepseeknova_core::registry::SkillScope;
+        use deepseeknova_skills::SkillResolver;
+        // 三层来源：builtin / user / project（project 层用 TUI 配置的 skills_paths，
+        // 均视为项目级；缺省含 .deepseeknova/skills 与 .agents/skills）。
+        let user_skills = dirs::home_dir()
+            .map(|h| h.join(".deepseeknova/skills"))
+            .unwrap_or_default();
+        let mut resolver = SkillResolver::new()
+            .add_preloaded(
+                SkillScope::Builtin,
+                deepseeknova_skills::load_builtin_skills(),
+            )
+            .add_source(SkillScope::User, user_skills);
         for path in &ctx.caps.skills_paths {
-            let loader = deepseeknova_skills::SkillLoader::new(path);
-            match loader.load_all() {
-                Ok(skills) if !skills.is_empty() => {
-                    if !found {
-                        ctx.app.echo_line(LineKind::System, tr.t(Key::SkillsHeader));
-                        found = true;
-                    }
-                    for skill in &skills {
-                        ctx.app.echo_line(
-                            LineKind::System,
-                            &format!("  • {} — {}", skill.name, skill.description),
-                        );
-                        if !skill.tools_allowed.is_empty() {
-                            ctx.app.echo_line(
-                                LineKind::System,
-                                &format!("    tools: {}", skill.tools_allowed.join(", ")),
-                            );
-                        }
-                    }
-                }
-                Ok(_) => {}
-                Err(e) => ctx.app.show_notice(tr.t_args(
-                    Key::SkillsLoadFailed,
-                    &[
-                        ("path", &path.display().to_string()),
-                        ("err", &e.to_string()),
-                    ],
-                )),
-            }
+            resolver = resolver.add_source(SkillScope::Project, path);
         }
-        if !found {
+        let skills = resolver.resolve();
+        if skills.is_empty() {
             ctx.app.show_notice(tr.t(Key::NoSkillsFound));
+        } else {
+            ctx.app.echo_line(LineKind::System, tr.t(Key::SkillsHeader));
+            for skill in &skills {
+                ctx.app.echo_line(
+                    LineKind::System,
+                    &format!(
+                        "  • [{}] {} — {}",
+                        skill.scope.label(),
+                        skill.name,
+                        skill.description
+                    ),
+                );
+                if !skill.tools_allowed.is_empty() {
+                    ctx.app.echo_line(
+                        LineKind::System,
+                        &format!("    tools: {}", skill.tools_allowed.join(", ")),
+                    );
+                }
+            }
         }
         CommandOutcome::Handled
     }

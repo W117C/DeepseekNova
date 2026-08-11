@@ -26,7 +26,7 @@
 //! The frontmatter block (between `---` delimiters) is YAML.
 //! The body is the system prompt injected when the skill is activated.
 
-use deepseeknova_core::registry::Skill;
+use deepseeknova_core::registry::{Skill, SkillScope};
 use deepseeknova_core::DeepseeknovaError;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -49,16 +49,33 @@ struct SkillFrontmatter {
 // SkillLoader
 // ---------------------------------------------------------------------------
 
-/// Loads skills from a `.deepseeknova/skills/` directory.
+/// Loads skills from a directory.
 pub struct SkillLoader {
     root: PathBuf,
+    /// 来源层级；同名覆盖与 `/skills` 展示用。`new()` 默认
+    /// [`SkillScope::Project`]（既有调用均为项目级路径，保持兼容）。
+    scope: SkillScope,
 }
 
 impl SkillLoader {
     /// Create a new loader rooted at `path` (e.g. `~/.deepseeknova/skills/` or
     /// `<project>/.deepseeknova/skills/`).
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { root: path.into() }
+        Self {
+            root: path.into(),
+            scope: SkillScope::Project,
+        }
+    }
+
+    /// 显式设置来源层级（builtin / user / project）。
+    pub fn with_scope(mut self, scope: SkillScope) -> Self {
+        self.scope = scope;
+        self
+    }
+
+    /// 当前来源层级。
+    pub fn scope(&self) -> SkillScope {
+        self.scope
     }
 
     /// Walk the root directory and return all parsed skills.
@@ -88,7 +105,7 @@ impl SkillLoader {
             if path.extension().and_then(|s| s.to_str()) != Some("md") {
                 continue;
             }
-            match parse_skill_file(path) {
+            match parse_skill_file(path, self.scope) {
                 Ok(skill) => {
                     tracing::debug!(name = %skill.name, path = %path.display(), "loaded skill");
                     skills.push(skill);
@@ -113,7 +130,7 @@ impl SkillLoader {
 // ---------------------------------------------------------------------------
 
 /// Parse a single `.md` skill file.
-fn parse_skill_file(path: &Path) -> Result<Skill, DeepseeknovaError> {
+fn parse_skill_file(path: &Path, scope: SkillScope) -> Result<Skill, DeepseeknovaError> {
     let raw = std::fs::read_to_string(path).map_err(|e| {
         DeepseeknovaError::Io(std::io::Error::new(
             e.kind(),
@@ -146,6 +163,7 @@ fn parse_skill_file(path: &Path) -> Result<Skill, DeepseeknovaError> {
         model: fm.model,
         tools_allowed: fm.tools_allowed,
         system_prompt: body,
+        scope,
     })
 }
 

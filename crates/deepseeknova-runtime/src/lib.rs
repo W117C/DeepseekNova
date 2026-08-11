@@ -327,6 +327,34 @@ pub fn build_agent_with_role_providers(
         deepseeknova_tools::lsp_diagnostics_tools(&config.tools),
     );
 
+    // 技能工具：三层来源（builtin / user / project）按 scope 优先级解析，注册为
+    // `skill__<name>` 工具。可经 tools.overrides 按名禁用（精确匹配 skill__<name>）。
+    // 用户级目录 `~/.deepseeknova/skills`，项目级 `.deepseeknova/skills`（后加者
+    // 覆盖 `.agents/skills`）。
+    {
+        use deepseeknova_core::registry::SkillScope;
+        use deepseeknova_skills::{SkillResolver, SkillTool};
+        let user_skills = dirs::home_dir()
+            .map(|h| h.join(".deepseeknova/skills"))
+            .unwrap_or_default();
+        let resolver = SkillResolver::new()
+            .add_preloaded(
+                SkillScope::Builtin,
+                deepseeknova_skills::load_builtin_skills(),
+            )
+            .add_source(SkillScope::User, user_skills)
+            .add_source(SkillScope::Project, ".deepseeknova/skills")
+            .add_source(SkillScope::Project, ".agents/skills");
+        let skill_tools: Vec<Arc<dyn deepseeknova_core::Tool>> = resolver
+            .resolve()
+            .into_iter()
+            .map(|s| Arc::new(SkillTool::new(s)) as Arc<dyn deepseeknova_core::Tool>)
+            .collect();
+        if !skill_tools.is_empty() {
+            register(&mut agent, skill_tools);
+        }
+    }
+
     // Dynamically-discovered tools (MCP, etc). Same disable-filter as built-ins;
     // their namespaced names (`mcp__server__tool`) can be toggled via overrides.
     register(&mut agent, extra_tools);
