@@ -290,6 +290,17 @@ pub fn build_agent_with_role_providers(
                 &sandbox_writable_paths(config, &workspace_root),
                 config.sandbox.allow_network,
             ));
+        // T3 沙箱降级告警：用户显式请求的限制（禁网 / 只读档 / 域名白名单）
+        // 后端无法强制时，升级为可检测的结构化告警（target=sandbox_degradation，
+        // 测试/运维可订阅），不再只是沙箱构造时的一条日志。
+        for gap in sandbox_enforcement_gaps(
+            sandbox.as_ref(),
+            deepseeknova_sandbox::SandboxTier::WorkspaceWrite,
+            config.sandbox.allow_network,
+            &config.sandbox.network_allow_domains,
+        ) {
+            tracing::warn!(target: "sandbox_degradation", "{}", gap);
+        }
         register(
             &mut agent,
             deepseeknova_tools::all_builtin_tools_with_sandbox_and_checkpoint(
@@ -1112,6 +1123,66 @@ pub fn build_agent(
     )
 }
 
+/// 沙箱能力与用户请求之间的差距检测（T3 沙箱降级告警）。
+///
+/// 逐条比较用户显式请求的限制与所选后端的实际强制能力，返回需要提示的
+/// 降级信息列表（空 = 无降级）。检测三类静默失效：
+///
+/// 1. **显式禁网但后端无法强制**：有效网络状态为禁网（`WorkspaceWrite` +
+///    `allow_network=false`，或只读档），而后端
+///    [`deepseeknova_sandbox::Sandbox::enforced_network`] 为 `false`（如
+///    Windows JobSandbox / NoOpSandbox）；
+/// 2. **请求只读档但后端无法强制文件系统写限制**：
+///    [`deepseeknova_sandbox::SandboxTier::ReadOnly`] 且
+///    [`deepseeknova_sandbox::Sandbox::enforced_fs`] 为 `false`；
+/// 3. **配置了网络域名白名单但后端不支持域名级过滤**：
+///    [`deepseeknova_sandbox::NetworkPolicy::requests_domain_filtering`] 为真
+///    （当前所有平台后端均不支持域名级过滤，配置会被静默忽略）。
+///
+/// 本函数不直接打日志，便于测试直接断言返回内容；调用方（装配点）对每条
+/// 结果执行 `tracing::warn!`（target `sandbox_degradation`），使降级可被
+/// 程序检测而非仅留在沙箱构造时的一条日志里。
+pub(crate) fn sandbox_enforcement_gaps(
+    sandbox: &dyn deepseeknova_sandbox::Sandbox,
+    tier: deepseeknova_sandbox::SandboxTier,
+    allow_network: bool,
+    network_allow_domains: &[String],
+) -> Vec<String> {
+    use deepseeknova_sandbox::NetworkPolicy;
+    let mut gaps = Vec::new();
+
+    // 有效网络状态与 platform_sandbox_tiered 保持一致：
+    // ReadOnly → 强制禁网；FullAccess → 全开；WorkspaceWrite → 按配置。
+    let effective_net = match tier {
+        deepseeknova_sandbox::SandboxTier::ReadOnly => false,
+        deepseeknova_sandbox::SandboxTier::FullAccess => true,
+        deepseeknova_sandbox::SandboxTier::WorkspaceWrite => allow_network,
+    };
+    if !effective_net && !sandbox.enforced_network() {
+        gaps.push(format!(
+            "sandbox backend '{}' cannot enforce the network-off policy \
+             (allow_network=false); sandboxed commands still have network access",
+            sandbox.name()
+        ));
+    }
+    if tier.is_read_only() && !sandbox.enforced_fs() {
+        gaps.push(format!(
+            "sandbox backend '{}' cannot enforce read-only filesystem; \
+             sandboxed commands can still write to arbitrary paths",
+            sandbox.name()
+        ));
+    }
+    let policy = NetworkPolicy::new(allow_network, network_allow_domains.to_vec());
+    if policy.requests_domain_filtering() {
+        gaps.push(format!(
+            "sandbox backend '{}' does not support network allow-domain filtering; \
+             configured network_allow_domains is not enforced",
+            sandbox.name()
+        ));
+    }
+    gaps
+}
+
 /// Connect to every enabled MCP server in `config` and return their tools,
 /// ready to hand to [`build_agent`] as `extra_tools`.
 ///
@@ -1158,3 +1229,99 @@ pub async fn discover_mcp_tools(config: &Config) -> Vec<Arc<dyn deepseeknova_cor
 // 同目录 tests.rs（纯行范围搬移，无内容变更），本文件仅保留模块声明。
 #[cfg(test)]
 mod tests;
+
+/// T3 沙箱降级告警单测：`sandbox_enforcement_gaps` 的能力差距检测。
+#[cfg(test)]
+mod t3_sandbox_gaps_tests {
+    use super::sandbox_enforcement_gaps;
+    use deepseeknova_sandbox::Sandbox;
+    use deepseeknova_sandbox::SandboxTier;
+
+    /// 模拟具备完整强制能力的后端（seatbelt/bwrap 语义）。
+    struct EnforcingSandbox;
+    impl Sandbox for EnforcingSandbox {
+        fn sandbox(&self, exe: &str, args: &[String]) -> (String, Vec<String>) {
+            (exe.to_string(), args.to_vec())
+        }
+        fn name(&self) -> &str {
+            "enforcing"
+        }
+        fn enforced_network(&self) -> bool {
+            true
+        }
+        fn enforced_fs(&self) -> bool {
+            true
+        }
+    }
+
+    /// 模拟零强制能力的后端（Windows JobSandbox / NoOp 语义）。
+    struct NonEnforcingSandbox;
+    impl Sandbox for NonEnforcingSandbox {
+        fn sandbox(&self, exe: &str, args: &[String]) -> (String, Vec<String>) {
+            (exe.to_string(), args.to_vec())
+        }
+        fn name(&self) -> &str {
+            "non-enforcing"
+        }
+    }
+
+    #[test]
+    fn sandbox_gaps_report_silent_network_degradation() {
+        // 显式禁网 + 后端零强制 → 必须报网络降级；允许网络时不得误报。
+        let gaps = sandbox_enforcement_gaps(
+            &NonEnforcingSandbox,
+            SandboxTier::WorkspaceWrite,
+            false,
+            &[],
+        );
+        assert_eq!(gaps.len(), 1, "got: {gaps:?}");
+        assert!(gaps[0].contains("network-off policy"), "got: {}", gaps[0]);
+
+        let gaps =
+            sandbox_enforcement_gaps(&NonEnforcingSandbox, SandboxTier::WorkspaceWrite, true, &[]);
+        assert!(gaps.is_empty(), "允许网络时不应告警: {gaps:?}");
+    }
+
+    #[test]
+    fn sandbox_gaps_report_readonly_degradation() {
+        // 只读档 + 后端零强制 → 网络与文件系统写两条都报。
+        let gaps = sandbox_enforcement_gaps(&NonEnforcingSandbox, SandboxTier::ReadOnly, true, &[]);
+        assert_eq!(gaps.len(), 2, "got: {gaps:?}");
+        assert!(
+            gaps.iter().any(|g| g.contains("network-off policy")),
+            "got: {gaps:?}"
+        );
+        assert!(
+            gaps.iter().any(|g| g.contains("read-only filesystem")),
+            "got: {gaps:?}"
+        );
+    }
+
+    #[test]
+    fn sandbox_gaps_report_domain_filtering_not_supported() {
+        // 域名白名单非空即告警（所有平台后端当前均不支持域名级过滤），
+        // 即使后端能强制整网开关。
+        let gaps = sandbox_enforcement_gaps(
+            &EnforcingSandbox,
+            SandboxTier::WorkspaceWrite,
+            false,
+            &["api.github.com".to_string()],
+        );
+        assert_eq!(gaps.len(), 1, "got: {gaps:?}");
+        assert!(
+            gaps[0].contains("allow-domain filtering"),
+            "got: {}",
+            gaps[0]
+        );
+    }
+
+    #[test]
+    fn sandbox_gaps_none_for_enforcing_backend() {
+        // 后端能强制网络与文件系统写限制、且未配置域名白名单 → 无降级。
+        let gaps = sandbox_enforcement_gaps(&EnforcingSandbox, SandboxTier::ReadOnly, false, &[]);
+        assert!(gaps.is_empty(), "got: {gaps:?}");
+        let gaps =
+            sandbox_enforcement_gaps(&EnforcingSandbox, SandboxTier::WorkspaceWrite, false, &[]);
+        assert!(gaps.is_empty(), "got: {gaps:?}");
+    }
+}

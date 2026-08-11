@@ -134,6 +134,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: Some("中文".into()),
+            reasoning_signature: None,
         };
         // "abcd" ≈ 2 tokens（ceil 0.3×4）+ "中文" ≈ 2 tokens（ceil 0.6×2）
         assert_eq!(estimate_messages_tokens(&[m]), 4);

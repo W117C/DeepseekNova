@@ -600,6 +600,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
+            reasoning_signature: None,
         }
     }
 
@@ -968,6 +969,7 @@ data: [DONE]
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
+            reasoning_signature: None,
         };
         let tool_refs: Vec<&dyn Tool> = Vec::new();
         let messages = [msg];
@@ -1064,6 +1066,7 @@ data: [DONE]
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
+            reasoning_signature: None,
         };
         let tool_refs: Vec<&dyn Tool> = Vec::new();
         let messages = [msg];

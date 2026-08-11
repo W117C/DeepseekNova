@@ -35,6 +35,16 @@ pub struct Message {
     /// When no tool calls were made, this field is ignored by the API.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
+    /// Anthropic/DeepSeek 兼容端点的 thinking 块签名（opaque signature）。
+    ///
+    /// 多轮对话中 assistant 的 thinking 块必须**原样回传**（含 signature），
+    /// 否则 `api.anthropic.com` 与 `api.deepseek.com/anthropic` 均以 HTTP 400
+    /// 拒绝（"The content[].thinking in the thinking mode must be passed back
+    /// to the API."）。签名由响应解析填充（非流式 thinking 块的 `signature`
+    /// 字段 / 流式 `signature_delta` 事件）；无签名（如 OpenAI 端点）为
+    /// `None`，回放时不带 signature 字段。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_signature: Option<String>,
 }
 
 impl Message {

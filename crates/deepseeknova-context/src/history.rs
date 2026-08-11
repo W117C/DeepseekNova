@@ -379,6 +379,7 @@ impl HistoryCompactor for AtomicUnitCompactor {
                             tool_calls: None,
                             tool_call_id: None,
                             reasoning_content: assistant.reasoning_content.clone(),
+                            reasoning_signature: None,
                         });
                         tokens = tokens.saturating_sub(result[idx].estimated_tokens());
                         tokens += replacement.estimated_tokens();
@@ -419,6 +420,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
+            reasoning_signature: None,
         }
     }
 
@@ -430,6 +432,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: Some(call_id.to_string()),
             reasoning_content: None,
+            reasoning_signature: None,
         }
     }
 
@@ -457,6 +460,7 @@ mod tests {
             ),
             tool_call_id: None,
             reasoning_content: reasoning.map(|r| r.to_string()),
+            reasoning_signature: None,
         }
     }
 

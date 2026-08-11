@@ -173,15 +173,19 @@ impl Tool for LspDiagnosticsTool {
 }
 
 fn resolve_path(workspace_root: &Path, raw: &str) -> Result<PathBuf, DeepseeknovaError> {
-    let p = PathBuf::from(raw);
-    let p = if p.is_absolute() {
-        p
-    } else {
-        workspace_root.join(p)
-    };
-    // Lexical normalization (no filesystem canonicalization so the file does
-    // not need to exist for URI construction in tests).
-    Ok(p)
+    // LSP 工具是 stdio 交互：任何未净化路径都不得进入 didOpen。
+    // 与其余 fs 工具共用 sanitize_path 同一事实源——拒绝 `..` 逃逸、
+    // 绝对路径与 symlink 逃逸，保证最终路径落在工作区内。
+    if Path::new(raw).is_absolute() {
+        return Err(DeepseeknovaError::permission(format!(
+            "lsp_diagnostics: 拒绝绝对路径，path 必须是工作区内的相对路径: {raw}"
+        )));
+    }
+    deepseeknova_security::path::sanitize_path(workspace_root, raw).map_err(|e| {
+        DeepseeknovaError::permission(format!(
+            "lsp_diagnostics: 路径未通过安全检查（拒绝越出工作区或非法路径）: {raw} — {e}"
+        ))
+    })
 }
 
 fn uri_from_path(path: &Path) -> Result<String, DeepseeknovaError> {
@@ -680,6 +684,50 @@ mod tests {
             elapsed < Duration::from_secs(5),
             "empty diagnostics must return quickly, took {elapsed:?}"
         );
+    }
+
+    #[test]
+    fn resolve_path_rejects_parent_traversal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let res = resolve_path(tmp.path(), "../../etc/passwd");
+        assert!(res.is_err(), "must block parent traversal: {res:?}");
+        let msg = res.unwrap_err().to_string();
+        assert!(
+            msg.contains("lsp_diagnostics"),
+            "should be a clear lsp error: {msg}"
+        );
+        assert!(
+            msg.contains("安全检查"),
+            "should explain the reason in Chinese: {msg}"
+        );
+    }
+
+    #[test]
+    fn resolve_path_rejects_absolute_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        // 平台无关的绝对路径：temp_dir 在所有平台都带盘符/前缀，且不在工作区内。
+        let abs = std::env::temp_dir().join("etc").join("passwd");
+        let res = resolve_path(tmp.path(), &abs.to_string_lossy());
+        assert!(res.is_err(), "must block absolute path: {res:?}");
+        assert!(
+            res.unwrap_err().to_string().contains("拒绝绝对路径"),
+            "should reject absolute paths outright"
+        );
+    }
+
+    #[test]
+    fn resolve_path_allows_workspace_relative_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        // 文件不存在也返回工作区内规范化绝对路径（与 fs.rs 消费方式一致）。
+        let res = resolve_path(tmp.path(), "src/main.rs").unwrap();
+        assert_eq!(res, tmp.path().join("src/main.rs"));
+    }
+
+    #[test]
+    fn resolve_path_normalizes_dotdot_staying_in_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let res = resolve_path(tmp.path(), "src/../src/main.rs").unwrap();
+        assert_eq!(res, tmp.path().join("src/main.rs"));
     }
 
     #[test]

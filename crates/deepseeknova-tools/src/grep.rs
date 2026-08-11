@@ -70,6 +70,9 @@ impl Tool for GrepTool {
             Some(ref p) => deepseeknova_security::path::sanitize_path(&ctx.workspace_root, p)?,
             None => ctx.workspace_root.clone(),
         };
+        // T2：denied_paths 只拦 fs 工具而不拦搜索工具等于没拦——grep 是
+        // 最直接的泄密通道，必须与 read_file 同口径执行策略检查。
+        crate::fs::check_policy_path_allowed(ctx, &base)?;
 
         let security = ctx
             .extensions

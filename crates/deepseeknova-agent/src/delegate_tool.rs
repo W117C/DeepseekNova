@@ -111,7 +111,18 @@ impl Tool for DelegateTool {
             .map(|d| d.0)
             .unwrap_or(0);
         let next = current + 1;
-        match h.run_at_depth(&parsed.agent, &goal, values, next).await {
+        // T12：把当前工具上下文的主 run 取消令牌传给引擎——子代理执行使用
+        // 其 child_token()，主 run 取消（Ctrl-C / 外部 cancel）立即中止子代理。
+        match h
+            .run_at_depth_with_parent_cancel(
+                &parsed.agent,
+                &goal,
+                values,
+                next,
+                Some(ctx.cancellation.clone()),
+            )
+            .await
+        {
             Ok(text) => Ok(format!("[delegate:{}] {text}", parsed.agent)),
             Err(e) => Ok(format!(
                 "delegate to '{}' failed at depth {next}: {e}. Available agents: {}",
@@ -371,5 +382,86 @@ mod tests {
             .unwrap();
         assert!(out.contains("missing required input 'path'"), "got: {out}");
         assert!(out.contains("Available agents: reviewer"), "got: {out}");
+    }
+
+    /// T12 接线端到端：DelegateTool 把工具上下文的取消令牌传给引擎 →
+    /// 子代理执行用其 `child_token()`——父取消后子代理立即中止（不再跑满
+    /// `max_steps`），DelegateTool 优雅降级返回错误文本。
+    #[tokio::test]
+    async fn delegate_aborts_sub_agent_when_parent_cancelled() {
+        use crate::test_utils::MockProvider;
+        use deepseeknova_core::chunk::{Chunk, Usage};
+        use tokio_util::sync::CancellationToken;
+
+        // 永不完成的工具：依赖子代理执行循环的父取消分支打断。
+        struct BlockingTool;
+        #[async_trait::async_trait]
+        impl Tool for BlockingTool {
+            fn schema(&self) -> deepseeknova_core::ToolSchema {
+                deepseeknova_core::ToolSchema {
+                    name: "block".to_string(),
+                    description: "blocks forever".to_string(),
+                    parameters: serde_json::json!({}),
+                }
+            }
+            async fn execute(
+                &self,
+                _ctx: &ToolContext,
+                _args: &str,
+            ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
+                std::future::pending::<()>().await;
+                Ok(String::new())
+            }
+        }
+
+        let provider = Arc::new(MockProvider::sequential(vec![
+            vec![
+                Chunk::ToolCallStart {
+                    id: "b1".into(),
+                    name: "block".into(),
+                },
+                Chunk::ToolCallEnd {
+                    id: "b1".into(),
+                    name: "block".into(),
+                    arguments: "{}".into(),
+                },
+                Chunk::Done,
+            ],
+            vec![
+                Chunk::TextDelta("done".into()),
+                Chunk::Usage(Usage::default()),
+                Chunk::Done,
+            ],
+        ]));
+        let mut sub = Agent::new(provider, 3).with_system_prompt("blocker");
+        sub.register_tool(Arc::new(BlockingTool));
+        let mut agents: HashMap<String, Arc<Agent>> = HashMap::new();
+        agents.insert("blocker".into(), Arc::new(sub));
+        let engine: DelegateHandle = Arc::new(DelegateEngine::new(agents, 2, 2000));
+
+        let parent = CancellationToken::new();
+        let ctx = ToolContext::with_cancellation("t", parent.clone())
+            .with_extension(SecurityContext::with_safe_defaults())
+            .with_extension(engine);
+        let handle = tokio::spawn(async move {
+            DelegateTool
+                .execute(&ctx, r#"{"agent":"blocker","goal":"block me"}"#)
+                .await
+        });
+        // 让子代理进入工具执行（阻塞在 pending future）。
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        parent.cancel();
+        // 父取消后 DelegateTool 应立即返回降级文本（不再等待子代理跑满）。
+        let out = tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+            .await
+            .expect("delegate must return promptly after parent cancel")
+            .expect("execute must not panic")
+            .unwrap();
+        // T12 语义：取消路径子代理以 Ok 提前结束（非 Err），collect_final_text
+        // 为空文本——核心断言是"快速返回、不阻塞"，而非失败文案。
+        assert!(
+            out.starts_with("[delegate:blocker]"),
+            "delegate must return its wrapper text promptly, got: {out}"
+        );
     }
 }

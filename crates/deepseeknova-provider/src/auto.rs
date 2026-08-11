@@ -105,6 +105,7 @@ impl ModelAutoRouter {
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
+            reasoning_signature: None,
         };
         let user = Message {
             role: Role::User,
@@ -113,6 +114,7 @@ impl ModelAutoRouter {
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
+            reasoning_signature: None,
         };
         let provider = self.router.provider_for_maybe_model(
             ModelRole::Quick,
@@ -241,6 +243,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
+            reasoning_signature: None,
         }
     }
 

@@ -455,6 +455,7 @@ impl From<&StoredMessage> for Message {
             tool_calls: sm.tool_calls.clone(),
             tool_call_id: sm.tool_call_id.clone(),
             reasoning_content: sm.reasoning_content.clone(),
+            reasoning_signature: None,
         }
     }
 }
@@ -488,6 +489,7 @@ mod tests {
                 tool_calls: None,
                 tool_call_id: None,
                 reasoning_content: None,
+                reasoning_signature: None,
             },
             Message {
                 role: Role::Assistant,
@@ -496,6 +498,7 @@ mod tests {
                 tool_calls: None,
                 tool_call_id: None,
                 reasoning_content: None,
+                reasoning_signature: None,
             },
         ]
     }
@@ -794,6 +797,7 @@ mod tests {
             }]),
             tool_call_id: None,
             reasoning_content: Some("I should read the file first.".into()),
+            reasoning_signature: None,
         };
         let turn = SessionStore::build_turn(&sample_input(), 1, vec![msg], None);
         let json = serde_json::to_string(&turn).unwrap();

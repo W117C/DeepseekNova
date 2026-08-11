@@ -268,7 +268,11 @@ impl Store {
                 [],
             )?;
         }
-        // 迁移：旧版库缺 raw_calls/raw_imports 事实，清空 files 强制下次全量重解析
+        // schema 版本核对（三态策略，与 memory store 的 ensure_schema_version 一致）：
+        // - 无版本标记（旧库/新库）或**已知旧版本**（可解析为数字且 < 当前）：清空 files
+        //   强制下次全量重解析，并回写当前版本；
+        // - **未来版本**（可解析且 > 当前，如 '5'）或不可解析的未知版本：**不回写**、不降级、
+        //   不清空，保持原版本号只读可用（避免旧二进制抹除未来库的版本簿记）。
         let version: Option<String> = conn
             .query_row(
                 "SELECT value FROM meta WHERE key = 'schema_version'",
@@ -280,7 +284,15 @@ impl Store {
                 rusqlite::Error::QueryReturnedNoRows => Ok(None),
                 other => Err(other),
             })?;
-        if version.as_deref() != Some(SCHEMA_VERSION) {
+        let needs_migration = match version.as_deref() {
+            None => true, // 无版本标记（旧库/新库升级路径）→ 清表重索引并写当前版本
+            Some(v) => match v.parse::<i64>() {
+                // 仅已知旧版本（可解析且 < 当前）走清表迁移回写
+                Ok(n) => n < SCHEMA_VERSION.parse::<i64>().unwrap_or(4),
+                Err(_) => false, // 未知/不可解析版本：保守不回写
+            },
+        };
+        if needs_migration {
             conn.execute("DELETE FROM files", [])?;
             conn.execute(
                 "INSERT INTO meta(key, value) VALUES('schema_version', ?1)\n                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -2581,5 +2593,84 @@ require github.com/single/dep v1.0.0\n";
         let hy = store2.search_hybrid("needle", None, 10).unwrap();
         assert!(!hy.is_empty(), "旧索引 hybrid 必须 fail-open 到 FTS");
         assert!(hy.iter().all(|n| n.name == "alpha_needle"));
+    }
+
+    #[test]
+    fn future_schema_version_library_not_cleared_or_downgraded() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write(root, "src/a.rs", "pub fn alpha_needle() {}\n");
+        let db = root.join(".deepseeknova/graph.db");
+        {
+            let mut store = Store::open(&db).unwrap();
+            store.refresh(root, 1_048_576).unwrap();
+        }
+        // 模拟未来版本库：仅把版本号改为 '5'，files 已索引内容保持不动。
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute(
+                "UPDATE meta SET value = '5' WHERE key = 'schema_version'",
+                [],
+            )
+            .unwrap();
+        }
+        let reopened = Store::open(&db).unwrap();
+        // 版本号不得被改写回写（保持 '5'），files 不得被清空。
+        let v: String = reopened
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(v, "5", "未来版本库打开后不得回写降级版本号");
+        let files: i64 = reopened
+            .conn
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(files, 1, "未来版本库打开后不得清空 files");
+        assert_eq!(
+            reopened.find_by_name("alpha_needle").unwrap().len(),
+            1,
+            "未来版本库打开后既有索引仍可只读使用"
+        );
+    }
+
+    #[test]
+    fn old_schema_version_migrates_and_rewrites_version() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write(root, "src/a.rs", "pub fn alpha_needle() {}\n");
+        let db = root.join(".deepseeknova/graph.db");
+        {
+            let mut store = Store::open(&db).unwrap();
+            store.refresh(root, 1_048_576).unwrap();
+        }
+        // 模拟已知旧版本库（v3）：可解析且 < 当前，应清空 files 并回写当前版本。
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute(
+                "UPDATE meta SET value = '3' WHERE key = 'schema_version'",
+                [],
+            )
+            .unwrap();
+        }
+        let reopened = Store::open(&db).unwrap();
+        let v: String = reopened
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(v, SCHEMA_VERSION, "已知旧版本库打开后应回写当前版本");
+        // 既有迁移行为不变：files 被清空，强制下次全量重解析。
+        let files: i64 = reopened
+            .conn
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(files, 0, "已知旧版本库打开后应清空 files 强制全量重索引");
     }
 }

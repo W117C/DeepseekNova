@@ -76,6 +76,45 @@ pub fn extract_supported_versions(response: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Whether a JSON-RPC message from the server is a *request* directed at the
+/// client rather than a response to one of our pending requests or a
+/// notification.
+///
+/// A server request carries both `method` and `id` and no `result`/`error`
+/// field. MCP clients that advertise the `roots` capability must answer
+/// `roots/list`; other server requests may be answered with an error or
+/// ignored — but never mistaken for a response to a pending request.
+pub fn is_server_request(message: &Value) -> bool {
+    message.get("method").is_some()
+        && message.get("id").is_some()
+        && message.get("result").is_none()
+        && message.get("error").is_none()
+}
+
+/// Build a JSON-RPC response object answering a server request with `result`,
+/// echoing the request's `id` (which may be any JSON value).
+pub fn build_server_response(request: &Value, result: Value) -> Value {
+    let mut resp = serde_json::json!({ "jsonrpc": "2.0", "result": result });
+    if let Value::Object(map) = &mut resp {
+        if let Some(id) = request.get("id") {
+            map.insert("id".into(), id.clone());
+        }
+    }
+    resp
+}
+
+/// Build a JSON-RPC error response object answering a server request.
+pub fn build_server_error(request: &Value, code: i64, message: String) -> Value {
+    let mut resp =
+        serde_json::json!({ "jsonrpc": "2.0", "error": { "code": code, "message": message } });
+    if let Value::Object(map) = &mut resp {
+        if let Some(id) = request.get("id") {
+            map.insert("id".into(), id.clone());
+        }
+    }
+    resp
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,5 +174,42 @@ mod tests {
         });
         assert!(!is_version_mismatch(&other));
         assert!(extract_supported_versions(&other).is_empty());
+    }
+
+    #[test]
+    fn server_request_classification_distinguishes_the_three_message_kinds() {
+        // A server request (roots/list) — id + method, no result/error.
+        let request = json!({
+            "jsonrpc": "2.0", "id": 42, "method": "roots/list", "params": {}
+        });
+        assert!(is_server_request(&request));
+
+        // A response to one of our pending requests — id + result, no method.
+        let response = json!({"jsonrpc": "2.0", "id": 1, "result": {"pong": true}});
+        assert!(!is_server_request(&response));
+
+        // An error response — id + error, no method.
+        let error = json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": "x"}});
+        assert!(!is_server_request(&error));
+
+        // A notification — method, no id.
+        let notif = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
+        assert!(!is_server_request(&notif));
+    }
+
+    #[test]
+    fn server_response_builders_echo_the_request_id() {
+        let request = json!({
+            "jsonrpc": "2.0", "id": "abc-7", "method": "roots/list", "params": {}
+        });
+        let resp = build_server_response(&request, json!({"roots": []}));
+        assert_eq!(resp["id"], "abc-7");
+        assert_eq!(resp["result"], json!({"roots": []}));
+        assert!(resp.get("error").is_none());
+
+        let err = build_server_error(&request, -32601, "Method not found".into());
+        assert_eq!(err["id"], "abc-7");
+        assert_eq!(err["error"]["code"], -32601);
+        assert!(err.get("result").is_none());
     }
 }

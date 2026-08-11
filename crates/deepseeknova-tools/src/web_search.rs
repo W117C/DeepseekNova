@@ -18,6 +18,9 @@ use std::time::Duration;
 const SNIPPET_MAX_CHARS: usize = 320;
 const MAX_RESULTS_CAP: usize = 10;
 const MAX_SEARCH_REDIRECTS: u32 = 5;
+/// 响应体字节上限（5 MB），与 web_fetch.rs 的 `MAX_RESPONSE_BYTES` 对齐。
+/// 四后端统一：超限返回明确错误而非静默截断（口径同 web_fetch）。
+const MAX_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
 
 /// Build the optional web-search tool set for agent registration.
 /// HTTP 客户端构造失败时降级为空集合并告警——不 panic（L2）。
@@ -133,6 +136,9 @@ impl Tool for WebSearchTool {
                     .clone()
                     .unwrap_or_else(|| "https://api.tavily.com/search".to_string());
                 check_domain_allowed(ctx, &endpoint)?;
+                // T7：tavily 的 base_url 可被配置指向内网/回环 IP——域名策略检查
+                // 之后必须与 bing/searxng/ddg（`search_get`）同源做 SSRF 校验。
+                check_host_ssrf(&endpoint).await?;
                 let body = json!({
                     "api_key": key,
                     "query": parsed.query,
@@ -148,9 +154,7 @@ impl Tool for WebSearchTool {
                         DeepseeknovaError::tool(format!("tavily search request failed: {e}"))
                     })?;
                 let status = resp.status();
-                let text = resp.text().await.map_err(|e| {
-                    DeepseeknovaError::tool(format!("tavily search response read failed: {e}"))
-                })?;
+                let text = read_response_body(resp).await?;
                 if !status.is_success() {
                     return Err(deepseeknova_core::DeepseeknovaError::tool(format!(
                         "tavily search failed (HTTP {status}): {}",
@@ -273,6 +277,40 @@ fn check_domain_allowed(ctx: &ToolContext, url: &str) -> Result<(), Deepseeknova
     Ok(())
 }
 
+/// SSRF 校验：解析 URL 取 host，复用 [`crate::web_fetch::validate_host_ssrf`]
+/// （与 web_fetch 同源：拒绝私有/回环/链路本地等不安全地址）。
+async fn check_host_ssrf(url: &str) -> Result<(), DeepseeknovaError> {
+    let parsed = url::Url::parse(url)
+        .map_err(|e| DeepseeknovaError::tool(format!("invalid search URL: {e}")))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| DeepseeknovaError::tool("search URL has no host".to_string()))?;
+    crate::web_fetch::validate_host_ssrf(host).await
+}
+
+/// 响应体字节上限检查（T7）：超限返回明确错误，不静默截断。
+/// 抽为纯函数便于确定性单测（长度判定与网络层读取解耦）。
+fn enforce_max_response_bytes(len: usize) -> Result<(), DeepseeknovaError> {
+    if len > MAX_RESPONSE_BYTES {
+        return Err(DeepseeknovaError::tool(format!(
+            "response body exceeds maximum size of {MAX_RESPONSE_BYTES} bytes (got {len} bytes)"
+        )));
+    }
+    Ok(())
+}
+
+/// 读取响应体并施加字节上限（对齐 web_fetch 的 5MB）：超限或非 UTF-8
+/// 返回明确错误，不静默截断。
+async fn read_response_body(resp: reqwest::Response) -> Result<String, DeepseeknovaError> {
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| DeepseeknovaError::tool(format!("failed to read response body: {e}")))?;
+    enforce_max_response_bytes(bytes.len())?;
+    String::from_utf8(bytes.to_vec())
+        .map_err(|e| DeepseeknovaError::tool(format!("response body is not valid UTF-8: {e}")))
+}
+
 /// GET with manual redirect handling: every hop is re-validated against the
 /// domain policy and the same SSRF checks web_fetch applies. Returns the
 /// final non-redirect status + body.
@@ -285,12 +323,10 @@ async fn search_get(
     let mut current = url.to_string();
     for _ in 0..=MAX_SEARCH_REDIRECTS {
         check_domain_allowed(ctx, &current)?;
+        // SSRF：每跳复用 web_fetch 的 `validate_host_ssrf`（同源）。
+        check_host_ssrf(&current).await?;
         let parsed = url::Url::parse(&current)
             .map_err(|e| DeepseeknovaError::tool(format!("invalid search URL '{current}': {e}")))?;
-        let host = parsed
-            .host_str()
-            .ok_or_else(|| DeepseeknovaError::tool(format!("search URL has no host: {current}")))?;
-        crate::web_fetch::validate_host_ssrf(host).await?;
 
         let mut req = client.get(&current);
         for (name, value) in headers {
@@ -318,9 +354,7 @@ async fn search_get(
                 .to_string();
             continue;
         }
-        let text = resp.text().await.map_err(|e| {
-            DeepseeknovaError::tool(format!("failed to read search response body: {e}"))
-        })?;
+        let text = read_response_body(resp).await?;
         return Ok((status, text));
     }
     Err(DeepseeknovaError::tool(format!(
@@ -513,5 +547,92 @@ mod tests {
             err.contains("unknown web_search provider 'bogus'"),
             "expected provider error, got: {err}"
         );
+    }
+
+    // ── T7：SSRF 校验与响应体上限 ──────────────────────────────────
+
+    #[tokio::test]
+    async fn tavily_internal_ip_base_url_is_rejected() {
+        // tavily 的 base_url 可被配置指向内网/回环 IP——SSRF 必须在发出
+        // 任何 HTTP 请求前拒绝（tavily 分支与 search_get 每跳同源）。
+        let err = check_host_ssrf("http://127.0.0.1:8000/search")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("blocked (private/internal network)"),
+            "expected SSRF block, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_host_ssrf_rejects_unsafe_and_allows_public() {
+        // IP 形态免 DNS，确定性断言：回环 IPv6 与私有网段必须拒绝，
+        // 公网 IP 放行。
+        assert!(check_host_ssrf("http://[::1]/").await.is_err());
+        assert!(check_host_ssrf("http://10.0.0.5/").await.is_err());
+        assert!(check_host_ssrf("http://8.8.8.8/").await.is_ok());
+    }
+
+    /// 起一个本地 HTTP mock，返回固定长度 body（回环直连）。
+    ///
+    /// 服务器先读完客户端请求头再响应，写完后显式 shutdown 写端（FIN 而非
+    /// drop 触发的 RST），并保持连接直到客户端关闭——避免并行测试下
+    /// "connection closed before message completed / error decoding response
+    /// body" 的 flaky 竞态。
+    async fn spawn_body_server(body: Vec<u8>) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            if let Ok((mut sock, _)) = listener.accept().await {
+                // 先读客户端请求头（HTTP 交互对称，消除"服务器先响应"边缘）。
+                let mut req_buf = [0u8; 4096];
+                let _ = sock.read(&mut req_buf).await;
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(header.as_bytes()).await;
+                let _ = sock.write_all(&body).await;
+                let _ = sock.flush().await;
+                // 优雅关闭写端（FIN），避免 drop 时内核缓冲未发送完触发 RST。
+                let _ = sock.shutdown().await;
+                // 保持读侧直到客户端关闭，防止 socket 早于客户端读完被释放。
+                let mut drain = [0u8; 1024];
+                while let Ok(n) = sock.read(&mut drain).await {
+                    if n == 0 {
+                        break;
+                    }
+                }
+            }
+        });
+        format!("http://{addr}/")
+    }
+
+    #[test]
+    fn oversized_response_is_rejected_not_truncated() {
+        // 超限响应必须报错而非静默截断（口径同 web_fetch）。纯函数单测：
+        // 长度判定与网络层读取解耦，确定性不依赖 socket 时序（5MB HTTP
+        // mock 在并行测试下有连接提前关闭的 flaky 竞态，故不走网络层）。
+        let err = enforce_max_response_bytes(MAX_RESPONSE_BYTES + 1)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("exceeds maximum size"),
+            "expected size error, got: {err}"
+        );
+        assert!(enforce_max_response_bytes(MAX_RESPONSE_BYTES).is_ok());
+        assert!(enforce_max_response_bytes(0).is_ok());
+    }
+
+    #[tokio::test]
+    async fn under_limit_response_is_read() {
+        let body = br#"{"ok":true}"#.to_vec();
+        let url = spawn_body_server(body).await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let resp = client.get(&url).send().await.unwrap();
+        let text = read_response_body(resp).await.unwrap();
+        assert_eq!(text, r#"{"ok":true}"#);
     }
 }

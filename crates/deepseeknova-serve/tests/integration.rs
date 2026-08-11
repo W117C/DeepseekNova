@@ -14,7 +14,9 @@ use deepseeknova_core::runner::{RunEvent, RunEventStream, RunInput, RunOutput, R
 use deepseeknova_serve::{ChatRequest, Server};
 use serde_json::Value;
 use std::convert::Infallible;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio_stream::StreamExt;
 
 mod helpers;
@@ -1332,5 +1334,191 @@ async fn chat_done_event_carries_durable_run_id() {
         runs.iter()
             .any(|r| r["id"].as_str() == Some(run_id.as_str())),
         "durable run {run_id} must be listed: {runs:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T14: 并发隔离（/v1/chat 与 /v1/runs/{id}/resume 全局并发上限）
+// ---------------------------------------------------------------------------
+
+/// Runner 用 oneshot 门闩阻塞，模拟一个持续进行的 run（期间占住并发额度）。
+struct GatedRunner {
+    release: Arc<tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>>,
+    started: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl Runner for GatedRunner {
+    async fn run_stream(
+        &self,
+        _input: RunInput,
+    ) -> Result<RunEventStream, deepseeknova_core::DeepseeknovaError> {
+        self.started.fetch_add(1, Ordering::SeqCst);
+        // 等待测试端放行，期间该 run 保持 in-flight。
+        let rx = self
+            .release
+            .lock()
+            .await
+            .take()
+            .expect("release receiver must be present exactly once");
+        let _ = rx.await;
+        let events: Vec<Result<RunEvent, deepseeknova_core::DeepseeknovaError>> = vec![
+            Ok(RunEvent::TextDelta("gated ".to_string())),
+            Ok(RunEvent::Done(RunOutput {
+                text: "gated done".to_string(),
+                tool_calls: vec![],
+                usage: None,
+            })),
+        ];
+        Ok(Box::pin(tokio_stream::iter(events)))
+    }
+}
+
+#[tokio::test]
+async fn chat_rejects_over_limit_with_429() {
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let started = Arc::new(AtomicUsize::new(0));
+    let runner: Arc<dyn Runner> = Arc::new(GatedRunner {
+        release: Arc::new(tokio::sync::Mutex::new(Some(release_rx))),
+        started: started.clone(),
+    });
+    let server = Server::new(runner).with_max_concurrency(1);
+    let app = server.into_router();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let client = helpers::http::localhost_client();
+    let post_chat = || {
+        client
+            .post(format!("http://127.0.0.1:{port}/v1/chat"))
+            .json(&ChatRequest {
+                prompt: "gate me".to_string(),
+                images: None,
+                model: None,
+            })
+    };
+
+    // 第一个请求占住唯一的并发额度。
+    let resp1 = post_chat().send().await.unwrap();
+    assert_eq!(resp1.status(), reqwest::StatusCode::OK);
+
+    // 等待第一个 run 真正 in-flight（已持有 permit）。
+    for _ in 0..200 {
+        if started.load(Ordering::SeqCst) >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        started.load(Ordering::SeqCst) >= 1,
+        "first run should have started"
+    );
+
+    // 第二个请求超限 → 429（拒绝、不排队）。
+    let resp2 = post_chat().send().await.unwrap();
+    assert_eq!(
+        resp2.status(),
+        reqwest::StatusCode::TOO_MANY_REQUESTS,
+        "over-limit request must be rejected with 429: {}",
+        resp2.text().await.unwrap()
+    );
+
+    // 放行第一个 run，SSE 流正常结束（说明 permit 在流结束后才释放）。
+    let _ = release_tx.send(());
+    let body = resp1.text().await.unwrap();
+    assert!(
+        body.contains("gated done"),
+        "first stream must complete: {body}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T14: 审批条目超时拒绝 + pending map 清理（端到端）
+// ---------------------------------------------------------------------------
+
+/// Runner 模拟 agent 审批流程：先发 `approval_request` 事件，再调用
+/// `ApprovalResponder::request`（客户端不应答 → 超时按拒绝处理），最后发
+/// `done` 事件（文本携带审批结果，便于断言）。
+struct ApprovalRunner {
+    responder: Arc<dyn deepseeknova_core::runner::ApprovalResponder>,
+}
+
+#[async_trait::async_trait]
+impl Runner for ApprovalRunner {
+    async fn run_stream(
+        &self,
+        _input: RunInput,
+    ) -> Result<RunEventStream, deepseeknova_core::DeepseeknovaError> {
+        let responder = self.responder.clone();
+        let (tx, rx) = futures::channel::mpsc::unbounded::<
+            Result<RunEvent, deepseeknova_core::DeepseeknovaError>,
+        >();
+        tokio::spawn(async move {
+            let _ = tx.unbounded_send(Ok(RunEvent::ApprovalRequest {
+                id: "appr-1".to_string(),
+                title: "run command".to_string(),
+                description: Some("ls".to_string()),
+            }));
+            let approved = responder.request("appr-1", "run command", Some("ls")).await;
+            let _ = tx.unbounded_send(Ok(RunEvent::Done(RunOutput {
+                text: format!("approved={approved}"),
+                tool_calls: vec![],
+                usage: None,
+            })));
+        });
+        Ok(Box::pin(rx))
+    }
+}
+
+#[tokio::test]
+async fn approval_timeout_denies_and_pending_map_stays_empty() {
+    let pending = deepseeknova_serve::new_pending_approvals();
+    let responder: Arc<dyn deepseeknova_core::runner::ApprovalResponder> = Arc::new(
+        deepseeknova_serve::ServerApprovalResponder::new(pending.clone())
+            .with_timeout(Duration::from_millis(150)),
+    );
+    let runner: Arc<dyn Runner> = Arc::new(ApprovalRunner { responder });
+    let server = Server::with_pending(runner, pending.clone());
+    let app = server.into_router();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let client = helpers::http::localhost_client();
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/v1/chat"))
+        .json(&ChatRequest {
+            prompt: "needs approval".to_string(),
+            images: None,
+            model: None,
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body = resp.text().await.unwrap();
+
+    // SSE 先出现 approval_request；客户端不应答 → 超时按拒绝 → done(approved=false)。
+    assert!(
+        body.contains("approval_request"),
+        "must emit an approval_request event: {body}"
+    );
+    assert!(
+        body.contains("approved=false"),
+        "timeout must deny the approval: {body}"
+    );
+    // 流结束后 pending map 为空 → 超时清理了条目，map 不增长。
+    assert!(
+        pending.lock().unwrap().is_empty(),
+        "pending map must be empty after the unanswered run"
     );
 }

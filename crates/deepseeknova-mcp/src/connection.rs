@@ -178,6 +178,9 @@ impl McpConnection {
 
         // Background reader task
         let pending_r = Arc::clone(&pending);
+        // The reader answers server-initiated requests (e.g. `roots/list`) by
+        // writing the response through the same channel the writer task drains.
+        let reader_write_tx = write_tx.clone();
         let reader_handle = tokio::spawn(async move {
             let buf = BufReader::new(stdout);
             let mut lines = buf.lines();
@@ -204,22 +207,72 @@ impl McpConnection {
                             }
                         };
 
-                        if let Some(id) = val.get("id").and_then(|i| i.as_u64()) {
+                        // Distinguish the three JSON-RPC message kinds a server
+                        // may emit on stdout:
+                        //  1. server request — `method` + `id`, no result/error
+                        //     (e.g. `roots/list`, which the client advertises
+                        //     support for during `initialize`). Answer it so the
+                        //     server does not block waiting for a reply.
+                        //  2. notification — `method`, no `id`.
+                        //  3. response — answers one of our pending requests
+                        //     (`id` with `result`/`error`, no `method`).
+                        if protocol::is_server_request(&val) {
+                            let method = val["method"].as_str().unwrap_or("?").to_string();
+                            let reply = if method == "roots/list" {
+                                protocol::build_server_response(
+                                    &val,
+                                    serde_json::json!({"roots": []}),
+                                )
+                            } else {
+                                protocol::build_server_error(
+                                    &val,
+                                    -32601,
+                                    format!("Method not found: {method}"),
+                                )
+                            };
+                            let reply_str =
+                                serde_json::to_string(&reply).unwrap_or_else(|_| String::new());
+                            debug!("MCP ← srv request {method}; replying");
+                            // 有界通道满时不可阻塞：reader 是子进程 stdout 的唯一
+                            // 消费者，阻塞发送会与 writer/子进程形成双向管道死锁
+                            // （子进程停止读 stdin → writer 阻塞 → 通道满 →
+                            // reader 阻塞 → stdout 满 → 子进程挂死）。满时丢弃
+                            // 应答并告警，保证 reader 永远继续排空 stdout。
+                            if let Err(e) = reader_write_tx.try_send(format!("{reply_str}\n")) {
+                                match e {
+                                    tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                                        warn!("MCP write channel full; dropping answer to server request {method}");
+                                    }
+                                    tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                                        warn!("MCP write channel closed while answering {method}");
+                                        break;
+                                    }
+                                }
+                            }
+                        } else if let Some(id) = val.get("id").and_then(|i| i.as_u64()) {
                             // Response to a pending request — forward the full
                             // response object (including any `error` field) so
                             // callers can inspect it (e.g. protocol-version
                             // negotiation). Result extraction happens in
                             // [`McpConnection::send_raw`].
+                            //
+                            // 注意：response 分支必须在 notification 分支之前——
+                            // 部分服务器（非规范但常见）会在响应对象里回声
+                            // `method` 字段（如 {"id":7,"method":"initialize",
+                            // "result":{...}}）。若先判 method 会把这类响应当
+                            // notification 丢弃，pending 请求挂到超时。
                             let mut map = pending_r.write().await;
                             if let Some(p) = map.remove(&id) {
                                 let _ = p.response_tx.send(Ok(val.clone()));
                             } else {
                                 warn!("MCP: response for unknown id {id}");
                             }
-                        } else if val.get("method").is_some() {
+                        } else if val.get("method").is_some() && val.get("id").is_none() {
                             // Notification — log for now
                             let method = val["method"].as_str().unwrap_or("?");
                             debug!("MCP notification: {method}");
+                        } else {
+                            warn!("MCP: unrecognized server message without id or method");
                         }
                     }
                     Ok(None) => {
@@ -604,6 +657,123 @@ mod tests {
             .expect("request should survive surrounding garbage");
         assert_eq!(result, json!({"pong": true}));
         server.abort();
+    }
+
+    // ── Server requests (client-advertised `roots` capability) ──────────
+
+    #[tokio::test]
+    async fn server_request_roots_list_is_answered_and_handshake_does_not_hang() {
+        // The client advertises `roots` in initialize, so a compliant server
+        // sends a `roots/list` request (id + method, no result/error). The
+        // client must answer `{"roots": []}` — not drop it as an unknown
+        // response. The server deliberately refuses to answer the follow-up
+        // `ping` until it has seen the roots/list answer, which makes any
+        // missed reply surface as a request timeout (a hang).
+        const ROOTS_REQ_ID: u64 = 9001;
+
+        let (conn_stdin, mut srv_rx) = duplex(crate::test_util::DUPLEX_BUF);
+        let (mut srv_tx, conn_stdout) = duplex(crate::test_util::DUPLEX_BUF);
+        let seen_roots_answer: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let seen_roots_answer_capture = Arc::clone(&seen_roots_answer);
+
+        let server = tokio::spawn(async move {
+            let buf = BufReader::new(&mut srv_rx);
+            let mut lines = buf.lines();
+            let mut roots_answered = false;
+            let mut pending_ping: Option<u64> = None;
+            while let Ok(Some(line)) = lines.next_line().await {
+                let val: Value = match serde_json::from_str(&line) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+
+                // The client's answer to our roots/list request.
+                if val.get("id").and_then(|i| i.as_u64()) == Some(ROOTS_REQ_ID) {
+                    roots_answered = true;
+                    *seen_roots_answer_capture.lock().unwrap() = Some(line.clone());
+                    if let Some(pid) = pending_ping.take() {
+                        let pong = json!({"jsonrpc":"2.0","id": pid, "result":{"pong":true}});
+                        let _ = srv_tx.write_all(pong.to_string().as_bytes()).await;
+                        let _ = srv_tx.write_all(b"\n").await;
+                        let _ = srv_tx.flush().await;
+                    }
+                    continue;
+                }
+
+                let Some(id) = val.get("id").and_then(|i| i.as_u64()) else {
+                    continue; // notification (e.g. notifications/initialized) — no id
+                };
+                match val["method"].as_str() {
+                    Some("initialize") => {
+                        // Reply to initialize, then immediately send a
+                        // `roots/list` server request.
+                        let _ = srv_tx
+                            .write_all(init_reply(id).to_string().as_bytes())
+                            .await;
+                        let _ = srv_tx.write_all(b"\n").await;
+                        let roots_req = json!({
+                            "jsonrpc": "2.0",
+                            "id": ROOTS_REQ_ID,
+                            "method": "roots/list",
+                            "params": {}
+                        });
+                        let _ = srv_tx.write_all(roots_req.to_string().as_bytes()).await;
+                        let _ = srv_tx.write_all(b"\n").await;
+                        let _ = srv_tx.flush().await;
+                    }
+                    Some("ping") => {
+                        // Refuse to answer until the roots/list reply arrived.
+                        if roots_answered {
+                            let pong = json!({"jsonrpc":"2.0","id": id, "result":{"pong":true}});
+                            let _ = srv_tx.write_all(pong.to_string().as_bytes()).await;
+                            let _ = srv_tx.write_all(b"\n").await;
+                            let _ = srv_tx.flush().await;
+                        } else {
+                            pending_ping = Some(id);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let conn = McpConnection::from_streams(
+            conn_stdin,
+            conn_stdout,
+            None,
+            Duration::from_secs(5),
+            WRITE_CHANNEL_CAPACITY,
+        )
+        .await
+        .expect("from_streams");
+
+        conn.handshake(Duration::from_secs(5))
+            .await
+            .expect("handshake must complete despite the roots/list request");
+
+        let result = conn
+            .request("ping", None, Duration::from_secs(5))
+            .await
+            .expect("ping must succeed once the roots/list answer was delivered");
+        assert_eq!(result, json!({"pong": true}));
+        server.abort();
+
+        let answer = seen_roots_answer
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("client must write a roots/list answer to its stdout");
+        let answer: Value =
+            serde_json::from_str(&answer).expect("roots/list answer must be valid JSON");
+        assert_eq!(
+            answer["id"], ROOTS_REQ_ID,
+            "answer must echo the request id"
+        );
+        assert_eq!(
+            answer["result"],
+            json!({"roots": []}),
+            "answer must carry an empty roots list"
+        );
     }
 
     // ── Half-close / EOF ────────────────────────────────────────────

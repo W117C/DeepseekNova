@@ -35,16 +35,84 @@ use std::path::{Path, PathBuf};
 // ---------------------------------------------------------------------------
 
 /// A snapshot of a file's content identified by its SHA-256 hash.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// 内容以原始字节无损保存（JSONL 持久化时经 hex 编码为字符串），回滚时
+/// 原子写回，二进制文件（图片/PDF/编译产物）快照后回滚字节级一致。
+/// `existed` 区分“文件原本不存在”（回滚时删除现有文件）与“原本存在但
+/// 内容为空”（0 字节文件回滚后保留为空文件），修复旧实现用空串表示
+/// 两种状态的歧义。
+#[derive(Debug, Clone)]
 pub struct Snapshot {
     /// 被快照的文件路径。
     pub path: PathBuf,
-    /// 文件内容（UTF-8 有损转换）。
-    pub content: String,
+    /// 文件内容（原始字节，无损；不再经 [`String::from_utf8_lossy`] 有损转换）。
+    pub content: Vec<u8>,
+    /// 快照时文件是否原本存在：`false` 表示原本不存在，回滚时删除现有文件；
+    /// `true` 表示原本存在（含 0 字节文件），回滚时原子写回 `content`。
+    pub existed: bool,
     /// 内容的 SHA-256 哈希（十六进制）。
     pub hash: String,
     /// 快照创建时间。
     pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl serde::Serialize for Snapshot {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("Snapshot", 5)?;
+        state.serialize_field("path", &self.path)?;
+        // 新格式：content_hex（hex 编码的原始字节），兼容旧存档的 content 字符串。
+        state.serialize_field("content_hex", &hex::encode(&self.content))?;
+        state.serialize_field("existed", &self.existed)?;
+        state.serialize_field("hash", &self.hash)?;
+        state.serialize_field("created_at", &self.created_at)?;
+        state.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Snapshot {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // JSONL 落盘格式的中间结构：旧存档只有 `content` 字符串，新格式
+        // 写 `content_hex` + `existed`；未知字段忽略（不 deny_unknown_fields）。
+        #[derive(serde::Deserialize)]
+        struct SnapshotWire {
+            path: PathBuf,
+            #[serde(default)]
+            content: Option<String>,
+            #[serde(default)]
+            content_hex: Option<String>,
+            #[serde(default)]
+            existed: Option<bool>,
+            hash: String,
+            created_at: chrono::DateTime<chrono::Utc>,
+        }
+
+        let wire = SnapshotWire::deserialize(deserializer)?;
+        let (content, existed) = if let Some(hex_str) = wire.content_hex {
+            let bytes = hex::decode(&hex_str).map_err(serde::de::Error::custom)?;
+            (bytes, wire.existed.unwrap_or(true))
+        } else if let Some(legacy) = wire.content {
+            // 旧格式：空串按旧语义视为“文件原本不存在”；非空串视为原本存在，
+            // 内容为该字符串的 UTF-8 字节。
+            let existed = !legacy.is_empty();
+            (legacy.into_bytes(), existed)
+        } else {
+            (Vec::new(), wire.existed.unwrap_or(false))
+        };
+        Ok(Snapshot {
+            path: wire.path,
+            content,
+            existed,
+            hash: wire.hash,
+            created_at: wire.created_at,
+        })
+    }
 }
 
 /// 内存快照容量上限的默认值：超出后按 FIFO 淘汰最旧快照。
@@ -349,7 +417,9 @@ impl CheckpointManager {
             } else {
                 String::new()
             };
-            let snapshot = snap.content.clone();
+            // 展示层 diff 用有损字符串（与 current 的 lossy 口径一致）；
+            // 快照/回滚本身仍是无损字节。
+            let snapshot = String::from_utf8_lossy(&snap.content).to_string();
 
             // 哈希一致 → 无实际变更，返回 None（与 verify() 语义一致）。
             let current_hash = hex::encode(Sha256::digest(current.as_bytes()));
@@ -461,29 +531,30 @@ fn text_diff(old: &str, new: &str) -> (usize, usize, String) {
 // ---------------------------------------------------------------------------
 
 /// 读取文件当前状态并计算 SHA-256，构造一条 [`Snapshot`]。
-/// 文件不存在时按空内容快照（回滚时删除现有文件）。
+/// 文件存在时无损读取原始字节（`existed = true`）；不存在时记录
+/// `existed = false`（回滚时删除现有文件）。
 async fn snapshot_state(path: &Path) -> Result<Snapshot, DeepseeknovaError> {
-    let (content, hash) = if path.exists() {
+    let (content, existed, hash) = if path.exists() {
         let bytes = tokio::fs::read(path).await?;
-        let content = String::from_utf8_lossy(&bytes).to_string();
         let hash = hex::encode(Sha256::digest(&bytes));
-        (content, hash)
+        (bytes, true, hash)
     } else {
-        (String::new(), hex::encode(Sha256::digest(b"")))
+        (Vec::new(), false, hex::encode(Sha256::digest(b"")))
     };
     Ok(Snapshot {
         path: path.to_path_buf(),
         content,
+        existed,
         hash,
         created_at: chrono::Utc::now(),
     })
 }
 
-/// 把一条快照状态恢复到文件系统：文件原本不存在 → 删除现有文件；
-/// 否则原子写（临时文件 + rename）。非 UTF-8 文件内容经
-/// [`String::from_utf8_lossy`] 有损，与 [`CheckpointManager`] 的既有口径一致。
+/// 把一条快照状态恢复到文件系统：`existed = false`（原本不存在）→ 删除
+/// 现有文件；否则把原始字节原子写回（临时文件 + rename），0 字节文件也会
+/// 保留为空文件。内容为无损字节，二进制文件回滚后字节级一致。
 async fn restore_state(snap: &Snapshot) -> Result<(), DeepseeknovaError> {
-    if snap.content.is_empty() {
+    if !snap.existed {
         // File was absent before — remove it if it now exists
         if snap.path.exists() {
             tokio::fs::remove_file(&snap.path).await?;
@@ -496,7 +567,7 @@ async fn restore_state(snap: &Snapshot) -> Result<(), DeepseeknovaError> {
             .map(|e| format!(".{}.rollback", e.to_string_lossy()))
             .unwrap_or_else(|| ".rollback".to_string());
         let tmp = snap.path.with_extension(&ext[1..]);
-        tokio::fs::write(&tmp, snap.content.as_bytes()).await?;
+        tokio::fs::write(&tmp, &snap.content).await?;
         tokio::fs::rename(&tmp, &snap.path).await?;
     }
     Ok(())
@@ -887,7 +958,8 @@ mod tests {
         // Simulate a snapshot without going through async snapshot_file
         ck.snapshots.push(Snapshot {
             path: PathBuf::from("x"),
-            content: "hello".into(),
+            content: b"hello".to_vec(),
+            existed: true,
             hash: "abcdef0123456789".into(),
             created_at: chrono::Utc::now(),
         });
@@ -1212,26 +1284,154 @@ mod tests {
 
     #[test]
     fn old_format_jsonl_still_loads() {
-        // Snapshot 序列化契约未变；手写一条既有格式 JSONL，验证 load_from
-        // 仍能读取并保持回滚语义，防止未来格式漂移破坏旧文件。
+        // 旧存档的 content 是普通字符串（UTF-8 文本），新格式是
+        // content_hex + existed。load_from 必须能区分两种格式：
+        //   非空串 → existed=true，内容为该字符串的 UTF-8 字节；
+        //   空串   → 旧语义“文件原本不存在”→ existed=false。
         let dir = temp_dir();
         let ck_path = dir.path().join("old.jsonl");
-        let snap = Snapshot {
-            path: PathBuf::from("legacy.txt"),
-            content: "legacy".into(),
-            hash: "deadbeef0123456789".into(),
-            created_at: chrono::Utc::now(),
-        };
+        let created = "2024-01-01T00:00:00Z";
         std::fs::write(
             &ck_path,
-            format!("{}\n", serde_json::to_string(&snap).unwrap()),
+            format!(
+                r#"{{"path":"legacy.txt","content":"legacy","hash":"deadbeef0123456789","created_at":"{created}"}}
+{{"path":"empty.txt","content":"","hash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","created_at":"{created}"}}
+"#
+            ),
         )
         .unwrap();
 
         let ck = CheckpointManager::load_from(&ck_path).unwrap();
-        assert_eq!(ck.len(), 1);
-        assert_eq!(ck.snapshots()[0].path, PathBuf::from("legacy.txt"));
-        assert_eq!(ck.snapshots()[0].hash, "deadbeef0123456789");
+        assert_eq!(ck.len(), 2);
+        let snap0 = &ck.snapshots()[0];
+        assert_eq!(snap0.path, PathBuf::from("legacy.txt"));
+        assert_eq!(snap0.hash, "deadbeef0123456789");
+        assert!(snap0.existed, "旧格式非空串应视为 existed=true");
+        assert_eq!(snap0.content, b"legacy");
+        let snap1 = &ck.snapshots()[1];
+        assert_eq!(snap1.path, PathBuf::from("empty.txt"));
+        assert!(!snap1.existed, "旧格式空串按旧语义视为原本不存在");
+        assert!(snap1.content.is_empty());
+    }
+
+    // ── 二进制 / 0 字节 / 格式兼容 ───────────────────────────────────
+
+    #[tokio::test]
+    async fn binary_snapshot_rollback_is_lossless() {
+        // PNG 魔数样张 + 非 UTF-8 字节：快照后覆盖为另一段二进制，回滚
+        // 必须字节级还原，不得被 String::from_utf8_lossy 换成替换符。
+        let dir = temp_dir();
+        let file = dir.path().join("image.png");
+        let png: Vec<u8> = {
+            let mut v = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+            // IHDR 等二进制块中的非 UTF-8 字节。
+            v.extend_from_slice(&[0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52]);
+            v.extend_from_slice(&[0xFF, 0xFE, 0x80, 0x01, 0x00, 0x00, 0x00]);
+            v
+        };
+        std::fs::write(&file, &png).unwrap();
+
+        let mut ck = CheckpointManager::new();
+        ck.snapshot_file(&file).await.unwrap();
+
+        // 用完全不同的二进制覆盖。
+        std::fs::write(&file, b"\x00\x01\x02\x03\xFF\xFE\xFD").unwrap();
+
+        ck.rollback().await.unwrap();
+        let restored = std::fs::read(&file).unwrap();
+        assert_eq!(restored, png, "二进制快照回滚必须字节级一致");
+    }
+
+    #[tokio::test]
+    async fn zero_byte_file_rollback_preserves_empty_file() {
+        // 0 字节合法文件：快照时 existed=true、content 为空；回滚后文件
+        // 应存在且为空，而不是被当作“原本不存在”删除。
+        let dir = temp_dir();
+        let file = dir.path().join("empty.dat");
+        std::fs::write(&file, b"").unwrap();
+        assert_eq!(std::fs::metadata(&file).unwrap().len(), 0);
+
+        let mut ck = CheckpointManager::new();
+        ck.snapshot_file(&file).await.unwrap();
+        assert!(
+            ck.snapshots()[0].existed,
+            "0 字节文件快照应标记 existed=true"
+        );
+
+        std::fs::write(&file, b"now it has content").unwrap();
+
+        ck.rollback().await.unwrap();
+        assert!(file.exists(), "0 字节文件回滚后应存在");
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            b"",
+            "0 字节文件回滚后应为空文件"
+        );
+    }
+
+    #[tokio::test]
+    async fn binary_snapshot_survives_persistence_roundtrip() {
+        // 全字节域（0..=255）经 JSONL 持久化 + 跨实例重载后回滚，验证
+        // hex 编码无损覆盖所有字节值。
+        let dir = temp_dir();
+        let file = dir.path().join("blob.bin");
+        let blob: Vec<u8> = (0u8..=255u8).collect();
+        std::fs::write(&file, &blob).unwrap();
+        let ck_path = dir.path().join("ck.jsonl");
+
+        {
+            let mut ck = CheckpointManager::new().with_persistence(ck_path.clone());
+            ck.snapshot_file(&file).await.unwrap();
+            std::fs::write(&file, b"garbage").unwrap();
+        }
+
+        let mut ck2 = CheckpointManager::load_from(&ck_path).unwrap();
+        assert_eq!(ck2.len(), 1);
+        assert!(ck2.snapshots()[0].existed);
+        ck2.rollback().await.unwrap();
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            blob,
+            "经 JSONL 持久化的二进制快照回滚应字节级一致"
+        );
+    }
+
+    #[test]
+    fn new_format_jsonl_uses_content_hex_and_existed() {
+        // 新格式落盘字段契约：content_hex（hex 编码）+ existed 必须写出，
+        // 旧字段 content 不再出现；读回与序列化前一致。
+        let snap = Snapshot {
+            path: PathBuf::from("p.bin"),
+            content: vec![0x00, 0x89, 0xFF, 0x0A],
+            existed: true,
+            hash: "abc123".into(),
+            created_at: chrono::Utc::now(),
+        };
+        let json = serde_json::to_string(&snap).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["content_hex"], "0089ff0a");
+        assert_eq!(value["existed"], true);
+        assert!(
+            value.get("content").is_none(),
+            "新格式不应再写旧 content 字段"
+        );
+
+        let back: Snapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.content, vec![0x00, 0x89, 0xFF, 0x0A]);
+        assert!(back.existed);
+
+        // 新格式表示“原本不存在”：existed=false + 空内容。
+        let absent = Snapshot {
+            path: PathBuf::from("gone.txt"),
+            content: Vec::new(),
+            existed: false,
+            hash: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
+            created_at: chrono::Utc::now(),
+        };
+        let json2 = serde_json::to_string(&absent).unwrap();
+        let back2: Snapshot = serde_json::from_str(&json2).unwrap();
+        assert!(!back2.existed);
+        assert!(back2.content.is_empty());
     }
 
     // ── 会话级检查点（SessionCheckpointManager）──────────────────────

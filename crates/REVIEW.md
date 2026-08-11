@@ -650,5 +650,100 @@ x86_64-pc-windows-msvc` 对 sandbox cfg 分支做定向复现。
 ### 4. 结论
 
 **0 critical / 1 high（R1 已修）/ 1 medium（R2 已修）/ 1 low（R3 已修）**。
-上一轮遗留项全部闭环；剩余“docs/superpowers 内部任务书移出/保留”仍属领导
+上一轮遗留项全部闭环；剩余"docs/superpowers 内部任务书移出/保留"仍属领导
 裁决范围。
+
+---
+
+## 轮次：架构审查修复任务书 T1-T7（2026-08-11，并行 worker + 父级收尾）
+
+### 1. 覆盖声明
+
+- 依据：`docs/superpowers/plans/2026-08-11-arch-review-fix-plan.md`（19 项任务书）。
+- 本轮回合执行 **P0 安全组 T1-T7**：T1 tar `-I` 漏网 / T2 SecurityPolicy 路径表接线 /
+  T3 沙箱能力位 / T4 Anthropic content-block 回放 / T5 LSP 路径守卫 /
+  T6 MCP 服务器→客户端请求应答 / T7 web_search SSRF + 响应上限。
+- 执行方式：hard 难度并行 worker（批 1：T1+T4+T6；批 2：T2+T5+T7；批 3：T3）+
+  父级 diff 审阅 + 聚焦测试复检；T2 因 worker 两次被策略中止改由父级直接实现。
+- 并行事故记录：T5 worker 误用 `git stash` 全局操作，清掉 T7 并行写入的
+  web_search 辅助函数定义与 4 个测试——父级恢复后补回（教训：worker 禁止全局
+  git 操作，已写入任务书纪律）。
+- 验证：`make check` 全链路 EXIT=0（fmt/clippy/workspace 测试/doc 零警告）；
+  受影响 crate 聚焦测试全绿。
+
+### 2. 评论表（code_review 复检轮）
+
+| # | 路径 | 内容 | 严重度 |
+|---|------|------|--------|
+| C1 | provider/anthropic.rs | `Role::Tool` 无 `tool_call_id` 的合成消息（压缩摘要等）被序列化为孤儿 `tool_result`（空 `tool_use_id` → API 400）——T4 引入的回归 | P1 |
+| C2 | mcp/http_client.rs | `post_jsonrpc_value` 应答 server-request 时未处理 `Mcp-Session-Id` 轮换、未读响应体 | P3 |
+| C3 | mcp/connection.rs | reader 任务在有界通道上阻塞 `send`，可形成双向管道死锁链 | P3 |
+| C4 | provider/anthropic.rs | thinking 块无条件发射，未 gate 于 `thinking_enabled`，且缺 API 要求的 signature | P3 |
+
+### 3. 修复轮验证
+
+- C1：`tool_call_id` 为 `Some` 才发 `tool_result` 块，`None` 回落纯文本；新增回归
+  测试 `synthetic_tool_message_without_call_id_stays_plain_text`。
+- C2：应答 POST 后读取 `Mcp-Session-Id` 与响应体，按主 send 路径同逻辑更新 session。
+- C3：reader 改 `try_send`，通道满时丢弃应答并告警，保证继续排空 stdout。
+- C4：thinking 块 gate 于 `thinking_enabled`（未启用不发射，避免 400）；signature
+  缺失（core `Message` 未存储）记为已知限制。
+- 复跑：provider 73 / mcp 69 / tools 103+12+8 / sandbox 24 / runtime 115 /
+  security readonly 全绿；`make check` 全链路 EXIT=0。
+
+### 4. 遗留（如实）
+
+- **T8-T10 / T11-T19**：已在本任务书后续批次执行完毕（见下一分节
+  "轮次：架构审查修复任务书 T8-T19"）。
+- thinking 块回放缺 signature：`api.anthropic.com` 正式端点多轮 thinking 回放
+  仍需携带 API 返回的 signature（core `Message` 类型未存储），DeepSeek 兼容端点
+  行为未知——后续项。
+- Windows（T3 能力位、T6 相关）以 CI windows-latest 为准（本地交叉编译受
+  libsqlite3-sys 需 Windows C 工具链限制）。
+
+---
+
+## 轮次：架构审查修复任务书 T8-T19（2026-08-11 续）
+
+### 1. 覆盖声明
+
+- 批 4（T8+T9+T10 并行 worker）：config merge 深合并五段 /
+  checkpoint 二进制快照（hex + existed，旧格式兼容）/ 权限缓存契约
+  （deny 优先、set_mode 清缓存、容量 4096 逐出、key 规范化）。
+- 批 5（T11+T12 合并 + T14 + T15 并行 worker）：findings 容器 run 边界重置 +
+  run 局部暂存区并发隔离 / 子代理取消传播 + 步级限额 + 输出截断 + 递归委派
+  能力门 / serve 并发上限（Semaphore + 429）+ 审批 RAII + 超时 / CLI
+  process::exit 收敛为退出码返回（main 在 telemetry guard drop 后统一退出）。
+- 批 6（T16+T17+T18+T19 并行 worker）：graph schema 未来版本保守三态 /
+  content_id 换 Sha256 / 记忆锁内嵌入扫描移出 + HashMap 归并 /
+  run_user_hook 异步化（tokio::process + kill_on_drop）。
+- 每批均父级审 diff + 聚焦测试复检；T12 的 DelegateEngine 顶层接线点
+  （runtime/delegate.rs）因任务书批次约束未纳入本轮，机制由
+  `run_at_depth_with_parent_cancel` + 直连测试证明可用（后续项）。
+
+### 2. 验证
+
+- 各 crate 聚焦测试全绿：config 75+18 / checkpoint 33 / permission 63+8 /
+  agent 348+1+4 / serve 37 / cli 108 / graph 81+2 / core memory 88+1 /
+  core tool_hook 15。
+- `cargo fmt` 统一后 `--check` 通过；`cargo clippy --workspace --all-targets
+  -- -D warnings` 零告警；`cargo test --workspace` 无失败；
+  `RUSTDOCFLAGS="-D warnings" cargo doc` 零警告（修复 serve 两处 pub 文档
+  链接到私有常量的 broken link）。
+- 工作树含既有未提交改动（cli compat import 功能，非本任务书产物）与
+  本任务书全部修复，均未提交。
+
+### 3. 遗留（如实）
+
+- ~~T12 父取消的 DelegateEngine 顶层接线点~~ **已补（2026-08-11 收尾**：
+  `DelegateEngine::run_at_depth_with_parent_cancel` /
+  `delegate_once_with_parent_cancel` + `DelegationSink::delegate_with_parent_cancel`
+  覆盖，`DelegateTool`/`RecursiveDelegateTool` 从 `ToolContext::cancellation`
+  取父令牌，`Agent::run_stream_with_parent_cancel` 用 `child_token()`。
+  接线过程发现并修复真实缺口：**主循环 `execute_tool_call` 工具执行无
+  select! 取消分支**（审查 H2/A4 曾指出，T12 只覆盖了子代理循环）——阻塞中
+  的工具无法被父取消中断，已补 `tokio::select!` 取消分支 + 端到端测试
+  `delegate_aborts_sub_agent_when_parent_cancelled`（0.11s 返回））。
+- 各批 worker 并行期间出现一次踩踏事故（T5 误用 `git stash` 清掉 T7 写入），
+  父级恢复并补回；纪律已固化进任务书。批 5/6 worker 的 fmt 未达标由父级
+  `cargo fmt --all` 统一兜底（AGENTS.md §5 既有归档模式）。

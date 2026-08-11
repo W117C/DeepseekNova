@@ -997,12 +997,12 @@ fn find_allowed(args: &[String]) -> bool {
 }
 
 /// tar 只读判定：仅 `-t`（list）组合，且**全部**短 flag 组合中不得含
-/// `x`（解包）/`c`（创建）/`r`（append）/`u`（update）。`-txf x.tar`
-/// 解包写文件必须拒绝；`-tvf`/`-tzf` 只读放行。
+/// `x`（解包）/`c`（创建）/`r`（append）/`u`（update）/`I`（压缩程序）。
+/// `-txf x.tar` 解包写文件必须拒绝；`-tvf`/`-tzf` 只读放行。
 ///
 /// 执行类长 flag（GNU tar）：`--checkpoint-action=exec`（读路径也触发
 /// RCE）、`--to-command`、`-F/--info-script`、`--rmt-command`、
-/// `--use-compress-program` 一律拒绝；`--checkpoint` 仅允许不带 action。
+/// `-I/--use-compress-program` 一律拒绝；`--checkpoint` 仅允许不带 action。
 fn tar_allowed(args: &[String]) -> bool {
     let mut list_seen = false;
     for a in args {
@@ -1038,7 +1038,7 @@ fn tar_allowed(args: &[String]) -> bool {
             for c in body.chars() {
                 match c {
                     't' => list_seen = true,
-                    'x' | 'c' | 'r' | 'u' | 'F' => return false, // 解包/创建/追加/更新/脚本
+                    'x' | 'c' | 'r' | 'u' | 'F' | 'I' => return false, // 解包/创建/追加/更新/脚本/压缩程序
                     _ => {}
                 }
             }
@@ -2078,9 +2078,26 @@ mod tests {
         assert!(!is_readonly_command("tar -t -x f.tar"));
         assert!(!is_readonly_command("tar -t -c f.tar"));
         assert!(!is_readonly_command("tar -t -F script.sh f.tar"));
+        // T1：`-I/--use-compress-program` 短 flag 漏网——`-I`、`-I=*`、
+        // 组合形态 `-tfI` 均须拒绝（压缩程序经 /bin/sh -c 执行）
+        assert!(!is_readonly_command("tar -I 'sh -c id'"));
+        assert!(!is_readonly_command("tar -tfI x.tar"));
+        assert!(!is_readonly_command("tar -tf -I=cat x.tar"));
         // 纯 list 仍放行
         assert!(is_readonly_command("tar -tf x.tar"));
         assert!(is_readonly_command("tar -tvf x.tar"));
+    }
+
+    #[test]
+    fn tar_short_compress_program_not_readonly() {
+        // T1 反例：GNU tar `-tfI` 组合带压缩程序，只读命令实为任意命令
+        // 执行（含空格时经 /bin/sh -c），必须判 NotReadOnly 走权限流程。
+        assert_eq!(
+            classify_readonly("tar -tfI 'sh -c \"id\"'"),
+            ReadOnlyKind::NotReadOnly
+        );
+        assert!(!is_readonly_command("tar -tfI 'sh -c \"id\"'"));
+        assert!(!is_readonly_command("tar -tfI 'sh -c \"touch /tmp/pwn\"'"));
     }
 
     // ── exec 审计：CommandAudit / classify_with_form 命中形态 ──

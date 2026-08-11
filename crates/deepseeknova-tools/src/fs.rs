@@ -71,6 +71,7 @@ impl Tool for ReadFileTool {
         )?;
         let parsed: ReadFileArgs = serde_json::from_str(args)?;
         let path = sanitize_path(&ctx.workspace_root, &parsed.path)?;
+        check_policy_path_allowed(ctx, &path)?;
 
         if ctx.cancellation.is_cancelled() {
             return Err(deepseeknova_core::DeepseeknovaError::Cancelled);
@@ -205,6 +206,7 @@ impl Tool for WriteFileTool {
         )?;
         let parsed: WriteFileArgs = serde_json::from_str(args)?;
         let path = sanitize_path(&ctx.workspace_root, &parsed.path)?;
+        check_policy_path_allowed(ctx, &path)?;
 
         if ctx.cancellation.is_cancelled() {
             return Err(deepseeknova_core::DeepseeknovaError::Cancelled);
@@ -354,6 +356,7 @@ impl Tool for EditFileTool {
         )?;
         let parsed: EditFileArgs = serde_json::from_str(args)?;
         let path = sanitize_path(&ctx.workspace_root, &parsed.path)?;
+        check_policy_path_allowed(ctx, &path)?;
 
         // snippet_id is now required — enforce read-then-edit contract
         let snip_id = parsed.snippet_id.as_deref().ok_or_else(|| {
@@ -502,6 +505,8 @@ impl Tool for MoveFileTool {
         let parsed: MoveFileArgs = serde_json::from_str(args)?;
         let src = sanitize_path(&ctx.workspace_root, &parsed.source)?;
         let dst = sanitize_path(&ctx.workspace_root, &parsed.destination)?;
+        check_policy_path_allowed(ctx, &src)?;
+        check_policy_path_allowed(ctx, &dst)?;
 
         if ctx.cancellation.is_cancelled() {
             return Err(deepseeknova_core::DeepseeknovaError::Cancelled);
@@ -532,6 +537,34 @@ impl Tool for MoveFileTool {
 /// Helper wrapper calling the centralized sanitize_path helper.
 fn sanitize_path(workspace: &Path, raw: &str) -> Result<PathBuf, DeepseeknovaError> {
     deepseeknova_security::path::sanitize_path(workspace, raw)
+}
+
+/// 策略路径检查（T2 接线）：解析后的路径须通过
+/// [`deepseeknova_security::policy::SecurityPolicy::is_path_allowed`]
+/// （denied_paths 优先、allowed_paths
+/// 前缀匹配；空列表 = 全放）。未装配
+/// [`deepseeknova_security::context::SecurityContext`] 时直接放行，
+/// 与 limits 读取同款 fail-open 口径（既有行为不变）。
+///
+/// `pub(crate)` 供同 crate 的 grep/glob/ls/graph_tools 读路径复用
+/// （denied_paths 不能只拦 fs 工具，搜索/列举工具必须同口径拦截）。
+pub(crate) fn check_policy_path_allowed(
+    ctx: &ToolContext,
+    path: &Path,
+) -> Result<(), DeepseeknovaError> {
+    if let Some(sec) = ctx
+        .extensions
+        .get::<deepseeknova_security::context::SecurityContext>()
+    {
+        if !sec.policy.is_path_allowed(path) {
+            return Err(DeepseeknovaError::tool(format!(
+                "Security violation: path '{}' is blocked by security policy \
+                 ([security] allowed_paths / denied_paths)",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// 以 O_EXCL 语义打开临时文件：预埋的 symlink（指向工作区外）因"已存在"

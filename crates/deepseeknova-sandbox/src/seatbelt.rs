@@ -189,6 +189,17 @@ impl Sandbox for SeatbeltSandbox {
     fn backend_available(&self) -> bool {
         sandbox_exec_available()
     }
+
+    // T3 能力位：seatbelt profile 按 `allow_network` 渲染 `(allow network*)`
+    // （默认 `(deny network*)`）、按档位渲染文件写规则，具备强制网络与
+    // 文件系统写限制的能力（如实反映；是否实际禁网/只读由构造参数决定）。
+    fn enforced_network(&self) -> bool {
+        true
+    }
+
+    fn enforced_fs(&self) -> bool {
+        true
+    }
 }
 
 /// Check whether `sandbox-exec` is available on the system (cached per process
@@ -265,6 +276,22 @@ mod tests {
     fn seatbelt_is_active() {
         let sb = SeatbeltSandbox::default();
         assert!(sb.is_active());
+    }
+
+    #[test]
+    fn seatbelt_can_enforce_network_and_fs() {
+        // T3 能力位：seatbelt 具备强制网络与文件系统写限制的能力，与
+        // 构造参数（是否实际禁网/只读）无关。
+        let denied = SeatbeltSandbox::with_policy(&[], false);
+        assert!(denied.enforced_network());
+        assert!(denied.enforced_fs());
+        let allowed = SeatbeltSandbox::with_policy(&["/tmp/work".into()], true);
+        assert!(allowed.enforced_network());
+        assert!(allowed.enforced_fs());
+        // 只读档同样具备两种强制能力。
+        let ro = SeatbeltSandbox::with_tier(crate::SandboxTier::ReadOnly, &[], false);
+        assert!(ro.enforced_network());
+        assert!(ro.enforced_fs());
     }
 
     #[test]

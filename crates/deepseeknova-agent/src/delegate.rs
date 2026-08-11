@@ -31,6 +31,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio_stream::StreamExt;
+use tokio_util::sync::CancellationToken;
 
 /// 一个内置子代理预设。`spec.tools` 为工具 schema 名白名单（默认不含
 /// `delegate`；`allow_recursion` 为真时递归工具可加入工具面）。
@@ -318,6 +319,22 @@ impl DelegateEngine {
         values: InputValues,
         depth: usize,
     ) -> Result<String, DeepseeknovaError> {
+        self.run_at_depth_with_parent_cancel(agent, goal, values, depth, None)
+            .await
+    }
+
+    /// 带深度委派 + 父取消传播（T12 接线）：行为与 [`Self::run_at_depth`]
+    /// 一致，额外把父 run 的 [`CancellationToken`] 透传到子代理执行
+    /// （`run_stream_with_parent_cancel`），父取消后子代理在步边界/工具
+    /// 执行中途立即中止。`None` = 顶层派发（自建令牌 + Ctrl-C 接线）。
+    pub async fn run_at_depth_with_parent_cancel(
+        &self,
+        agent: &str,
+        goal: &str,
+        values: InputValues,
+        depth: usize,
+        parent_cancel: Option<CancellationToken>,
+    ) -> Result<String, DeepseeknovaError> {
         if depth > self.max_depth {
             return Err(DeepseeknovaError::runner(format!(
                 "sub-agent recursion depth exceeded (max {}, depth requested: {depth})",
@@ -327,7 +344,7 @@ impl DelegateEngine {
         // 无归因设置：维持旧行为（失败直接上抛，不重试）。
         let Some(cfg) = self.attribution.as_ref() else {
             return self
-                .delegate_once(agent, goal, &values, depth)
+                .delegate_once_with_parent_cancel(agent, goal, &values, depth, parent_cancel)
                 .await
                 .map_err(|e| e.into_error());
         };
@@ -345,7 +362,13 @@ impl DelegateEngine {
                 None => goal.to_string(),
             };
             match self
-                .delegate_once(&current_agent, &prompt, &values, depth)
+                .delegate_once_with_parent_cancel(
+                    &current_agent,
+                    &prompt,
+                    &values,
+                    depth,
+                    parent_cancel.clone(),
+                )
                 .await
             {
                 Ok(text) => return Ok(text),
@@ -393,13 +416,16 @@ impl DelegateEngine {
     /// 单次委派尝试（无归因重试）：深度守门 → 渲染任务书 → 信号量排队 →
     /// 收集封顶文本。渲染类错误（`spec.render` 失败）与执行类错误分开标记，
     /// 供调用方决定是否进入归因循环；`collect_final_text` 透传子代理
-    /// run_stream 的 Err。
-    async fn delegate_once(
+    /// run_stream 的 Err。T12 起支持父取消令牌透传（子代理执行用
+    /// `run_stream_with_parent_cancel`，父取消立即中止子代理）。
+    #[allow(clippy::too_many_arguments)]
+    async fn delegate_once_with_parent_cancel(
         &self,
         agent: &str,
         goal: &str,
         values: &InputValues,
         depth: usize,
+        parent_cancel: Option<CancellationToken>,
     ) -> Result<String, DelegateError> {
         if depth > self.max_depth {
             return Err(DelegateError::Execute(DeepseeknovaError::runner(format!(
@@ -457,7 +483,7 @@ impl DelegateEngine {
             reg.insert(DelegateDepth(depth));
         });
         let stream = sub
-            .run_stream_with_extensions(input, vec![depth_ext])
+            .run_stream_with_parent_cancel(input, vec![depth_ext], parent_cancel)
             .await
             .map_err(DelegateError::Execute)?;
         let text = collect_final_text(stream)
@@ -477,6 +503,20 @@ impl DelegationSink for DelegateEngine {
         depth: usize,
     ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
         self.run_at_depth(agent, goal, values.clone(), depth).await
+    }
+
+    /// T12 接线：递归派发同样透传父取消令牌（子代理内递归再派发时，
+    /// `RecursiveDelegateTool` 把当前 `ToolContext::cancellation` 传入）。
+    async fn delegate_with_parent_cancel(
+        &self,
+        agent: &str,
+        goal: &str,
+        values: &InputValues,
+        depth: usize,
+        parent_cancel: Option<CancellationToken>,
+    ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
+        self.run_at_depth_with_parent_cancel(agent, goal, values.clone(), depth, parent_cancel)
+            .await
     }
 }
 
@@ -964,6 +1004,7 @@ mod tests {
                 tool_calls: None,
                 tool_call_id: None,
                 reasoning_content: None,
+                reasoning_signature: None,
             })
         }
 
@@ -1027,6 +1068,7 @@ mod tests {
                 tool_calls: None,
                 tool_call_id: None,
                 reasoning_content: None,
+                reasoning_signature: None,
             })
         }
 

@@ -82,6 +82,7 @@ pub async fn run_reflection(
         tool_calls: None,
         tool_call_id: None,
         reasoning_content: None,
+        reasoning_signature: None,
     }];
     let validated = match ValidatedRequest::new(&msgs, &[]) {
         Ok(v) => v,
@@ -203,6 +204,7 @@ mod tests {
                 tool_calls: None,
                 tool_call_id: None,
                 reasoning_content: None,
+                reasoning_signature: None,
             })
         }
     }

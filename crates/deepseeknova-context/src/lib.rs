@@ -251,6 +251,7 @@ impl PromptBuilder {
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
+            reasoning_signature: None,
         });
 
         // Conversation history from working memory
@@ -270,6 +271,7 @@ impl PromptBuilder {
                         tool_calls: None,
                         tool_call_id: None,
                         reasoning_content: None,
+                        reasoning_signature: None,
                     },
                 );
             }
@@ -417,6 +419,7 @@ impl CacheAwarePromptBuilder {
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
+            reasoning_signature: None,
         });
 
         // ── VOLATILE SUFFIX ────────────────────────────────
@@ -432,6 +435,7 @@ impl CacheAwarePromptBuilder {
                 tool_calls: None,
                 tool_call_id: None,
                 reasoning_content: None,
+                reasoning_signature: None,
             });
         }
 
@@ -1140,6 +1144,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
+            reasoning_signature: None,
         });
         wm.add_message(Message {
             role: Role::Assistant,
@@ -1148,6 +1153,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
+            reasoning_signature: None,
         });
         assert_eq!(wm.get_all().len(), 2);
     }
@@ -1162,6 +1168,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
+            reasoning_signature: None,
         });
         assert_eq!(wm.get_all().len(), 1);
         wm.clear();
@@ -1180,6 +1187,7 @@ mod tests {
                 tool_calls: None,
                 tool_call_id: None,
                 reasoning_content: None,
+                reasoning_signature: None,
             });
         }
         assert_eq!(wm.get_all().len(), 5);
@@ -1197,6 +1205,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
+            reasoning_signature: None,
         });
         assert_eq!(wm.pinned.len(), 1);
         wm.clear();
@@ -1246,6 +1255,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
+            reasoning_signature: None,
         });
         wm.compaction_digest = Some("summary of earlier conversation".into());
 

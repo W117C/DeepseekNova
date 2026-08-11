@@ -213,6 +213,7 @@ impl SessionManager {
                 tool_calls: None,
                 tool_call_id: None,
                 reasoning_content: None,
+                reasoning_signature: None,
             },
             Message {
                 role: Role::Assistant,
@@ -221,6 +222,7 @@ impl SessionManager {
                 tool_calls: None,
                 tool_call_id: None,
                 reasoning_content: None,
+                reasoning_signature: None,
             },
         ];
         let input = RunInput {

@@ -139,10 +139,12 @@ impl AnthropicProvider {
                     role: match m.role {
                         Role::User => "user",
                         Role::Assistant => "assistant",
+                        // Tool results are sent as user-role `tool_result`
+                        // content blocks in the Anthropic Messages API.
                         _ => "user",
                     }
                     .to_string(),
-                    content: m.content.clone(),
+                    content: anthropic_message_content(m, self.thinking_enabled),
                 })
                 .collect(),
             tools: self.build_tools(tools),
@@ -294,15 +296,24 @@ impl Provider for AnthropicProvider {
             })
             .collect();
 
-        // --- Extract reasoning (thinking blocks) ---
-        let reasoning: String = resp
-            .content
-            .iter()
-            .filter_map(|c| match c {
-                AnthropicContent::Thinking { thinking } => Some(thinking.clone()),
-                _ => None,
-            })
-            .collect();
+        // --- Extract reasoning (thinking blocks) + opaque signature ---
+        // 多轮回放必须原样携带 signature（Anthropic/DeepSeek 兼容端点校验，
+        // 缺 signature → HTTP 400）。signature 取首个非空值（thinking 块
+        // 级字段，DeepSeek 通常单块）。
+        let mut reasoning = String::new();
+        let mut reasoning_signature: Option<String> = None;
+        for c in &resp.content {
+            if let AnthropicContent::Thinking {
+                thinking,
+                signature,
+            } = c
+            {
+                reasoning.push_str(thinking);
+                if reasoning_signature.is_none() {
+                    reasoning_signature = signature.clone();
+                }
+            }
+        }
 
         // --- Extract tool_use blocks (non-streaming path) ---
         let tool_calls: Vec<ToolCall> = resp
@@ -341,6 +352,7 @@ impl Provider for AnthropicProvider {
             } else {
                 Some(reasoning)
             },
+            reasoning_signature,
         })
     }
 
@@ -370,6 +382,90 @@ impl Provider for AnthropicProvider {
 // Anthropic API types
 // ---------------------------------------------------------------------------
 
+/// Build the Anthropic `content` payload for a core [`Message`].
+///
+/// * Plain user/assistant text — the existing string form.
+/// * Assistant `tool_calls` — `tool_use` content blocks (`id`/`name`/`input`),
+///   with the assistant text emitted as a `text` block when structured blocks
+///   are present.
+/// * Non-empty `reasoning_content` — a `thinking` block, replayed on subsequent
+///   turns (DeepSeek V4 returns HTTP 400 if reasoning is dropped while the
+///   paired tool calls remain).
+/// * [`Role::Tool`] results — `tool_result` content blocks carrying the
+///   `tool_use_id` of the call they answer, as a user-role message.
+fn anthropic_message_content(m: &Message, thinking_enabled: bool) -> AnthropicMessageContent {
+    // Tool results: user-role `tool_result` content blocks in the API.
+    // 合成 Tool 消息（压缩摘要等）无 tool_call_id 时回落纯文本，避免孤儿
+    // tool_result（空 tool_use_id 会被 Anthropic API 以 HTTP 400 拒绝）。
+    if m.role == Role::Tool {
+        return match &m.tool_call_id {
+            Some(id) => AnthropicMessageContent::Blocks(vec![serde_json::json!({
+                "type": "tool_result",
+                "tool_use_id": id,
+                "content": m.content,
+            })]),
+            None => AnthropicMessageContent::Text(m.content.clone()),
+        };
+    }
+
+    let mut blocks: Vec<serde_json::Value> = Vec::new();
+
+    // Replay chain-of-thought first (matches the wire order of DeepSeek/
+    // Anthropic responses: thinking → text → tool_use)。仅当 extended
+    // thinking 已启用时发射 thinking 块：未启用时 Anthropic API 会拒绝
+    // thinking 块（HTTP 400）。完整回放仍需 API 返回的 signature（core
+    // `Message` 未存储，属已知限制，见 REVIEW.md 2026-08-11 轮次）。
+    if thinking_enabled {
+        if let Some(reasoning) = m.reasoning_content.as_ref() {
+            if !reasoning.is_empty() {
+                let mut block = serde_json::json!({
+                    "type": "thinking",
+                    "thinking": reasoning,
+                });
+                // T12 收尾：thinking 块原样回放（含 signature）——
+                // Anthropic/DeepSeek 兼容端点要求，缺 signature → HTTP 400。
+                if let Some(sig) = m.reasoning_signature.as_ref() {
+                    block["signature"] = serde_json::Value::String(sig.clone());
+                }
+                blocks.push(block);
+            }
+        }
+    }
+
+    let has_tool_calls = m
+        .tool_calls
+        .as_ref()
+        .map(|tc| !tc.is_empty())
+        .unwrap_or(false);
+
+    if (has_tool_calls || !blocks.is_empty()) && !m.content.is_empty() {
+        blocks.push(serde_json::json!({"type": "text", "text": m.content}));
+    }
+
+    if has_tool_calls {
+        if let Some(tool_calls) = m.tool_calls.as_ref() {
+            for tc in tool_calls {
+                // `arguments` is a JSON string in core; parse it back into the
+                // `input` object the Anthropic API requires.
+                let input = serde_json::from_str(&tc.function.arguments)
+                    .unwrap_or_else(|_| serde_json::json!({}));
+                blocks.push(serde_json::json!({
+                    "type": "tool_use",
+                    "id": tc.id,
+                    "name": tc.function.name,
+                    "input": input,
+                }));
+            }
+        }
+    }
+
+    if blocks.is_empty() {
+        AnthropicMessageContent::Text(m.content.clone())
+    } else {
+        AnthropicMessageContent::Blocks(blocks)
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct AnthropicRequest {
     model: String,
@@ -391,10 +487,23 @@ struct AnthropicRequest {
     temperature: Option<f32>,
 }
 
+/// Content payload of an Anthropic message: either a plain string (single text
+/// message) or an array of typed content blocks (`tool_use` / `tool_result` /
+/// `thinking`). Serialised as a JSON string in the former case and a JSON array
+/// in the latter via `#[serde(untagged)]`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+enum AnthropicMessageContent {
+    /// A single plain-text message (`"content": "hi"`).
+    Text(String),
+    /// A list of typed content blocks (`"content": [...]`).
+    Blocks(Vec<serde_json::Value>),
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct AnthropicMessage {
     role: String,
-    content: String,
+    content: AnthropicMessageContent,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -417,9 +526,18 @@ struct AnthropicResponse {
 enum AnthropicContent {
     #[serde(rename = "text")]
     Text { text: String },
-    /// DeepSeek/Anthropic chain-of-thought block.
+    /// DeepSeek/Anthropic chain-of-thought block。
+    ///
+    /// `signature`（opaque）：Anthropic/DeepSeek 兼容端点多轮回放 thinking
+    /// 块必须原样携带——缺 signature 回放会被 HTTP 400 拒绝
+    /// （"The content[].thinking in the thinking mode must be passed back
+    /// to the API."）。
     #[serde(rename = "thinking")]
-    Thinking { thinking: String },
+    Thinking {
+        thinking: String,
+        #[serde(default)]
+        signature: Option<String>,
+    },
     #[serde(rename = "tool_use")]
     ToolUse {
         name: String,
@@ -795,6 +913,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
+            reasoning_signature: None,
         }];
         let body = provider.build_request(&msgs, &[], false);
         let v = serde_json::to_value(&body).unwrap();
@@ -823,6 +942,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
+            reasoning_signature: None,
         }];
         let body = provider.build_request(&msgs, &[], false);
         let v = serde_json::to_value(&body).unwrap();
@@ -851,6 +971,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
+            reasoning_signature: None,
         }];
         let body = provider.build_request(&msgs, &[], false);
         let v = serde_json::to_value(&body).unwrap();
@@ -881,10 +1002,297 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
+            reasoning_signature: None,
         }];
         let body = provider.build_request(&msgs, &[], false);
         let v = serde_json::to_value(&body).unwrap();
         assert!(v.get("temperature").is_none(), "unset temperature omitted");
+    }
+
+    /// A multi-turn assistant(tool_calls) → tool_result sequence with
+    /// reasoning must serialise into Anthropic content blocks (tool_use /
+    /// tool_result / thinking) instead of being flattened into a string.
+    #[test]
+    fn build_request_emits_tool_use_tool_result_and_thinking_blocks() {
+        std::env::set_var("TEST_ANTHRO_KEY_MULTI", "dummy");
+        let provider = AnthropicProvider::new(
+            "https://api.deepseek.com/anthropic",
+            "deepseek-v4-flash",
+            "TEST_ANTHRO_KEY_MULTI",
+            30,
+            0,
+        )
+        .unwrap()
+        .with_thinking(true);
+
+        let msgs = vec![
+            Message {
+                role: Role::User,
+                content: "杭州今天天气怎么样？".into(),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                reasoning_signature: None,
+            },
+            Message {
+                role: Role::Assistant,
+                content: "我来查一下。".into(),
+                name: None,
+                tool_calls: Some(vec![ToolCall {
+                    id: "toolu_abc123".into(),
+                    ty: "function".into(),
+                    function: FunctionCall {
+                        name: "get_weather".into(),
+                        arguments: r#"{"city":"杭州"}"#.into(),
+                    },
+                }]),
+                tool_call_id: None,
+                reasoning_content: Some("用户想查杭州天气，需要调用工具。".into()),
+                reasoning_signature: None,
+            },
+            Message {
+                role: Role::Tool,
+                content: "24°C，多云".into(),
+                name: None,
+                tool_calls: None,
+                tool_call_id: Some("toolu_abc123".into()),
+                reasoning_content: None,
+                reasoning_signature: None,
+            },
+        ];
+
+        let body = provider.build_request(&msgs, &[], false);
+        let v = serde_json::to_value(&body).unwrap();
+        let messages = v["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 3);
+
+        // 1. Plain user text keeps the existing string form.
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[0]["content"], "杭州今天天气怎么样？");
+
+        // 2. Assistant: thinking → text → tool_use content blocks.
+        let asst = &messages[1];
+        assert_eq!(asst["role"], "assistant");
+        let asst_blocks = asst["content"]
+            .as_array()
+            .expect("assistant content must be a block array");
+        assert_eq!(asst_blocks.len(), 3);
+        assert_eq!(asst_blocks[0]["type"], "thinking");
+        assert!(
+            asst_blocks[0]["thinking"]
+                .as_str()
+                .unwrap()
+                .contains("需要调用工具"),
+            "reasoning_content must be replayed as a thinking block"
+        );
+        assert_eq!(asst_blocks[1]["type"], "text");
+        assert_eq!(asst_blocks[1]["text"], "我来查一下。");
+        assert_eq!(asst_blocks[2]["type"], "tool_use");
+        assert_eq!(asst_blocks[2]["id"], "toolu_abc123");
+        assert_eq!(asst_blocks[2]["name"], "get_weather");
+        assert_eq!(asst_blocks[2]["input"]["city"], "杭州");
+
+        // 3. Tool result: user role + tool_result block with the call id.
+        let tool = &messages[2];
+        assert_eq!(tool["role"], "user");
+        let tool_blocks = tool["content"]
+            .as_array()
+            .expect("tool result content must be a block array");
+        assert_eq!(tool_blocks[0]["type"], "tool_result");
+        assert_eq!(tool_blocks[0]["tool_use_id"], "toolu_abc123");
+        assert_eq!(tool_blocks[0]["content"], "24°C，多云");
+
+        std::env::remove_var("TEST_ANTHRO_KEY_MULTI");
+    }
+
+    /// An assistant message that only carries tool calls (no reasoning) must
+    /// still emit text + tool_use blocks in the canonical order.
+    #[test]
+    fn build_request_emits_tool_use_without_thinking() {
+        std::env::set_var("TEST_ANTHRO_KEY_TOOLONLY", "dummy");
+        let provider = AnthropicProvider::new(
+            "https://api.anthropic.com",
+            "claude-sonnet-5-20251001",
+            "TEST_ANTHRO_KEY_TOOLONLY",
+            30,
+            0,
+        )
+        .unwrap();
+
+        let msgs = vec![Message {
+            role: Role::Assistant,
+            content: "calling".into(),
+            name: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "toolu_1".into(),
+                ty: "function".into(),
+                function: FunctionCall {
+                    name: "noop".into(),
+                    arguments: r#"{"x":1}"#.into(),
+                },
+            }]),
+            tool_call_id: None,
+            reasoning_content: None,
+            reasoning_signature: None,
+        }];
+
+        let body = provider.build_request(&msgs, &[], false);
+        let v = serde_json::to_value(&body).unwrap();
+        let asst = &v["messages"][0];
+        let blocks = asst["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 2, "text + tool_use");
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[1]["type"], "tool_use");
+        assert_eq!(blocks[1]["input"]["x"], 1);
+        std::env::remove_var("TEST_ANTHRO_KEY_TOOLONLY");
+    }
+
+    /// P1 回归（code_review 2026-08-11）：无 `tool_call_id` 的合成 Tool 消息
+    /// （如压缩摘要 `[Compaction digest]`、`[Compacted turn]`）不得序列化为
+    /// 孤儿 `tool_result` 块（空 `tool_use_id` 会被 Anthropic API 以 HTTP 400
+    /// 拒绝），须回落纯文本（修复前行为）。
+    #[test]
+    fn synthetic_tool_message_without_call_id_stays_plain_text() {
+        std::env::set_var("TEST_ANTHRO_KEY_SYNTH", "dummy");
+        let provider = AnthropicProvider::new(
+            "https://api.deepseek.com/anthropic",
+            "deepseek-v4-flash",
+            "TEST_ANTHRO_KEY_SYNTH",
+            30,
+            0,
+        )
+        .unwrap();
+
+        let msgs = vec![Message {
+            role: Role::Tool,
+            content: "[Compaction digest] 前面的对话已被摘要。".into(),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            reasoning_signature: None,
+        }];
+
+        let body = provider.build_request(&msgs, &[], false);
+        let v = serde_json::to_value(&body).unwrap();
+        let m = &v["messages"][0];
+        assert_eq!(m["role"], "user");
+        // 必须是纯文本形态（字符串），而不是带空 tool_use_id 的块数组。
+        assert!(
+            m["content"].is_string(),
+            "synthetic Tool message must stay plain text: {m}"
+        );
+        assert_eq!(m["content"], "[Compaction digest] 前面的对话已被摘要。");
+
+        std::env::remove_var("TEST_ANTHRO_KEY_SYNTH");
+    }
+
+    /// T12 收尾：thinking 块回放必须原样携带 signature（Anthropic/DeepSeek
+    /// 兼容端点校验，缺 signature → HTTP 400）。
+    #[test]
+    fn thinking_block_replays_with_signature() {
+        std::env::set_var("TEST_ANTHRO_KEY_SIG", "dummy");
+        let provider = AnthropicProvider::new(
+            "https://api.deepseek.com/anthropic",
+            "deepseek-v4-pro",
+            "TEST_ANTHRO_KEY_SIG",
+            30,
+            0,
+        )
+        .unwrap()
+        .with_thinking(true);
+
+        let msgs = vec![Message {
+            role: Role::Assistant,
+            content: "done".into(),
+            name: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "toolu_1".into(),
+                ty: "function".into(),
+                function: FunctionCall {
+                    name: "noop".into(),
+                    arguments: r#"{"x":1}"#.into(),
+                },
+            }]),
+            tool_call_id: None,
+            reasoning_content: Some("thinking text".into()),
+            reasoning_signature: Some("sig-abc123".into()),
+        }];
+
+        let body = provider.build_request(&msgs, &[], false);
+        let v = serde_json::to_value(&body).unwrap();
+        let blocks = v["messages"][0]["content"].as_array().unwrap();
+        let thinking = blocks
+            .iter()
+            .find(|b| b["type"] == "thinking")
+            .expect("thinking block must be emitted");
+        assert_eq!(thinking["thinking"], "thinking text");
+        assert_eq!(
+            thinking["signature"], "sig-abc123",
+            "signature 必须原样回放（缺 signature → API 400）"
+        );
+
+        std::env::remove_var("TEST_ANTHRO_KEY_SIG");
+    }
+
+    /// T12 收尾：无 signature 的 thinking 块回放时不带 signature 字段
+    /// （既有行为不变，OpenAI 等无签名端点不受影响）。
+    #[test]
+    fn thinking_block_omits_signature_when_absent() {
+        std::env::set_var("TEST_ANTHRO_KEY_NOSIG", "dummy");
+        let provider = AnthropicProvider::new(
+            "https://api.deepseek.com/anthropic",
+            "deepseek-v4-pro",
+            "TEST_ANTHRO_KEY_NOSIG",
+            30,
+            0,
+        )
+        .unwrap()
+        .with_thinking(true);
+
+        let msgs = vec![Message {
+            role: Role::Assistant,
+            content: "done".into(),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: Some("plain reasoning".into()),
+            reasoning_signature: None,
+        }];
+
+        let body = provider.build_request(&msgs, &[], false);
+        let v = serde_json::to_value(&body).unwrap();
+        let blocks = v["messages"][0]["content"].as_array().unwrap();
+        let thinking = blocks
+            .iter()
+            .find(|b| b["type"] == "thinking")
+            .expect("thinking block must be emitted");
+        assert!(
+            thinking.get("signature").is_none(),
+            "无 signature 时不得携带空 signature 字段: {thinking}"
+        );
+
+        std::env::remove_var("TEST_ANTHRO_KEY_NOSIG");
+    }
+
+    /// T12 收尾：响应解析必须保留 thinking 块的 opaque signature
+    /// （AnthropicResponse serde 层，非流式路径的提取链起点）。
+    #[test]
+    fn thinking_block_signature_is_deserialized() {
+        let json =
+            r#"{"content":[{"type":"thinking","thinking":"t","signature":"s1"}],"usage":null}"#;
+        let resp: AnthropicResponse = serde_json::from_str(json).unwrap();
+        match &resp.content[0] {
+            AnthropicContent::Thinking {
+                thinking,
+                signature,
+            } => {
+                assert_eq!(thinking, "t");
+                assert_eq!(signature.as_deref(), Some("s1"));
+            }
+            _ => panic!("expected thinking block"),
+        }
     }
 
     /// build_tools must produce one AnthropicTool per tool and `None` for an
@@ -960,7 +1368,7 @@ mod tests {
             .content
             .iter()
             .filter_map(|c| match c {
-                AnthropicContent::Thinking { thinking } => Some(thinking.clone()),
+                AnthropicContent::Thinking { thinking, .. } => Some(thinking.clone()),
                 _ => None,
             })
             .collect();
