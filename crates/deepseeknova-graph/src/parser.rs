@@ -6,10 +6,15 @@ use tree_sitter::{Language, Node as TsNode, Parser};
 /// 支持的源语言。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lang {
+    /// Rust（tree-sitter-rust）。
     Rust,
+    /// Python（tree-sitter-python）。
     Python,
+    /// JavaScript（tree-sitter-javascript）。
     JavaScript,
+    /// TypeScript/TSX（tree-sitter-typescript）。
     TypeScript,
+    /// Go（tree-sitter-go）。
     Go,
 }
 
@@ -27,6 +32,7 @@ impl Lang {
         }
     }
 
+    /// 语言标识字符串（`from_path` 与存储/过滤共用）。
     pub fn as_str(&self) -> &'static str {
         match self {
             Lang::Rust => "rust",
@@ -51,12 +57,16 @@ impl Lang {
 /// 结构化 import 链接类型：本地符号（按名匹配）/ 本地文件（相对路径）/ 外部依赖。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImportKind {
+    /// 本地符号引用（按符号名匹配）。
     Symbol,
+    /// 本地文件引用（相对路径）。
     File,
+    /// 外部依赖（如 Cargo.toml / go.mod / package.json 依赖名）。
     External,
 }
 
 impl ImportKind {
+    /// 序列化为存储用的字符串标识。
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Symbol => "symbol",
@@ -69,14 +79,19 @@ impl ImportKind {
 /// 一条结构化 import 事实。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportLink {
+    /// import 链接类型（符号/文件/外部）。
     pub kind: ImportKind,
+    /// 目标：符号名、相对文件路径或依赖名。
     pub target: String,
 }
 
 /// 单文件解析结果：实体节点 + 名称级调用对 + import 事实 + 符号引用。
 pub struct FileParse {
+    /// 解析出的实体节点。
     pub nodes: Vec<Node>,
+    /// 名称级调用对 (caller_id, callee_name)。
     pub calls: Vec<(String, String)>,
+    /// 原始 import 文本（Rust `use` / Python `import` / JS import 语句）。
     pub imports: Vec<String>,
     /// 结构化 import 事实（Rust/Python 路径段、JS/TS specifier）。
     pub import_links: Vec<ImportLink>,

@@ -28,6 +28,7 @@ fn handle(ctx: &ToolContext) -> Option<MemoryHandle> {
 // RememberTool
 // ---------------------------------------------------------------------------
 
+/// 把一条 key-value 记忆持久化到跨会话记忆库（`remember`），同 key 覆盖旧值。
 pub struct RememberTool;
 
 #[derive(Deserialize)]
@@ -101,6 +102,7 @@ impl Tool for RememberTool {
 // ForgetTool
 // ---------------------------------------------------------------------------
 
+/// 从跨会话记忆库删除指定 key 的记忆（`forget`）。
 pub struct ForgetTool;
 
 #[derive(Deserialize)]
@@ -152,6 +154,7 @@ impl Tool for ForgetTool {
 // RecallTool
 // ---------------------------------------------------------------------------
 
+/// 按语义相似度召回历史记忆，返回排序后的 top-k 条目（`recall`）。
 pub struct RecallTool;
 
 #[derive(Deserialize)]

@@ -2,20 +2,30 @@
 
 use serde::{Deserialize, Serialize};
 
+/// 节点种类（图检索与 repo map 分类用）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeKind {
+    /// 目录节点（依赖图按文件组织，目录仅作组织层级）。
     Directory,
+    /// 源文件节点。
     File,
+    /// Rust/Go 的 struct 类型。
     Struct,
+    /// Rust/Go 的 enum 类型。
     Enum,
+    /// Rust trait 类型。
     Trait,
+    /// Python/JS/TS 的 class 类型。
     Class,
+    /// 顶层函数。
     Function,
+    /// 类 / impl 内方法。
     Method,
 }
 
 impl NodeKind {
+    /// 序列化为存储与 JSON 使用的 snake_case 字符串（`parse` 的反函数）。
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Directory => "directory",
@@ -28,6 +38,7 @@ impl NodeKind {
             Self::Method => "method",
         }
     }
+    /// 反序列化：字符串 → [`NodeKind`]；无法识别返回 None。
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "directory" => Self::Directory,
@@ -43,19 +54,26 @@ impl NodeKind {
     }
 }
 
+/// 有向边类型（代码图的关系维度）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EdgeKind {
+    /// 层级归属：目录/文件/类型包含子符号。
     Contains,
+    /// 跨文件依赖：文件导入符号或文件。
     Imports,
+    /// 调用关系（callee 名级匹配）。
     Calls,
+    /// 实现关系：类实现接口 / trait impl。
     Implements,
+    /// 引用关系：定义体引用的标识符（名称级，call callee 不在内）。
     References,
     /// 动态分发桥：trait 方法 → 同名 impl 方法（Rust trait 多态，名称级匹配）。
     Dispatch,
 }
 
 impl EdgeKind {
+    /// 序列化为存储使用的 snake_case 字符串（`parse` 的反函数）。
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Contains => "contains",
@@ -66,6 +84,7 @@ impl EdgeKind {
             Self::Dispatch => "dispatch",
         }
     }
+    /// 反序列化：字符串 → [`EdgeKind`]；无法识别返回 None。
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "contains" => Self::Contains,
@@ -79,38 +98,63 @@ impl EdgeKind {
     }
 }
 
+/// 代码图节点：一个符号（文件/函数/类型…）的稳定表示。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Node {
+    /// 稳定节点 ID（`path#name#start_line`），全库唯一。
     pub id: String,
+    /// 节点种类。
     pub kind: NodeKind,
+    /// 符号名（已去限定符）。
     pub name: String,
+    /// 相对 workspace 根的文件路径。
     pub path: String,
+    /// 定义起始行（1-based）。
     pub start_line: u32,
+    /// 定义结束行（1-based，含函数体）。
     pub end_line: u32,
+    /// 提取的签名（如 `pub fn foo(a: i32) -> bool`）。
     pub signature: String,
+    /// 定义上方提取的文档注释（可为空串）。
     pub doc: String,
+    /// PageRank 分数（`refresh` 与 `repo_map` 写入）。
     pub score: f64,
 }
 
+/// 一条有向边记录（源节点 id → 目标节点 id）。
 #[derive(Debug, Clone)]
 pub struct EdgeRec {
+    /// 源节点 id。
     pub src: String,
+    /// 目标节点 id。
     pub dst: String,
+    /// 边类型。
     pub kind: EdgeKind,
 }
 
+/// 生成稳定节点 ID：`{path}#{name}#{start_line}`。
 pub fn node_id(path: &str, name: &str, start_line: u32) -> String {
     format!("{path}#{name}#{start_line}")
 }
 
+/// 图索引错误类型。
 #[derive(Debug, thiserror::Error)]
 pub enum GraphError {
+    /// 源文件解析失败（tree-sitter 语法错误或语言不支持）。
     #[error("parse error in {path} ({lang})")]
-    Parse { path: String, lang: &'static str },
+    Parse {
+        /// 出错文件路径。
+        path: String,
+        /// 源语言标识（如 "rust"）。
+        lang: &'static str,
+    },
+    /// 底层 SQLite 存储错误。
     #[error("storage error: {0}")]
     Storage(#[from] rusqlite::Error),
+    /// 索引忙（refresh 进行中，数据库被锁）。
     #[error("index is busy (refresh in progress)")]
     IndexBusy,
+    /// 实体未找到（`resolve`/`get` 无法定位）。
     #[error("entity not found: {0}")]
     EntityNotFound(String),
 }

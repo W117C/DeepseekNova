@@ -8,13 +8,17 @@ use tracing::{info, warn};
 
 /// Result of discovering and connecting to MCP servers from config.
 pub struct DiscoveredMcpServer {
+    /// Name of the MCP server (from the config entry).
     pub name: String,
+    /// The established connection for this server.
     pub connection: McpServerConnection,
 }
 
 /// Either a stdio or HTTP connection to an MCP server.
 pub enum McpServerConnection {
+    /// A child-process MCP server connected over stdio.
     Stdio(Arc<McpConnection>),
+    /// A remote MCP server connected over HTTP/SSE.
     Http(Arc<McpHttpConnection>),
 }
 

@@ -64,6 +64,8 @@ pub enum RouteChoice {
 /// provider" (router failure, no matching pointer, or explicit override).
 #[async_trait]
 pub trait AutoRouteDecider: Send + Sync {
+    /// Decide which provider should run the given conversation. `None` means
+    /// "keep the caller's default provider".
     async fn decide(&self, messages: &[Message]) -> Option<Arc<dyn Provider>>;
 }
 
@@ -75,6 +77,8 @@ pub struct ModelAutoRouter {
 }
 
 impl ModelAutoRouter {
+    /// Create a router that uses `routing_model` (falling back to the router's
+    /// `quick` pointer) and truncates routing prompts to `max_chars`.
     pub fn new(router: Arc<ModelRouter>, routing_model: Option<String>, max_chars: usize) -> Self {
         Self {
             router,

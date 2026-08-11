@@ -1,12 +1,21 @@
+/// Outcome of a budget evaluation at a step boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BudgetDecision {
+    /// The proposed addition fits within both budgets; proceed.
     Allow,
+    /// The addition would exceed a budget; compact the conversation first.
     CompressHistory,
+    /// The addition drastically exceeds the total context window; reject with
+    /// a message explaining why.
     Reject(String),
 }
 
+/// Per-step prompt budget: caps total context tokens and memory tokens.
 pub struct PromptBudgetController {
+    /// Hard ceiling on total context tokens (`current + proposed addition`).
     pub max_total_tokens: usize,
+    /// Independent ceiling on memory/recall tokens; exceeding it triggers
+    /// compression so the memory block cannot crowd out the conversation.
     pub max_memory_tokens: usize,
 }
 
@@ -20,6 +29,8 @@ impl Default for PromptBudgetController {
 }
 
 impl PromptBudgetController {
+    /// Evaluate whether `proposed_addition` (on top of `current_tokens`, with
+    /// `memory_tokens` already injected) fits within the configured budgets.
     pub fn evaluate_budget(
         &self,
         current_tokens: usize,

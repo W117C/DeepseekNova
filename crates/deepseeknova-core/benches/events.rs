@@ -1,3 +1,4 @@
+//! Criterion bench：RunEvent/Usage 序列化与事件流处理基线。
 use criterion::{criterion_group, criterion_main, Criterion};
 use deepseeknova_core::chunk::Usage;
 use deepseeknova_core::{DeepseeknovaError, RunEvent, RunInput, RunOutput};

@@ -24,6 +24,7 @@ pub type MessageId = String;
 /// that could break provider-side integrity checks.
 #[derive(Debug, Clone)]
 pub struct ReasoningBlock {
+    /// The reasoning text extracted from the assistant message.
     pub text: String,
     /// Original provider response payload for faithful replay.
     /// When present, replay should use this instead of reconstructing
@@ -65,7 +66,11 @@ impl ReasoningBlock {
 ///   never partially evicted.
 #[derive(Debug, Clone)]
 pub enum HistoryUnit {
+    /// A user message or a non-tool-calling assistant message; safe to
+    /// summarize or drop independently.
     Standalone(Message),
+    /// An assistant message with tool calls plus all of its matching tool
+    /// result messages; must be kept or removed atomically.
     ToolExchange {
         /// The assistant message that initiated the tool calls.
         assistant: Message,
@@ -187,8 +192,14 @@ pub fn group_into_units(messages: &[Message]) -> Vec<HistoryUnit> {
 /// Violation of the DeepSeek V4 replay invariant.
 #[derive(Debug, thiserror::Error)]
 pub enum InvariantViolation {
+    /// A tool result message whose `tool_call_id` has no matching tool call.
     #[error("tool result {tool_call_id} has no matching tool call — orphan result")]
-    OrphanToolResult { tool_call_id: String },
+    OrphanToolResult {
+        /// The tool call id referenced by the orphan result.
+        tool_call_id: String,
+    },
+    /// A message carries load-bearing reasoning (paired with tool calls) but
+    /// its `reasoning_content` is missing.
     #[error("message has load-bearing reasoning that is missing (must_replay but reasoning_content=None)")]
     MissingLoadBearingReasoning,
 }
@@ -259,13 +270,17 @@ pub fn validate_replay_invariant(messages: &[Message]) -> Result<(), Vec<Invaria
 /// Budget in estimated tokens.
 #[derive(Debug, Clone, Copy)]
 pub struct TokenBudget {
+    /// Maximum number of estimated tokens the compacted history may use.
     pub max_tokens: usize,
 }
 
+/// Error produced when compaction cannot satisfy the given budget.
 #[derive(Debug, thiserror::Error)]
 pub enum CompactionError {
+    /// The budget is too small to retain even a single complete unit.
     #[error("budget too small to retain any complete unit")]
     BudgetTooSmall,
+    /// Compaction failed for another reason.
     #[error("compaction failed: {0}")]
     Other(String),
 }
@@ -296,6 +311,9 @@ impl From<CompactionError> for deepseeknova_core::DeepseeknovaError {
 /// - No orphan tool results (tool result without matching tool call)
 /// - No load-bearing reasoning removed while tool calls remain
 pub trait HistoryCompactor {
+    /// Compact `units` to fit within `budget`, returning the new units or an
+    /// error. Implementations must never produce orphan tool results or drop
+    /// load-bearing reasoning while the corresponding tool calls remain.
     fn compact(
         &self,
         units: &[HistoryUnit],

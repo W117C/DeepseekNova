@@ -34,7 +34,9 @@ pub enum Verdict {
 /// 一次失败归因的结果。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Attribution {
+    /// 失败根因分析。
     pub root_cause: String,
+    /// 归因判定（Retry / Degrade / Abort）。
     pub verdict: Verdict,
     /// 修复计划（Abort 判定时可能缺失）。
     pub fix_plan: Option<String>,
@@ -61,6 +63,7 @@ pub struct AttributionBudget {
 }
 
 impl AttributionBudget {
+    /// 以指定上限构造预算门卫。
     pub fn new(max: usize) -> Self {
         Self {
             used: AtomicUsize::new(0),

@@ -17,6 +17,9 @@ use tracing::info;
 // AnthropicProvider — Anthropic Messages API
 // ---------------------------------------------------------------------------
 
+/// [`Provider`] implementation speaking the Anthropic Messages API, used for
+/// Claude backends and DeepSeek's Anthropic-compatible endpoint (extended
+/// thinking, reasoning effort, prompt caching, streaming, tool calling).
 pub struct AnthropicProvider {
     client: Client,
     base_url: String,
@@ -42,6 +45,13 @@ pub struct AnthropicProvider {
 }
 
 impl AnthropicProvider {
+    /// Build a new provider for `base_url` / `model`. The API key is resolved
+    /// from the `api_key_env` environment variable at construction time.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeepseeknovaError`] if the API key environment variable is
+    /// unset or the HTTP client cannot be constructed.
     pub fn new(
         base_url: &str,
         model: &str,

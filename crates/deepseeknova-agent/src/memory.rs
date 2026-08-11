@@ -21,6 +21,7 @@ pub struct Memory {
 }
 
 impl Memory {
+    /// Create an empty conversation history.
     pub fn new() -> Self {
         Self {
             messages: VecDeque::new(),
@@ -30,10 +31,12 @@ impl Memory {
         }
     }
 
+    /// Append a message to the conversation history.
     pub fn add_message(&mut self, message: Message) {
         self.messages.push_back(message);
     }
 
+    /// Return a cloned snapshot of all messages (pinned first, then the rest).
     pub fn get_all(&self) -> Vec<Message> {
         let mut out = Vec::new();
         out.extend(self.pinned.iter().cloned());
@@ -79,6 +82,8 @@ impl Memory {
         crate::tokens::estimate_messages_iter(self.iter_all())
     }
 
+    /// Clear all messages, cached full results, and shrink markers (pinned
+    /// messages are retained).
     pub fn clear(&mut self) {
         self.messages.clear();
         self.full_results.clear();
@@ -296,6 +301,8 @@ impl Memory {
         }
     }
 
+    /// Pin a message so compaction never removes it (e.g. system prompt,
+    /// first user turn).
     pub fn pin_message(&mut self, message: Message) {
         self.pinned.push(message);
     }

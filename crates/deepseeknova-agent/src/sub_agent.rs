@@ -40,6 +40,7 @@ pub const DEFAULT_MAX_DEPTH: usize = 3;
 /// per-agent 模型解析：把声明模型名解析为 provider 实例。由上层
 /// （runtime / CLI）基于 provider 工厂实现；未装配时声明模型回退默认 provider。
 pub trait ModelResolver: Send + Sync {
+    /// 把声明模型名解析为 provider；返回 `None` 表示回退默认 provider。
     fn resolve(&self, name: &str) -> Option<Arc<dyn Provider>>;
 }
 
@@ -60,7 +61,9 @@ pub trait ModelResolver: Send + Sync {
 /// 执行参数一致。
 #[derive(Clone)]
 pub struct SubAgentConfig {
+    /// 子代理名（委派目标标识）。
     pub name: String,
+    /// 角色系统提示。
     pub system_prompt: String,
     /// 任务书（渲染用：task/rules/inputs；tools/max_steps 仅作描述）。
     pub spec: TaskSpec,
@@ -92,6 +95,7 @@ impl fmt::Debug for SubAgentConfig {
 }
 
 impl SubAgentConfig {
+    /// 以名字 + 系统提示构造配置（其余参数取默认：无工具、10 步、默认权限）。
     pub fn new(name: impl Into<String>, system_prompt: impl Into<String>) -> Self {
         let name = name.into();
         Self {
@@ -107,12 +111,14 @@ impl SubAgentConfig {
         }
     }
 
+    /// 设置执行用工具集（同时同步 spec.tools 名字白名单）。
     pub fn with_tools(mut self, tools: Vec<Arc<dyn Tool>>) -> Self {
         self.spec.tools = tools.iter().map(|t| t.schema().name.clone()).collect();
         self.tools = tools;
         self
     }
 
+    /// 设置执行步数上限（`0` 视作默认 10；同步 spec.max_steps 描述）。
     pub fn with_max_steps(mut self, steps: usize) -> Self {
         self.spec.max_steps = if steps == 0 { 10 } else { steps };
         self.max_steps = self.spec.max_steps;
@@ -209,6 +215,7 @@ pub struct SubAgentRunner {
 }
 
 impl SubAgentRunner {
+    /// 以默认 provider 构造 runner（其余设置经 builder 装配）。
     pub fn new(provider: Arc<dyn Provider>) -> Self {
         Self {
             provider,

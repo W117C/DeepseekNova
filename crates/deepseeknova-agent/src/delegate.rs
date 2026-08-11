@@ -36,6 +36,7 @@ use tokio_stream::StreamExt;
 /// `delegate`；`allow_recursion` 为真时递归工具可加入工具面）。
 #[derive(Debug, Clone)]
 pub struct DelegatePreset {
+    /// 预设名（`delegate` 工具的目标标识）。
     pub name: String,
     /// 角色身份 prompt，构造期注入 System 消息（与任务内容分离）。
     pub system_prompt: String,
@@ -207,6 +208,7 @@ impl DelegateError {
 }
 
 impl DelegateEngine {
+    /// 构造委派引擎：注册初始子代理集合，并限定并发数与单次输出 token 上限。
     pub fn new(
         agents: HashMap<String, Arc<Agent>>,
         max_concurrent: usize,

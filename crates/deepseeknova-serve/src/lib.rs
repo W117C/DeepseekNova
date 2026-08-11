@@ -63,9 +63,13 @@ use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum RunStatus {
+    /// The run is currently executing.
     Running,
+    /// The run completed successfully.
     Done,
+    /// The run failed with an error.
     Failed,
+    /// The run was paused and can be resumed later.
     Paused,
     /// Server restarted while the run was still running; it can be resumed.
     Interrupted,
@@ -74,12 +78,19 @@ pub enum RunStatus {
 /// A run record persisted to disk so long tasks survive process restarts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunRecord {
+    /// Unique run identifier (also used as the persisted file name).
     pub id: String,
+    /// The original user prompt that started the run.
     pub prompt: String,
+    /// Model requested for the run, if any.
     pub model: Option<String>,
+    /// Creation timestamp in milliseconds since the Unix epoch.
     pub created_at_ms: u64,
+    /// Current lifecycle status of the run.
     pub status: RunStatus,
+    /// Short result summary produced when the run completes, if any.
     pub summary: Option<String>,
+    /// Error message when the run failed, else `None`.
     pub error: Option<String>,
 }
 
@@ -92,6 +103,7 @@ pub struct DurableRuns {
 }
 
 impl DurableRuns {
+    /// Open (creating it if needed) the directory backing the run store.
     pub fn open(dir: PathBuf) -> Result<Self, deepseeknova_core::DeepseeknovaError> {
         fs::create_dir_all(&dir)?;
         Ok(Self {
@@ -100,6 +112,7 @@ impl DurableRuns {
         })
     }
 
+    /// The directory where run records are persisted.
     pub fn dir(&self) -> &PathBuf {
         &self.dir
     }
@@ -108,6 +121,7 @@ impl DurableRuns {
         self.dir.join(format!("{id}.json"))
     }
 
+    /// Atomically persist a run record (write temp file, then rename).
     pub fn save(&self, record: &RunRecord) -> Result<(), deepseeknova_core::DeepseeknovaError> {
         let path = self.path(&record.id);
         let tmp = path.with_extension("json.tmp");
@@ -116,6 +130,7 @@ impl DurableRuns {
         Ok(())
     }
 
+    /// Load a run record by id; returns `None` if no such record exists.
     pub fn load(
         &self,
         id: &str,
@@ -127,6 +142,7 @@ impl DurableRuns {
         }
     }
 
+    /// List all persisted run records, newest first.
     pub fn list(&self) -> Result<Vec<RunRecord>, deepseeknova_core::DeepseeknovaError> {
         let mut records = Vec::new();
         for entry in fs::read_dir(&self.dir)? {
@@ -225,6 +241,7 @@ pub struct ServerApprovalResponder {
 }
 
 impl ServerApprovalResponder {
+    /// Create a responder that registers pending approvals in the shared map.
     pub fn new(pending: PendingApprovals) -> Self {
         Self { pending }
     }
@@ -241,6 +258,7 @@ impl ApprovalResponder for ServerApprovalResponder {
 
 /// An HTTP server that wraps a [`Runner`] and exposes it via REST + SSE.
 pub struct Server {
+    /// The agent runner this server wraps and exposes over HTTP.
     pub runner: Arc<dyn Runner>,
     pending: PendingApprovals,
     /// Metrics/diagnose 输出目录（`<dir>/<id>.scorecard.json` 与
@@ -256,6 +274,7 @@ pub struct Server {
 }
 
 impl Server {
+    /// Create a server with default options (no auth, no persistence, no sessions).
     pub fn new(runner: Arc<dyn Runner>) -> Self {
         Self {
             runner,
@@ -1040,18 +1059,26 @@ fn stream_session_input(
 
 // ── Request / Response types ───────────────────────────────────
 
+/// Incoming chat prompt body accepted by the `/v1/chat` and
+/// `/v1/sessions/{id}/chat` endpoints.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ChatRequest {
+    /// The user's prompt text.
     pub prompt: String,
+    /// Optional image attachments (e.g. data URLs or file paths).
     #[serde(default)]
     pub images: Option<Vec<String>>,
+    /// Optional model override.
     #[serde(default)]
     pub model: Option<String>,
 }
 
+/// Streaming chat response event emitted over SSE.
 #[derive(Debug, Serialize)]
 pub struct ChatResponse {
+    /// The assistant's reply text for this event.
     pub text: String,
+    /// Token usage counters, when reported by the provider.
     pub usage: Option<deepseeknova_core::chunk::Usage>,
 }
 

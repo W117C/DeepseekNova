@@ -27,6 +27,7 @@ use std::time::Duration;
 
 /// 嵌入 API key 首选环境变量，缺失时回落通用 OpenAI key。
 pub const EMBED_API_KEY_ENV: &str = "DEEPSEEKNOVA_EMBED_API_KEY";
+/// 嵌入 API key 回落变量：`EMBED_API_KEY_ENV` 缺失时读取通用 OpenAI key。
 pub const FALLBACK_API_KEY_ENV: &str = "OPENAI_API_KEY";
 
 /// 同步 [`EmbeddingProvider::embed`] 的共享执行 runtime：进程级懒加载多线程

@@ -1,3 +1,4 @@
+//! 安全路径分类与权限边界集成测试（readonly 分类、路径逃逸、写操作拦截）。
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

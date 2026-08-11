@@ -7,8 +7,11 @@ use serde::{Deserialize, Serialize};
 /// Finding severity. Ordered high→low for report grouping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Severity {
+    /// High-severity issues (e.g. hardcoded secrets, command injection).
     High,
+    /// Medium-severity issues (e.g. SQL string interpolation).
     Medium,
+    /// Low-severity issues (e.g. panic surfaces in non-test code).
     Low,
 }
 
@@ -35,10 +38,15 @@ impl Severity {
 
 /// A regex matcher rule. `lang = None` applies to all supported languages.
 pub struct Rule {
+    /// Unique rule identifier (e.g. `hardcoded-secret`).
     pub id: String,
+    /// Severity assigned to findings produced by this rule.
     pub severity: Severity,
+    /// Optional language scope; `None` applies to all supported languages.
     pub lang: Option<Lang>,
+    /// Compiled regex matched against each source line.
     pub pattern: Regex,
+    /// Human-readable description of the issue, used in scan reports.
     pub message: String,
 }
 

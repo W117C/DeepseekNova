@@ -16,15 +16,25 @@ pub const THEME_ENV: &str = "DEEPSEEKNOVA_THEME";
 /// 语义色映射表：渲染样式全部经此解析，杜绝散落硬编码。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Theme {
+    /// 用户消息样式。
     pub user: Style,
+    /// 助手消息样式。
     pub agent: Style,
+    /// 推理段样式。
     pub reasoning: Style,
+    /// 工具调用行（`⏺ Tool(args)`）样式。
     pub tool: Style,
+    /// 工具结果段（`⎿ result`）样式。
     pub tool_result: Style,
+    /// 确定性校验通过（`✓`）样式。
     pub verification_ok: Style,
+    /// 确定性校验失败（`✗`）样式。
     pub verification_fail: Style,
+    /// 系统消息样式。
     pub system: Style,
+    /// 错误消息样式。
     pub error: Style,
+    /// 暂停状态样式。
     pub paused: Style,
     /// 强调色（状态行 model 标签、输入框提示符、diff 块头）。
     pub accent: Color,

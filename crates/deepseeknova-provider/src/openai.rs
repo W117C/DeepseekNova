@@ -11,6 +11,9 @@ use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tracing::{info, warn};
 
+/// [`Provider`] implementation for OpenAI-compatible chat-completions APIs,
+/// with streaming, tool calling, and DeepSeek thinking-mode / reasoning-effort
+/// passthrough via the request `extra_body`.
 pub struct OpenAIProvider {
     client: Client,
     base_url: String,
@@ -33,6 +36,13 @@ pub struct OpenAIProvider {
 }
 
 impl OpenAIProvider {
+    /// Build a new provider for `base_url` / `model`. The API key is resolved
+    /// from the `api_key_env` environment variable at construction time.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeepseeknovaError`] if the API key environment variable is
+    /// unset or the HTTP client cannot be constructed.
     pub fn new(
         base_url: &str,
         model: &str,

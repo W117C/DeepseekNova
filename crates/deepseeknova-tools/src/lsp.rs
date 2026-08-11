@@ -39,11 +39,14 @@ pub fn lsp_diagnostics_tools(cfg: &deepseeknova_config::ToolsConfig) -> Vec<Arc<
     vec![Arc::new(LspDiagnosticsTool::new(cfg.lsp.clone()))]
 }
 
+/// Runs a configured language server over stdio on a file and returns its
+/// current diagnostics (errors/warnings with line numbers).
 pub struct LspDiagnosticsTool {
     cfg: LspConfig,
 }
 
 impl LspDiagnosticsTool {
+    /// Create a new `LspDiagnosticsTool` with the given LSP configuration.
     pub fn new(cfg: LspConfig) -> Self {
         Self { cfg }
     }

@@ -31,6 +31,9 @@ pub fn web_search_tools(cfg: &deepseeknova_config::ToolsConfig) -> Vec<Arc<dyn T
     }
 }
 
+/// Searches the web via a configured provider (duckduckgo/tavily/bing/searxng)
+/// and returns ranked results (title, URL, snippet), re-checking domain and
+/// SSRF safety at every redirect hop.
 pub struct WebSearchTool {
     cfg: WebSearchConfig,
     /// 进程级/工具级一次构造的共享客户端：不自动跟随重定向，每个跳点

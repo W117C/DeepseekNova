@@ -19,16 +19,23 @@
 )]
 
 pub mod docs_tools;
+/// File read/write/edit/move tools (`read_file`, `write_file`, `edit_file`, `move_file`).
 pub mod fs;
+/// Glob pattern file-finding tool (`glob`).
 pub mod glob;
 pub mod graph_tools;
+/// Recursive text-search tool (`grep`).
 pub mod grep;
+/// Directory-listing tool (`ls`).
 pub mod ls;
 pub mod lsp;
 pub mod memory;
+/// Sandboxed shell execution tool (`shell`).
 pub mod shell;
 pub mod snippet;
+/// Structured task-list management tool (`todo_write`).
 pub mod todo;
+/// URL fetching tool with SSRF protection (`web_fetch`).
 pub mod web_fetch;
 pub mod web_search;
 

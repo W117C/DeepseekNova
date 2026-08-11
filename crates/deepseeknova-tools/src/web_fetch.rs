@@ -10,6 +10,8 @@ use tokio::net::lookup_host;
 const DEFAULT_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_RESPONSE_BYTES: usize = 5 * 1024 * 1024; // 5 MB
 
+/// Fetches a URL's contents (HTTP/HTTPS) with SSRF protection: only public
+/// IPs are reachable, redirects are re-validated, and the response is capped.
 pub struct WebFetchTool;
 
 #[derive(Deserialize)]

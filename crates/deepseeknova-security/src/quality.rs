@@ -49,13 +49,21 @@ pub fn redact_secrets(s: &str) -> String {
 pub enum RuleKind {
     /// 正则匹配。`targets` 为文件名后缀白名单（空 = 全部文件/文本均适用）。
     Regex {
+        /// 正则表达式模式。
         pattern: String,
+        /// 命中的文件名后缀白名单（空 = 全部适用）。
         targets: Vec<String>,
     },
     /// 禁写路径 glob（相对 workspace）。命中即违规。
-    PathGlob { deny: Vec<String> },
+    PathGlob {
+        /// 禁写路径 glob 列表。
+        deny: Vec<String>,
+    },
     /// 单次写入字节上限。
-    SizeLimit { bytes: u64 },
+    SizeLimit {
+        /// 单次写入允许的最大字节数。
+        bytes: u64,
+    },
 }
 
 /// 一条质量规则。

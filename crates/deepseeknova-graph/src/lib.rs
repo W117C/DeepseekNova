@@ -77,6 +77,7 @@ impl GraphIndex {
         Ok(report)
     }
 
+    /// FTS5 BM25 全文检索：按名称/签名/文档相关度排序，名称精确匹配（忽略大小写）置前。
     pub fn search(
         &self,
         query: &str,
@@ -130,6 +131,8 @@ impl GraphIndex {
             .search_hybrid_with_weight(query, kind, limit, weight)
     }
 
+    /// BFS 邻居遍历：沿 `kinds`（空=全部边类型）按 `dir` 方向最多 `hops` 跳，
+    /// 去重且排除起点，按 PageRank score 降序返回。
     pub fn neighbors(
         &self,
         entity: &str,

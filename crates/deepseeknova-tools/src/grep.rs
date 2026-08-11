@@ -3,6 +3,8 @@ use deepseeknova_core::{DeepseeknovaError, Tool, ToolContext, ToolSchema};
 use serde::Deserialize;
 use serde_json::json;
 
+/// Recursively searches files for a regex pattern, aggregating matches under
+/// a byte budget and enforcing the workspace read capability.
 pub struct GrepTool;
 
 #[derive(Deserialize)]

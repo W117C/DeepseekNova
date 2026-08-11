@@ -3,6 +3,8 @@ use deepseeknova_core::{Tool, ToolContext, ToolSchema};
 use serde::Deserialize;
 use serde_json::json;
 
+/// Lists a directory's immediate entries (directories prefixed `d `, files
+/// `f `), sorted by name, relative to the workspace root.
 pub struct LsTool;
 
 #[derive(Deserialize)]

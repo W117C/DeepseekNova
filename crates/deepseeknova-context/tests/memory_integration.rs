@@ -1,3 +1,4 @@
+//! 上下文记忆集成测试（工作区记忆检索、prefix cache 稳定性）。
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

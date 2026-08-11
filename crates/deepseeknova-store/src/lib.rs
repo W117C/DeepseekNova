@@ -48,35 +48,51 @@ pub struct StoredTurn {
     pub workspace: Option<String>,
 }
 
+/// The user's input captured for a turn.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredInput {
+    /// The user's prompt text.
     pub prompt: String,
+    /// Optional image attachments (paths or data URIs).
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub images: Vec<String>,
+    /// Optional model override chosen for this turn.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_override: Option<String>,
 }
 
+/// The agent's final output for a turn.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredOutput {
+    /// Collected text output.
     pub text: String,
+    /// Tool calls issued during this turn.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub tool_calls: Vec<StoredToolCall>,
 }
 
+/// A single tool invocation recorded in a stored output.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredToolCall {
+    /// Tool name.
     pub name: String,
+    /// Serialized tool arguments.
     pub arguments: String,
+    /// Tool result payload, if one was produced.
     pub result: Option<String>,
 }
 
+/// A serialized message recorded for a turn.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredMessage {
+    /// Role name: `system`, `user`, `assistant`, or `tool`.
     pub role: String,
+    /// Message text content.
     pub content: String,
+    /// Optional message name (e.g. for system/tool messages).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// For tool results, the id of the tool call this result answers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     /// Assistant tool calls (schema v2). `serde(default)` keeps old files readable.

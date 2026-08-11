@@ -114,8 +114,11 @@ pub(crate) fn warn_on_low_cache_hit(report: &deepseeknova_metrics::SessionReport
 
 /// 会话效能落盘所需的成本面数据与输出目录。
 pub struct MetricsSink {
+    /// 成本台账（usage 计量与累计）。
     pub ledger: Arc<deepseeknova_provider::cost::CostLedger>,
+    /// 模型单价表（用于成本折算）。
     pub prices: deepseeknova_provider::cost::PriceTable,
+    /// 报告输出目录（JSON 报告 + 评分卡落盘）。
     pub dir: PathBuf,
 }
 

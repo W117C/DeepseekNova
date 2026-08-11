@@ -3,6 +3,8 @@ use deepseeknova_core::{DeepseeknovaError, Tool, ToolContext, ToolSchema};
 use serde::Deserialize;
 use serde_json::json;
 
+/// Finds files by glob pattern (e.g. `"**/*.rs"`), returning matching paths
+/// sorted by name; only paths resolving inside the workspace are returned.
 pub struct GlobTool;
 
 #[derive(Deserialize)]

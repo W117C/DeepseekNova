@@ -77,9 +77,12 @@ struct PlanEdge {
 /// never in the text stream — cache-neutral by design.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReasoningLanguage {
+    /// Let the provider choose the reasoning language (default).
     #[default]
     Auto,
+    /// Prefer Chinese reasoning output.
     Zh,
+    /// Prefer English reasoning output.
     En,
 }
 
@@ -183,6 +186,9 @@ fn build_planning_prompt(goal: &str, read_only_tools: &[&dyn Tool]) -> Vec<Messa
 // CoordinatorRunner — two-model (Planner + Executor)
 // ---------------------------------------------------------------------------
 
+/// Two-model coordinator runner: a planner model produces an
+/// [`ExecutionGraph`] which an executor model then runs, with optional
+/// sub-agent delegation.
 pub struct CoordinatorRunner {
     /// Strong reasoning model used for planning.
     planner_provider: Arc<dyn Provider>,
@@ -212,6 +218,7 @@ pub struct CoordinatorRunner {
 }
 
 impl CoordinatorRunner {
+    /// Construct with distinct planner and executor providers.
     pub fn new(planner_provider: Arc<dyn Provider>, executor_provider: Arc<dyn Provider>) -> Self {
         Self {
             planner_provider,

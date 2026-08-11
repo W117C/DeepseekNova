@@ -49,6 +49,11 @@ default-members = [
     "crates/deepseeknova-metrics",
 ]
 
+[workspace.lints.rust]
+# 文档门禁：所有 crate 的公开 API 必须带 /// 文档注释（doc 阶段 -D warnings 强制）。
+# 已启用 crate 的 #![warn(missing_docs)] 声明保留（不冲突），新 crate 由本段继承。
+missing_docs = "warn"
+
 [workspace.lints.rustdoc]
 broken_intra_doc_links = "deny"
 invalid_codeblock_attributes = "deny"

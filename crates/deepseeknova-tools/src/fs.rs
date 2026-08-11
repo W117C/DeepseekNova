@@ -13,6 +13,8 @@ use tokio::sync::Mutex;
 // ReadFileTool
 // ---------------------------------------------------------------------------
 
+/// Reads a file's contents (optionally a 1-based line range). Returns the
+/// contents directly, or an error if the file is missing or exceeds limits.
 pub struct ReadFileTool;
 
 const MAX_READ_SIZE: u64 = 1024 * 1024; // 1 MB
@@ -140,12 +142,15 @@ impl Tool for ReadFileTool {
 // WriteFileTool — atomic write via temp file + rename, with checkpoint support
 // ---------------------------------------------------------------------------
 
+/// Writes a file atomically (temp file + rename), optionally snapshotting the
+/// target with a checkpoint manager so the write can be rolled back.
 #[derive(Default)]
 pub struct WriteFileTool {
     checkpointer: Option<Arc<Mutex<CheckpointManager>>>,
 }
 
 impl WriteFileTool {
+    /// Create a `WriteFileTool` without checkpoint support.
     pub fn new() -> Self {
         Self::default()
     }
@@ -236,12 +241,15 @@ impl Tool for WriteFileTool {
 // EditFileTool — SEARCH/REPLACE block exact match, with checkpoint support
 // ---------------------------------------------------------------------------
 
+/// Applies SEARCH/REPLACE edit blocks to a file, requiring exact unique
+/// matches; optionally snapshots the target with a checkpoint manager.
 #[derive(Default)]
 pub struct EditFileTool {
     checkpointer: Option<Arc<Mutex<CheckpointManager>>>,
 }
 
 impl EditFileTool {
+    /// Create an `EditFileTool` without checkpoint support.
     pub fn new() -> Self {
         Self::default()
     }
@@ -431,12 +439,15 @@ impl Tool for EditFileTool {
 // MoveFileTool — rename / move, with checkpoint support
 // ---------------------------------------------------------------------------
 
+/// Renames / moves a file (optionally across directories), snapshotting the
+/// target with a checkpoint manager when attached.
 #[derive(Default)]
 pub struct MoveFileTool {
     checkpointer: Option<Arc<Mutex<CheckpointManager>>>,
 }
 
 impl MoveFileTool {
+    /// Create a `MoveFileTool` without checkpoint support.
     pub fn new() -> Self {
         Self::default()
     }

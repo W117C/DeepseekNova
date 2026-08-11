@@ -7,6 +7,8 @@ use serde_json::json;
 // TodoWriteTool — structured task tracking
 // ---------------------------------------------------------------------------
 
+/// Manages the session's structured task list: replaces the whole list or
+/// merges by id, with pending/in_progress/completed/cancelled statuses.
 pub struct TodoWriteTool;
 
 /// The valid status values for a todo item.

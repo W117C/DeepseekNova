@@ -8,11 +8,16 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
+/// 安全上下文：一次执行环境中能力门禁、资源限制、策略与审计的统一入口。
 #[derive(Debug, Clone)]
 pub struct SecurityContext {
+    /// 当前已授予的能力集合。
     pub capabilities: HashSet<Capability>,
+    /// 资源限制（文件数/大小/时长/输出等配额）。
     pub limits: ResourceLimits,
+    /// 安全策略（路径/命令/域名放行与拒绝列表）。
     pub policy: SecurityPolicy,
+    /// 审计日志器（记录每次安全判定事件）。
     pub audit: Arc<dyn AuditLogger>,
 }
 

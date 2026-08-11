@@ -27,6 +27,7 @@ pub struct PlanModeRunner {
 }
 
 impl PlanModeRunner {
+    /// Create a plan-mode runner backed by the given provider.
     pub fn new(provider: Arc<dyn Provider>) -> Self {
         Self {
             provider,

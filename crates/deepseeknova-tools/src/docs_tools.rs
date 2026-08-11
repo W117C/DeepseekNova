@@ -20,6 +20,8 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_MAX_CHARS: usize = 6000;
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 
+/// 通过 Context7 公开 API 检索第三方库最新文档（`context7_docs`）；端点固定
+/// `context7.com`，支持按库名 + 主题搜索并返回上下文片段。
 pub struct Context7DocsTool {
     base_url: String,
     /// 工具级一次构造的共享客户端（不自动跟随重定向）。
@@ -38,6 +40,8 @@ fn build_shared_client() -> Result<reqwest::Client, DeepseeknovaError> {
 }
 
 impl Context7DocsTool {
+    /// 使用生产端点 `https://context7.com` 构造工具；HTTP 客户端构建失败返回
+    /// `Err` 向上传播（L2：不 `expect` panic 宿主）。
     pub fn new() -> Result<Self, DeepseeknovaError> {
         Ok(Self {
             base_url: DEFAULT_BASE_URL.to_string(),

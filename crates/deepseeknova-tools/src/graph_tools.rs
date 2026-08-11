@@ -47,6 +47,7 @@ fn lock_index(
         .map_err(|_| DeepseeknovaError::tool("graph index lock poisoned".to_string()))
 }
 
+/// 按符号名或关键字在代码图中检索函数/结构体/trait 等实体（`search_code`）。
 pub struct SearchCodeTool;
 
 #[derive(Deserialize)]
@@ -149,6 +150,7 @@ impl Tool for SearchCodeTool {
     }
 }
 
+/// 沿调用方向（callers/callees/both）最多 3 跳遍历代码图邻居（`traverse_graph`）。
 pub struct TraverseGraphTool;
 
 #[derive(Deserialize)]
@@ -279,6 +281,8 @@ impl Tool for TraverseGraphTool {
     }
 }
 
+/// 按名字取回单个代码实体：skeleton 视图给签名与文档注释，full 视图给带行号的
+/// 源码片段（有 token 上限，完整源码请用 `read_file`）（`retrieve_entity`）。
 pub struct RetrieveEntityTool;
 
 #[derive(Deserialize)]
@@ -407,6 +411,7 @@ fn direction_label(dir: Direction) -> &'static str {
     }
 }
 
+/// 追踪多跳调用链，含动态分派解析到具体实现（`trace_code`）。
 pub struct TraceCodeTool;
 
 #[derive(Deserialize)]
@@ -518,6 +523,7 @@ impl Tool for TraceCodeTool {
     }
 }
 
+/// 估算重构影响半径：找出哪些代码会到达目标实体（`impact_code`）。
 pub struct ImpactCodeTool;
 
 #[derive(Deserialize)]
@@ -623,6 +629,7 @@ impl Tool for ImpactCodeTool {
     }
 }
 
+/// 把多个实体渲染为按文件分组的带行号源码（`explore_code`）。
 pub struct ExploreCodeTool;
 
 #[derive(Deserialize)]
@@ -777,6 +784,7 @@ fn indent(text: &str, spaces: usize) -> String {
         .join("\n")
 }
 
+/// 检视某文件的 import 与外部依赖；不传实体时给出工作区外部依赖汇总（`deps_code`）。
 pub struct DepsCodeTool;
 
 #[derive(Deserialize)]

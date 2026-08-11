@@ -22,15 +22,22 @@ use async_trait::async_trait;
 use deepseeknova_core::chunk::ChunkStream;
 use deepseeknova_core::Message;
 
+/// Anthropic Messages API provider: streaming, tool calling, and DeepSeek
+/// extended-thinking / reasoning-effort support.
 pub mod anthropic;
 pub mod auto;
 pub mod cost;
 pub mod embeddings;
+/// OpenAI-compatible chat-completions provider with streaming, tool calling,
+/// and DeepSeek thinking-mode passthrough.
 pub mod openai;
 pub mod retry;
 pub mod router;
+/// Streaming JSON scavenger that reassembles complete JSON objects from a
+/// partial token stream (used to parse model replies mid-stream).
 pub mod scavenge;
 pub mod tool_cache;
+/// Owned wire request/response types shared by the provider backends.
 pub mod types;
 
 /// 读取 API key 环境变量：默认名 `DEEPSEEKNOVA_API_KEY` 缺失时回退旧名
@@ -98,7 +105,10 @@ mod test_util {
 /// [vi]: deepseeknova_context::history::validate_replay_invariant
 #[allow(clippy::manual_non_exhaustive)]
 pub struct ValidatedRequest<'a> {
+    /// The conversation history, guaranteed to satisfy the DeepSeek V4 replay
+    /// invariant.
     pub messages: &'a [Message],
+    /// Tool schemas offered to the provider for the call.
     pub tools: &'a [&'a dyn deepseeknova_core::Tool],
     // A private zero-sized field so the outer world cannot destructure or
     // reconstruct this token without calling ::new() (which runs the check).
@@ -137,31 +147,47 @@ impl<'a> ValidatedRequest<'a> {
 // ProviderError
 // ---------------------------------------------------------------------------
 
+/// Errors returned by LLM providers. Carries the retryability category so a
+/// caller can decide whether to retry without text-matching messages.
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
+    /// A non-2xx HTTP response; retryable for status 429 / 5xx.
     #[error("HTTP {status}: {body}")]
-    Http { status: u16, body: String },
+    Http {
+        /// HTTP status code returned by the provider.
+        status: u16,
+        /// Raw response body for diagnostics.
+        body: String,
+    },
 
+    /// The underlying HTTP request failed (network / transport).
     #[error("request failed: {0}")]
     Request(#[from] reqwest::Error),
 
+    /// The response contained no choices to return.
     #[error("no choices returned")]
     NoChoices,
 
+    /// The response stream failed mid-flight.
     #[error("stream error: {0}")]
     Stream(String),
 
+    /// The request exceeded its configured timeout.
     #[error("timeout after {0:?}")]
     Timeout(std::time::Duration),
 
+    /// The provider rate-limited the request.
     #[error("rate limited — retry after {retry_after:?}")]
     RateLimited {
+        /// Server-provided retry-after hint, when available.
         retry_after: Option<std::time::Duration>,
     },
 
+    /// Authentication failed (invalid or missing API key).
     #[error("authentication failed: {0}")]
     Auth(String),
 
+    /// The request itself was malformed or rejected by the provider.
     #[error("invalid request: {0}")]
     InvalidRequest(String),
 }
@@ -209,6 +235,9 @@ impl From<ProviderError> for deepseeknova_core::DeepseeknovaError {
 // Provider trait — now with streaming
 // ---------------------------------------------------------------------------
 
+/// A unified LLM backend: non-streaming [`Provider::generate`] and streaming
+/// [`Provider::stream`]. All methods accept only a [`ValidatedRequest`], so the
+/// DeepSeek V4 replay invariant is enforced by construction.
 #[async_trait]
 pub trait Provider: Send + Sync {
     /// Non-streaming generate — returns a complete Message.
@@ -442,8 +471,11 @@ pub mod factory {
     /// 3. Provider factory default (config file)
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum ReasoningEffort {
+        /// Reasoning disabled (DeepSeek thinking mode off).
         Disabled,
+        /// High reasoning effort ("high").
         High,
+        /// Maximum reasoning effort ("max").
         Max,
     }
 
@@ -484,10 +516,13 @@ pub mod factory {
     }
 
     impl ReasoningEffortResolver {
+        /// Create a resolver with the given config-level factory default.
         pub fn new(factory_default: Option<ReasoningEffort>) -> Self {
             Self { factory_default }
         }
 
+        /// Resolve the effective effort by priority: explicit > task
+        /// classification > factory default, falling back to `High`.
         pub fn resolve(
             &self,
             explicit: Option<ReasoningEffort>,
