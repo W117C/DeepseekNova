@@ -45,6 +45,36 @@ pub use loader::SkillLoader;
 /// Path to the built-in skills bundled with this crate.
 pub const BUILTIN_SKILLS_DIR: &str = "builtin";
 
+/// 内置技能源文件列表（`(文件名, 编译期内嵌内容)`）。
+///
+/// 用 `include_str!` 把 `builtin/*.md` 内嵌进二进制，运行时不再依赖编译期
+/// `CARGO_MANIFEST_DIR` 磁盘路径——`cargo install` / 分发 release 二进制到
+/// 其他机器后技能依然存在。`BUILTIN_SKILLS_DIR` 常量保留作文档与 /skills
+/// 的兼容引用。
+const BUILTIN_SKILL_FILES: &[(&str, &str)] = &[
+    (
+        "adversarial-review",
+        include_str!("../builtin/adversarial-review.md"),
+    ),
+    (
+        "coding-copilot",
+        include_str!("../builtin/coding-copilot.md"),
+    ),
+    ("dna-spec", include_str!("../builtin/dna-spec.md")),
+    (
+        "first-principles",
+        include_str!("../builtin/first-principles.md"),
+    ),
+    (
+        "frontend-developer",
+        include_str!("../builtin/frontend-developer.md"),
+    ),
+    (
+        "loop-engineering",
+        include_str!("../builtin/loop-engineering.md"),
+    ),
+];
+
 /// Load all built-in skills shipped with the deepseeknova-skills crate.
 ///
 /// These are the default cognitive frameworks that every DeepseekNova
@@ -54,14 +84,25 @@ pub const BUILTIN_SKILLS_DIR: &str = "builtin";
 /// - `loop-engineering` — iterative improvement loop
 /// - `first-principles` — first-principles reasoning
 /// - `adversarial-review` — hostile red-team review
+///
+/// 内容编译期内嵌（见 `BUILTIN_SKILL_FILES`），单条解析失败只 warn 不整体失败。
 pub fn load_builtin_skills() -> Vec<Skill> {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let builtin_path = std::path::Path::new(manifest_dir).join(BUILTIN_SKILLS_DIR);
-    let loader = SkillLoader::new(&builtin_path).with_scope(SkillScope::Builtin);
-    loader.load_all().unwrap_or_else(|e| {
-        tracing::warn!(error = %e, "failed to load builtin skills");
-        Vec::new()
-    })
+    let mut skills = Vec::new();
+    for (name, raw) in BUILTIN_SKILL_FILES {
+        match loader::parse_skill_str(raw, SkillScope::Builtin) {
+            Ok(skill) => {
+                debug_assert_eq!(
+                    skill.name, *name,
+                    "内置技能文件名应与 frontmatter name 一致"
+                );
+                skills.push(skill);
+            }
+            Err(e) => {
+                tracing::warn!(name = *name, error = %e, "failed to parse builtin skill");
+            }
+        }
+    }
+    skills
 }
 
 /// 多来源技能解析器：按 scope 优先级（project > user > builtin）合并多个来源，

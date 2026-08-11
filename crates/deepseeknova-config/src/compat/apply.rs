@@ -17,7 +17,7 @@ pub fn apply(
     scope: ImportScope,
     cwd: &Path,
 ) -> Result<(PathBuf, usize, usize), DeepseeknovaError> {
-    let path = scope.path(cwd);
+    let path = scope.path(cwd)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -42,6 +42,9 @@ pub fn apply(
 
     let mut applied = 0usize;
     let mut skipped = 0usize;
+    // 是否写入了任何 Hook 项：若是，需置 `[hooks] enabled = true`，
+    // 否则导入的 hook 因总开关缺省 false 永不执行（HooksConfig.enabled 默认 false）。
+    let mut wrote_hook = false;
 
     for item in &plan.items {
         match item {
@@ -121,6 +124,7 @@ pub fn apply(
                     &["hooks", event.config_key()],
                     Toml::Table(hook),
                 );
+                wrote_hook = true;
                 applied += 1;
             }
             ImportItem::Env { .. } => {
@@ -133,6 +137,11 @@ pub fn apply(
     // 全部项都被跳过时（如只有 env），不写盘，避免造出空配置段。
     if applied == 0 {
         return Ok((path, 0, skipped));
+    }
+
+    // 写入了 Hook 项 → 确保 `[hooks] enabled = true`，否则装配层不挂载。
+    if wrote_hook {
+        ensure_hooks_enabled(&mut table);
     }
 
     let content = toml::to_string_pretty(&Toml::Table(table)).map_err(|e| {
@@ -184,6 +193,18 @@ fn mcp_exists(table: &toml::map::Map<String, Toml>, name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// 确保 `[hooks] enabled = true`（幂等）：已显式设置则不覆盖。
+fn ensure_hooks_enabled(table: &mut toml::map::Map<String, Toml>) {
+    let hooks = table
+        .entry("hooks".to_string())
+        .or_insert_with(|| Toml::Table(toml::map::Map::new()));
+    if let Toml::Table(hooks) = hooks {
+        hooks
+            .entry("enabled".to_string())
+            .or_insert_with(|| Toml::Boolean(true));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,6 +253,38 @@ mod tests {
         assert!(raw.contains("name = \"filesystem\""));
         assert!(raw.contains("command = \"gate.sh\""));
         assert!(raw.contains("tool_before"), "hooks 事件组: {raw}");
+        assert!(
+            raw.contains("[hooks]") && raw.contains("enabled = true"),
+            "写入了 hook 必须置 [hooks] enabled = true: {raw}"
+        );
+    }
+
+    #[test]
+    fn apply_without_hooks_does_not_force_hooks_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut plan = sample_plan();
+        plan.items.retain(|i| !matches!(i, ImportItem::Hook { .. }));
+        let (path, applied, _) = apply(&plan, ImportScope::Project, dir.path()).unwrap();
+        assert_eq!(applied, 2);
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !raw.contains("[hooks]"),
+            "无 hook 项时不应写 [hooks] 段: {raw}"
+        );
+    }
+
+    #[test]
+    fn apply_does_not_override_explicit_hooks_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("deepseeknova.toml");
+        std::fs::write(&cfg, "[hooks]\nenabled = false\n").unwrap();
+        let plan = sample_plan();
+        apply(&plan, ImportScope::Project, dir.path()).unwrap();
+        let raw = std::fs::read_to_string(&cfg).unwrap();
+        assert!(
+            raw.contains("enabled = false"),
+            "用户显式 enabled=false 不得被覆盖: {raw}"
+        );
     }
 
     #[test]
@@ -282,7 +335,14 @@ mod tests {
     #[test]
     fn user_scope_path_points_to_home_config() {
         let scope = ImportScope::User;
-        let p: PathBuf = scope.path(std::path::Path::new("/tmp"));
+        let p: PathBuf = scope.path(std::path::Path::new("/tmp")).unwrap();
         assert!(p.ends_with(".deepseeknova/config.toml"), "{p:?}");
+    }
+
+    #[test]
+    fn project_scope_path_resolves_under_cwd() {
+        let scope = ImportScope::Project;
+        let p = scope.path(std::path::Path::new("/tmp/foo")).unwrap();
+        assert_eq!(p, std::path::Path::new("/tmp/foo/deepseeknova.toml"));
     }
 }

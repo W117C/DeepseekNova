@@ -1317,10 +1317,17 @@ async fn main() -> Result<(), DeepseeknovaError> {
                 println!("no importable items found");
                 return Ok(());
             }
+            let target = match scope.path(&cwd) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(exit_code::CONFIG);
+                }
+            };
             println!(
                 "would write {} item(s) to {} ({})",
                 plan.items.len(),
-                scope.path(&cwd).display(),
+                target.display(),
                 scope_label(scope)
             );
 

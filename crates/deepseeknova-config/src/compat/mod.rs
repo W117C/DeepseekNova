@@ -42,11 +42,17 @@ pub enum ImportScope {
 
 impl ImportScope {
     /// 目标配置文件路径（`cwd` 为项目层基准）。
-    pub fn path(self, cwd: &std::path::Path) -> std::path::PathBuf {
+    ///
+    /// 无家目录时 [`ImportScope::User`] 返回错误——不落入字面量 `~` 的相对路径
+    /// 静默写错位置。
+    pub fn path(self, cwd: &std::path::Path) -> Result<std::path::PathBuf, DeepseeknovaError> {
         match self {
-            ImportScope::User => crate::user_config_path()
-                .unwrap_or_else(|| std::path::PathBuf::from("~/.deepseeknova/config.toml")),
-            ImportScope::Project => cwd.join("deepseeknova.toml"),
+            ImportScope::User => crate::user_config_path().ok_or_else(|| {
+                DeepseeknovaError::config(
+                    "无法定位用户配置目录（HOME 未设置）；请改用 --scope project".to_string(),
+                )
+            }),
+            ImportScope::Project => Ok(cwd.join("deepseeknova.toml")),
         }
     }
 }

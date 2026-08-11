@@ -130,31 +130,33 @@ impl SkillLoader {
 // ---------------------------------------------------------------------------
 
 /// Parse a single `.md` skill file.
-fn parse_skill_file(path: &Path, scope: SkillScope) -> Result<Skill, DeepseeknovaError> {
+///
+/// `pub(crate)`：供 `load_builtin_skills()`（lib.rs，`include_str!` 内嵌内容）
+/// 复用同一解析逻辑——内置技能不依赖编译期磁盘路径，可随二进制分发。
+pub(crate) fn parse_skill_file(path: &Path, scope: SkillScope) -> Result<Skill, DeepseeknovaError> {
     let raw = std::fs::read_to_string(path).map_err(|e| {
         DeepseeknovaError::Io(std::io::Error::new(
             e.kind(),
             format!("failed to read skill file {}: {e}", path.display()),
         ))
     })?;
+    parse_skill_str(&raw, scope)
+        .map_err(|e| DeepseeknovaError::config(format!("skill file {}: {e}", path.display())))
+}
 
-    let (frontmatter_yaml, body) = split_frontmatter(&raw).ok_or_else(|| {
-        DeepseeknovaError::config(format!("invalid frontmatter in {}", path.display()))
-    })?;
+/// 从原始 markdown 文本解析技能（builtin 内嵌内容用，路径仅用于报错）。
+pub(crate) fn parse_skill_str(raw: &str, scope: SkillScope) -> Result<Skill, DeepseeknovaError> {
+    let (frontmatter_yaml, body) = split_frontmatter(raw)
+        .ok_or_else(|| DeepseeknovaError::config("invalid frontmatter".to_string()))?;
 
-    let fm: SkillFrontmatter = serde_norway::from_str(&frontmatter_yaml).map_err(|e| {
-        DeepseeknovaError::config(format!(
-            "invalid YAML frontmatter in {}: {e}",
-            path.display()
-        ))
-    })?;
+    let fm: SkillFrontmatter = serde_norway::from_str(&frontmatter_yaml)
+        .map_err(|e| DeepseeknovaError::config(format!("invalid YAML frontmatter: {e}")))?;
 
     let body = body.trim().to_string();
     if body.is_empty() {
-        return Err(DeepseeknovaError::config(format!(
-            "skill file {} has empty body",
-            path.display()
-        )));
+        return Err(DeepseeknovaError::config(
+            "skill has empty body".to_string(),
+        ));
     }
 
     Ok(Skill {
