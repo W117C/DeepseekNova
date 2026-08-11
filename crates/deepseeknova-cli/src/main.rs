@@ -43,6 +43,43 @@ fn scope_label(scope: deepseeknova_config::compat::ImportScope) -> &'static str 
     }
 }
 
+/// 把 checkpoint diff 条目格式化成展示行（`checkpoint diff` 用）。
+///
+/// 抽成纯函数以便单测「快照存在但文件被删除」等展示路径；`filter` 限定
+/// 单个文件。返回要逐行打印的文本行。
+fn format_diff_entries(
+    entries: &[Option<deepseeknova_checkpoint::FileDiff>],
+    filter: Option<&str>,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut shown = false;
+    for entry in entries.iter().flatten() {
+        if let Some(filter) = filter {
+            if entry.path != *filter {
+                continue;
+            }
+        }
+        shown = true;
+        if entry.truncated {
+            lines.push(format!(
+                "{} (truncated, +{}/-{})",
+                entry.path.display(),
+                entry.added,
+                entry.removed
+            ));
+        } else {
+            lines.push(format!("--- {} ---", entry.path.display()));
+            for line in entry.diff_text.lines() {
+                lines.push(line.to_string());
+            }
+        }
+    }
+    if !shown {
+        lines.push("no modified files to diff".to_string());
+    }
+    lines
+}
+
 /// 进程退出码常量（集中定义，避免各处魔数冲突）。
 ///
 /// 退出码分区：
@@ -1248,30 +1285,8 @@ async fn run_cli() -> Result<i32, DeepseeknovaError> {
                 cli::CheckpointAction::Diff { path: filter } => {
                     let ck = CheckpointManager::load_from(&path)?;
                     let entries = ck.diff_entries(DEFAULT_DIFF_MAX_BYTES).await?;
-                    let mut shown = false;
-                    for entry in entries.into_iter().flatten() {
-                        if let Some(filter) = &filter {
-                            if entry.path != *filter {
-                                continue;
-                            }
-                        }
-                        shown = true;
-                        if entry.truncated {
-                            println!(
-                                "{} (truncated, +{}/-{})",
-                                entry.path.display(),
-                                entry.added,
-                                entry.removed
-                            );
-                        } else {
-                            println!("--- {} ---", entry.path.display());
-                            for line in entry.diff_text.lines() {
-                                println!("{line}");
-                            }
-                        }
-                    }
-                    if !shown {
-                        println!("no modified files to diff");
+                    for line in format_diff_entries(&entries, filter.as_deref()) {
+                        println!("{line}");
                     }
                 }
                 cli::CheckpointAction::Rollback { all } => {

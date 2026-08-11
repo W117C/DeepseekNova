@@ -144,13 +144,18 @@ fn parse_config_toml(raw: &str) -> (Vec<ImportItem>, Vec<String>) {
 
 /// 扫描 Codex 配置文件，构建导入计划（canonical 路径去重，同 Claude 模块）。
 pub fn build_plan(cwd: &Path) -> ImportPlan {
+    build_plan_with_home(cwd, dirs::home_dir())
+}
+
+/// [`build_plan`] 的 home 注入版：测试用临时 HOME 隔离真实 `~/.codex/config.toml`。
+fn build_plan_with_home(cwd: &Path, home: Option<PathBuf>) -> ImportPlan {
     let mut plan = ImportPlan {
         source: ImportSource::Codex,
         ..Default::default()
     };
 
     let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = home {
         candidates.push(home.join(".codex/config.toml"));
     }
     candidates.push(cwd.join(".codex/config.toml"));
@@ -239,5 +244,47 @@ pre_tool_use = [{ command = "gate" }]
         let (items, unmapped) = parse_config_toml("not [ valid toml");
         assert!(items.is_empty());
         assert!(unmapped.iter().any(|u| u.contains("解析失败")));
+    }
+
+    #[test]
+    fn codex_build_plan_scans_project_config() {
+        // 真实文件路径扫描：项目层 .codex/config.toml 应被发现并映射。
+        let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap(); // 空 HOME，隔离真实 ~/.codex
+        std::fs::create_dir_all(dir.path().join(".codex")).unwrap();
+        std::fs::write(
+            dir.path().join(".codex/config.toml"),
+            r#"
+model = "gpt-5"
+[permission]
+allow = ["Bash(npm run build)"]
+
+[[mcp_servers]]
+name = "filesystem"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem"]
+"#,
+        )
+        .unwrap();
+
+        let plan = build_plan_with_home(dir.path(), Some(home.path().to_path_buf()));
+        assert_eq!(plan.sources.len(), 1, "项目层 config.toml 应被扫到");
+        assert!(plan.items.iter().any(|i| matches!(
+            i,
+            ImportItem::Permission { tool, .. } if tool == "bash"
+        )));
+        assert!(plan.items.iter().any(|i| matches!(
+            i,
+            ImportItem::McpServer { name, .. } if name == "filesystem"
+        )));
+    }
+
+    #[test]
+    fn codex_build_plan_ignores_missing_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap(); // 空 HOME
+        let plan = build_plan_with_home(dir.path(), Some(home.path().to_path_buf()));
+        assert!(plan.sources.is_empty());
+        assert!(plan.items.is_empty());
     }
 }

@@ -223,13 +223,19 @@ fn parse_mcp_json(raw: &str) -> Vec<ImportItem> {
 /// 按 canonical 路径去重：user 层与 project 层指向同一文件（如 HOME == cwd）时
 /// 只扫一次，避免重复导入。
 pub fn build_plan(cwd: &Path) -> ImportPlan {
+    build_plan_with_home(cwd, dirs::home_dir())
+}
+
+/// [`build_plan`] 的 home 注入版：测试用临时 HOME 隔离真实 `~/.claude/settings.json`。
+/// `home = None` 表示无用户层来源（等价于 HOME 未设置）。
+fn build_plan_with_home(cwd: &Path, home: Option<PathBuf>) -> ImportPlan {
     let mut plan = ImportPlan {
         source: ImportSource::Claude,
         ..Default::default()
     };
 
     let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = home {
         candidates.push(home.join(".claude/settings.json"));
     }
     candidates.push(cwd.join(".claude/settings.json"));
@@ -390,5 +396,65 @@ mod tests {
         let (items, unmapped) = parse_settings_json(raw);
         assert_eq!(items.len(), 1);
         assert!(unmapped.iter().any(|u| u.contains("WeirdTool")));
+    }
+
+    #[test]
+    fn build_plan_scans_project_settings_and_mcp_files() {
+        // 真实文件路径扫描（补「文件路径扫描由集成测试覆盖」的空缺）：
+        // 项目层 .claude/settings.json + .mcp.json 都应被发现并映射。
+        let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap(); // 空 HOME，隔离真实 ~/.claude
+        std::fs::create_dir_all(dir.path().join(".claude")).unwrap();
+        std::fs::write(
+            dir.path().join(".claude/settings.json"),
+            r#"{
+                "permissions": {"allow": ["Bash(npm run build)", "Read(src/**)"]},
+                "env": {"FOO": "bar"}
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join(".mcp.json"),
+            r#"{"mcpServers": {"filesystem": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem"]}}}"#,
+        )
+        .unwrap();
+
+        let plan = build_plan_with_home(dir.path(), Some(home.path().to_path_buf()));
+        assert_eq!(
+            plan.sources.len(),
+            2,
+            "settings.json + .mcp.json 都应被扫到"
+        );
+
+        let perms: Vec<_> = plan
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                ImportItem::Permission { tool, subject, .. } => {
+                    Some((tool.as_str(), subject.as_deref()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(perms.contains(&("bash", Some("npm run build"))));
+        assert!(perms.contains(&("read_file", Some("src/**"))));
+
+        let mcp = plan
+            .items
+            .iter()
+            .find(|i| matches!(i, ImportItem::McpServer { name, .. } if name == "filesystem"));
+        assert!(mcp.is_some(), "mcpServers 应映射为 McpServer 项");
+
+        // env 项出现在 unmapped（配置层无 env 目标，应用层跳过）。
+        assert!(plan.unmapped.iter().any(|u| u.contains("env")));
+    }
+
+    #[test]
+    fn build_plan_ignores_missing_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap(); // 空 HOME
+        let plan = build_plan_with_home(dir.path(), Some(home.path().to_path_buf()));
+        assert!(plan.sources.is_empty());
+        assert!(plan.items.is_empty());
     }
 }

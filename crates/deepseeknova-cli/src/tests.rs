@@ -221,3 +221,67 @@ fn severity_min_filter_direction() {
     assert!(Severity::Medium <= min);
     assert!(!(Severity::Low <= min), "Low excluded under medium floor");
 }
+
+// ── checkpoint diff 展示（format_diff_entries）──────────────────────────
+
+/// 构造一个 `FileDiff` 测试助手（避免依赖 tokio 文件 I/O）。
+fn fake_file_diff(
+    path: &str,
+    added: usize,
+    removed: usize,
+    diff_text: &str,
+    truncated: bool,
+) -> deepseeknova_checkpoint::FileDiff {
+    deepseeknova_checkpoint::FileDiff {
+        path: std::path::PathBuf::from(path),
+        hash: "abcd1234".to_string(),
+        added,
+        removed,
+        diff_text: diff_text.to_string(),
+        truncated,
+    }
+}
+
+#[test]
+fn format_diff_entries_deleted_file_shows_all_removed() {
+    // 快照存在但文件被删除 → 展示层应全为 `-` 行。
+    let entries = vec![Some(fake_file_diff(
+        "gone.txt",
+        0,
+        3,
+        "-line1\n-line2\n-line3\n",
+        false,
+    ))];
+    let lines = format_diff_entries(&entries, None);
+    assert_eq!(lines[0], "--- gone.txt ---");
+    assert_eq!(lines[1], "-line1");
+    assert_eq!(lines[2], "-line2");
+    assert_eq!(lines[3], "-line3");
+    assert_eq!(lines.len(), 4);
+}
+
+#[test]
+fn format_diff_entries_filter_keeps_only_matching_path() {
+    let entries = vec![
+        Some(fake_file_diff("a.txt", 1, 0, "+x\n", false)),
+        Some(fake_file_diff("b.txt", 0, 2, "-y\n-z\n", false)),
+    ];
+    let lines = format_diff_entries(&entries, Some("b.txt"));
+    assert_eq!(lines.len(), 3);
+    assert_eq!(lines[0], "--- b.txt ---");
+    assert!(lines.iter().all(|l| !l.contains("a.txt")));
+}
+
+#[test]
+fn format_diff_entries_no_match_reports_empty() {
+    let entries = vec![Some(fake_file_diff("a.txt", 1, 0, "+x\n", false))];
+    let lines = format_diff_entries(&entries, Some("nope.txt"));
+    assert_eq!(lines, vec!["no modified files to diff"]);
+}
+
+#[test]
+fn format_diff_entries_truncated_shows_counts_only() {
+    let entries = vec![Some(fake_file_diff("big.txt", 12, 3, "", true))];
+    let lines = format_diff_entries(&entries, None);
+    assert_eq!(lines, vec!["big.txt (truncated, +12/-3)"]);
+}
