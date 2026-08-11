@@ -92,6 +92,8 @@ make test           # cargo test --all
 make fmt            # 格式化代码
 make clippy-fix     # clippy 自动修复
 make audit          # 安全审计（先检查 cargo-deny，再执行 cargo deny --all-features check）
+make test-count     # 运行 cargo test --all，按 passed 总数同步 README 测试数
+make test-count-check  # 校验 README 测试数与 cargo test --all 的 passed 总数一致（CI 已接入）
 ```
 
 > **云端安全审查不可用时的回退验收路径**：交付/推送前若云端安全审查（如 L3 深度安全审查）因外部资源不可用（如积分耗尽）暂时无法执行，先以项目内既有手段留存验收证据：运行 `make check` 与 `make audit`，记录两者结果与待补审查项，待服务恢复后补跑云端审查，不因此新增脚本、修改 CI 或引入新工具。注意 `make audit` 配方会先检查 `cargo-deny` 是否安装，然后直接执行 `cargo deny --all-features check`（与 CI `.github/workflows/security.yml` 的 cargo deny 任务对齐；本地缺 cargo-deny 时目标会打印安装提示并退出）。CI 侧另有带 RUSTSEC ignore 清单的 cargo-audit 任务，推送后由 security.yml 自动覆盖，ignore 理由见 `deny.toml` 的 `[advisories].ignore`。

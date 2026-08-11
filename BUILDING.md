@@ -58,6 +58,13 @@ git config diff.renames true  # diff/log 统计启用重命名检测
   需预装 `cargo-deny`（`cargo install cargo-deny --locked`）；目标会先检查
   `cargo-deny`，再直接执行 `cargo deny --all-features check`。
 
+- **同步 / 校验 README 测试数**：
+  ```bash
+  make test-count          # 按 cargo test --all 的 passed 总数更新 README
+  make test-count-check    # 校验 README 数字与 passed 总数一致（CI Linux 矩阵已接入）
+  ```
+  数字由 `scripts/sync-test-count.py` 统一维护，避免徽章与表格各自漂移。
+
 > 桌面端前端（`crates/deepseeknova-desktop`）已于 2026-08-08 整体移除，
 > 历史可经 git 追溯（先例 `3ab55d7`）。当前无 Node 工程，本仓库为纯
 > Rust workspace。

@@ -409,7 +409,6 @@ struct AnthropicResponse {
     #[serde(default)]
     content: Vec<AnthropicContent>,
     #[serde(default)]
-    #[allow(dead_code)]
     usage: Option<AnthropicUsage>,
 }
 

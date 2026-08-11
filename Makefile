@@ -1,6 +1,6 @@
 .PHONY: all build check test clean run release \
         release-patch release-minor release-major \
-        check-all test-all clippy-fix example \
+        check-all test-all test-count test-count-check clippy-fix example \
         install dist audit
 
 # ── Default ─────────────────────────────────────────────────────
@@ -32,6 +32,12 @@ test:
 
 test-all:
 	cargo test --workspace
+
+test-count:
+	python3 scripts/sync-test-count.py
+
+test-count-check:
+	python3 scripts/sync-test-count.py --check
 
 # ── Clippy auto-fix ─────────────────────────────────────────────
 clippy-fix:
