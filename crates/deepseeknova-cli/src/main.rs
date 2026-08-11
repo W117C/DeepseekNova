@@ -1371,14 +1371,10 @@ async fn run_cli() -> Result<i32, DeepseeknovaError> {
             };
             println!(
                 "would write {} item(s) to {} ({})",
-                plan.applicable_len(),
+                plan.items.len(),
                 target.display(),
                 scope_label(scope)
             );
-            if plan.applicable_len() != plan.items.len() {
-                let report_only = plan.items.len() - plan.applicable_len();
-                println!("  ({report_only} env item(s) are report-only and will not be written)");
-            }
 
             if *apply {
                 if target.exists() {
