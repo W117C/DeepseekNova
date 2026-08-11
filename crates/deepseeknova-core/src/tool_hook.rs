@@ -12,6 +12,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// 钩子对一次工具调用的放行决策。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -236,8 +237,15 @@ impl UserHooks {
 
 /// 执行单条外部命令：stdin 写入 JSON 载荷，捕获 stdout/stderr，带超时。
 /// 超时 / 无法启动 / IO 失败按 [`HookExecResult::Error`] 返回（fail-closed：
-/// 调用方一律视为拒绝）。不引入新依赖（`std::process::Command`）。
-pub fn run_user_hook(command: &UserHookCommand, payload: &HookPayload) -> HookRun {
+/// 调用方一律视为拒绝）。
+///
+/// **同步阻塞版本**：`std::process::Command` + 轮询等待，阻塞当前线程直至
+/// 命令退出或超时（最长 [`DEFAULT_HOOK_TIMEOUT`]）。供无 async 上下文或需要
+/// 阻塞完成语义的路径使用（如会话结束 / failure 通知经 `Drop` 触发时）。
+/// 阻塞期间不占用 tokio worker 的调用方应优先使用异步版本
+/// [`run_user_hook`]，或把本函数放入 `tokio::task::spawn_blocking` /
+/// `block_in_place`。
+pub fn run_user_hook_sync(command: &UserHookCommand, payload: &HookPayload) -> HookRun {
     let timeout = command.timeout.unwrap_or(DEFAULT_HOOK_TIMEOUT);
     let mut child = match Command::new(&command.command)
         .args(&command.args)
@@ -320,6 +328,108 @@ pub fn run_user_hook(command: &UserHookCommand, payload: &HookPayload) -> HookRu
             exec: HookExecResult::Failed {
                 exit_code: status.code(),
                 stderr: truncate_hook_output(&stderr),
+            },
+            verdict: None,
+        },
+        None => HookRun {
+            exec: HookExecResult::Error {
+                message: format!("timed out after {timeout:?}"),
+            },
+            verdict: None,
+        },
+    }
+}
+
+/// 执行单条外部命令：stdin 写入 JSON 载荷，异步捕获 stdout/stderr，带超时。
+/// 超时 / 无法启动 / IO 失败按 [`HookExecResult::Error`] 返回（fail-closed：
+/// 调用方一律视为拒绝）。
+///
+/// **异步实现**（[`tokio::process::Command`]）：等待子进程期间让出当前
+/// tokio worker，不占用运行时线程（T19）。stdin 载荷写入在独立任务中完成，
+/// 子进程不读 stdin 时仅该任务滞留（不 join、不阻塞本函数）；stdout/stderr
+/// 异步读取，子进程退出即 EOF。
+pub async fn run_user_hook(command: &UserHookCommand, payload: &HookPayload<'_>) -> HookRun {
+    let timeout = command.timeout.unwrap_or(DEFAULT_HOOK_TIMEOUT);
+    let mut child = match tokio::process::Command::new(&command.command)
+        .args(&command.args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return HookRun {
+                exec: HookExecResult::Error {
+                    message: format!("failed to spawn '{}': {e}", command.command),
+                },
+                verdict: None,
+            };
+        }
+    };
+
+    let body = serde_json::to_string(payload).unwrap_or_else(|_| "{}".to_string());
+
+    // stdout/stderr：异步读取（子进程退出→EOF），不占 worker。
+    let mut stdout = child.stdout.take();
+    let out_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        if let Some(mut out) = stdout.take() {
+            let _ = out.read_to_end(&mut buf).await;
+        }
+        String::from_utf8_lossy(&buf).into_owned()
+    });
+    let mut stderr = child.stderr.take();
+    let err_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        if let Some(mut err) = stderr.take() {
+            let _ = err.read_to_end(&mut buf).await;
+        }
+        String::from_utf8_lossy(&buf).into_owned()
+    });
+
+    // stdin 载荷写入：独立任务写并关闭（EOF）。子进程不读 stdin 时该任务
+    // 滞留（不阻塞本函数）；子进程退出/被杀后管道断开即结束。
+    let mut stdin = child.stdin.take();
+    tokio::spawn(async move {
+        if let Some(mut s) = stdin.take() {
+            let _ = s.write_all(body.as_bytes()).await;
+            let _ = s.shutdown().await;
+        }
+    });
+
+    // 带超时等待退出；超时或 wait 失败先 kill 并回收（fail-closed 视为
+    // Error）。注意：必须在读取 stdout/stderr **之前** kill——否则子进程
+    // 继续运行导致管道不 EOF，后续读取会阻塞到子进程自然退出。
+    let status = tokio::select! {
+        status = child.wait() => Some(status),
+        _ = tokio::time::sleep(timeout) => None,
+    };
+    let needs_kill = status.is_none() || matches!(status, Some(Err(_)));
+    if needs_kill {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+    }
+
+    let stdout = out_task.await.unwrap_or_default();
+    let stderr = err_task.await.unwrap_or_default();
+
+    match status {
+        Some(Ok(status)) if status.success() => HookRun {
+            exec: HookExecResult::Success,
+            verdict: serde_json::from_str(&stdout).ok(),
+        },
+        Some(Ok(status)) => HookRun {
+            exec: HookExecResult::Failed {
+                exit_code: status.code(),
+                stderr: truncate_hook_output(&stderr),
+            },
+            verdict: None,
+        },
+        Some(Err(e)) => HookRun {
+            exec: HookExecResult::Error {
+                message: format!("wait failed: {e}"),
             },
             verdict: None,
         },
@@ -447,26 +557,26 @@ mod tests {
         assert_eq!(HookEvent::Failure.as_str(), "failure");
     }
 
-    #[test]
-    fn run_user_hook_success_exit_zero() {
+    #[tokio::test]
+    async fn run_user_hook_success_exit_zero() {
         let cmd = UserHookCommand {
             command: "true".into(),
             args: vec![],
             timeout: Some(Duration::from_secs(5)),
         };
-        let run = run_user_hook(&cmd, &hook_payload("tool_before", Some("read_file")));
+        let run = run_user_hook(&cmd, &hook_payload("tool_before", Some("read_file"))).await;
         assert!(run.exec.is_allowed(), "exit 0 → Success");
         assert!(run.verdict.is_none(), "非 JSON 输出 → verdict None");
     }
 
-    #[test]
-    fn run_user_hook_nonzero_exit_fails_closed() {
+    #[tokio::test]
+    async fn run_user_hook_nonzero_exit_fails_closed() {
         let cmd = UserHookCommand {
             command: "false".into(),
             args: vec![],
             timeout: Some(Duration::from_secs(5)),
         };
-        let run = run_user_hook(&cmd, &hook_payload("tool_before", Some("bash")));
+        let run = run_user_hook(&cmd, &hook_payload("tool_before", Some("bash"))).await;
         match run.exec {
             HookExecResult::Failed { exit_code, .. } => assert_eq!(exit_code, Some(1)),
             other => panic!("expected Failed, got {other:?}"),
@@ -474,15 +584,15 @@ mod tests {
         assert!(!run.exec.is_allowed(), "非 0 退出必须视为拒绝");
     }
 
-    #[test]
-    fn run_user_hook_parses_json_verdict() {
+    #[tokio::test]
+    async fn run_user_hook_parses_json_verdict() {
         let script = "cat >/dev/null; echo '{\"allowed\":false,\"reason\":\"blocked by gate\"}'";
         let cmd = UserHookCommand {
             command: "sh".into(),
             args: vec!["-c".into(), script.into()],
             timeout: Some(Duration::from_secs(5)),
         };
-        let run = run_user_hook(&cmd, &hook_payload("tool_before", Some("bash")));
+        let run = run_user_hook(&cmd, &hook_payload("tool_before", Some("bash"))).await;
         assert!(
             run.exec.is_allowed(),
             "exit 0 但裁决 allowed=false 由调用方判定"
@@ -492,15 +602,15 @@ mod tests {
         assert_eq!(v.reason, "blocked by gate");
     }
 
-    #[test]
-    fn run_user_hook_timeout_is_error() {
+    #[tokio::test]
+    async fn run_user_hook_timeout_is_error() {
         let cmd = UserHookCommand {
             command: "sleep".into(),
             args: vec!["5".into()],
             timeout: Some(Duration::from_millis(150)),
         };
         let start = Instant::now();
-        let run = run_user_hook(&cmd, &hook_payload("tool_before", None));
+        let run = run_user_hook(&cmd, &hook_payload("tool_before", None)).await;
         assert!(
             matches!(run.exec, HookExecResult::Error { .. }),
             "超时必须视为 Error（fail-closed），got {:?}",
@@ -512,14 +622,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn run_user_hook_missing_command_is_error() {
+    #[tokio::test]
+    async fn run_user_hook_missing_command_is_error() {
         let cmd = UserHookCommand {
             command: "definitely-not-a-real-command-xyz".into(),
             args: vec![],
             timeout: None,
         };
-        let run = run_user_hook(&cmd, &hook_payload("failure", None));
+        let run = run_user_hook(&cmd, &hook_payload("failure", None)).await;
         assert!(
             matches!(run.exec, HookExecResult::Error { .. }),
             "spawn 失败必须视为 Error（fail-closed）"
@@ -527,8 +637,8 @@ mod tests {
         assert!(!run.exec.is_allowed());
     }
 
-    #[test]
-    fn run_user_hook_stdin_receives_payload() {
+    #[tokio::test]
+    async fn run_user_hook_stdin_receives_payload() {
         let tmp = tempfile::tempdir().unwrap();
         let out = tmp.path().join("hook-in.json");
         let script = format!("cat > '{}'", out.display());
@@ -537,7 +647,7 @@ mod tests {
             args: vec!["-c".into(), script],
             timeout: Some(Duration::from_secs(5)),
         };
-        let run = run_user_hook(&cmd, &hook_payload("tool_before", Some("write_file")));
+        let run = run_user_hook(&cmd, &hook_payload("tool_before", Some("write_file"))).await;
         assert!(run.exec.is_allowed());
         let written = std::fs::read_to_string(&out).unwrap();
         let v: serde_json::Value = serde_json::from_str(&written).unwrap();
@@ -545,6 +655,63 @@ mod tests {
         assert_eq!(v["tool"], "write_file");
         assert_eq!(v["workspace"], "/ws");
         assert_eq!(v["session_id"], "sess-1");
+    }
+
+    /// T19 回归：钩子等待子进程期间不占用 tokio worker。若 `run_user_hook`
+    /// 同步阻塞（旧实现 20ms 轮询 + sleep），单 worker runtime 下并发定时
+    /// 器只能在钩子返回后才有机会推进，从而晚于钩子完成；异步实现下两者
+    /// 并发推进，定时器先于钩子返回触发。
+    #[tokio::test(flavor = "current_thread")]
+    async fn run_user_hook_does_not_block_worker() {
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let done_task = std::sync::Arc::clone(&done);
+        let cmd = UserHookCommand {
+            command: "sleep".into(),
+            args: vec!["1".into()],
+            timeout: Some(Duration::from_secs(5)),
+        };
+        let hook = tokio::spawn(async move {
+            let run = run_user_hook(&cmd, &hook_payload("tool_before", None)).await;
+            done_task.store(true, std::sync::atomic::Ordering::SeqCst);
+            run
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !done.load(std::sync::atomic::Ordering::SeqCst),
+            "200ms 时钩子仍在等待子进程（sleep 1s）：worker 不应被同步占用"
+        );
+        let run = hook.await.unwrap();
+        assert!(run.exec.is_allowed(), "sleep 1 正常退出 → Success");
+    }
+
+    /// 同步版本（通知型路径：session / failure / tool_after）必须保持
+    /// fail-closed 语义：非 0 退出 / 超时 / 无法启动 → 拒绝。
+    #[test]
+    fn run_user_hook_sync_preserves_fail_closed_semantics() {
+        let cmd = UserHookCommand {
+            command: "false".into(),
+            args: vec![],
+            timeout: Some(Duration::from_secs(5)),
+        };
+        let run = run_user_hook_sync(&cmd, &hook_payload("tool_before", Some("bash")));
+        match run.exec {
+            HookExecResult::Failed { exit_code, .. } => assert_eq!(exit_code, Some(1)),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert!(!run.exec.is_allowed());
+
+        let timeout_cmd = UserHookCommand {
+            command: "sleep".into(),
+            args: vec!["5".into()],
+            timeout: Some(Duration::from_millis(150)),
+        };
+        let start = Instant::now();
+        let run = run_user_hook_sync(&timeout_cmd, &hook_payload("tool_before", None));
+        assert!(
+            matches!(run.exec, HookExecResult::Error { .. }),
+            "同步版本超时也必须视为 Error（fail-closed）"
+        );
+        assert!(start.elapsed() < Duration::from_secs(2), "超时后应提前返回");
     }
 
     #[test]

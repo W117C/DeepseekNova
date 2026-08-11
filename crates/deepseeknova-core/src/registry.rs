@@ -211,6 +211,29 @@ impl Default for PlannerRegistry {
 // Skill Registry
 // ---------------------------------------------------------------------------
 
+/// 技能来源层级，同名冲突时高优先级覆盖低优先级：`Project > User > Builtin`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SkillScope {
+    /// crate 内置技能（随 deepseeknova-skills 分发，优先级最低）。
+    Builtin,
+    /// 用户级技能（`~/.deepseeknova/skills/`）。
+    User,
+    /// 项目级技能（`.deepseeknova/skills/` / `.agents/skills/`，优先级最高）。
+    #[default]
+    Project,
+}
+
+impl SkillScope {
+    /// 展示标签（`/skills` 列表用）。
+    pub fn label(self) -> &'static str {
+        match self {
+            SkillScope::Builtin => "builtin",
+            SkillScope::User => "user",
+            SkillScope::Project => "project",
+        }
+    }
+}
+
 /// 一个 skill 的定义（名称、描述、允许工具、系统提示等）。
 #[derive(Debug, Clone)]
 pub struct Skill {
@@ -224,6 +247,8 @@ pub struct Skill {
     pub tools_allowed: Vec<String>,
     /// 该 skill 的系统提示。
     pub system_prompt: String,
+    /// 来源层级（用于同名覆盖与展示）。
+    pub scope: SkillScope,
 }
 
 /// skill 注册表：按名索引。

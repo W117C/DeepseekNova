@@ -67,11 +67,16 @@ pub struct MemoryEngine {
 }
 
 /// 由内容派生稳定 id，实现"相同内容不重复插入"的确定性去重。
+///
+/// 基于 SHA-256（而非 `DefaultHasher`）：后者算法未承诺跨 Rust 编译版本稳定，
+/// 编译器升级后旧库条目的去重 id（distill-*/lesson-*/file-*）将无法再命中，
+/// 产生重复记忆且跨入口去重失效。SHA-256 是密码学标准哈希，跨版本/跨平台稳定。
+/// id 格式为 `{prefix}-{Sha256(content) hex 前 16 位}`：长度语义与原
+/// DefaultHasher(u64) 的 16 位 hex 输出保持一致（64 bit），前缀不变。
 fn content_id(prefix: &str, content: &str) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    content.hash(&mut h);
-    format!("{prefix}-{:016x}", h.finish())
+    use sha2::{Digest, Sha256};
+    let digest = hex::encode(Sha256::digest(content.as_bytes()));
+    format!("{prefix}-{}", &digest[..16])
 }
 
 impl MemoryEngine {
@@ -963,6 +968,39 @@ mod tests {
             "kind: skill\ntitle: Use serde derive\nPrefer derive"
         );
         assert!(skills2[0].tags.contains(&"llm-distill".to_string()));
+    }
+
+    #[test]
+    fn content_id_is_sha256_stable_and_distinct() {
+        // T17：content_id 必须基于跨编译版本稳定的 SHA-256（而非 DefaultHasher）。
+        // 同内容 → 同 id；不同内容 → 不同 id；前缀与 16 位 hex 长度语义不变。
+        let a1 = content_id("distill", "always escape user input");
+        let a2 = content_id("distill", "always escape user input");
+        assert_eq!(a1, a2, "同内容必须产出同 id（去重基础）");
+
+        // 长度/前缀语义：`{prefix}-` + 16 位 hex（与原 u64 hex 输出一致）。
+        assert!(a1.starts_with("distill-"), "前缀语义不变");
+        assert_eq!(
+            a1.len(),
+            "distill-".len() + 16,
+            "id 保持 16 位 hex 长度语义"
+        );
+        let hash_part = a1.split_once('-').unwrap().1;
+        assert!(
+            hash_part.chars().all(|c| c.is_ascii_hexdigit()),
+            "hash 部分必须为 hex 字符"
+        );
+
+        // 不同内容（仅尾部空格不同）→ 不同 id。
+        let b = content_id("distill", "always escape user input ");
+        assert_ne!(a1, b, "不同内容必须产出不同 id");
+
+        // 前缀不同但内容相同 → 不同 id（distill / reflect 分属不同去重域）。
+        assert_ne!(
+            content_id("reflect", "always escape user input"),
+            a1,
+            "前缀参与 id 派生"
+        );
     }
 
     /// 确定性测试替身（接口替身，非被测对象 mock）：语义命中不需 FTS 共词。

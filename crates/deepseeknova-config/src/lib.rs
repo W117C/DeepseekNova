@@ -21,6 +21,9 @@
     )
 )]
 
+/// 外部 Agent 工具配置导入（Claude Code / Codex → 分层配置）。
+pub mod compat;
+
 use deepseeknova_core::DeepseeknovaError;
 use serde::{Deserialize, Serialize};
 
@@ -1328,7 +1331,7 @@ pub struct McpServerConfig {
 }
 
 /// 环境变量键值对。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnvEntry {
     /// 变量名。
     pub name: String,
@@ -1888,11 +1891,13 @@ impl Config {
         self.model_pointers.merge(other.model_pointers);
         self.memory.merge(other.memory);
         self.delegate.merge(other.delegate);
-        self.session = other.session;
-        self.budget = other.budget;
-        self.review = other.review;
-        self.verify = other.verify;
-        self.checkpoint = other.checkpoint;
+        // 与 memory/agent/permissions 等段同款深度合并：项目层缺省段（serde
+        // default 填充）不得清掉用户层显式配置。
+        self.session.merge(other.session);
+        self.budget.merge(other.budget);
+        self.review.merge(other.review);
+        self.verify.merge(other.verify);
+        self.checkpoint.merge(other.checkpoint);
         self.metrics.merge(other.metrics);
         self.attribution.merge(other.attribution);
         self.quality.merge(other.quality);
@@ -1990,6 +1995,102 @@ impl ToolsConfig {
         }
         self.web_search.merge(other.web_search);
         self.lsp.merge(other.lsp);
+    }
+}
+
+impl SessionConfig {
+    /// 深度合并 `[session]`：`enabled` 非默认值才覆盖（默认 true），`root`
+    /// 空串视为未设置——项目层缺省段不得清掉用户层显式持久化配置。
+    fn merge(&mut self, other: SessionConfig) {
+        let d = SessionConfig::default();
+        if other.enabled != d.enabled {
+            self.enabled = other.enabled;
+        }
+        if !other.root.is_empty() {
+            self.root = other.root;
+        }
+    }
+}
+
+impl BudgetConfig {
+    /// 深度合并 `[budget]`：`enabled`/`max_total_tokens`/`max_memory_tokens`
+    /// 非默认值才覆盖；`max_total_cost_usd` 为 Option，仅 `Some` 时覆盖
+    /// （项目层缺省段不得清掉用户层的花费上限）。
+    fn merge(&mut self, other: BudgetConfig) {
+        let d = BudgetConfig::default();
+        if other.enabled != d.enabled {
+            self.enabled = other.enabled;
+        }
+        if other.max_total_tokens != d.max_total_tokens {
+            self.max_total_tokens = other.max_total_tokens;
+        }
+        if other.max_memory_tokens != d.max_memory_tokens {
+            self.max_memory_tokens = other.max_memory_tokens;
+        }
+        if other.max_total_cost_usd.is_some() {
+            self.max_total_cost_usd = other.max_total_cost_usd;
+        }
+    }
+}
+
+impl ReviewConfig {
+    /// 深度合并 `[review]`：开关/上限非默认值才覆盖；`review_model` 空串
+    /// 视为未设置——项目层缺省段不得清掉用户层显式配置。
+    fn merge(&mut self, other: ReviewConfig) {
+        let d = ReviewConfig::default();
+        if other.enabled != d.enabled {
+            self.enabled = other.enabled;
+        }
+        if !other.review_model.is_empty() {
+            self.review_model = other.review_model;
+        }
+        if other.diff_cap_tokens != d.diff_cap_tokens {
+            self.diff_cap_tokens = other.diff_cap_tokens;
+        }
+        if other.max_cycles != d.max_cycles {
+            self.max_cycles = other.max_cycles;
+        }
+    }
+}
+
+impl VerifyConfig {
+    /// 深度合并 `[verify]`：开关/上限非默认值才覆盖；`commands` 显式非空时
+    /// 整体替换（与 providers/models 的“显式列表替换”语义一致）；`llm_model`
+    /// 为 Option，仅 `Some` 时覆盖——项目层缺省段不得清掉用户层显式配置。
+    fn merge(&mut self, other: VerifyConfig) {
+        let d = VerifyConfig::default();
+        if other.enabled != d.enabled {
+            self.enabled = other.enabled;
+        }
+        if !other.commands.is_empty() {
+            self.commands = other.commands;
+        }
+        if other.max_cycles != d.max_cycles {
+            self.max_cycles = other.max_cycles;
+        }
+        if other.llm != d.llm {
+            self.llm = other.llm;
+        }
+        if other.llm_model.is_some() {
+            self.llm_model = other.llm_model;
+        }
+        if other.llm_max_chars != d.llm_max_chars {
+            self.llm_max_chars = other.llm_max_chars;
+        }
+    }
+}
+
+impl CheckpointConfig {
+    /// 深度合并 `[checkpoint]`：字段非默认值才覆盖——项目层缺省段不得清掉
+    /// 用户层显式配置。
+    fn merge(&mut self, other: CheckpointConfig) {
+        let d = CheckpointConfig::default();
+        if other.enabled != d.enabled {
+            self.enabled = other.enabled;
+        }
+        if other.path != d.path {
+            self.path = other.path;
+        }
     }
 }
 
@@ -2857,6 +2958,134 @@ mod tests {
         };
         base.merge(project2);
         assert_eq!(base.memory.verify_use_threshold, 11);
+    }
+
+    #[test]
+    fn session_budget_review_verify_checkpoint_merge_preserves_user_layer() {
+        // 用户层显式配置五段字段。
+        let mut base = Config {
+            session: SessionConfig {
+                enabled: false,
+                root: "/custom/sessions".into(),
+            },
+            budget: BudgetConfig {
+                enabled: false,
+                max_total_tokens: 64_000,
+                max_memory_tokens: 16_000,
+                max_total_cost_usd: Some(10.0),
+            },
+            review: ReviewConfig {
+                enabled: true,
+                review_model: "reviewer-x".into(),
+                diff_cap_tokens: 9_000,
+                max_cycles: 3,
+            },
+            verify: VerifyConfig {
+                enabled: true,
+                commands: vec!["cargo test".into()],
+                max_cycles: 4,
+                llm: true,
+                llm_model: Some("verifier-x".into()),
+                llm_max_chars: 8_000,
+            },
+            checkpoint: CheckpointConfig {
+                enabled: false,
+                path: "/custom/checkpoints.json".into(),
+            },
+            ..Default::default()
+        };
+
+        // 项目层 TOML 存在但未写这五段 → serde 默认值填充（enabled=true 等），
+        // 不得清掉用户层显式配置。
+        let project_without: Config = toml::from_str("").unwrap();
+        base.merge(project_without);
+        assert!(
+            !base.session.enabled,
+            "未写 [session] 不得重置用户层显式关闭"
+        );
+        assert_eq!(base.session.root, "/custom/sessions");
+        assert!(!base.budget.enabled, "未写 [budget] 不得重置 enabled");
+        assert_eq!(base.budget.max_total_tokens, 64_000);
+        assert_eq!(base.budget.max_memory_tokens, 16_000);
+        assert_eq!(
+            base.budget.max_total_cost_usd,
+            Some(10.0),
+            "未写 [budget] 不得清掉用户层的花费上限"
+        );
+        assert!(base.review.enabled, "未写 [review] 不得重置开关");
+        assert_eq!(base.review.review_model, "reviewer-x");
+        assert_eq!(base.review.diff_cap_tokens, 9_000);
+        assert_eq!(base.review.max_cycles, 3);
+        assert!(base.verify.enabled, "未写 [verify] 不得重置开关");
+        assert_eq!(base.verify.commands, vec!["cargo test".to_string()]);
+        assert_eq!(base.verify.max_cycles, 4);
+        assert!(base.verify.llm);
+        assert_eq!(base.verify.llm_model.as_deref(), Some("verifier-x"));
+        assert_eq!(base.verify.llm_max_chars, 8_000);
+        assert!(
+            !base.checkpoint.enabled,
+            "未写 [checkpoint] 不得重置用户层显式关闭"
+        );
+        assert_eq!(base.checkpoint.path, "/custom/checkpoints.json");
+
+        // 项目层显式写五段（非默认值）→ 覆盖用户层对应字段。以全新默认
+        // base 演示：项目层显式非默认值全部落地。
+        let mut base2 = Config::default();
+        let project_with: Config = toml::from_str(
+            r#"
+            [session]
+            enabled = false
+            root = "/project/sessions"
+
+            [budget]
+            enabled = false
+            max_total_tokens = 100000
+            max_memory_tokens = 20000
+            max_total_cost_usd = 50.0
+
+            [review]
+            enabled = true
+            review_model = "project-reviewer"
+            diff_cap_tokens = 5000
+            max_cycles = 2
+
+            [verify]
+            enabled = true
+            commands = ["cargo check"]
+            max_cycles = 2
+            llm = true
+            llm_model = "project-verifier"
+            llm_max_chars = 6000
+
+            [checkpoint]
+            enabled = false
+            path = "/project/checkpoints.json"
+            "#,
+        )
+        .unwrap();
+        base2.merge(project_with);
+
+        assert!(!base2.session.enabled, "项目层显式 enabled=false 必须落地");
+        assert_eq!(base2.session.root, "/project/sessions");
+        assert!(!base2.budget.enabled, "项目层显式 enabled=false 必须落地");
+        assert_eq!(base2.budget.max_total_tokens, 100_000);
+        assert_eq!(base2.budget.max_memory_tokens, 20_000);
+        assert_eq!(base2.budget.max_total_cost_usd, Some(50.0));
+        assert!(base2.review.enabled, "项目层显式 enabled=true 必须落地");
+        assert_eq!(base2.review.review_model, "project-reviewer");
+        assert_eq!(base2.review.diff_cap_tokens, 5_000);
+        assert_eq!(base2.review.max_cycles, 2);
+        assert!(base2.verify.enabled, "项目层显式 enabled=true 必须落地");
+        assert_eq!(base2.verify.commands, vec!["cargo check".to_string()]);
+        assert_eq!(base2.verify.max_cycles, 2);
+        assert!(base2.verify.llm);
+        assert_eq!(base2.verify.llm_model.as_deref(), Some("project-verifier"));
+        assert_eq!(base2.verify.llm_max_chars, 6_000);
+        assert!(
+            !base2.checkpoint.enabled,
+            "项目层显式 enabled=false 必须落地"
+        );
+        assert_eq!(base2.checkpoint.path, "/project/checkpoints.json");
     }
 
     #[test]

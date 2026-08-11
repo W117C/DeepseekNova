@@ -16,7 +16,7 @@ use deepseeknova_security::limits::ResourceLimits;
 use deepseeknova_security::path::secure_resolve;
 use deepseeknova_security::policy::SecurityPolicy;
 use deepseeknova_tools::{
-    GlobTool, GrepTool, LsTool, ReadFileTool, ShellTool, WebFetchTool, WriteFileTool,
+    GlobTool, GrepTool, LsTool, MoveFileTool, ReadFileTool, ShellTool, WebFetchTool, WriteFileTool,
 };
 use std::path::Path;
 
@@ -300,4 +300,73 @@ async fn test_network_domain_blocking_policy() {
         .unwrap_err()
         .to_string()
         .contains("blocked by security policy"));
+}
+
+#[tokio::test]
+async fn test_path_denied_policy_blocks_fs_tools() {
+    // T2：`[security] denied_paths` 必须真实拦截 fs 工具（此前 is_path_allowed
+    // 零生产调用，工作区内子路径可被 write/edit/move 照写——静默 fail-open）。
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let secret = root.join("secrets");
+    std::fs::create_dir_all(&secret).unwrap();
+
+    let mut caps = std::collections::HashSet::new();
+    caps.insert(Capability::FileRead);
+    caps.insert(Capability::FileWrite);
+    let policy = SecurityPolicy {
+        allowed_paths: Vec::new(),
+        denied_paths: vec![secret.clone()],
+        allowed_commands: Vec::new(),
+        allowed_domains: Vec::new(),
+    };
+    let sec = SecurityContext {
+        capabilities: caps,
+        limits: ResourceLimits::default(),
+        policy,
+        audit: std::sync::Arc::new(deepseeknova_security::audit::TracingAuditLogger),
+    };
+    let ctx = ToolContext::new("call-t2")
+        .with_workspace(root.clone())
+        .with_extension(sec);
+
+    // write_file 到 denied 子路径 → 拒绝
+    let write_tool = WriteFileTool::new();
+    let res = write_tool
+        .execute(&ctx, r#"{"path":"secrets/x.txt","content":"pwn"}"#)
+        .await;
+    assert!(
+        res.is_err(),
+        "write_file into denied_paths must be blocked: {:?}",
+        res
+    );
+    assert!(res
+        .unwrap_err()
+        .to_string()
+        .contains("blocked by security policy"));
+
+    // move_file 目标进入 denied 子路径 → 拒绝
+    std::fs::write(root.join("ok.txt"), "fine").unwrap();
+    let move_tool = MoveFileTool::new();
+    let res = move_tool
+        .execute(
+            &ctx,
+            r#"{"source":"ok.txt","destination":"secrets/ok.txt"}"#,
+        )
+        .await;
+    assert!(
+        res.is_err(),
+        "move_file into denied_paths must be blocked: {:?}",
+        res
+    );
+
+    // 工作区内常规路径 → 放行（空白名单/未命中 deny 不改变既有行为）
+    let res = write_tool
+        .execute(&ctx, r#"{"path":"ok.txt","content":"fine"}"#)
+        .await;
+    assert!(
+        res.is_ok(),
+        "unrestricted path must stay writable: {:?}",
+        res
+    );
 }

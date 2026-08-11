@@ -343,6 +343,9 @@ impl Tool for RetrieveEntityTool {
                 Err(e) => return Ok(graph_error_message("locating the entity", &e)),
             };
             let abs = deepseeknova_security::path::sanitize_path(&ctx.workspace_root, &rel_path)?;
+            // T2：graph 读路径与 fs/grep/glob/ls 同口径执行 denied_paths 检查
+            // （索引内的 rel_path 仍可能指向被拒子路径，如 ./secrets）。
+            crate::fs::check_policy_path_allowed(ctx, &abs)?;
             let content = match std::fs::read_to_string(&abs) {
                 Ok(c) => c,
                 Err(e) => {
@@ -748,6 +751,8 @@ impl Tool for ExploreCodeTool {
                     merged.push((start, end));
                 }
                 let abs = deepseeknova_security::path::sanitize_path(&ctx.workspace_root, &path)?;
+                // T2：graph 检索读路径同口径执行 denied_paths 检查。
+                crate::fs::check_policy_path_allowed(ctx, &abs)?;
                 let content = match std::fs::read_to_string(&abs) {
                     Ok(c) => c,
                     Err(e) => {

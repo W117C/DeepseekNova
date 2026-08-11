@@ -80,6 +80,7 @@ impl L3Compactor {
                         tool_calls: None,
                         tool_call_id: None,
                         reasoning_content: None,
+                        reasoning_signature: None,
                     });
                 }
                 // 状态重建②：重放最后一条用户消息，让任务从原意图继续。
@@ -187,6 +188,7 @@ async fn summarize(provider: &dyn Provider, prompt: &str) -> Result<String, Deep
         tool_calls: None,
         tool_call_id: None,
         reasoning_content: None,
+        reasoning_signature: None,
     }];
     let validated = ValidatedRequest::new(&msgs, &[]).map_err(|violations| {
         DeepseeknovaError::runner(format!(
@@ -216,6 +218,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
+            reasoning_signature: None,
         }
     }
 

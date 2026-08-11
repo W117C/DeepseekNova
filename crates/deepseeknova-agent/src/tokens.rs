@@ -97,6 +97,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: Some("中文".into()),
+            reasoning_signature: None,
         };
         // 2 + 2
         assert_eq!(estimate_tokens(&[m]), 4);
@@ -112,6 +113,7 @@ mod tests {
                 tool_calls: None,
                 tool_call_id: None,
                 reasoning_content: None,
+                reasoning_signature: None,
             },
             Message {
                 role: Role::Assistant,
@@ -120,6 +122,7 @@ mod tests {
                 tool_calls: None,
                 tool_call_id: None,
                 reasoning_content: Some("中文".into()),
+                reasoning_signature: None,
             },
         ];
         assert_eq!(estimate_messages_iter(msgs.iter()), estimate_tokens(&msgs));

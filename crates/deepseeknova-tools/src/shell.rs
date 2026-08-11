@@ -14,6 +14,17 @@ const DEFAULT_SHELL_TIMEOUT: Duration = Duration::from_secs(120);
 ///
 /// By default it uses `NoOpSandbox`. Pass `Arc<dyn Sandbox>` to the constructor
 /// to enable platform-specific isolation (macOS seatbelt or Linux bubblewrap).
+///
+/// ## 沙箱降级边界（T3）
+///
+/// 用户显式请求禁网（`allow_network=false`）或只读档、而后端无法强制（如
+/// Windows JobSandbox、NoOpSandbox）时，命令仍可联网 / 写任意路径。ShellTool
+/// 只持有 `Arc<dyn Sandbox>`，无法得知用户策略中的显式请求，故**不在此处
+/// 拒绝执行**（会误伤仅需进程树隔离的合法用法）；它改为在执行路径发出
+/// target=`sandbox_degradation` 的结构化告警（[`Sandbox::enforced_network`]
+/// 能力位为 `false` 且 [`Sandbox::requires_isolation`] 为真时），使降级可被
+/// 程序检测。精确的 fail-closed 决策在 runtime 装配点完成（启动时
+/// `sandbox_enforcement_gaps` 检测并告警）。
 pub struct ShellTool {
     sandbox: Arc<dyn Sandbox>,
 }
@@ -115,6 +126,22 @@ impl Tool for ShellTool {
                  set [sandbox] enabled=false.",
                 self.sandbox.name()
             )));
+        }
+
+        // T3 降级可检测告警：必须隔离的后端却无法强制网络限制（如 Windows
+        // JobSandbox / NoOp）时，命令仍可联网。这里打一条可订阅的结构化告警
+        // （target=sandbox_degradation），不拒绝执行——ShellTool 只持有
+        // `Arc<dyn Sandbox>`，无法得知用户是否显式请求禁网；"显式禁网但后端
+        // 无法强制"的精确 fail-closed 决策在 runtime 装配点完成
+        // （`deepseeknova_runtime::sandbox_enforcement_gaps`）。文件系统写限制
+        // 同理：零强制后端由装配点告警，本处只发网络侧告警避免重复刷屏。
+        if self.sandbox.requires_isolation() && !self.sandbox.enforced_network() {
+            tracing::warn!(
+                target: "sandbox_degradation",
+                "shell: sandbox backend '{}' cannot enforce network restrictions; \
+                 sandboxed commands still have network access",
+                self.sandbox.name()
+            );
         }
 
         let (sandbox_bin, sandbox_args) = self.sandbox.sandbox(shell.0, &cmd_args);
@@ -275,6 +302,36 @@ mod tests {
                 .contains("refusing to run command without isolation"),
             "错误信息应说明拒绝原因: {err}"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shell_runs_but_warns_when_isolation_required_and_network_not_enforced() {
+        // T3 边界：必须隔离的后端可用但无法强制网络限制（能力位
+        // enforced_network=false，如 Windows JobSandbox）时，ShellTool **不**
+        // 拒绝执行——它无法得知用户是否显式禁网，精确 fail-closed 决策在
+        // runtime 装配点；本测试守护"不误拒绝"，降级由 target=
+        // sandbox_degradation 的结构化告警承载。
+        struct NonEnforcing;
+        impl Sandbox for NonEnforcing {
+            fn sandbox(&self, exe: &str, args: &[String]) -> (String, Vec<String>) {
+                (exe.to_string(), args.to_vec())
+            }
+            fn name(&self) -> &str {
+                "non-enforcing"
+            }
+            fn requires_isolation(&self) -> bool {
+                true
+            }
+        }
+
+        let tool = ShellTool::new(Arc::new(NonEnforcing));
+        let ctx = ctx_with(SecurityContext::with_safe_defaults());
+        let out = tool
+            .execute(&ctx, r#"{"command":"echo hi"}"#)
+            .await
+            .expect("后端可用且必须隔离时不应拒绝执行（降级由告警承载）");
+        assert!(out.contains("hi"), "got: {out}");
     }
 
     #[cfg(unix)]

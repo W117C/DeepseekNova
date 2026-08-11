@@ -270,13 +270,14 @@ struct MetricsGuard {
     emitted: bool,
     /// 本 run 的会话标注（透传进 QualitySummary，供 metrics 落盘命名）。
     session_label: Option<String>,
-    /// 会话累计 findings 的 Arc 引用（emit 时快照进 QualitySummary）。
+    /// 本 run findings 的 Arc 引用（emit 时快照进 QualitySummary）。T11 起
+    /// 主循环传入**本 run 局部暂存区**（`run_findings`），并发 run 各归各
+    /// run；仍保留差分切片语义以兼容直接构造（测试/库级）传入会话容器。
     quality_findings: Option<Arc<tokio::sync::Mutex<Vec<QualityFinding>>>>,
-    /// F4：本 run 起始时会话 findings 长度。emit 时只取 `[start_len..]` 差分
-    /// 切片——并发 run 共享同一 Agent 级 `Arc\<Mutex\>` 时，各 run 的 QualitySummary
-    /// 只含本 run 新增，不互相污染。`None` = 构造时锁被占用，起始基准未知
-    /// （此时 emit 一律报空 findings，绝不回退到 `0` 把并发 run 的 findings
-    /// 误切进本 run）。
+    /// F4：起始长度基准。emit 时只取 `[start_len..]` 差分切片——传入
+    /// run 局部暂存区时恒为 0（只含本 run）。`None` = 构造时锁被占用，
+    /// 起始基准未知（此时 emit 一律报空 findings，绝不回退到 `0` 把并发
+    /// run 的 findings 误切进本 run）。
     start_len: Option<usize>,
     /// 本 run 失败回炉路径上实际产出 reflection 记录的次数。
     reflection_count: u32,
@@ -897,6 +898,22 @@ impl Agent {
         input: RunInput,
         extra_extensions: Vec<Arc<ExtensionApplier>>,
     ) -> Result<RunEventStream, deepseeknova_core::DeepseeknovaError> {
+        self.run_stream_with_parent_cancel(input, extra_extensions, None)
+            .await
+    }
+
+    /// T12 接线：带父取消令牌的运行版本。`parent_cancel` 为父 run 的
+    /// [`CancellationToken`]（主 agent 的 delegate 工具把
+    /// [`deepseeknova_core::tool::ToolContext::cancellation`] 传入子代理执行）；
+    /// 子代理使用其 `child_token()`，父取消后子代理在步边界/工具执行中途
+    /// （`tokio::select!`）立即中止。`None` = 顶层运行：自建令牌并接线
+    /// Ctrl-C（与既有行为一致）。
+    pub(crate) async fn run_stream_with_parent_cancel(
+        &self,
+        input: RunInput,
+        extra_extensions: Vec<Arc<ExtensionApplier>>,
+        parent_cancel: Option<CancellationToken>,
+    ) -> Result<RunEventStream, deepseeknova_core::DeepseeknovaError> {
         let (tx, rx) = mpsc::channel(64);
 
         let provider = Arc::clone(&self.provider);
@@ -961,20 +978,28 @@ impl Agent {
 
         // Create a cancellation token and wire Ctrl-C (SIGINT) to cancel it.
         // This enables graceful interruption of the agent loop (e.g. Ctrl-C).
-        let cancel = CancellationToken::new();
-        let cancel_clone = cancel.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = tokio::signal::ctrl_c() => {
-                        info!("Ctrl-C received, cancelling agent...");
-                        cancel_clone.cancel();
-                        break;
+        // 带父取消令牌时（子代理运行）：复用父令牌的子令牌，父取消即中止；
+        // 不重复接线 Ctrl-C（顶层 run 已处理）。
+        let cancel = match &parent_cancel {
+            Some(parent) => parent.child_token(),
+            None => {
+                let c = CancellationToken::new();
+                let cancel_clone = c.clone();
+                tokio::spawn(async move {
+                    loop {
+                        tokio::select! {
+                            _ = tokio::signal::ctrl_c() => {
+                                info!("Ctrl-C received, cancelling agent...");
+                                cancel_clone.cancel();
+                                break;
+                            }
+                            _ = cancel_clone.cancelled() => break,
+                        }
                     }
-                    _ = cancel_clone.cancelled() => break,
-                }
+                });
+                c
             }
-        });
+        };
 
         // 任务质量闭环 A：钩子链与会话级 findings 在 spawn 前 clone，
         // 供 spawned task 内引用（避免 self 借用逃逸出方法体）。
@@ -1007,6 +1032,16 @@ impl Agent {
                 false
             };
 
+            // T11：新会话（未续聊）run 边界重置会话级 findings 容器。serve
+            // 长驻进程共享同一 Agent 时，容器此前只增不减（跨 run 累积），
+            // 触顶（MAX_QUALITY_FINDINGS）后新 finding 永久丢弃；新会话起点
+            // 清空容器，保证后续 run 的 Blocking finding 始终可见。并发 run
+            // 的隔离由 run 局部暂存区（loop_impl 内 run_findings）承担，此处
+            // 仅维护会话级容器的"不跨会话累积"语义。
+            if !seeded {
+                quality_findings.lock().await.clear();
+            }
+
             // Inject the system prompt only on a fresh conversation. When the
             // store already holds prior turns, the system prompt is part of
             // them and re-injecting it would duplicate it. The default prompt
@@ -1032,6 +1067,7 @@ impl Agent {
                     tool_calls: None,
                     tool_call_id: None,
                     reasoning_content: None,
+                    reasoning_signature: None,
                 });
             }
 

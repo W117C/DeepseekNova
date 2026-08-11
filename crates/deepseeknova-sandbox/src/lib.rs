@@ -179,6 +179,34 @@ pub trait Sandbox: Send + Sync {
     fn backend_available(&self) -> bool {
         true
     }
+
+    /// 该后端是否具备强制网络限制的能力（能力位查询）。
+    ///
+    /// `true`：后端能在沙箱内落实"禁网/网络隔离"策略——seatbelt 以
+    /// `(deny network*)` 默认禁网、`(allow network*)` 放行；bwrap 以
+    /// `--unshare-net` 隔离、`--share-net` 放行。是否实际禁网由构造参数
+    /// `allow_network` 决定，与本站点值无关。
+    ///
+    /// `false`：后端对网络零限制（如 Windows JobSandbox、NoOpSandbox），
+    /// 用户请求 `allow_network=false` 时会被静默忽略。上层（如 runtime
+    /// 装配点）据此在"用户显式禁网但后端无法强制"时发出可检测的降级告警，
+    /// 作为 fail-closed 决策输入。
+    fn enforced_network(&self) -> bool {
+        false
+    }
+
+    /// 该后端是否具备强制文件系统写限制的能力（能力位查询）。
+    ///
+    /// `true`：后端能在沙箱内限制文件写入——seatbelt/bwrap 按
+    /// [`SandboxTier`] 渲染只读或路径白名单写策略。是否实际只读由构造档位
+    /// 决定，与本站点值无关。
+    ///
+    /// `false`：后端对文件写入零限制（如 Windows JobSandbox、NoOpSandbox），
+    /// 用户请求 [`SandboxTier::ReadOnly`] 时会被静默忽略。上层据此在
+    /// "用户请求只读档但后端无法强制"时发出可检测的降级告警。
+    fn enforced_fs(&self) -> bool {
+        false
+    }
 }
 
 /// A sandbox that performs no isolation — commands run directly.
@@ -373,6 +401,13 @@ mod tests {
     #[test]
     fn noop_sandbox_name() {
         assert_eq!(NoOpSandbox.name(), "noop");
+    }
+
+    #[test]
+    fn noop_sandbox_cannot_enforce_network_or_fs() {
+        // NoOp 无隔离：网络与文件系统写路径零限制（能力位为 false）。
+        assert!(!NoOpSandbox.enforced_network());
+        assert!(!NoOpSandbox.enforced_fs());
     }
 
     #[test]

@@ -52,9 +52,9 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::{oneshot, Mutex};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::sync::{oneshot, OwnedSemaphorePermit, Semaphore};
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 
 // ── Durable run store ─────────────────────────────────────────
@@ -225,6 +225,11 @@ fn now_ms() -> u64 {
 /// Shared map of pending approval requests keyed by request id. The agent's
 /// [`ServerApprovalResponder`] inserts a `oneshot` sender per `Ask`; the
 /// `POST /v1/approval` route resolves it when the client answers.
+///
+/// 底层使用 `std::sync::Mutex`（短临界区：仅插入/移除，不跨 await 持有），
+/// 使 [`ServerApprovalResponder`] 在 future 被 drop 时可用同步 RAII guard
+/// 立即清理条目，避免 SSE 客户端断开 / 任务取消后 `oneshot` 发送端泄漏在
+/// map 中。
 pub type PendingApprovals = Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>;
 
 /// Create an empty pending-approvals map to share between a [`Server`] and the
@@ -233,17 +238,55 @@ pub fn new_pending_approvals() -> PendingApprovals {
     Arc::new(Mutex::new(HashMap::new()))
 }
 
+/// 默认审批等待超时：客户端在此时间内未经 `POST /v1/approval` 应答，则该次
+/// 审批按「拒绝」处理并清理 pending 条目，避免 agent 永久阻塞。
+const DEFAULT_APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
+
 /// Approval responder bridging the agent's permission-gate `Ask` decisions to
 /// HTTP clients: registers a `oneshot` in the shared map and awaits the
-/// `POST /v1/approval` answer. A dropped stream resolves to deny (no hang).
+/// `POST /v1/approval` answer.
+///
+/// 生命周期治理（T14）：
+/// - RAII guard：`request` 的 future 被 drop（run 结束 / 任务取消 /
+///   进程中止其所属任务）时，同步从 pending map 移除该条目，杜绝
+///   `oneshot::Sender` 永久驻留 map（内存泄漏 + 可被猜 id 应答死请求）。
+/// - 超时兜底：客户端永不调用 `POST /v1/approval` 时，等待至 [`Self::with_timeout`]
+///   设定的时长后按「拒绝」处理并清理条目，避免 agent 永久阻塞。
 pub struct ServerApprovalResponder {
     pending: PendingApprovals,
+    timeout: Duration,
 }
 
 impl ServerApprovalResponder {
     /// Create a responder that registers pending approvals in the shared map.
+    /// 默认等待超时为 `DEFAULT_APPROVAL_TIMEOUT`（300 秒）。
     pub fn new(pending: PendingApprovals) -> Self {
-        Self { pending }
+        Self {
+            pending,
+            timeout: DEFAULT_APPROVAL_TIMEOUT,
+        }
+    }
+
+    /// 设置审批等待超时。超时后该次审批按「拒绝」处理，并从 pending map
+    /// 清理条目。设为极短时长可用于测试超时拒绝路径。
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+}
+
+/// RAII guard：`request` 的 future 被 drop 时从 pending map 移除对应条目。
+/// 若条目已被 `POST /v1/approval` 消费（`remove` 已将其移出），drop 为空操作。
+struct PendingApprovalGuard {
+    pending: PendingApprovals,
+    id: String,
+}
+
+impl Drop for PendingApprovalGuard {
+    fn drop(&mut self) {
+        if let Ok(mut map) = self.pending.lock() {
+            map.remove(&self.id);
+        }
     }
 }
 
@@ -251,8 +294,19 @@ impl ServerApprovalResponder {
 impl ApprovalResponder for ServerApprovalResponder {
     async fn request(&self, id: &str, _title: &str, _description: Option<&str>) -> bool {
         let (tx, rx) = oneshot::channel::<bool>();
-        self.pending.lock().await.insert(id.to_string(), tx);
-        rx.await.unwrap_or(false)
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id.to_string(), tx);
+        // RAII guard：future drop（任务取消 / run 结束）时同步清理 pending 条目。
+        let _guard = PendingApprovalGuard {
+            pending: self.pending.clone(),
+            id: id.to_string(),
+        };
+        match tokio::time::timeout(self.timeout, rx).await {
+            Ok(Ok(approved)) => approved,
+            Ok(Err(_)) | Err(_) => false, // 通道关闭或超时 → 按拒绝处理
+        }
     }
 }
 
@@ -271,7 +325,15 @@ pub struct Server {
     /// Bearer token required on every `/v1/*` route; `None` = no auth.
     /// `/health` stays unauthenticated so liveness probes work.
     auth_token: Option<Arc<str>>,
+    /// 单次端点（`/v1/chat` 与 `/v1/runs/{id}/resume`）的全局并发上限
+    /// （信号量）。每次请求先 `try_acquire_owned`，超限直接返回 HTTP 429
+    /// （不排队）；permit 随 SSE 流任务持有，流结束时释放，从而把同时运行的
+    /// agent run 数钳制在配置上限内（默认 4）。
+    semaphore: Arc<Semaphore>,
 }
+
+/// 默认单次端点全局并发上限。
+const DEFAULT_MAX_CONCURRENT_RUNS: usize = 4;
 
 impl Server {
     /// Create a server with default options (no auth, no persistence, no sessions).
@@ -283,6 +345,7 @@ impl Server {
             runs: None,
             sessions: None,
             auth_token: None,
+            semaphore: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_RUNS)),
         }
     }
 
@@ -297,6 +360,7 @@ impl Server {
             runs: None,
             sessions: None,
             auth_token: None,
+            semaphore: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_RUNS)),
         }
     }
 
@@ -356,6 +420,20 @@ impl Server {
     /// loopback. `/health` is exempt so probes keep working.
     pub fn with_auth_token(mut self, token: Option<String>) -> Self {
         self.auth_token = token.map(Arc::from);
+        self
+    }
+
+    /// 设置单次端点（`/v1/chat` 与 `/v1/runs/{id}/resume`）的全局并发上限。
+    ///
+    /// 超过上限的请求**直接返回 HTTP 429**（`TOO_MANY_REQUESTS`），不排队
+    /// 等待；permit 在 SSE 流整个生命周期内持有，流结束（run 完成 / 失败 /
+    /// 暂停）后释放。`0` 会被钳制为 `1`。默认值为
+    /// `DEFAULT_MAX_CONCURRENT_RUNS`（4）。
+    ///
+    /// 注意：多轮会话端点（`/v1/sessions/{id}/chat`）自带 per-session busy
+    /// guard，不占用该全局额度。
+    pub fn with_max_concurrency(mut self, max: usize) -> Self {
+        self.semaphore = Arc::new(Semaphore::new(max.max(1)));
         self
     }
 
@@ -492,7 +570,7 @@ async fn approval(
     State(state): State<Arc<Server>>,
     Json(req): Json<ApprovalRequestBody>,
 ) -> Json<serde_json::Value> {
-    let mut pending = state.pending.lock().await;
+    let mut pending = state.pending.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(tx) = pending.remove(&req.id) {
         let _ = tx.send(req.approved);
         Json(serde_json::json!({ "status": "ok" }))
@@ -510,25 +588,40 @@ struct ApprovalRequestBody {
 /// Concrete SSE stream type shared by `/v1/chat` and `/v1/runs/{id}/resume`.
 type RunSse = Sse<futures::channel::mpsc::UnboundedReceiver<Result<Event, Infallible>>>;
 
-async fn chat(State(state): State<Arc<Server>>, Json(req): Json<ChatRequest>) -> RunSse {
+/// 构造一个只含单个 `error` SSE 事件的流（用于输入校验失败的响应，保持
+/// 与既有 SSE 协议一致的错误形态）。
+fn error_sse(message: impl Into<String>) -> RunSse {
+    let error_event = Event::default().event("error").data(message.into());
+    let (tx, rx) = futures::channel::mpsc::unbounded();
+    let _ = tx.unbounded_send(Ok(error_event));
+    Sse::new(rx)
+}
+
+async fn chat(
+    State(state): State<Arc<Server>>,
+    Json(req): Json<ChatRequest>,
+) -> Result<RunSse, (StatusCode, String)> {
     // Validate prompt
     if req.prompt.trim().is_empty() {
-        let error_event = Event::default()
-            .event("error")
-            .data("prompt must not be empty");
-        let (tx, rx) = futures::channel::mpsc::unbounded();
-        let _ = tx.unbounded_send(Ok(error_event));
-        return Sse::new(rx);
+        return Ok(error_sse("prompt must not be empty"));
     }
     const MAX_PROMPT_LEN: usize = 32_000;
     if req.prompt.len() > MAX_PROMPT_LEN {
-        let error_event = Event::default().event("error").data(format!(
+        return Ok(error_sse(format!(
             "prompt exceeds max length ({MAX_PROMPT_LEN} chars)"
-        ));
-        let (tx, rx) = futures::channel::mpsc::unbounded();
-        let _ = tx.unbounded_send(Ok(error_event));
-        return Sse::new(rx);
+        )));
     }
+
+    // 全局并发上限：permit 随 SSE 流任务持有，流结束时释放；超限直接 429。
+    let permit = match state.semaphore.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                "too many concurrent runs; retry after current runs finish".to_string(),
+            ));
+        }
+    };
 
     let input = RunInput {
         prompt: req.prompt,
@@ -540,17 +633,28 @@ async fn chat(State(state): State<Arc<Server>>, Json(req): Json<ChatRequest>) ->
         .runs
         .as_ref()
         .map(|_| uuid::Uuid::new_v4().to_string());
-    stream_input(state, input, run_id)
+    Ok(stream_input(state, input, run_id, permit))
 }
 
 /// Shared SSE runner used by both `/v1/chat` and `/v1/runs/{id}/resume`.
 /// When a durable store is configured the run is persisted as `running`
 /// before launch and updated to done/failed/paused when the stream ends.
-fn stream_input(state: Arc<Server>, input: RunInput, run_id: Option<String>) -> RunSse {
+///
+/// `permit` 来自 [`Server::with_max_concurrency`] 的全局并发信号量；它随本
+/// 函数 spawn 的任务持有，任务结束（run 完成 / 失败 / 暂停）时 drop 释放，
+/// 从而限制同时运行的 agent run 数量。
+fn stream_input(
+    state: Arc<Server>,
+    input: RunInput,
+    run_id: Option<String>,
+    permit: OwnedSemaphorePermit,
+) -> RunSse {
     start_run_record(state.runs.as_ref(), &input, run_id.as_deref());
     let (tx, rx) = futures::channel::mpsc::unbounded::<Result<Event, Infallible>>();
 
     tokio::spawn(async move {
+        // 持有并发 permit 直至流结束（run 生命周期覆盖整个 SSE 流）。
+        let _permit = permit;
         let mut done_text = String::new();
         let mut failed: Option<String> = None;
         let mut paused = false;
@@ -793,6 +897,16 @@ async fn resume_run(
     if !valid_session_id(&id) {
         return Err((StatusCode::NOT_FOUND, "not found".to_string()));
     }
+    // 先占并发额度再 claim，避免把记录置为 Running 后才发现超限而需要回滚。
+    let permit = match state.semaphore.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                "too many concurrent runs; retry after current runs finish".to_string(),
+            ));
+        }
+    };
     let record = match runs
         .claim(&id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -808,7 +922,7 @@ async fn resume_run(
         images: Vec::new(),
         model_override: record.model.clone(),
     };
-    Ok(stream_input(state, input, Some(record.id)))
+    Ok(stream_input(state, input, Some(record.id), permit))
 }
 
 /// 会话 id 合法性校验：复用 `SessionStore` 的共享校验（`[A-Za-z0-9_-]`，
@@ -1171,5 +1285,78 @@ mod tests {
             store.claim("missing").unwrap(),
             ClaimResult::NotFound
         ));
+    }
+
+    // ── 审批条目生命周期（T14）──────────────────────────────────────
+
+    /// 等待 pending map 中条目数达到 `n`（最多约 1s）。
+    async fn wait_pending_len(pending: &PendingApprovals, n: usize) {
+        for _ in 0..200 {
+            if pending.lock().unwrap().len() == n {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("pending map never reached len {n}");
+    }
+
+    #[tokio::test]
+    async fn approval_entry_removed_when_request_future_dropped() {
+        let pending = new_pending_approvals();
+        let responder = ServerApprovalResponder::new(pending.clone());
+        let handle = tokio::spawn(async move {
+            let _ = responder.request("req-drop", "title", None).await;
+        });
+        // 等待条目注册进 map（模拟客户端正在被询问审批）。
+        wait_pending_len(&pending, 1).await;
+        assert_eq!(pending.lock().unwrap().len(), 1);
+
+        // 模拟 SSE 客户端断开 / 任务取消：future 被 drop → RAII guard 清理条目。
+        handle.abort();
+        let _ = handle.await; // 忽略 JoinError（abort 后必然返回）
+
+        let map = pending.lock().unwrap();
+        assert!(
+            map.is_empty(),
+            "aborted approval future must clean up its pending entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn approval_map_does_not_grow_across_dropped_requests() {
+        let pending = new_pending_approvals();
+        for i in 0..8 {
+            let responder = ServerApprovalResponder::new(pending.clone());
+            let handle = tokio::spawn(async move {
+                let _ = responder.request(&format!("req-{i}"), "title", None).await;
+            });
+            wait_pending_len(&pending, 1).await;
+            handle.abort();
+            let _ = handle.await;
+            assert!(
+                pending.lock().unwrap().is_empty(),
+                "map must not accumulate stale entries after request {i}"
+            );
+        }
+        // 全部结束后 map 依然为空 → 不增长、无泄漏。
+        assert!(pending.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn approval_timeout_denies_and_cleans_entry() {
+        let pending = new_pending_approvals();
+        let responder =
+            ServerApprovalResponder::new(pending.clone()).with_timeout(Duration::from_millis(100));
+        let started = tokio::time::Instant::now();
+        let approved = responder.request("req-timeout", "title", None).await;
+        assert!(!approved, "unanswered approval must time out to deny");
+        assert!(
+            started.elapsed() >= Duration::from_millis(80),
+            "timeout path should wait at least the configured timeout"
+        );
+        assert!(
+            pending.lock().unwrap().is_empty(),
+            "timed-out approval must be removed from the pending map"
+        );
     }
 }

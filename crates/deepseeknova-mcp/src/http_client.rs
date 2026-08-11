@@ -398,11 +398,7 @@ impl McpHttpConnection {
         }
 
         let val: Value = if content_type.contains("text/event-stream") {
-            parse_sse_response(&body, id).ok_or_else(|| {
-                SendError::Other(DeepseeknovaError::runner(format!(
-                    "MCP SSE response: no event matched request id {id}"
-                )))
-            })?
+            self.handle_sse_body(&body, id).await?
         } else {
             serde_json::from_str(&body).map_err(|e| {
                 SendError::Other(DeepseeknovaError::runner(format!(
@@ -412,6 +408,93 @@ impl McpHttpConnection {
         };
 
         Ok(val)
+    }
+
+    /// Parse an SSE response body into JSON-RPC messages and return the
+    /// response matching `our_id`.
+    ///
+    /// Streamable HTTP servers may interleave server-initiated requests (e.g.
+    /// `roots/list`) and notifications with the response to our POST. Server
+    /// requests are answered with a fresh POST so the server does not block
+    /// waiting for a reply; notifications and unrelated frames are ignored.
+    async fn handle_sse_body(&self, body: &str, our_id: u64) -> Result<Value, SendError> {
+        let mut matched: Option<Value> = None;
+        for (_, data) in parse_sse_events(body) {
+            let Ok(val) = serde_json::from_str::<Value>(&data) else {
+                continue;
+            };
+            if protocol::is_server_request(&val) {
+                let method = val["method"].as_str().unwrap_or("?").to_string();
+                let reply = if method == "roots/list" {
+                    protocol::build_server_response(&val, serde_json::json!({"roots": []}))
+                } else {
+                    protocol::build_server_error(
+                        &val,
+                        -32601,
+                        format!("Method not found: {method}"),
+                    )
+                };
+                if let Err(e) = self.post_jsonrpc_value(&reply).await {
+                    warn!("MCP: failed to answer server request {method}: {e}");
+                }
+            } else if val.get("id").and_then(|i| i.as_u64()) == Some(our_id) {
+                matched = Some(val);
+            }
+            // Notifications and responses for other requests are ignored.
+        }
+        matched.ok_or_else(|| {
+            SendError::Other(DeepseeknovaError::runner(format!(
+                "MCP SSE response: no event matched request id {our_id}"
+            )))
+        })
+    }
+
+    /// POST a raw JSON-RPC message (e.g. the client's answer to a server
+    /// request). The response body is ignored; the session id header is echoed.
+    async fn post_jsonrpc_value(&self, body: &Value) -> Result<(), DeepseeknovaError> {
+        let mut builder = self
+            .client
+            .post(&self.post_url)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream")
+            .json(body)
+            .timeout(self.request_timeout);
+        if let Some(session) = self.session_id.read().await.as_deref() {
+            builder = builder.header("Mcp-Session-Id", session);
+        }
+
+        let resp = builder
+            .send()
+            .await
+            .map_err(|e| DeepseeknovaError::runner(format!("MCP HTTP POST failed: {e}")))?;
+        let status = resp.status();
+
+        // 服务器可能在任何响应（包括对本应答 POST 的响应）轮换 session id：
+        // 与主 send 路径同逻辑处理（空 → 清除，非空 → 替换），避免后续请求
+        // 继续用过期 session 被服务器拒绝。
+        let session_header = resp
+            .headers()
+            .get("Mcp-Session-Id")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        if let Some(sess) = session_header.as_ref() {
+            if sess.is_empty() {
+                *self.session_id.write().await = None;
+                warn!("MCP server terminated the session (empty Mcp-Session-Id)");
+            } else {
+                *self.session_id.write().await = Some(sess.clone());
+            }
+        }
+        // 读取并丢弃响应体：可能夹带更多服务器消息，且不读会占用连接。
+        let _ = resp.text().await;
+
+        if status != StatusCode::OK
+            && status != StatusCode::ACCEPTED
+            && status != StatusCode::NO_CONTENT
+        {
+            warn!("MCP server-request answer returned HTTP {status}");
+        }
+        Ok(())
     }
 
     /// POST a JSON-RPC notification (no id). The response is expected to be an
@@ -553,6 +636,11 @@ fn parse_sse_events(body: &str) -> Vec<(String, String)> {
 
 /// Find the SSE event whose JSON-RPC `id` matches `id`, returning the parsed
 /// message. Interleaved events (e.g. other requests' responses) are skipped.
+///
+/// Production parsing now goes through [`McpHttpConnection::handle_sse_body`],
+/// which also answers server-initiated requests; this pure helper is retained
+/// for tests.
+#[cfg(test)]
 fn parse_sse_response(body: &str, id: u64) -> Option<Value> {
     parse_sse_events(body)
         .into_iter()
@@ -1065,6 +1153,80 @@ data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"second\":true}}
             "unexpected error: {err}"
         );
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn streamable_http_answers_server_request_in_sse_stream() {
+        let _guard = ENV_LOCK.lock().await;
+        clear_proxy_env();
+        // The client advertises `roots` in initialize, so a compliant
+        // streamable HTTP server may push a `roots/list` request (id + method,
+        // no result/error) inside the SSE-framed response. The client must
+        // POST an answer — not drop it as an unmatched response — so the
+        // handshake completes and later requests keep working.
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_capture = Arc::clone(&seen);
+        let (url, server) = spawn_http_mock(
+            || (404, "no sse".to_string()),
+            move |req_text| {
+                seen_capture.lock().unwrap().push(req_text.clone());
+                let id = extract_id(&req_text);
+                if is_initialize(&req_text) {
+                    // SSE stream carrying the roots/list server request plus
+                    // the actual initialize result.
+                    let result = r#"{"protocolVersion":"2025-06-18","capabilities":{"tools":{"listChanged":true}},"serverInfo":{"name":"mock","version":"1.0.0"}}"#;
+                    let body = format!(
+                        "event: message\ndata: {{\"jsonrpc\":\"2.0\",\"id\":9001,\"method\":\"roots/list\",\"params\":{{}}}}\n\nevent: message\ndata: {{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{result}}}\n\n"
+                    );
+                    (
+                        200,
+                        body,
+                        vec![("Content-Type".to_string(), "text/event-stream".to_string())],
+                    )
+                } else if req_text.contains("\"method\":\"notifications/") {
+                    (202, String::new(), Vec::new())
+                } else if req_text.contains("\"id\":9001") {
+                    // The client's POSTed answer to the roots/list request.
+                    (202, String::new(), Vec::new())
+                } else {
+                    (
+                        200,
+                        format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{{"pong":true}}}}"#),
+                        Vec::new(),
+                    )
+                }
+            },
+        );
+
+        let conn = McpHttpConnection::connect(&url, Duration::from_secs(5))
+            .await
+            .expect("connect must not hang on an interleaved roots/list request");
+        assert_eq!(
+            conn.protocol_version().await.as_deref(),
+            Some("2025-06-18"),
+            "handshake must still negotiate the protocol version"
+        );
+
+        let result = conn
+            .request("ping", None, Duration::from_secs(5))
+            .await
+            .expect("ping must succeed once the roots/list answer was delivered");
+        assert_eq!(result, json!({"pong": true}));
+        server.abort();
+
+        let reqs = seen.lock().unwrap();
+        let answer = reqs
+            .iter()
+            .find(|r| r.contains("\"id\":9001"))
+            .expect("client must POST an answer to the roots/list server request");
+        assert!(
+            answer.contains("\"roots\":[]"),
+            "answer must carry an empty roots list: {answer}"
+        );
+        assert!(
+            !answer.contains("\"method\":\"ping\""),
+            "the answer POST must not be a ping: {answer}"
+        );
     }
 
     // ── Session id lifecycle ───────────────────────────────────────

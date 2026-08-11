@@ -60,6 +60,8 @@ impl Tool for LsTool {
             Some(p) => deepseeknova_security::path::sanitize_path(&ctx.workspace_root, &p)?,
             None => ctx.workspace_root.clone(),
         };
+        // T2：ls 与 grep/glob 同口径执行 denied_paths 策略检查。
+        crate::fs::check_policy_path_allowed(ctx, &dir)?;
 
         let mut entries: Vec<String> = Vec::new();
         let mut read_dir = tokio::fs::read_dir(&dir).await?;

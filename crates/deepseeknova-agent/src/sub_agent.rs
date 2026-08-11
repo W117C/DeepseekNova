@@ -414,12 +414,30 @@ impl SubAgentRunner {
         values: &InputValues,
         depth: usize,
     ) -> Result<String, DeepseeknovaError> {
+        self.run_at_depth_with_parent_cancel(agent, goal, values, depth, None)
+            .await
+    }
+
+    /// 带深度派发 + 父取消传播：行为与 [`Self::run_at_depth`] 完全一致，额外
+    /// 把父 run 的 [`CancellationToken`] 传进子代理循环（`dispatch_stream` →
+    /// `run_sub_agent_loop`）。父取消后，子代理在步边界检查或工具执行中途
+    /// （`tokio::select!` 抢占）立即中止，不再跑满 `max_steps`；`None` =
+    /// 顶层派发（无父 run），子代理使用独立取消令牌。
+    pub async fn run_at_depth_with_parent_cancel(
+        &self,
+        agent: &str,
+        goal: &str,
+        values: &InputValues,
+        depth: usize,
+        parent_cancel: Option<CancellationToken>,
+    ) -> Result<String, DeepseeknovaError> {
         let mut stream = self
             .dispatch_stream(
                 Some(agent.to_string()),
                 goal.to_string(),
                 values.clone(),
                 depth,
+                parent_cancel,
             )
             .await?;
         let mut text = String::new();
@@ -442,12 +460,15 @@ impl SubAgentRunner {
     }
 
     /// 核心派发：解析配置 → 渲染任务书 → 应用 per-agent 模型/权限 → spawn 循环。
+    /// `parent_cancel`：父 run 的取消令牌（`None` = 顶层派发）；透传给
+    /// [`run_sub_agent_loop`]，父取消即中止子代理。
     async fn dispatch_stream(
         &self,
         sub_agent_name: Option<String>,
         goal: String,
         parsed_inputs: InputValues,
         depth: usize,
+        parent_cancel: Option<CancellationToken>,
     ) -> Result<RunEventStream, DeepseeknovaError> {
         // 深度上限：超深拒绝（递归守门；根派发 depth 1）。
         if depth > self.max_depth {
@@ -565,6 +586,7 @@ impl SubAgentRunner {
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
+            reasoning_signature: None,
         });
 
         info!(
@@ -597,6 +619,7 @@ impl SubAgentRunner {
                 tool_hooks,
                 user_hooks,
                 sub_agent_name,
+                parent_cancel,
             )
             .await
             {
@@ -645,7 +668,7 @@ impl Runner for SubAgentRunner {
             },
         };
 
-        self.dispatch_stream(sub_agent_name, goal, parsed_inputs, 1)
+        self.dispatch_stream(sub_agent_name, goal, parsed_inputs, 1, None)
             .await
     }
 }
@@ -700,13 +723,21 @@ async fn run_sub_agent_loop(
     tool_hooks: Vec<Arc<dyn ToolHook>>,
     user_hooks: UserHooks,
     sub_agent_name: String,
+    parent_cancel: Option<CancellationToken>,
 ) -> Result<(), DeepseeknovaError> {
-    let cancel = CancellationToken::new();
+    // T12：父 run 取消传播——有父令牌时取其子令牌（父取消级联到本循环），
+    // 无父（顶层派发）用独立令牌。工具执行包 `tokio::select!`，父取消立即中断。
+    let cancel = match &parent_cancel {
+        Some(parent) => parent.child_token(),
+        None => CancellationToken::new(),
+    };
 
     // 构建工具执行上下文：工作区 + 安全上下文 + 递归深度 + 递归派发出口。
     // 递归深度扩展供 `RecursiveDelegateTool` 读取当前深度（再派时 +1）。
+    // 取消令牌由本循环统一持有（父派生/独立），注入每个工具执行 ctx。
     let build_ctx = |call_id: &str| {
-        let mut ctx = ToolContext::new(call_id.to_string()).with_workspace(workspace_root.clone());
+        let mut ctx = ToolContext::with_cancellation(call_id.to_string(), cancel.child_token())
+            .with_workspace(workspace_root.clone());
         if let Some(sec) = &security {
             ctx.extensions.insert(sec.clone());
         }
@@ -725,7 +756,12 @@ async fn run_sub_agent_loop(
         tool_calls: None,
         tool_call_id: None,
         reasoning_content: None,
+        reasoning_signature: None,
     });
+
+    // T12：资源限额步级检查（对齐主循环 loop_impl.rs 的 step 边界判定）。
+    let run_started = std::time::Instant::now();
+    let mut tool_calls_made: usize = 0;
 
     for step in 0..max_steps {
         // Check for cancellation between steps
@@ -738,6 +774,30 @@ async fn run_sub_agent_loop(
             .await
             .ok();
             return Ok(());
+        }
+
+        // T12：步级限额——整体墙钟截止 + 工具调用预算（与主循环同口径）。
+        if let Some(sec) = &security {
+            if run_started.elapsed() > sec.limits.max_execution_time {
+                warn!(
+                    "sub-agent exceeded max_execution_time ({:?})",
+                    sec.limits.max_execution_time
+                );
+                return Err(DeepseeknovaError::runner(format!(
+                    "sub-agent exceeded max execution time ({:?})",
+                    sec.limits.max_execution_time
+                )));
+            }
+            if tool_calls_made >= sec.limits.max_tool_calls {
+                warn!(
+                    "sub-agent exceeded max_tool_calls ({})",
+                    sec.limits.max_tool_calls
+                );
+                return Err(DeepseeknovaError::runner(format!(
+                    "sub-agent exceeded max tool calls ({})",
+                    sec.limits.max_tool_calls
+                )));
+            }
         }
 
         info!("sub-agent step {}/{}", step + 1, max_steps);
@@ -793,6 +853,8 @@ async fn run_sub_agent_loop(
         let mut stream = provider.stream(validated).await?;
         let mut text_buf = String::new();
         let mut reasoning_buf = String::new();
+        // T12 收尾：流式 signature 随 reasoning 保存（多轮回放必需）。
+        let mut reasoning_signature: Option<String> = None;
         let mut usage: Option<Usage> = None;
         let mut tool_calls: Vec<(String, String, String)> = Vec::new();
 
@@ -804,6 +866,9 @@ async fn run_sub_agent_loop(
                 }
                 Chunk::ReasoningDelta { text, signature } => {
                     reasoning_buf.push_str(&text);
+                    if reasoning_signature.is_none() {
+                        reasoning_signature = signature.clone();
+                    }
                     tx.send(Ok(RunEvent::ReasoningDelta { text, signature }))
                         .await
                         .ok();
@@ -877,6 +942,7 @@ async fn run_sub_agent_loop(
                 } else {
                     Some(reasoning_buf.clone())
                 },
+                reasoning_signature: reasoning_signature.clone(),
             });
 
             // 2) 逐个执行（gate 检查 → ToolHook before → 执行 → ToolHook after），
@@ -1022,7 +1088,7 @@ async fn run_sub_agent_loop(
                             };
                             let mut denied: Option<String> = None;
                             for cmd in &user_hooks.tool_before {
-                                let run = run_user_hook(cmd, &payload);
+                                let run = run_user_hook(cmd, &payload).await;
                                 if !run.exec.is_allowed() {
                                     denied = Some(format!(
                                         "blocked by user hook '{}' (fail-closed: {:?})",
@@ -1050,12 +1116,66 @@ async fn run_sub_agent_loop(
                         if let Some(reason) = gate_block.or(hook_block).or(user_block) {
                             reason
                         } else {
-                            // ── 阶段 3：执行工具 ──
+                            // ── 阶段 3：执行工具（父取消即中断）──
+                            // T12：工具执行包 `tokio::select!`——父 run 取消
+                            // （级联到本循环 `cancel`）时立即丢弃工具 future，
+                            // 不再跑满 max_steps。
                             let ctx = build_ctx(id);
-                            let exec_result = tool.execute(&ctx, arguments).await;
-                            let output = match exec_result {
-                                Ok(out) => out,
-                                Err(e) => format!("Error: {e}"),
+                            // T12：递归委派工具能力门（对齐 DelegateTool 的
+                            // enforce_capability）。RecursiveDelegateTool 本体在
+                            // recursion.rs（本次改动范围外），子代理执行边界在此
+                            // 补同款门禁：委派隐含命令执行，需 CommandExecute
+                            // 能力。SecurityContext 存在时未授予 → fail-closed
+                            // 阻断（不执行工具）；未装配 SecurityContext 的子
+                            // 代理（测试/库级裸装配）保持既有行为不拦截。
+                            let cap_block: Option<String> = if name == "delegate"
+                                && ctx
+                                    .extensions
+                                    .get::<deepseeknova_security::context::SecurityContext>()
+                                    .is_some()
+                            {
+                                deepseeknova_security::context::enforce_capability(
+                                    &ctx,
+                                    "delegate",
+                                    deepseeknova_security::capability::Capability::CommandExecute,
+                                )
+                                .err()
+                                .map(|e| format!("Error: tool '{name}' {e}"))
+                            } else {
+                                None
+                            };
+                            let output = if let Some(blocked) = cap_block {
+                                blocked
+                            } else {
+                                tool_calls_made += 1;
+                                let exec_result = tokio::select! {
+                                    r = tool.execute(&ctx, arguments) => r,
+                                    _ = cancel.cancelled() => Err(
+                                        deepseeknova_core::DeepseeknovaError::Cancelled
+                                    ),
+                                };
+                                match exec_result {
+                                    Ok(out) => out,
+                                    Err(e) => format!("Error: {e}"),
+                                }
+                            };
+                            // T12：工具输出统一 `max_output_bytes` 截断（含非
+                            // shell 工具；方式与 shell.rs cap_output / 主循环
+                            // execute_tool_call 对齐——UTF-8 字符边界 + 截断标记）。
+                            // SecurityContext 缺失时不截断（无配额可依）。
+                            let output = match security.as_ref() {
+                                Some(sec)
+                                    if output.len() > sec.limits.max_output_bytes as usize =>
+                                {
+                                    let max_out = sec.limits.max_output_bytes as usize;
+                                    let end = output.floor_char_boundary(max_out);
+                                    format!(
+                                        "{}... [truncated {} bytes]",
+                                        &output[..end],
+                                        output.len() - end
+                                    )
+                                }
+                                _ => output,
                             };
 
                             // ── 阶段 4：ToolHook after 写后评估（fail-open）──
@@ -1139,7 +1259,19 @@ async fn run_sub_agent_loop(
                     tool_calls: None,
                     tool_call_id: Some(id.clone()),
                     reasoning_content: None,
+                    reasoning_signature: None,
                 });
+            }
+            // T12：工具执行被父取消中断 → 立即中止（不再续步跑满 max_steps）。
+            if cancel.is_cancelled() {
+                tx.send(Ok(RunEvent::Done(RunOutput {
+                    text: String::new(),
+                    tool_calls: Vec::new(),
+                    usage: None,
+                })))
+                .await
+                .ok();
+                return Ok(());
             }
             // 工具轮次后继续下一循环（模型将基于工具结果继续）
             continue;
@@ -1158,6 +1290,7 @@ async fn run_sub_agent_loop(
                 } else {
                     Some(reasoning_buf.clone())
                 },
+                reasoning_signature: reasoning_signature.clone(),
             });
 
             // 输出净化：中和权限修改指令形状，防父上下文被注入
@@ -1192,6 +1325,7 @@ async fn run_sub_agent_loop(
             } else {
                 Some(reasoning_buf.clone())
             },
+            reasoning_signature: reasoning_signature.clone(),
         });
     }
 
@@ -1231,6 +1365,7 @@ async fn compact_with_provider(
         tool_calls: None,
         tool_call_id: None,
         reasoning_content: None,
+        reasoning_signature: None,
     }];
 
     let validated =
@@ -1341,6 +1476,7 @@ mod tests {
                     tool_calls: None,
                     tool_call_id: None,
                     reasoning_content: None,
+                    reasoning_signature: None,
                 })
             }
 
@@ -1493,6 +1629,7 @@ mod tests {
                 tool_calls: None,
                 tool_call_id: None,
                 reasoning_content: None,
+                reasoning_signature: None,
             })
         }
     }
@@ -1557,6 +1694,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
+            reasoning_signature: None,
         }];
         let tokens = estimate_tokens(&msgs);
         assert!(tokens > 0);
@@ -1855,6 +1993,7 @@ mod tests {
                 tool_calls: None,
                 tool_call_id: None,
                 reasoning_content: None,
+                reasoning_signature: None,
             })
         }
         async fn stream(
@@ -2069,5 +2208,311 @@ mod tests {
         let none_runner = none_runner.with_default("f");
         let out_none = collect_text(&none_runner, "goal: read").await;
         assert!(out_none.contains("read ok"), "None 应绕过 gate: {out_none}");
+    }
+
+    // -----------------------------------------------------------------------
+    // T12：父取消传播 / 步级限额 / 输出截断 / 递归委派能力门
+    // -----------------------------------------------------------------------
+
+    /// 直接驱动 `run_sub_agent_loop` 的最小装配。
+    async fn drive_sub_agent_loop(
+        provider: Arc<dyn Provider>,
+        tools: Vec<Arc<dyn Tool>>,
+        security: Option<deepseeknova_security::context::SecurityContext>,
+        parent_cancel: Option<CancellationToken>,
+        memory: &mut Memory,
+    ) -> Result<(), DeepseeknovaError> {
+        let (tx, _rx) = mpsc::channel(64);
+        run_sub_agent_loop(
+            provider.clone(),
+            provider,
+            tools,
+            100,
+            None,
+            memory,
+            "goal: test".to_string(),
+            &tx,
+            None,
+            security,
+            std::env::temp_dir(),
+            1,
+            None,
+            false,
+            Vec::new(),
+            UserHooks::default(),
+            "sub-test".to_string(),
+            parent_cancel,
+        )
+        .await
+    }
+
+    /// T12：父取消传播——工具执行中被父取消立即中断，不再跑满 max_steps。
+    #[tokio::test]
+    async fn parent_cancel_aborts_sub_agent_during_tool_execution() {
+        use crate::test_utils::MockProvider;
+
+        // 永不完成的工具：依赖 `select!` 的父取消分支打断。
+        struct BlockingTool;
+        #[async_trait::async_trait]
+        impl Tool for BlockingTool {
+            fn schema(&self) -> deepseeknova_core::ToolSchema {
+                deepseeknova_core::ToolSchema {
+                    name: "block".to_string(),
+                    description: "blocks forever".to_string(),
+                    parameters: serde_json::json!({}),
+                }
+            }
+            async fn execute(
+                &self,
+                _ctx: &ToolContext,
+                _args: &str,
+            ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
+                std::future::pending::<()>().await;
+                Ok(String::new())
+            }
+        }
+        let provider = Arc::new(MockProvider::sequential(vec![
+            vec![
+                Chunk::ToolCallStart {
+                    id: "b1".into(),
+                    name: "block".into(),
+                },
+                Chunk::ToolCallEnd {
+                    id: "b1".into(),
+                    name: "block".into(),
+                    arguments: "{}".into(),
+                },
+                Chunk::Done,
+            ],
+            vec![
+                Chunk::TextDelta("done".into()),
+                Chunk::Usage(Usage::default()),
+                Chunk::Done,
+            ],
+        ]));
+
+        let parent = CancellationToken::new();
+        let parent_for_task = parent.clone();
+        let sec = deepseeknova_security::context::SecurityContext::with_safe_defaults();
+        let handle = tokio::spawn(async move {
+            let mut memory = Memory::new();
+            drive_sub_agent_loop(
+                provider,
+                vec![Arc::new(BlockingTool)],
+                Some(sec),
+                Some(parent_for_task),
+                &mut memory,
+            )
+            .await
+        });
+        // 让子代理进入工具执行（阻塞在 pending future）。
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        parent.cancel();
+        // 父取消后子代理应立即返回（select! 抢占 + 步边界检查）。
+        let joined = tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+            .await
+            .expect("sub-agent must abort promptly after parent cancel")
+            .expect("loop future must not panic");
+        assert!(joined.is_ok(), "cancel path returns Ok, got: {joined:?}");
+    }
+
+    /// T12：工具输出统一 `max_output_bytes` 截断（含非 shell 工具）。
+    #[tokio::test]
+    async fn sub_agent_truncates_tool_output_at_max_output_bytes() {
+        use crate::test_utils::MockProvider;
+
+        struct LongTool;
+        #[async_trait::async_trait]
+        impl Tool for LongTool {
+            fn schema(&self) -> deepseeknova_core::ToolSchema {
+                deepseeknova_core::ToolSchema {
+                    name: "long".to_string(),
+                    description: "long output tool".to_string(),
+                    parameters: serde_json::json!({}),
+                }
+            }
+            async fn execute(
+                &self,
+                _ctx: &ToolContext,
+                _args: &str,
+            ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
+                Ok("a".repeat(500))
+            }
+        }
+        let provider = Arc::new(MockProvider::sequential(vec![
+            vec![
+                Chunk::ToolCallStart {
+                    id: "l1".into(),
+                    name: "long".into(),
+                },
+                Chunk::ToolCallEnd {
+                    id: "l1".into(),
+                    name: "long".into(),
+                    arguments: "{}".into(),
+                },
+                Chunk::Done,
+            ],
+            vec![
+                Chunk::TextDelta("done".into()),
+                Chunk::Usage(Usage::default()),
+                Chunk::Done,
+            ],
+        ]));
+        let mut sec = deepseeknova_security::context::SecurityContext::with_safe_defaults();
+        sec.limits.max_output_bytes = 32;
+
+        let mut memory = Memory::new();
+        let result = drive_sub_agent_loop(
+            provider,
+            vec![Arc::new(LongTool)],
+            Some(sec),
+            None,
+            &mut memory,
+        )
+        .await;
+        assert!(result.is_ok(), "loop must complete: {result:?}");
+        let msgs = memory.get_all();
+        let tool_msg = msgs
+            .iter()
+            .find(|m| m.role == Role::Tool)
+            .expect("tool result must be stored in memory");
+        assert!(
+            tool_msg.content.contains("[truncated"),
+            "oversized output must be truncated: {}",
+            tool_msg.content
+        );
+        assert!(
+            tool_msg.content.len() < 500,
+            "truncated output must be much shorter than original"
+        );
+    }
+
+    /// T12：步级限额——`max_tool_calls` 超限后步边界中止（对齐主循环）。
+    #[tokio::test]
+    async fn sub_agent_stops_at_max_tool_calls() {
+        use crate::test_utils::MockProvider;
+
+        struct OkTool;
+        #[async_trait::async_trait]
+        impl Tool for OkTool {
+            fn schema(&self) -> deepseeknova_core::ToolSchema {
+                deepseeknova_core::ToolSchema {
+                    name: "t".to_string(),
+                    description: "ok tool".to_string(),
+                    parameters: serde_json::json!({}),
+                }
+            }
+            async fn execute(
+                &self,
+                _ctx: &ToolContext,
+                _args: &str,
+            ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
+                Ok("ok".to_string())
+            }
+        }
+        // 单响应重放：每步都产工具调用 → 循环执行工具直到限额触发。
+        let provider = Arc::new(MockProvider::new(vec![
+            Chunk::ToolCallStart {
+                id: "t1".into(),
+                name: "t".into(),
+            },
+            Chunk::ToolCallEnd {
+                id: "t1".into(),
+                name: "t".into(),
+                arguments: "{}".into(),
+            },
+            Chunk::Done,
+        ]));
+        let mut sec = deepseeknova_security::context::SecurityContext::with_safe_defaults();
+        sec.limits.max_tool_calls = 1;
+
+        let mut memory = Memory::new();
+        let result = drive_sub_agent_loop(
+            provider,
+            vec![Arc::new(OkTool)],
+            Some(sec),
+            None,
+            &mut memory,
+        )
+        .await;
+        let err = result.expect_err("max_tool_calls limit must abort the loop");
+        assert!(err.to_string().contains("max tool calls"), "got: {err}");
+    }
+
+    /// T12：递归委派工具能力门生效——缺 CommandExecute 时 `delegate` 工具被
+    /// 阻断（fail-closed，不执行）。对齐 DelegateTool 的 enforce_capability。
+    #[tokio::test]
+    async fn recursive_delegate_tool_requires_command_execute_capability() {
+        use crate::test_utils::MockProvider;
+
+        struct DelegateToolStub;
+        #[async_trait::async_trait]
+        impl Tool for DelegateToolStub {
+            fn schema(&self) -> deepseeknova_core::ToolSchema {
+                deepseeknova_core::ToolSchema {
+                    name: "delegate".to_string(),
+                    description: "recursive delegate stub".to_string(),
+                    parameters: serde_json::json!({}),
+                }
+            }
+            async fn execute(
+                &self,
+                _ctx: &ToolContext,
+                _args: &str,
+            ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
+                Ok("delegate ran".to_string())
+            }
+        }
+        let provider = Arc::new(MockProvider::sequential(vec![
+            vec![
+                Chunk::ToolCallStart {
+                    id: "d1".into(),
+                    name: "delegate".into(),
+                },
+                Chunk::ToolCallEnd {
+                    id: "d1".into(),
+                    name: "delegate".into(),
+                    arguments: "{}".into(),
+                },
+                Chunk::Done,
+            ],
+            vec![
+                Chunk::TextDelta("done".into()),
+                Chunk::Usage(Usage::default()),
+                Chunk::Done,
+            ],
+        ]));
+        // 只授 FileRead，剥夺 CommandExecute（委派隐含命令执行）。
+        let mut sec = deepseeknova_security::context::SecurityContext::with_safe_defaults();
+        sec.capabilities = {
+            let mut c = std::collections::HashSet::new();
+            c.insert(deepseeknova_security::capability::Capability::FileRead);
+            c
+        };
+
+        let mut memory = Memory::new();
+        let result = drive_sub_agent_loop(
+            provider,
+            vec![Arc::new(DelegateToolStub)],
+            Some(sec),
+            None,
+            &mut memory,
+        )
+        .await;
+        assert!(result.is_ok(), "loop must complete: {result:?}");
+        let msgs = memory.get_all();
+        let tool_msg = msgs
+            .iter()
+            .find(|m| m.role == Role::Tool)
+            .expect("tool result must be stored in memory");
+        assert!(
+            tool_msg.content.contains("CommandExecute"),
+            "delegate tool must be capability-gated: {}",
+            tool_msg.content
+        );
+        assert!(
+            !tool_msg.content.contains("delegate ran"),
+            "delegate tool must NOT execute without CommandExecute"
+        );
     }
 }

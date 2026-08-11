@@ -61,6 +61,8 @@ impl Tool for GlobTool {
             Some(p) => deepseeknova_security::path::sanitize_path(&ctx.workspace_root, &p)?,
             None => ctx.workspace_root.clone(),
         };
+        // T2：glob 与 grep/ls 同口径执行 denied_paths 策略检查。
+        crate::fs::check_policy_path_allowed(ctx, &base)?;
 
         // Build the full glob pattern
         let full_pattern = base.join(&parsed.pattern);

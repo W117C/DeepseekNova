@@ -845,9 +845,9 @@ impl MemoryStore {
         };
         let fts = run_memory_search(&db, query, None, limit.saturating_mul(2), 0.0)?;
 
-        // 1. 扫描同模型嵌入，算余弦。
-        let mut emb_hits: Vec<(String, f32)> = Vec::new();
-        {
+        // 1. 锁内只做嵌入原始字节快照（id + 维度 + blob + 模型），不解码、不算余弦，
+        //    避免全库嵌入线性扫描期间长时间持有全局 DB 锁、阻塞并发写入。
+        let raw_rows: Vec<(String, i64, Vec<u8>, String)> = {
             let mut stmt = db.prepare(
                 "SELECT id, embedding, embed_dim, embed_model FROM memory_meta
                  WHERE embedding IS NOT NULL AND stage != 'archived'",
@@ -857,24 +857,36 @@ impl MemoryStore {
                 let blob: Vec<u8> = r.get(1)?;
                 let dim: i64 = r.get(2)?;
                 let m: String = r.get(3)?;
-                let mut vec = Vec::with_capacity(dim as usize);
-                for chunk in blob.chunks_exact(4) {
-                    vec.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-                }
-                Ok((id, m, vec))
+                Ok((id, dim, blob, m))
             })?;
+            let mut out = Vec::new();
             for row in rows {
-                let (id, m, vec) = row?;
-                if m != model {
-                    continue;
-                }
-                let c = crate::memory::embedding::cosine(&qv, &vec);
-                if c > 0.0 {
-                    emb_hits.push((id, c));
-                }
+                out.push(row?);
+            }
+            out
+        };
+        // 立即释放全局 DB 锁；逐条解码与余弦计算移到临界区之外（锁持有时间从 O(n) 降为 O(1)）。
+        drop(db);
+
+        // 1b. 锁外逐条解码 + 余弦，仅保留正余弦（阈值/过滤与旧实现一致）。
+        let mut emb_hits: Vec<(String, f32)> = Vec::new();
+        for (id, dim, blob, m) in raw_rows {
+            if m != model {
+                continue;
+            }
+            let mut vec = Vec::with_capacity(dim as usize);
+            for chunk in blob.chunks_exact(4) {
+                vec.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+            }
+            let c = crate::memory::embedding::cosine(&qv, &vec);
+            if c > 0.0 {
+                emb_hits.push((id, c));
             }
         }
         emb_hits.sort_by(|a, b| b.1.total_cmp(&a.1));
+
+        // 1c. 重新持锁执行后续 SQL 查询（FTS 条目拉取与生命周期因子）。
+        let db = self.db.lock().unwrap_or_else(|e| e.into_inner());
 
         // 2. FTS 归一化基数（纯 bm25）。
         let mut fts_map: HashMap<String, f64> = HashMap::new();
@@ -971,17 +983,15 @@ impl MemoryStore {
         // 5. 融合打分并排序。各分量均为对总分的加性贡献：
         //    bm25 = 0.5 * 归一化 bm25；cosine = 0.5 * max(cos, 0)；
         //    lifecycle = -rank_weight * lf；score = bm25 + cosine + lifecycle。
+        let emb_map: HashMap<&str, f32> =
+            emb_hits.iter().map(|(id, c)| (id.as_str(), *c)).collect();
         let mut out: Vec<MemoryScoreBreakdown> = ids
             .iter()
             .filter_map(|id| entries.get(id).cloned())
             .collect();
         for r in &mut out {
             let s = fts_map.get(&r.entry.id).copied().unwrap_or(0.0);
-            let c = emb_hits
-                .iter()
-                .find(|(id, _)| *id == r.entry.id)
-                .map(|(_, c)| *c as f64)
-                .unwrap_or(0.0);
+            let c = emb_map.get(r.entry.id.as_str()).copied().unwrap_or(0.0) as f64;
             let lf = lifecycle.get(&r.entry.id).copied().unwrap_or(0.0);
             r.bm25 = 0.5 * (s / max_s);
             r.cosine = 0.5 * c.max(0.0);

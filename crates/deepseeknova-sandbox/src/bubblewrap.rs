@@ -184,6 +184,17 @@ impl Sandbox for BubblewrapSandbox {
     fn backend_available(&self) -> bool {
         bwrap_available()
     }
+
+    // T3 能力位：bwrap 按 `allow_network` 渲染 `--share-net`/`--unshare-net`、
+    // 按档位渲染只读/读写 bind，具备强制网络与文件系统写限制的能力
+    // （如实反映；是否实际禁网/只读由构造参数决定）。
+    fn enforced_network(&self) -> bool {
+        true
+    }
+
+    fn enforced_fs(&self) -> bool {
+        true
+    }
 }
 
 /// Returns the default set of read-only bind mount paths.
@@ -228,6 +239,22 @@ mod tests {
     fn bubblewrap_is_active() {
         let bw = BubblewrapSandbox::default();
         assert!(bw.is_active());
+    }
+
+    #[test]
+    fn bubblewrap_can_enforce_network_and_fs() {
+        // T3 能力位：bwrap 具备强制网络与文件系统写限制的能力，与构造参数
+        // （是否实际禁网/只读）无关。
+        let isolated = BubblewrapSandbox::with_policy(&[], false);
+        assert!(isolated.enforced_network());
+        assert!(isolated.enforced_fs());
+        let shared = BubblewrapSandbox::with_policy(&["/tmp/work".into()], true);
+        assert!(shared.enforced_network());
+        assert!(shared.enforced_fs());
+        // 只读档同样具备两种强制能力。
+        let ro = BubblewrapSandbox::with_tier(crate::SandboxTier::ReadOnly, &[], false);
+        assert!(ro.enforced_network());
+        assert!(ro.enforced_fs());
     }
 
     #[test]

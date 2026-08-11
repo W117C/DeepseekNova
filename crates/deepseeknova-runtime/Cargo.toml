@@ -28,6 +28,7 @@ deepseeknova-security = { workspace = true }
 deepseeknova-mcp = { workspace = true }
 deepseeknova-metrics = { workspace = true }
 deepseeknova-skills = { workspace = true }
+dirs = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }

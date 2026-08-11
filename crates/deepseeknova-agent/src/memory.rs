@@ -135,6 +135,7 @@ impl Memory {
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: reasoning_summary,
+            reasoning_signature: None,
         });
     }
 
@@ -345,6 +346,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
+            reasoning_signature: None,
         }
     }
 
@@ -407,6 +409,7 @@ mod tests {
             ),
             tool_call_id: None,
             reasoning_content: None,
+            reasoning_signature: None,
         }
     }
 
@@ -419,6 +422,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: Some(id.to_string()),
             reasoning_content: None,
+            reasoning_signature: None,
         }
     }
 

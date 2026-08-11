@@ -10,7 +10,7 @@
     clippy::dbg_macro
 )]
 
-use deepseeknova_core::registry::Skill;
+use deepseeknova_core::registry::{Skill, SkillScope};
 use deepseeknova_core::{Tool, ToolContext};
 use deepseeknova_skills::{SkillLoader, SkillTool};
 use std::sync::Arc;
@@ -154,6 +154,7 @@ async fn e2e_skill_tool_registry_compatible() {
         model: None,
         tools_allowed: vec![],
         system_prompt: "Do the thing.".into(),
+        scope: SkillScope::Project,
     };
 
     let tool: Arc<dyn Tool> = Arc::new(SkillTool::new(skill));

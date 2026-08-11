@@ -539,6 +539,10 @@ impl Default for PolicyBuilder {
 // Permission Gate
 // ---------------------------------------------------------------------------
 
+/// 会话缓存容量上限：超过后随机逐出一个既有条目，防止缓存无限增长
+/// （T10：容量上限 + 简单逐出）。
+const SESSION_CACHE_CAPACITY: usize = 4096;
+
 /// PermissionGate is called by Runtime before every tool execution.
 /// Supports session-level caching of user decisions.
 pub struct PermissionGate {
@@ -547,6 +551,9 @@ pub struct PermissionGate {
     /// Once a user approves/denies a specific tool+args combo, we remember
     /// for the rest of the session to avoid repeated prompts.
     session_cache: std::sync::Mutex<std::collections::HashMap<u64, Decision>>,
+    /// 会话缓存容量上限（默认 [`SESSION_CACHE_CAPACITY`]）：达到上限后随机
+    /// 逐出一个既有条目，避免会话缓存无限增长（T10）。
+    cache_capacity: usize,
     /// Workspace root for path-based rules.
     workspace_root: Option<std::path::PathBuf>,
     /// Optional rate limit: max gated tool calls per rolling 60s window.
@@ -575,6 +582,7 @@ impl PermissionGate {
         Self {
             policy,
             session_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+            cache_capacity: SESSION_CACHE_CAPACITY,
             workspace_root: None,
             rate_limit_per_minute: None,
             call_times: std::sync::Mutex::new(std::collections::VecDeque::new()),
@@ -619,6 +627,9 @@ impl PermissionGate {
         if let Ok(mut m) = self.mode.lock() {
             *m = mode;
         }
+        // T10：模式切换改变写工具默认裁决（Auto 放行 → Plan 询问），旧缓存
+        // 决策基于旧模式批准、继续复用会绕过新模式契约 → 切换即清空会话缓存。
+        self.clear_cache();
     }
 
     /// 当前权限模式预设（`None` = 旧行为）。
@@ -631,6 +642,9 @@ impl PermissionGate {
         if let Ok(mut t) = self.trusted.lock() {
             *t = trusted;
         }
+        // T10：信任状态切换改变 allow 降级语义（untrusted 项目层 allow →
+        // Ask），旧缓存决策失效 → 切换即清空会话缓存。
+        self.clear_cache();
     }
 
     /// 当前工作区信任状态。
@@ -715,6 +729,20 @@ impl PermissionGate {
         let cache_key = compute_cache_key(tool_name, args);
         if let Ok(cache) = self.session_cache.lock() {
             if let Some(cached) = cache.get(&cache_key) {
+                // T10：缓存命中后仍先对 deny 表做一次匹配——deny 规则恒优先于
+                // 任何缓存决策（缓存 Allow/Ask 不得绕过 deny），"deny > ask >
+                // allow" 契约对缓存命中同样成立。
+                if let Some(r) =
+                    self.policy
+                        .matching_rule(tool_name, &preflight.args_value, &self.policy.deny)
+                {
+                    let v = CheckVerdict::deny(format!(
+                        "blocked by deny rule: tool={} subject={:?}",
+                        r.tool, r.subject
+                    ));
+                    self.audit_denial(tool, args, None, v.reason());
+                    return v;
+                }
                 return match *cached {
                     Decision::Allow => CheckVerdict::allow(),
                     Decision::Ask => CheckVerdict::ask("cached: requires approval"),
@@ -1031,6 +1059,14 @@ impl PermissionGate {
     pub fn cache_decision(&self, tool_name: &str, args: &str, decision: Decision) {
         let key = compute_cache_key(tool_name, args);
         if let Ok(mut cache) = self.session_cache.lock() {
+            // T10：容量上限 + 随机逐出——达到上限且键不存在时先淘汰一个既有
+            // 条目，防止会话缓存无限增长。HashMap 无访问序跟踪，逐出任一
+            // 条目即为最小侵入方案；`contains_key` 守卫保证已有条目刷新不逐出。
+            if cache.len() >= self.cache_capacity && !cache.contains_key(&key) {
+                if let Some(&victim) = cache.keys().next() {
+                    cache.remove(&victim);
+                }
+            }
             cache.insert(key, decision);
         }
     }
@@ -1221,12 +1257,44 @@ fn suggest_allow(tool_name: &str, args: &Value) -> Vec<RuleSuggestion> {
     vec![RuleSuggestion::new(Decision::Allow, rule, "user")]
 }
 
+/// 递归规范化 JSON 值：对象键按字典序排序、数组递归处理，返回规范化克隆。
+///
+/// 工作区启用了 serde_json `preserve_order`（`Value::Object` 为 IndexMap，
+/// 保留解析时的插入序），直接 re-serialize 无法消除键序差异；显式排序键
+/// 使 `{"command":"ls","flag":"--short"}` 与 `{"flag":"--short","command":"ls"}`
+/// 规范化到同一形式，供缓存键消除空白/键序差异（T10）。
+fn normalize_value(v: &Value) -> Value {
+    match v {
+        Value::Object(map) => {
+            let mut entries: Vec<(String, Value)> = map
+                .iter()
+                .map(|(k, val)| (k.clone(), normalize_value(val)))
+                .collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            let mut out = serde_json::Map::new();
+            for (k, val) in entries {
+                out.insert(k, val);
+            }
+            Value::Object(out)
+        }
+        Value::Array(items) => Value::Array(items.iter().map(normalize_value).collect()),
+        other => other.clone(),
+    }
+}
+
 /// Compute a cache key for session-level permission caching.
 fn compute_cache_key(tool_name: &str, args: &str) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     tool_name.hash(&mut hasher);
-    args.hash(&mut hasher);
+    // T10：参数规范化——解析 JSON 后按规范化形式重新序列化再 hash，消除
+    // 空白/键序差异（`{"command":"ls"}` 与 `{"command": "ls"}` 命中同一
+    // 缓存项，不再重复弹窗）。畸形 JSON 无法解析时退回原始串，与旧行为一致。
+    let normalized = match serde_json::from_str::<Value>(args) {
+        Ok(v) => normalize_value(&v).to_string(),
+        Err(_) => args.to_string(),
+    };
+    normalized.hash(&mut hasher);
     hasher.finish()
 }
 

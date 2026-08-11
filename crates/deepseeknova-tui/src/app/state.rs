@@ -156,6 +156,9 @@ pub trait UndoController: Send + Sync {
     async fn rollback_one(&self) -> Result<Option<String>, deepseeknova_core::DeepseeknovaError>;
     /// 回退全部检查点，返回回退数量。
     async fn rollback_all(&self) -> Result<usize, deepseeknova_core::DeepseeknovaError>;
+    /// 内容级 diff：每个 modified 文件的 `--- path ---` 头 + 行级 `+`/`-` 文本。
+    /// 无内容变更时返回空 Vec。
+    async fn diffs(&self) -> Result<Vec<String>, deepseeknova_core::DeepseeknovaError>;
 }
 
 /// 会话级检查点控制器（`/checkpoint save|list|rollback`）。

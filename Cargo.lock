@@ -253,6 +253,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bstr"
+version = "1.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6bb31b46c14244e20ee9984b11bf5c992b91fb6939fea616e3512c8baecdbe5f"
+dependencies = [
+ "memchr",
+ "serde_core",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -632,6 +642,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "similar",
  "tempfile",
  "tokio",
  "tracing",
@@ -849,6 +860,7 @@ dependencies = [
  "deepseeknova-security",
  "deepseeknova-skills",
  "deepseeknova-tools",
+ "dirs",
  "futures",
  "serde_json",
  "tempfile",
@@ -926,6 +938,7 @@ version = "0.5.0"
 dependencies = [
  "async-trait",
  "deepseeknova-core",
+ "indexmap",
  "serde",
  "serde_json",
  "serde_norway",
@@ -3064,6 +3077,15 @@ checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
 dependencies = [
  "errno",
  "libc",
+]
+
+[[package]]
+name = "similar"
+version = "3.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85ee016af5d736b69fc89e19254540fa4b5f5492853fb5503920f084011c78b6"
+dependencies = [
+ "bstr",
 ]
 
 [[package]]

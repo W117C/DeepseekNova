@@ -147,6 +147,18 @@ impl Sandbox for JobSandbox {
         true
     }
 
+    // T3 能力位：Job Object **不直接限制网络与文件系统写路径**（整网开关
+    // 与文件/目录白名单需 WFP 过滤器或 AppContainer，见模块文档），故网络
+    // 与文件系统写限制能力位均为 false——上层据此在用户显式禁网/请求只读
+    // 档时发出可检测的降级告警，避免静默失效。
+    fn enforced_network(&self) -> bool {
+        false
+    }
+
+    fn enforced_fs(&self) -> bool {
+        false
+    }
+
     fn spawn(&self, cmd: Command) -> io::Result<Child> {
         self.spawn_in_job(cmd)
     }
@@ -237,6 +249,15 @@ mod tests {
         let (exe, args) = sb.sandbox("cmd", &["/C".into(), "echo hi".into()]);
         assert_eq!(exe, "cmd");
         assert_eq!(args, vec!["/C", "echo hi"]);
+    }
+
+    #[test]
+    fn job_sandbox_cannot_enforce_network_or_fs() {
+        // T3 能力位：Job Object 不直接限制网络与文件系统写路径，能力位必须
+        // 为 false，使上层能把"显式禁网/只读档"升级为可检测告警而非静默失效。
+        let sb = JobSandbox::default();
+        assert!(!sb.enforced_network());
+        assert!(!sb.enforced_fs());
     }
 
     #[tokio::test]

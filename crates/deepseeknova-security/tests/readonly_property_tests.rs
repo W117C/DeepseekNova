@@ -44,9 +44,9 @@ fn pflag_false_value() -> impl Strategy<Value = &'static str> {
     prop::sample::select(vec!["0", "f", "F", "FALSE", "false", "False"])
 }
 
-/// tar 短 flag 组合中的写字符（解包/创建/追加/更新/脚本）。
+/// tar 短 flag 组合中的写字符（解包/创建/追加/更新/脚本/压缩程序）。
 fn tar_write_char() -> impl Strategy<Value = char> {
-    prop::sample::select(vec!['x', 'c', 'r', 'u', 'F'])
+    prop::sample::select(vec!['x', 'c', 'r', 'u', 'F', 'I'])
 }
 
 /// tar 短 flag 组合中的只读字符（list + 展示 flag）。

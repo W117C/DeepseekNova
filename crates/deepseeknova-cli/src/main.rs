@@ -24,6 +24,62 @@ mod setup;
 mod tui_undo;
 mod worktree;
 
+/// checkpoint diff 单文件内容超过该字节数时只统计行数、不展开全文。
+const DEFAULT_DIFF_MAX_BYTES: usize = 256 * 1024;
+
+/// 导入来源的显示名（`import` 命令提示用）。
+fn source_label(source: cli::ImportSource) -> &'static str {
+    match source {
+        cli::ImportSource::Claude => "claude",
+        cli::ImportSource::Codex => "codex",
+    }
+}
+
+/// 导入写入层级的显示名。
+fn scope_label(scope: deepseeknova_config::compat::ImportScope) -> &'static str {
+    match scope {
+        deepseeknova_config::compat::ImportScope::User => "user",
+        deepseeknova_config::compat::ImportScope::Project => "project",
+    }
+}
+
+/// 把 checkpoint diff 条目格式化成展示行（`checkpoint diff` 用）。
+///
+/// 抽成纯函数以便单测「快照存在但文件被删除」等展示路径；`filter` 限定
+/// 单个文件。返回要逐行打印的文本行。
+fn format_diff_entries(
+    entries: &[Option<deepseeknova_checkpoint::FileDiff>],
+    filter: Option<&str>,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut shown = false;
+    for entry in entries.iter().flatten() {
+        if let Some(filter) = filter {
+            if entry.path != *filter {
+                continue;
+            }
+        }
+        shown = true;
+        if entry.truncated {
+            lines.push(format!(
+                "{} (truncated, +{}/-{})",
+                entry.path.display(),
+                entry.added,
+                entry.removed
+            ));
+        } else {
+            lines.push(format!("--- {} ---", entry.path.display()));
+            for line in entry.diff_text.lines() {
+                lines.push(line.to_string());
+            }
+        }
+    }
+    if !shown {
+        lines.push("no modified files to diff".to_string());
+    }
+    lines
+}
+
 /// 进程退出码常量（集中定义，避免各处魔数冲突）。
 ///
 /// 退出码分区：
@@ -81,6 +137,21 @@ fn redact_config_for_display(config: &deepseeknova_config::Config) -> deepseekno
 
 #[tokio::main]
 async fn main() -> Result<(), DeepseeknovaError> {
+    // `run_cli` 持有 `_telemetry_guard`：函数返回时 guard 已被 drop（Drop 中
+    // shutdown tracer provider、flush spans）。因此退出码在此统一处理——
+    // `std::process::exit` 放在 guard 析构之后，可保证 Paused / eval 门禁
+    // 失败等路径的遥测在进程结束前落盘；直接在内部 `process::exit` 会跳过
+    // 析构函数、丢失 spans。
+    let code = run_cli().await?;
+    if code != 0 {
+        std::process::exit(code);
+    }
+    Ok(())
+}
+
+/// 各子命令的实际入口。返回进程退出码（`0` = 成功；非零时由 [`main`] 在
+/// `_telemetry_guard` drop 后统一退出，语义见 `exit_code` 模块）。
+async fn run_cli() -> Result<i32, DeepseeknovaError> {
     let cli = Cli::parse();
 
     // TUI 全屏模式（alternate screen）下 stdout 被 ratatui 独占，任何
@@ -318,7 +389,11 @@ async fn main() -> Result<(), DeepseeknovaError> {
                 } else {
                     Box::new(runner)
                 };
-                stream_coordinator(&*runner, input).await?;
+                let code = stream_coordinator(&*runner, input).await?;
+                if code != 0 {
+                    // Paused 等非零退出码：向上返回，由 main 在 guard drop 后统一退出。
+                    return Ok(code);
+                }
             } else {
                 // ── Single-agent mode ─────────────────────────────────────
                 use deepseeknova_provider::cost::ModelRole;
@@ -363,7 +438,10 @@ async fn main() -> Result<(), DeepseeknovaError> {
                     images: Vec::new(),
                     model_override: model_args.model.clone(),
                 };
-                stream_events(&agent, input).await?;
+                let code = stream_events(&agent, input).await?;
+                if code != 0 {
+                    return Ok(code);
+                }
             }
         }
 
@@ -392,7 +470,10 @@ async fn main() -> Result<(), DeepseeknovaError> {
                 images: Vec::new(),
                 model_override: model.clone(),
             };
-            stream_events(&plan_runner, input).await?;
+            let code = stream_events(&plan_runner, input).await?;
+            if code != 0 {
+                return Ok(code);
+            }
         }
 
         // ── Scan (matcher + optional AI investigation) ───────────────────
@@ -581,16 +662,20 @@ async fn main() -> Result<(), DeepseeknovaError> {
             }
             if exit_code != 0 {
                 // 供 CI 门禁：1 = 条目级失败；2 = CI 门槛失败；3 = 两者。
-                std::process::exit(exit_code);
+                // 退出码向上返回，由 main 在 telemetry guard drop 后统一退出。
+                return Ok(exit_code);
             }
         }
 
         // ── Chat (with /new loop) ────────────────────────────────────────
         Some(Commands::Chat { model, resume, tui }) => {
             info!("chat: model={model:?}, resume={resume}, tui={tui}");
-            // 首启校验：无 provider / API key 缺失时给出 setup 引导并退出，
+            // 首启校验：无 provider / API key 缺失时给出 setup 引导并以
+            // CONFIG 退出码结束（由 main 在 guard drop 后统一退出），
             // 而不是在 TUI/REPL 启动中途裸错（曾 panic 或闪退）。
-            ensure_first_run_configured(&config, model.as_deref());
+            if let Some(code) = ensure_first_run_configured(&config, model.as_deref()) {
+                return Ok(code);
+            }
             // Compute the baseline reasoning effort from config so the
             // REPL knows what to restore when toggling thinking back on.
             let provider_cfg = resolve_provider_cfg(&config, model.as_deref())?;
@@ -799,7 +884,7 @@ async fn main() -> Result<(), DeepseeknovaError> {
                     .collect();
                 tui = tui.with_at_files(at_candidates);
                 tui.run().await?;
-                return Ok(());
+                return Ok(0);
             }
 
             let sessions_root = sessions_root(&config);
@@ -962,7 +1047,8 @@ async fn main() -> Result<(), DeepseeknovaError> {
                         Ok(Arc::new(agent) as Arc<dyn Runner>)
                     });
                 info!("serve: acp stdio mode");
-                return deepseeknova_serve::serve_acp(factory).await;
+                deepseeknova_serve::serve_acp(factory).await?;
+                return Ok(0);
             }
 
             // Share a pending-approvals map between the agent's approval
@@ -1177,15 +1263,30 @@ async fn main() -> Result<(), DeepseeknovaError> {
                     if ck.is_empty() {
                         println!("no checkpoints (path: {})", path.display());
                     }
-                    for (snap, clean) in ck.verify().await? {
+                    // entries 与 verify() 同序（均按 snapshots 顺序）；modified 行带变更行数。
+                    let entries = ck.diff_entries(DEFAULT_DIFF_MAX_BYTES).await?;
+                    for (i, (snap, clean)) in ck.verify().await?.into_iter().enumerate() {
                         let status = if clean { "unchanged" } else { "modified" };
+                        let change_count = entries
+                            .get(i)
+                            .and_then(|e| e.as_ref())
+                            .map(|d| format!(" (+{}/-{})", d.added, d.removed))
+                            .unwrap_or_default();
                         println!(
-                            "{} [{}] {} ({})",
+                            "{} [{}] {} ({}){}",
                             if clean { "✓" } else { "✗" },
                             status,
                             snap.path.display(),
-                            &snap.hash[..8.min(snap.hash.len())]
+                            &snap.hash[..8.min(snap.hash.len())],
+                            change_count
                         );
+                    }
+                }
+                cli::CheckpointAction::Diff { path: filter } => {
+                    let ck = CheckpointManager::load_from(&path)?;
+                    let entries = ck.diff_entries(DEFAULT_DIFF_MAX_BYTES).await?;
+                    for line in format_diff_entries(&entries, filter.as_deref()) {
+                        println!("{line}");
                     }
                 }
                 cli::CheckpointAction::Rollback { all } => {
@@ -1209,6 +1310,86 @@ async fn main() -> Result<(), DeepseeknovaError> {
                     ck.clear();
                     println!("cleared {n} snapshot(s)");
                 }
+            }
+        }
+
+        // ── Import（外部 Agent 配置导入：Claude / Codex）──────────────
+        Some(Commands::Import {
+            source,
+            apply,
+            scope,
+        }) => {
+            use deepseeknova_config::compat;
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let scope = match compat::import_scope_from_arg(scope) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return Ok(exit_code::CONFIG);
+                }
+            };
+
+            let plan = match source {
+                cli::ImportSource::Claude => compat::claude::build_plan(&cwd),
+                cli::ImportSource::Codex => compat::codex::build_plan(&cwd),
+            };
+
+            if plan.sources.is_empty() {
+                println!(
+                    "no {} configuration found (searched: ~/.claude/settings.json, ./.claude/settings.json, ./.mcp.json)",
+                    source_label(*source)
+                );
+                return Ok(0);
+            }
+            println!(
+                "source: {} — {} source file(s)",
+                plan.source.label(),
+                plan.sources.len()
+            );
+            for s in &plan.sources {
+                println!("  found: {}", s.display());
+            }
+            for item in &plan.items {
+                println!("  {}", item.preview_line());
+            }
+            if !plan.unmapped.is_empty() {
+                println!("warnings ({})", plan.unmapped.len());
+                for w in &plan.unmapped {
+                    println!("  ! {w}");
+                }
+            }
+            if plan.is_empty() && plan.unmapped.is_empty() {
+                println!("no importable items found");
+                return Ok(0);
+            }
+            let target = match scope.path(&cwd) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return Ok(exit_code::CONFIG);
+                }
+            };
+            println!(
+                "would write {} item(s) to {} ({})",
+                plan.items.len(),
+                target.display(),
+                scope_label(scope)
+            );
+
+            if *apply {
+                if target.exists() {
+                    println!(
+                        "note: rewriting {} — existing comments/formatting are not preserved",
+                        target.display()
+                    );
+                }
+                let (path, applied, skipped) = compat::apply::apply(&plan, scope, &cwd)?;
+                println!(
+                    "applied {applied} item(s) to {} (skipped {skipped})",
+                    path.display()
+                );
+            } else {
+                println!("run with --apply to write");
             }
         }
 
@@ -1332,7 +1513,9 @@ async fn main() -> Result<(), DeepseeknovaError> {
         None => {
             info!("no command provided — starting interactive chat");
             // 首启校验：裸命令是最可能的首用入口，无 provider/key 时给引导。
-            ensure_first_run_configured(&config, None);
+            if let Some(code) = ensure_first_run_configured(&config, None) {
+                return Ok(code);
+            }
             // Resolve baseline effort from the default provider config.
             let provider_cfg = resolve_provider_cfg(&config, None)?;
             let baseline_effort =
@@ -1411,7 +1594,7 @@ async fn main() -> Result<(), DeepseeknovaError> {
         }
     }
 
-    Ok(())
+    Ok(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -1529,9 +1712,13 @@ fn resolve_provider_cfg<'a>(
 
 /// 首启校验（进入需要模型的交互/对话分支前调用）：确认已配置至少一个
 /// provider 且其 API key 可解析（内联 `api_key` 或环境变量）。失败时打印
-/// 可操作的修复引导（指向 `deepseeknova-cli setup`）并以 `CONFIG` 退出码
-/// 退出——避免 fresh 环境「裸错误」甚至 panic 让用户无从下手。
-fn ensure_first_run_configured(config: &deepseeknova_config::Config, model: Option<&str>) {
+/// 可操作的修复引导（指向 `deepseeknova-cli setup`）并返回 `CONFIG` 退出码
+/// （由 `run_cli`/`main` 在 guard drop 后统一退出）——避免 fresh 环境
+/// 「裸错误」甚至 panic 让用户无从下手。校验通过返回 `None`。
+fn ensure_first_run_configured(
+    config: &deepseeknova_config::Config,
+    model: Option<&str>,
+) -> Option<i32> {
     let pcfg = match resolve_provider_cfg(config, model) {
         Ok(c) => c,
         Err(e) => {
@@ -1540,7 +1727,7 @@ fn ensure_first_run_configured(config: &deepseeknova_config::Config, model: Opti
             eprintln!("First time? Run `deepseeknova-cli setup` to create a config");
             eprintln!("interactively, or add a `[[providers]]` section to your config file.");
             eprintln!("The README quickstart shows a minimal config example.");
-            std::process::exit(exit_code::CONFIG);
+            return Some(exit_code::CONFIG);
         }
     };
     if pcfg.api_key.is_none() {
@@ -1554,9 +1741,10 @@ fn ensure_first_run_configured(config: &deepseeknova_config::Config, model: Opti
             eprintln!("Set the key for this provider, e.g. in your shell:");
             eprintln!("  export {env_name}=sk-...");
             eprintln!("or run `deepseeknova-cli setup` to configure a provider interactively.");
-            std::process::exit(exit_code::CONFIG);
+            return Some(exit_code::CONFIG);
         }
     }
+    None
 }
 
 /// Compact 覆盖模型判定：指针优先；指针未设而 B2 的 agent.compact_model
@@ -1997,6 +2185,7 @@ impl deepseeknova_tui::SessionController for TuiSessionController {
                 tool_calls: None,
                 tool_call_id: None,
                 reasoning_content: None,
+                reasoning_signature: None,
             },
             deepseeknova_core::Message {
                 role: deepseeknova_core::Role::Assistant,
@@ -2005,6 +2194,7 @@ impl deepseeknova_tui::SessionController for TuiSessionController {
                 tool_calls: None,
                 tool_call_id: None,
                 reasoning_content: None,
+                reasoning_signature: None,
             },
         ];
         let stored_input = RunInput {
@@ -2089,6 +2279,7 @@ impl deepseeknova_tui::SessionCheckpointController for TuiCheckpointController {
                         tool_calls: None,
                         tool_call_id: None,
                         reasoning_content: None,
+                        reasoning_signature: None,
                     });
                 }
                 drop(hist);
@@ -2100,7 +2291,10 @@ impl deepseeknova_tui::SessionCheckpointController for TuiCheckpointController {
 }
 
 /// Stream events from any [`Runner`] to stdout in a consistent format.
-async fn stream_events(runner: &dyn Runner, input: RunInput) -> Result<(), DeepseeknovaError> {
+///
+/// 返回进程退出码（`0` = 正常结束；`PAUSED` = 非交互 pause）。不再直接
+/// `std::process::exit`，由 `main` 在 telemetry guard drop 后统一退出。
+async fn stream_events(runner: &dyn Runner, input: RunInput) -> Result<i32, DeepseeknovaError> {
     let mut stream = runner.run_stream(input).await?;
     while let Some(event) = stream.next().await {
         match event? {
@@ -2136,16 +2330,24 @@ async fn stream_events(runner: &dyn Runner, input: RunInput) -> Result<(), Deeps
                     None => eprintln!("resume with: deepseeknova chat --resume"),
                 }
                 // 非交互（CI/脚本）可判定的专用退出码：10 = paused。
-                std::process::exit(exit_code::PAUSED);
+                // 返回退出码而非直接 process::exit——由 main 在 telemetry
+                // guard drop（spans flush）之后统一退出，避免析构被跳过。
+                return Ok(exit_code::PAUSED);
             }
             _ => {}
         }
     }
-    Ok(())
+    Ok(0)
 }
 
 /// Stream from a [`CoordinatorRunner`] — uses plan-aware display labels.
-async fn stream_coordinator(runner: &dyn Runner, input: RunInput) -> Result<(), DeepseeknovaError> {
+///
+/// 返回进程退出码（`0` = 正常结束；`PAUSED` = 非交互 pause），由 `main`
+/// 在 telemetry guard drop 后统一退出。
+async fn stream_coordinator(
+    runner: &dyn Runner,
+    input: RunInput,
+) -> Result<i32, DeepseeknovaError> {
     let mut stream = runner.run_stream(input).await?;
     while let Some(event) = stream.next().await {
         match event? {
@@ -2187,12 +2389,14 @@ async fn stream_coordinator(runner: &dyn Runner, input: RunInput) -> Result<(), 
                     None => eprintln!("resume with: deepseeknova chat --resume"),
                 }
                 // 非交互（CI/脚本）可判定的专用退出码：10 = paused。
-                std::process::exit(exit_code::PAUSED);
+                // 返回退出码而非直接 process::exit——由 main 在 telemetry
+                // guard drop（spans flush）之后统一退出，避免析构被跳过。
+                return Ok(exit_code::PAUSED);
             }
             _ => {}
         }
     }
-    Ok(())
+    Ok(0)
 }
 
 /// 非交互 CLI 的审批应答：`Ask` 一律拒绝（fail-closed），避免无人工确认时
@@ -2345,3 +2549,86 @@ fn truncate_str(s: &str, max: usize) -> String {
 // 本文件仅保留模块声明。
 #[cfg(test)]
 mod tests;
+
+// T15：退出码语义测试。`stream_events` / `stream_coordinator` 在 Paused
+// 分支不再直接 `std::process::exit`（那会跳过 `_telemetry_guard` 的 Drop
+// flush、丢失遥测），而是返回退出码由 `main` 在 guard drop 后统一退出。
+// 此处用假 Runner 固定事件流，验证退出码不变（PAUSED=10、正常=0）。
+#[cfg(test)]
+mod exit_code_semantics_tests {
+    use super::*;
+    use deepseeknova_core::runner::{RunEventStream, RunOutput};
+
+    struct PausedRunner {
+        session_id: Option<String>,
+    }
+
+    #[async_trait]
+    impl Runner for PausedRunner {
+        async fn run_stream(&self, _input: RunInput) -> Result<RunEventStream, DeepseeknovaError> {
+            Ok(Box::pin(tokio_stream::iter(vec![Ok(RunEvent::Paused {
+                reason: "budget_reached".to_string(),
+                session_id: self.session_id.clone(),
+            })])))
+        }
+    }
+
+    struct DoneRunner;
+
+    #[async_trait]
+    impl Runner for DoneRunner {
+        async fn run_stream(&self, _input: RunInput) -> Result<RunEventStream, DeepseeknovaError> {
+            Ok(Box::pin(tokio_stream::iter(vec![
+                Ok(RunEvent::TextDelta("hi".to_string())),
+                Ok(RunEvent::Done(RunOutput {
+                    text: "hi".to_string(),
+                    tool_calls: Vec::new(),
+                    usage: None,
+                })),
+            ])))
+        }
+    }
+
+    fn input() -> RunInput {
+        RunInput {
+            prompt: "test".to_string(),
+            images: Vec::new(),
+            model_override: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_events_paused_returns_paused_exit_code() {
+        let code = stream_events(
+            &PausedRunner {
+                session_id: Some("s1".into()),
+            },
+            input(),
+        )
+        .await
+        .unwrap();
+        // 进程不应被终止（Paused 分支不再 process::exit），而是返回 10 供
+        // main 在 telemetry guard drop 后统一退出。
+        assert_eq!(code, exit_code::PAUSED);
+    }
+
+    #[tokio::test]
+    async fn stream_events_done_returns_zero_exit_code() {
+        let code = stream_events(&DoneRunner, input()).await.unwrap();
+        assert_eq!(code, 0);
+    }
+
+    #[tokio::test]
+    async fn stream_coordinator_paused_returns_paused_exit_code() {
+        let code = stream_coordinator(&PausedRunner { session_id: None }, input())
+            .await
+            .unwrap();
+        assert_eq!(code, exit_code::PAUSED);
+    }
+
+    #[tokio::test]
+    async fn stream_coordinator_done_returns_zero_exit_code() {
+        let code = stream_coordinator(&DoneRunner, input()).await.unwrap();
+        assert_eq!(code, 0);
+    }
+}

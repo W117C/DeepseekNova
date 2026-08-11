@@ -30,6 +30,7 @@ use deepseeknova_core::{DeepseeknovaError, ToolContext, ToolSchema};
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 /// 派发出口抽象：`SubAgentRunner` 与 `DelegateEngine` 实现，供递归委派工具
 /// 把嵌套子代理调用送回各自引擎。
@@ -44,6 +45,20 @@ pub trait DelegationSink: Send + Sync {
         values: &InputValues,
         depth: usize,
     ) -> Result<String, DeepseeknovaError>;
+
+    /// 带父取消令牌的派发（T12 接线）。默认实现忽略令牌、回落到
+    /// [`Self::delegate`]；支持取消传播的 sink（如 [`crate::DelegateEngine`]）
+    /// 覆盖之，把父 run 的取消令牌透传到子代理执行。
+    async fn delegate_with_parent_cancel(
+        &self,
+        agent: &str,
+        goal: &str,
+        values: &InputValues,
+        depth: usize,
+        _parent_cancel: Option<CancellationToken>,
+    ) -> Result<String, DeepseeknovaError> {
+        self.delegate(agent, goal, values, depth).await
+    }
 }
 
 /// 当前子代理调用深度的执行期扩展。由子代理执行循环注入每个 ToolContext
@@ -151,7 +166,18 @@ impl Tool for RecursiveDelegateTool {
             _ => parsed.goal.clone(),
         };
         let values = InputValues::from(parsed.inputs.unwrap_or_default());
-        match sink.delegate(&parsed.agent, &goal, &values, next).await {
+        // T12：把当前子代理工具上下文的主取消令牌传给 sink——递归派发的
+        // 子代理执行使用其 child_token()，父 run 取消立即中止整条派发链。
+        match sink
+            .delegate_with_parent_cancel(
+                &parsed.agent,
+                &goal,
+                &values,
+                next,
+                Some(ctx.cancellation.clone()),
+            )
+            .await
+        {
             Ok(text) => Ok(format!("[delegate:{}] {text}", parsed.agent)),
             Err(e) => Ok(format!(
                 "delegate to '{}' failed at depth {next}: {e}",

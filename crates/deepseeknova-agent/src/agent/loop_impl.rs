@@ -6,6 +6,7 @@
 //! 与辅助项（`maybe_spawn_adversarial_review` / `UserHooks` 等）。
 
 use super::*;
+use deepseeknova_core::tool_hook::run_user_hook_sync;
 use deepseeknova_core::DeepseeknovaError;
 
 async fn wire_session_adversarial_review(
@@ -21,7 +22,9 @@ async fn wire_session_adversarial_review(
         return;
     }
     // F4：只取本 run 新增的 findings `[start_len..]`——共享 Agent 下并发/
-    // 历史 run 的 findings 不得触发或进入本 run 的对抗审查证据。
+    // 历史 run 的 findings 不得触发或进入本 run 的对抗审查证据。T11 起
+    // 调用方传入**本 run 局部 findings 暂存区**（start_len=0），并发 run
+    // 各归各 run，不再依赖「会话容器长度差分」近似。
     let findings: Vec<QualityFinding> = quality_findings
         .lock()
         .await
@@ -108,17 +111,39 @@ async fn attribute_pause_reason(
     }
 }
 
-/// 触发一组通知型用户 hooks（session_start / session_end / failure）：
-/// 任一命令失败（非 0 退出 / 超时 / 崩溃）仅 warn，不阻断主流程。空列表
-/// 零开销（不 spawn 进程）。
+/// 触发一组通知型用户 hooks（session_start / session_end / failure /
+/// tool_after）：任一命令失败（非 0 退出 / 超时 / 崩溃）仅 warn，不阻断
+/// 主流程。空列表零开销（不 spawn 进程）。
+///
+/// 保持同步签名：session / failure 事件可能经 MetricsGuard 的 Drop 路径
+/// 触发（Drop 中无法 await）。为避免阻塞 tokio worker（T19），多线程
+/// runtime 上用 `block_in_place` 把当前线程让出 worker 池再同步执行；
+/// current_thread / 无 runtime 上下文退化为直接同步执行（本就没有可让出
+/// 的 worker）。阻塞完成语义不变：返回时钩子已执行完毕。
 pub(crate) fn fire_user_notify_hooks(commands: &[UserHookCommand], payload: &HookPayload) {
-    for cmd in commands {
-        let run = run_user_hook(cmd, payload);
-        if !run.exec.is_allowed() {
-            warn!(
-                "user hook '{}' ({}) failed: {:?}",
-                cmd.command, payload.event, run.exec
-            );
+    if commands.is_empty() {
+        return;
+    }
+    let run_blocking = || {
+        for cmd in commands {
+            let run = run_user_hook_sync(cmd, payload);
+            if !run.exec.is_allowed() {
+                warn!(
+                    "user hook '{}' ({}) failed: {:?}",
+                    cmd.command, payload.event, run.exec
+                );
+            }
+        }
+    };
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            // T19：多线程 runtime 上把当前线程让出 worker 池再阻塞执行，
+            // 通知型钩子不占用 worker，其他任务可继续推进。
+            tokio::task::block_in_place(run_blocking);
+        }
+        _ => {
+            // current_thread runtime / 无 runtime 上下文：直接同步执行。
+            run_blocking();
         }
     }
 }
@@ -180,6 +205,7 @@ pub(crate) async fn run_agent_loop(
         tool_calls: None,
         tool_call_id: None,
         reasoning_content: None,
+        reasoning_signature: None,
     });
 
     // Auto 模型+思考路由：每 run 决策一次（而非每步），决策状态随 run 隔离，
@@ -216,24 +242,29 @@ pub(crate) async fn run_agent_loop(
     // 会话效能采集（局部 tracker，run 隔离）。
     // 用户 hooks 的 failure 事件在 MetricsGuard::emit 触发（run 终点的唯一
     // chokepoint，可精确区分 PausedMaxSteps/异常返回与成功/取消）。
+    // T11：run 局部 findings 暂存区——工具钩子写会话容器时同步写入本暂存区；
+    // 所有 run 级消费方（MetricsGuard/DiagnoseGuard/对抗审查/协议门）只读本
+    // 暂存区，起点恒为 0。并发 run 共享同一会话容器时各归各 run，不再用
+    // 「容器长度差分」近似（F4 的 try_lock 缓解只是降级，交错切片仍可能把
+    // 另一 run 的 findings 误切进本 run）；且每次 run 独立起步，会话容器
+    // 即使触顶（F9 上限）也不会让新 run 的 Blocking finding 被丢弃。
+    let run_findings: Arc<tokio::sync::Mutex<Vec<QualityFinding>>> =
+        Arc::new(tokio::sync::Mutex::new(Vec::new()));
     let mut metrics = MetricsGuard::new(
         metrics_hook,
-        quality_findings,
+        &run_findings,
         session_label.clone(),
         &user_hooks.failure,
         workspace_root.clone(),
     );
-    // F4：本 run 起始时会话 findings 长度。DiagnoseGuard 与对抗审查同样
-    // 按此起点切片，保证诊断报告/审查只含本 run 新增，不被并发 run 或
-    // 历史 run 的 findings 污染（MetricsGuard 内部也按同一时刻切片）。
-    let quality_start_len = quality_findings.lock().await.len();
     // 任务质量闭环 B：失败诊断采集（Paused/failed 结束路径产出报告；
-    // 成功路径 suppress 关闭；Drop 兜底异常路径）。
+    // 成功路径 suppress 关闭；Drop 兜底异常路径）。findings 同样接本 run
+    // 局部暂存区（start_len=0 = 只含本 run），并发/历史 run 互不污染。
     let mut diagnose = DiagnoseGuard::new(
         diagnose_hook,
         session_label.clone(),
-        Arc::clone(quality_findings),
-        quality_start_len,
+        Arc::clone(&run_findings),
+        0,
     );
     diagnose.phase_enter("plan");
     // 协议门控（阶段3）：会话级阶段运行器；门集合为空时走零成本路径。
@@ -333,8 +364,8 @@ pub(crate) async fn run_agent_loop(
                         adversarial_review_enabled,
                         &input.prompt,
                         &*memory.read().await,
-                        quality_findings,
-                        quality_start_len,
+                        &run_findings,
+                        0,
                     )
                     .await;
                     diagnose
@@ -371,8 +402,8 @@ pub(crate) async fn run_agent_loop(
                     adversarial_review_enabled,
                     &input.prompt,
                     &*memory.read().await,
-                    quality_findings,
-                    quality_start_len,
+                    &run_findings,
+                    0,
                 )
                 .await;
                 diagnose
@@ -479,9 +510,10 @@ pub(crate) async fn run_agent_loop(
         // LLM 调用前推进。违规进事件流；stats 同步给 MetricsGuard。
         if protocol_active {
             if step == 0 {
-                // Bugbot #12：findings 接会话质量容器实时快照（首轮通常为空，
-                // 但自定义门可依赖 ctx.findings 的非空语义）。
-                let findings = quality_findings.lock().await.clone();
+                // Bugbot #12：findings 接 run 局部质量快照（首轮通常为空，
+                // 但自定义门可依赖 ctx.findings 的非空语义）。T11：只读
+                // 本 run 暂存区，并发 run 各归各 run。
+                let findings = run_findings.lock().await.clone();
                 let ctx =
                     phase_runner.build_ctx(Phase::Understand, verify_settings.is_some(), findings);
                 let violations = phase_runner.transition(Phase::Understand, &protocol_gates, &ctx);
@@ -503,7 +535,7 @@ pub(crate) async fn run_agent_loop(
                 let (pv, pt) = phase_runner.stats();
                 metrics.sync_protocol_stats(pv, pt);
             }
-            let findings = quality_findings.lock().await.clone();
+            let findings = run_findings.lock().await.clone();
             let ctx = phase_runner.build_ctx(Phase::Plan, verify_settings.is_some(), findings);
             let violations = phase_runner.transition(Phase::Plan, &protocol_gates, &ctx);
             tx.send(Ok(RunEvent::PhaseTransition {
@@ -541,6 +573,7 @@ pub(crate) async fn run_agent_loop(
             user_hooks,
             session_id,
             quality_findings,
+            &run_findings,
             &mut quality_blocked,
             permission.as_ref(),
             approval.as_ref(),
@@ -589,8 +622,8 @@ pub(crate) async fn run_agent_loop(
                                 // 计数含本轮 passed → 通过）。
                                 if protocol_active {
                                     phase_runner.observe_verify(true);
-                                    // Bugbot #12：findings 接会话质量快照。
-                                    let findings = quality_findings.lock().await.clone();
+                                    // Bugbot #12：findings 接 run 局部质量快照。
+                                    let findings = run_findings.lock().await.clone();
                                     let ctx = phase_runner.build_ctx(Phase::Verify, true, findings);
                                     let violations = phase_runner.transition(
                                         Phase::Verify,
@@ -654,6 +687,7 @@ pub(crate) async fn run_agent_loop(
                                     tool_calls: None,
                                     tool_call_id: None,
                                     reasoning_content: None,
+                                    reasoning_signature: None,
                                 });
                                 continue; // 回炉修复，下一次 Complete 再验证
                             }
@@ -681,8 +715,8 @@ pub(crate) async fn run_agent_loop(
                                     adversarial_review_enabled,
                                     &input.prompt,
                                     &*memory.read().await,
-                                    quality_findings,
-                                    quality_start_len,
+                                    &run_findings,
+                                    0,
                                 )
                                 .await;
                                 diagnose
@@ -735,6 +769,7 @@ pub(crate) async fn run_agent_loop(
                                         tool_calls: None,
                                         tool_call_id: None,
                                         reasoning_content: None,
+                                        reasoning_signature: None,
                                     });
                                     continue; // 回炉修复，下一次 Complete 再验证
                                 }
@@ -762,8 +797,8 @@ pub(crate) async fn run_agent_loop(
                                         adversarial_review_enabled,
                                         &input.prompt,
                                         &*memory.read().await,
-                                        quality_findings,
-                                        quality_start_len,
+                                        &run_findings,
+                                        0,
                                     )
                                     .await;
                                     diagnose
@@ -843,6 +878,7 @@ pub(crate) async fn run_agent_loop(
                                     tool_calls: None,
                                     tool_call_id: None,
                                     reasoning_content: None,
+                                    reasoning_signature: None,
                                 });
                                 continue; // 回炉修复，下一次 Complete 再审
                             }
@@ -898,8 +934,8 @@ pub(crate) async fn run_agent_loop(
                     // 反思记录即视为已产出 lesson（memory_distill 钩子在
                     // run_stream 层，主循环不可见）。
                     phase_runner.set_has_lesson(metrics.reflection_count > 0);
-                    // Bugbot #12：findings 接会话质量快照。
-                    let findings = quality_findings.lock().await.clone();
+                    // Bugbot #12：findings 接 run 局部质量快照。
+                    let findings = run_findings.lock().await.clone();
                     let ctx =
                         phase_runner.build_ctx(Phase::Distill, verify_settings.is_some(), findings);
                     let violations = phase_runner.transition(Phase::Distill, &protocol_gates, &ctx);
@@ -936,8 +972,8 @@ pub(crate) async fn run_agent_loop(
                     adversarial_review_enabled,
                     &input.prompt,
                     &*memory.read().await,
-                    quality_findings,
-                    quality_start_len,
+                    &run_findings,
+                    0,
                 )
                 .await;
                 if unverified {
@@ -978,8 +1014,8 @@ pub(crate) async fn run_agent_loop(
                         adversarial_review_enabled,
                         &input.prompt,
                         &*memory.read().await,
-                        quality_findings,
-                        quality_start_len,
+                        &run_findings,
+                        0,
                     )
                     .await;
                     diagnose
@@ -1017,8 +1053,8 @@ pub(crate) async fn run_agent_loop(
             adversarial_review_enabled,
             &input.prompt,
             &*memory.read().await,
-            quality_findings,
-            quality_start_len,
+            &run_findings,
+            0,
         )
         .await;
         diagnose
@@ -1109,6 +1145,7 @@ async fn stream_and_process_turn(
     user_hooks: &UserHooks,
     session_id: &str,
     quality_findings: &Arc<tokio::sync::Mutex<Vec<QualityFinding>>>,
+    run_findings: &Arc<tokio::sync::Mutex<Vec<QualityFinding>>>,
     quality_blocked: &mut bool,
     permission: Option<&Arc<PermissionGate>>,
     approval: Option<&Arc<dyn ApprovalResponder>>,
@@ -1147,6 +1184,9 @@ async fn stream_and_process_turn(
 
     let mut text_buf = String::new();
     let mut reasoning_buf = String::new();
+    // T12 收尾：流式 signature（signature_delta）随 reasoning 一并保存，
+    // 组装 assistant 消息时写入 reasoning_signature（多轮回放必需）。
+    let mut reasoning_signature: Option<String> = None;
     let mut usage: Option<Usage> = None;
     let mut pending_calls: Vec<PendingToolCall> = Vec::new();
 
@@ -1168,6 +1208,9 @@ async fn stream_and_process_turn(
             }
             Chunk::ReasoningDelta { text, signature } => {
                 reasoning_buf.push_str(&text);
+                if reasoning_signature.is_none() {
+                    reasoning_signature = signature.clone();
+                }
                 tx.send(Ok(RunEvent::ReasoningDelta { text, signature }))
                     .await
                     .ok();
@@ -1241,6 +1284,7 @@ async fn stream_and_process_turn(
             } else {
                 Some(reasoning_buf.clone())
             },
+            reasoning_signature: reasoning_signature.clone(),
         });
 
         let final_calls: Vec<ToolCall> = pending_calls
@@ -1290,6 +1334,7 @@ async fn stream_and_process_turn(
             } else {
                 Some(reasoning_buf.clone())
             },
+            reasoning_signature: reasoning_signature.clone(),
         });
 
         // ── 协议门控（阶段3）：Execute 阶段边界（工具执行前）──
@@ -1304,8 +1349,8 @@ async fn stream_and_process_turn(
         let mut protocol_block: Option<String> = None;
         if !protocol_gates.is_empty() {
             phase_runner.set_has_plan_text(!text_buf.is_empty());
-            // Bugbot #12：findings 接会话质量快照。
-            let findings = quality_findings.lock().await.clone();
+            // Bugbot #12：findings 接 run 局部质量快照。
+            let findings = run_findings.lock().await.clone();
             let ctx = phase_runner.build_ctx(Phase::Execute, false, findings);
             let violations = phase_runner.transition(Phase::Execute, protocol_gates, &ctx);
             tx.send(Ok(RunEvent::PhaseTransition {
@@ -1562,7 +1607,7 @@ async fn stream_and_process_turn(
                     session_id,
                 };
                 for cmd in &user_hooks.tool_before {
-                    let run = run_user_hook(cmd, &payload);
+                    let run = run_user_hook(cmd, &payload).await;
                     if !run.exec.is_allowed() {
                         gate_block = Some(format!(
                             "blocked by user hook '{}' (fail-closed: {:?})",
@@ -1834,13 +1879,18 @@ async fn stream_and_process_turn(
                     }
                     // F9：会话级 findings 有界累积——超限丢弃新 finding 并仅
                     // warn 一次（长会话保护；避免 Vec::remove(0) 的 O(n) 搬迁）。
-                    // 事件流照常发出（用户可见），仅不入会话累计。与 MetricsGuard
-                    // 的 run 级差分切片（F4）兼容：切片起点为 run 开始时长度，
-                    // 丢弃只会让切片更短，不会混入他 run 数据。
+                    // 事件流照常发出（用户可见），仅不入累计。
+                    // T11：会话容器与 run 局部暂存区**同步**写入（同一批次内
+                    // 按同一上限截断）。run 局部暂存区供本 run 的
+                    // MetricsGuard/DiagnoseGuard/对抗审查/协议门消费，起点恒
+                    // 为 0——并发 run 各归各 run，不再依赖「会话容器长度差分」
+                    // 近似；且每次 run 独立起步，即使会话容器已触顶，新 run 的
+                    // Blocking finding 依然进入本 run 暂存区（可见、可诊断）。
                     let mut dropped_warned = false;
                     let mut emitted = Vec::with_capacity(findings.len());
                     {
                         let mut qf = quality_findings.lock().await;
+                        let mut rlf = run_findings.lock().await;
                         for finding in findings {
                             if finding.severity == FindingSeverity::Blocking {
                                 *quality_blocked = true;
@@ -1855,6 +1905,17 @@ async fn stream_and_process_turn(
                                 }
                             } else {
                                 qf.push(finding.clone());
+                            }
+                            if rlf.len() >= MAX_QUALITY_FINDINGS {
+                                if !dropped_warned {
+                                    warn!(
+                                        "quality findings exceeded cap ({}); dropping new findings",
+                                        MAX_QUALITY_FINDINGS
+                                    );
+                                    dropped_warned = true;
+                                }
+                            } else {
+                                rlf.push(finding.clone());
                             }
                             emitted.push(finding);
                         }
@@ -1885,6 +1946,7 @@ async fn stream_and_process_turn(
                 tool_calls: None,
                 tool_call_id: Some(call.id.clone()),
                 reasoning_content: None,
+                reasoning_signature: None,
             });
         }
 
@@ -1972,7 +2034,15 @@ async fn execute_tool_call(
             &security,
             &extensions,
         );
-        match tool.execute(&ctx, &call.arguments).await {
+        // T12 接线补面：工具执行包 select!——父取消（cancel 令牌）立即打断
+        // 阻塞中的工具（future drop），返回取消错误文本。子代理经
+        // `run_stream_with_parent_cancel` 传入的父令牌在此生效；顶层 run 的
+        // Ctrl-C 取消同路径处理（此前主循环工具执行无取消分支，阻塞工具
+        // 无法被父取消中断）。
+        match tokio::select! {
+            r = tool.execute(&ctx, &call.arguments) => r,
+            _ = cancel.cancelled() => Err(deepseeknova_core::DeepseeknovaError::Cancelled),
+        } {
             Ok(output) => output,
             Err(e) => {
                 let err_str = format!("{e:#}");
@@ -2025,6 +2095,7 @@ async fn compress_observation(obs: &ObserveSettings, tool: &str, raw: &str) -> O
         tool_calls: None,
         tool_call_id: None,
         reasoning_content: None,
+        reasoning_signature: None,
     }];
     let validated = deepseeknova_provider::ValidatedRequest::new(&msgs, &[]).ok()?;
     let msg = obs.provider.generate(validated).await.ok()?;
@@ -2033,5 +2104,330 @@ async fn compress_observation(obs: &ObserveSettings, tool: &str, raw: &str) -> O
         None
     } else {
         Some(capped)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::MockProvider;
+    use deepseeknova_core::types::ToolSchema;
+    use std::sync::Arc;
+
+    /// 固定返回给定文本的写类工具桩（驱动工具钩子产 findings）。
+    struct OkTool {
+        name: &'static str,
+        result: String,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for OkTool {
+        fn schema(&self) -> ToolSchema {
+            ToolSchema {
+                name: self.name.to_string(),
+                description: "ok tool".to_string(),
+                parameters: serde_json::json!({"type":"object","properties":{}}),
+            }
+        }
+        async fn execute(
+            &self,
+            _ctx: &ToolContext,
+            _args: &str,
+        ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
+            Ok(self.result.clone())
+        }
+    }
+
+    /// 执行前在两个并发 run 之间同步的写类工具桩：双方都进入才放行，强制
+    /// 两 run 的工具执行 / 写 findings 交错（T11 并发交叉测试用）。
+    struct BarrierOkTool {
+        barrier: Arc<tokio::sync::Barrier>,
+        result: String,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for BarrierOkTool {
+        fn schema(&self) -> ToolSchema {
+            ToolSchema {
+                name: "write_file".to_string(),
+                description: "barrier tool".to_string(),
+                parameters: serde_json::json!({"type":"object","properties":{}}),
+            }
+        }
+        async fn execute(
+            &self,
+            _ctx: &ToolContext,
+            _args: &str,
+        ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
+            self.barrier.wait().await;
+            Ok(self.result.clone())
+        }
+    }
+
+    /// after 恒产出 1 条 Blocking finding 的钩子。
+    struct OneFindingHook;
+
+    impl ToolHook for OneFindingHook {
+        fn name(&self) -> &str {
+            "one-finding-hook"
+        }
+        fn after(
+            &self,
+            _ctx: &ToolHookCtx,
+            _call: &ToolCall,
+            _result: &str,
+        ) -> Vec<QualityFinding> {
+            vec![QualityFinding {
+                rule: "run-hook".into(),
+                severity: FindingSeverity::Blocking,
+                passed: false,
+                evidence: "run".into(),
+            }]
+        }
+    }
+
+    /// after 恒产出 N 条 Warning finding 的钩子（超限截断测试）。
+    struct FloodFindingHook {
+        count: usize,
+    }
+
+    impl ToolHook for FloodFindingHook {
+        fn name(&self) -> &str {
+            "flood-finding-hook"
+        }
+        fn after(
+            &self,
+            _ctx: &ToolHookCtx,
+            _call: &ToolCall,
+            _result: &str,
+        ) -> Vec<QualityFinding> {
+            (0..self.count)
+                .map(|i| QualityFinding {
+                    rule: format!("flood-{i}"),
+                    severity: FindingSeverity::Warning,
+                    passed: false,
+                    evidence: "flood".into(),
+                })
+                .collect()
+        }
+    }
+
+    /// 直连 `run_agent_loop` 的最小装配（单工具轮 + 完成文本）。事件流由
+    /// 独立 drain 任务并发消费，避免 64 缓冲填满阻塞 findings 写回。
+    async fn run_loop_once(
+        provider: Arc<dyn Provider>,
+        tools: Vec<Arc<dyn Tool>>,
+        tool_hooks: Vec<Arc<dyn ToolHook>>,
+        quality_findings: &Arc<tokio::sync::Mutex<Vec<QualityFinding>>>,
+        metrics_hook: Option<MetricsHook>,
+    ) {
+        let (tx, mut rx) = mpsc::channel(64);
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        let memory = Arc::new(tokio::sync::RwLock::new(Memory::new()));
+        let cancel = CancellationToken::new();
+        let _ = run_agent_loop(
+            provider,
+            tools,
+            5,
+            None,
+            memory,
+            RunInput {
+                prompt: "write a file".into(),
+                images: vec![],
+                model_override: None,
+            },
+            &tx,
+            &cancel,
+            std::env::temp_dir(),
+            SecurityContext::with_safe_defaults(),
+            None,
+            None,
+            true,
+            Vec::new(),
+            true,
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            metrics_hook,
+            None,
+            &tool_hooks,
+            &UserHooks::default(),
+            quality_findings,
+            None,
+            Vec::new(),
+            false,
+        )
+        .await;
+    }
+
+    /// T11：并发交叉——两 run 共享同一会话容器并发执行，scorecard 各归各 run
+    /// （不把另一 run 的 findings 误切进本 run）。修复前 MetricsGuard 依赖
+    /// 「会话容器长度差分」，交错切片可能把并发 run 的 findings 混进本 run；
+    /// 修复后各 run 消费自己的 run 局部暂存区，恒只含本 run。
+    #[tokio::test]
+    async fn concurrent_runs_scorecards_are_run_isolated() {
+        let quality_findings = Arc::new(tokio::sync::Mutex::new(Vec::<QualityFinding>::new()));
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let fired = Arc::new(std::sync::Mutex::new(Vec::<QualitySummary>::new()));
+
+        let run_one = |summaries: Arc<std::sync::Mutex<Vec<QualitySummary>>>,
+                       barrier: Arc<tokio::sync::Barrier>| {
+            let provider = Arc::new(MockProvider::tool_call(
+                "write_file",
+                r#"{"path":"src/a.rs","content":"x"}"#,
+                "written",
+                "done",
+            ));
+            let tool: Arc<dyn Tool> = Arc::new(BarrierOkTool {
+                barrier,
+                result: "written".into(),
+            });
+            let hook: MetricsHook = {
+                let summaries = summaries.clone();
+                Arc::new(move |_snap: SessionSnapshot, summary: QualitySummary| {
+                    summaries
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(summary);
+                })
+            };
+            let tool_hooks: Vec<Arc<dyn ToolHook>> = vec![Arc::new(OneFindingHook)];
+            run_loop_once(
+                provider,
+                vec![tool],
+                tool_hooks,
+                &quality_findings,
+                Some(hook),
+            )
+        };
+
+        let a = run_one(fired.clone(), barrier.clone());
+        let b = run_one(fired.clone(), barrier.clone());
+        tokio::join!(a, b);
+
+        let summaries = fired.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(
+            summaries.len(),
+            2,
+            "two concurrent runs must fire two summaries"
+        );
+        let total: usize = summaries.iter().map(|s| s.findings.len()).sum();
+        assert_eq!(total, 2, "total findings across both summaries must be 2");
+        for s in summaries.iter() {
+            assert_eq!(
+                s.findings.len(),
+                1,
+                "each run's summary must contain exactly its own finding"
+            );
+        }
+    }
+
+    /// T11：触顶后新 run 的 Blocking finding 仍可见——run 1 灌满会话容器
+    /// （MAX_QUALITY_FINDINGS 上限），run 2 的 Blocking finding 仍进入本 run
+    /// 局部暂存区并被 scorecard 看到（修复前被 F9 超限丢弃，serve 长驻进程
+    /// 的后续 run 的 scorecard/diagnose 全丢）。
+    #[tokio::test]
+    async fn new_run_blocking_finding_visible_after_session_cap() {
+        let quality_findings = Arc::new(tokio::sync::Mutex::new(Vec::<QualityFinding>::new()));
+        let fired = Arc::new(std::sync::Mutex::new(Vec::<QualitySummary>::new()));
+
+        // run 1：灌满会话容器（超限截断，事件流全发）。
+        {
+            let provider = Arc::new(MockProvider::tool_call(
+                "write_file",
+                r#"{"path":"src/a.rs","content":"x"}"#,
+                "written",
+                "done",
+            ));
+            let tool: Arc<dyn Tool> = Arc::new(OkTool {
+                name: "write_file",
+                result: "written".into(),
+            });
+            let hook: MetricsHook = {
+                let fired = fired.clone();
+                Arc::new(move |_snap: SessionSnapshot, summary: QualitySummary| {
+                    fired
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(summary);
+                })
+            };
+            let tool_hooks: Vec<Arc<dyn ToolHook>> = vec![Arc::new(FloodFindingHook {
+                count: MAX_QUALITY_FINDINGS + 1,
+            })];
+            run_loop_once(
+                provider,
+                vec![tool],
+                tool_hooks,
+                &quality_findings,
+                Some(hook),
+            )
+            .await;
+        }
+
+        // run 2：单条 Blocking finding —— 会话容器虽已触顶，本 run 暂存区
+        // 独立起步，scorecard 仍可见。
+        {
+            let provider = Arc::new(MockProvider::tool_call(
+                "write_file",
+                r#"{"path":"src/b.rs","content":"y"}"#,
+                "written",
+                "done",
+            ));
+            let tool: Arc<dyn Tool> = Arc::new(OkTool {
+                name: "write_file",
+                result: "written".into(),
+            });
+            let hook: MetricsHook = {
+                let fired = fired.clone();
+                Arc::new(move |_snap: SessionSnapshot, summary: QualitySummary| {
+                    fired
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(summary);
+                })
+            };
+            let tool_hooks: Vec<Arc<dyn ToolHook>> = vec![Arc::new(OneFindingHook)];
+            run_loop_once(
+                provider,
+                vec![tool],
+                tool_hooks,
+                &quality_findings,
+                Some(hook),
+            )
+            .await;
+        }
+
+        let summaries = fired.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(summaries.len(), 2, "two runs must fire two summaries");
+        assert_eq!(
+            summaries[0].findings.len(),
+            MAX_QUALITY_FINDINGS,
+            "run 1 (flood) summary capped at MAX_QUALITY_FINDINGS"
+        );
+        assert_eq!(
+            summaries[1].findings.len(),
+            1,
+            "run 2 must still see its own Blocking finding after session cap"
+        );
+        assert!(
+            summaries[1].findings[0].severity == FindingSeverity::Blocking,
+            "run 2 finding must be Blocking"
+        );
     }
 }

@@ -164,6 +164,18 @@ pub enum Commands {
         #[command(subcommand)]
         action: CheckpointAction,
     },
+    /// 导入外部 Agent 工具配置（Claude Code / Codex）为分层配置。
+    /// 默认仅预览映射计划；`--apply` 才写入目标配置层。
+    Import {
+        #[command(subcommand)]
+        source: ImportSource,
+        /// 应用导入（默认仅预览）。
+        #[arg(long, global = true)]
+        apply: bool,
+        /// 写入层级：user（~/.deepseeknova/config.toml，默认）/ project（deepseeknova.toml）。
+        #[arg(long, global = true, default_value = "user")]
+        scope: String,
+    },
     /// 生成项目后置产出（Wiki / 知识卡片，A2）。
     Artifacts {
         #[command(subcommand)]
@@ -266,8 +278,14 @@ pub enum MemoryAction {
 
 #[derive(Subcommand)]
 pub enum CheckpointAction {
-    /// 列出当前快照与文件状态（unchanged/modified）。
+    /// 列出当前快照与文件状态（unchanged/modified），modified 行带变更行数。
     List,
+    /// 显示快照与当前文件的内容级 diff（+ 新增 / - 删除）。
+    Diff {
+        /// 只显示该文件的 diff；缺省显示全部 modified 文件的 diff。
+        #[arg(long)]
+        path: Option<String>,
+    },
     /// 回滚最近一个快照；--all 回滚全部。
     Rollback {
         #[arg(long)]
@@ -275,6 +293,15 @@ pub enum CheckpointAction {
     },
     /// 丢弃全部快照（不恢复文件）。
     Clear,
+}
+
+/// 配置导入来源（`import claude` / `import codex`）。
+#[derive(Subcommand, Clone, Copy, Debug)]
+pub enum ImportSource {
+    /// Claude Code（扫描 ~/.claude/settings.json、.claude/settings.json、.mcp.json）。
+    Claude,
+    /// Codex CLI（扫描 ~/.codex/config.toml、.codex/config.toml）。
+    Codex,
 }
 
 #[derive(Subcommand)]
