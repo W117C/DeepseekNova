@@ -24,6 +24,9 @@ mod setup;
 mod tui_undo;
 mod worktree;
 
+/// checkpoint diff 单文件内容超过该字节数时只统计行数、不展开全文。
+const DEFAULT_DIFF_MAX_BYTES: usize = 256 * 1024;
+
 /// 进程退出码常量（集中定义，避免各处魔数冲突）。
 ///
 /// 退出码分区：
@@ -1177,15 +1180,52 @@ async fn main() -> Result<(), DeepseeknovaError> {
                     if ck.is_empty() {
                         println!("no checkpoints (path: {})", path.display());
                     }
-                    for (snap, clean) in ck.verify().await? {
+                    // entries 与 verify() 同序（均按 snapshots 顺序）；modified 行带变更行数。
+                    let entries = ck.diff_entries(DEFAULT_DIFF_MAX_BYTES).await?;
+                    for (i, (snap, clean)) in ck.verify().await?.into_iter().enumerate() {
                         let status = if clean { "unchanged" } else { "modified" };
+                        let change_count = entries
+                            .get(i)
+                            .and_then(|e| e.as_ref())
+                            .map(|d| format!(" (+{}/-{})", d.added, d.removed))
+                            .unwrap_or_default();
                         println!(
-                            "{} [{}] {} ({})",
+                            "{} [{}] {} ({}){}",
                             if clean { "✓" } else { "✗" },
                             status,
                             snap.path.display(),
-                            &snap.hash[..8.min(snap.hash.len())]
+                            &snap.hash[..8.min(snap.hash.len())],
+                            change_count
                         );
+                    }
+                }
+                cli::CheckpointAction::Diff { path: filter } => {
+                    let ck = CheckpointManager::load_from(&path)?;
+                    let entries = ck.diff_entries(DEFAULT_DIFF_MAX_BYTES).await?;
+                    let mut shown = false;
+                    for entry in entries.into_iter().flatten() {
+                        if let Some(filter) = &filter {
+                            if entry.path != *filter {
+                                continue;
+                            }
+                        }
+                        shown = true;
+                        if entry.truncated {
+                            println!(
+                                "{} (truncated, +{}/-{})",
+                                entry.path.display(),
+                                entry.added,
+                                entry.removed
+                            );
+                        } else {
+                            println!("--- {} ---", entry.path.display());
+                            for line in entry.diff_text.lines() {
+                                println!("{line}");
+                            }
+                        }
+                    }
+                    if !shown {
+                        println!("no modified files to diff");
                     }
                 }
                 cli::CheckpointAction::Rollback { all } => {

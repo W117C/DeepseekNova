@@ -325,12 +325,135 @@ impl CheckpointManager {
             lines.join("\n")
         ))
     }
+
+    /// Build content-level diffs (snapshot vs current file) for every snapshot.
+    ///
+    /// Unchanged files yield `None`; modified files yield a [`FileDiff`] with
+    /// line-level `+`/`-`/` `-prefixed text (via `similar` Myers diff).
+    ///
+    /// 大文件防护：单文件内容超过 `max_bytes` 时，`FileDiff::truncated` 置位
+    /// 且 `diff_text` 只保留变更行统计摘要，不展开全文，避免失控的内存与输出。
+    pub async fn diff_entries(
+        &self,
+        max_bytes: usize,
+    ) -> Result<Vec<Option<FileDiff>>, DeepseeknovaError> {
+        if self.snapshots.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut results = Vec::new();
+        for snap in &self.snapshots {
+            let current = if snap.path.exists() {
+                let bytes = tokio::fs::read(&snap.path).await?;
+                String::from_utf8_lossy(&bytes).to_string()
+            } else {
+                String::new()
+            };
+            let snapshot = snap.content.clone();
+
+            // 哈希一致 → 无实际变更，返回 None（与 verify() 语义一致）。
+            let current_hash = hex::encode(Sha256::digest(current.as_bytes()));
+            if current_hash == snap.hash {
+                results.push(None);
+                continue;
+            }
+
+            let truncated = snapshot.len() > max_bytes || current.len() > max_bytes;
+            let (added, removed, diff_text) = if truncated {
+                // 只统计行数差异，不产出全文 diff。
+                let snap_lines = snapshot.lines().count();
+                let current_lines = current.lines().count();
+                (
+                    current_lines.saturating_sub(snap_lines),
+                    snap_lines.saturating_sub(current_lines),
+                    String::new(),
+                )
+            } else {
+                text_diff(&snapshot, &current)
+            };
+
+            results.push(Some(FileDiff {
+                path: snap.path.clone(),
+                hash: snap.hash.clone(),
+                added,
+                removed,
+                diff_text,
+                truncated,
+            }));
+        }
+        Ok(results)
+    }
 }
 
 impl Default for CheckpointManager {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ---------------------------------------------------------------------------
+// 内容级 diff（快照 vs 当前文件）
+// ---------------------------------------------------------------------------
+
+/// 单个文件的快照 vs 当前内容 diff 结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileDiff {
+    /// 被快照的文件路径。
+    pub path: PathBuf,
+    /// 快照内容的 SHA-256 哈希（十六进制）。
+    pub hash: String,
+    /// 新增行数（`+` 行）。
+    pub added: usize,
+    /// 删除行数（`-` 行）。
+    pub removed: usize,
+    /// 行级 diff 文本：每行以 `+` / `-` / ` ` 前缀，由调用方决定展示。
+    /// `truncated` 置位时为空字符串。
+    pub diff_text: String,
+    /// 是否因超过 `max_bytes` 而省略了全文（仅统计行数）。
+    pub truncated: bool,
+}
+
+impl FileDiff {
+    /// `path: hash (+added/-removed)` 形式的一行摘要。
+    pub fn summary(&self) -> String {
+        format!(
+            "{}: {} (+{}/-{})",
+            self.path.display(),
+            &self.hash[..8.min(self.hash.len())],
+            self.added,
+            self.removed
+        )
+    }
+}
+
+/// 计算两段文本的行级 Myers diff，返回 (added, removed, diff_text)。
+/// 用 `similar` 的 `TextDiff::from_lines`，逐变更行加 `+` / `-` / ` ` 前缀。
+fn text_diff(old: &str, new: &str) -> (usize, usize, String) {
+    use similar::{ChangeTag, TextDiff};
+
+    let diff = TextDiff::from_lines(old, new);
+    let mut buf = String::new();
+    let mut added = 0usize;
+    let mut removed = 0usize;
+    for change in diff.iter_all_changes() {
+        match change.tag() {
+            ChangeTag::Delete => removed += 1,
+            ChangeTag::Insert => added += 1,
+            ChangeTag::Equal => {}
+        }
+        let prefix = match change.tag() {
+            ChangeTag::Delete => "-",
+            ChangeTag::Insert => "+",
+            ChangeTag::Equal => " ",
+        };
+        buf.push_str(prefix);
+        buf.push_str(change.value());
+        // iter_all_changes 的 value() 已含行尾换行；无换行的末尾行补一个。
+        if !change.value().ends_with('\n') {
+            buf.push('\n');
+        }
+    }
+    (added, removed, buf)
 }
 
 // ---------------------------------------------------------------------------
@@ -806,6 +929,93 @@ mod tests {
         let summary = ck.diff_summary().await.unwrap();
         assert!(summary.contains("modified"));
         assert!(summary.contains("diff.txt"));
+    }
+
+    #[tokio::test]
+    async fn diff_entries_marks_add_remove() {
+        let dir = temp_dir();
+        let f = dir.path().join("d.txt");
+        write_file(&f, "line1\nline2\nline3\n");
+
+        let mut ck = CheckpointManager::new();
+        ck.snapshot_file(&f).await.unwrap();
+
+        // 删除 line2、新增 line4。
+        write_file(&f, "line1\nline3\nline4\n");
+
+        let entries = ck.diff_entries(1 << 20).await.unwrap();
+        assert_eq!(entries.len(), 1, "一个快照一条 entry");
+        let diff = entries[0].clone().expect("modified 文件应产出 diff");
+        assert_eq!(diff.added, 1);
+        assert_eq!(diff.removed, 1);
+        assert!(!diff.truncated);
+        assert!(
+            diff.diff_text.contains("-line2"),
+            "应含删除行: {}",
+            diff.diff_text
+        );
+        assert!(
+            diff.diff_text.contains("+line4"),
+            "应含新增行: {}",
+            diff.diff_text
+        );
+        assert!(
+            diff.summary().contains("(+1/-1)"),
+            "summary 含行数: {}",
+            diff.summary()
+        );
+    }
+
+    #[tokio::test]
+    async fn diff_entries_none_for_clean_and_absent() {
+        let dir = temp_dir();
+        let clean = dir.path().join("clean.txt");
+        write_file(&clean, "same");
+        let absent = dir.path().join("absent.txt");
+
+        let mut ck = CheckpointManager::new();
+        ck.snapshot_file(&clean).await.unwrap();
+        ck.snapshot_file(&absent).await.unwrap();
+
+        // clean 未改 → None；absent 被创建 → 全部计入新增行。
+        write_file(&absent, "brand new");
+        let entries = ck.diff_entries(1 << 20).await.unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(entries[0].is_none(), "clean 文件应产出 None");
+        let absent_diff = entries[1].clone().expect("新建文件计入新增行");
+        assert_eq!(absent_diff.added, 1);
+        assert_eq!(absent_diff.removed, 0);
+    }
+
+    #[tokio::test]
+    async fn diff_entries_truncates_large_files() {
+        let dir = temp_dir();
+        let f = dir.path().join("big.txt");
+        let mut snap_content = String::new();
+        for _ in 0..10_000 {
+            snap_content.push_str("unchanged line\n");
+        }
+        write_file(&f, &snap_content);
+
+        let mut ck = CheckpointManager::new();
+        ck.snapshot_file(&f).await.unwrap();
+
+        write_file(&f, &format!("{snap_content}new tail line\n"));
+
+        // 远超 1 KB 上限 → 截断，只统计行数。
+        let entries = ck.diff_entries(1024).await.unwrap();
+        let diff = entries[0].clone().expect("modified 文件应产出 diff");
+        assert!(diff.truncated, "超过 max_bytes 应置 truncated");
+        assert!(diff.diff_text.is_empty(), "截断时不产出全文");
+        assert_eq!(diff.added, 1);
+        assert_eq!(diff.removed, 0);
+    }
+
+    #[tokio::test]
+    async fn diff_entries_empty_when_no_snapshots() {
+        let ck = CheckpointManager::new();
+        let entries = ck.diff_entries(1 << 20).await.unwrap();
+        assert!(entries.is_empty());
     }
 
     #[tokio::test]

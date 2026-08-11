@@ -266,8 +266,14 @@ pub enum MemoryAction {
 
 #[derive(Subcommand)]
 pub enum CheckpointAction {
-    /// 列出当前快照与文件状态（unchanged/modified）。
+    /// 列出当前快照与文件状态（unchanged/modified），modified 行带变更行数。
     List,
+    /// 显示快照与当前文件的内容级 diff（+ 新增 / - 删除）。
+    Diff {
+        /// 只显示该文件的 diff；缺省显示全部 modified 文件的 diff。
+        #[arg(long)]
+        path: Option<String>,
+    },
     /// 回滚最近一个快照；--all 回滚全部。
     Rollback {
         #[arg(long)]

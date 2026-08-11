@@ -124,6 +124,7 @@ opentelemetry-stdout = { version = "0.32", default-features = false, features = 
 tracing-opentelemetry = "0.33"
 tempfile = "3.14"
 proptest = "1.5"
+similar = "3.1"
 windows-sys = { version = "0.59", default-features = false }
 
 # Internal crates

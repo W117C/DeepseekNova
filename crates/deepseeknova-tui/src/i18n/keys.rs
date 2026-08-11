@@ -289,6 +289,12 @@ pub enum Key {
     NoSnapshots,
     /// 列出快照失败（`{err}`）。
     ListSnapshotsFailed,
+    /// 内容级 diff 头（`{path}`）。
+    SnapshotDiffHeader,
+    /// 没有内容级变更可展示。
+    NoDiffChanges,
+    /// 列出内容级 diff 失败（`{err}`）。
+    DiffFailed,
     /// /undo 未知参数（`{arg}`）。
     UndoUnknownArg,
     /// 显示模式切换提示（`{mode}`）。
@@ -723,7 +729,10 @@ impl Key {
             SnapshotListHeader => "Snapshot list:",
             NoSnapshots => "(no snapshots)",
             ListSnapshotsFailed => "Failed to list snapshots: {err}",
-            UndoUnknownArg => "Unknown argument: {arg} (usage: /undo | /undo all | /undo list)",
+            SnapshotDiffHeader => "--- {path} ---",
+            NoDiffChanges => "(no content-level changes)",
+            DiffFailed => "Failed to show diff: {err}",
+            UndoUnknownArg => "Unknown argument: {arg} (usage: /undo | /undo all | /undo list | /undo diff)",
             DisplayModeNotice => "Display mode: {mode}",
             FoldedAll => "All messages folded (current: {state})",
             ExpandedAll => "All messages expanded (current: {state})",
@@ -1018,7 +1027,10 @@ impl Key {
             SnapshotListHeader => "快照列表:",
             NoSnapshots => "（没有快照）",
             ListSnapshotsFailed => "列出快照失败: {err}",
-            UndoUnknownArg => "未知参数: {arg}（用法: /undo | /undo all | /undo list）",
+            SnapshotDiffHeader => "--- {path} ---",
+            NoDiffChanges => "（没有内容级变更）",
+            DiffFailed => "展示内容级 diff 失败: {err}",
+            UndoUnknownArg => "未知参数: {arg}（用法: /undo | /undo all | /undo list | /undo diff）",
             DisplayModeNotice => "显示模式: {mode}",
             FoldedAll => "已折叠全部消息（当前: {state}）",
             ExpandedAll => "已展开全部消息（当前: {state}）",

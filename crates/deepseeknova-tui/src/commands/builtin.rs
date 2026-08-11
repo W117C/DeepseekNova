@@ -716,6 +716,17 @@ impl CommandHandler for UndoCmd {
                     .app
                     .show_notice(tr.t_args(Key::ListSnapshotsFailed, &[("err", &e.to_string())])),
             },
+            "diff" => match ctrl.diffs().await {
+                Ok(lines) if !lines.is_empty() => {
+                    for line in lines {
+                        ctx.app.echo_line(LineKind::System, &line);
+                    }
+                }
+                Ok(_) => ctx.app.show_notice(tr.t(Key::NoDiffChanges)),
+                Err(e) => ctx
+                    .app
+                    .show_notice(tr.t_args(Key::DiffFailed, &[("err", &e.to_string())])),
+            },
             other => ctx
                 .app
                 .show_notice(tr.t_args(Key::UndoUnknownArg, &[("arg", other)])),

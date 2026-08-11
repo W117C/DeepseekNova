@@ -2,7 +2,7 @@
 //! `deepseeknova_tui::UndoController`（路径与 `checkpoint` 子命令一致）。
 
 use async_trait::async_trait;
-use deepseeknova_checkpoint::CheckpointManager;
+use deepseeknova_checkpoint::{CheckpointManager, FileDiff};
 use deepseeknova_tui::UndoController;
 use std::path::PathBuf;
 
@@ -48,6 +48,31 @@ impl UndoController for TuiUndoController {
         let mut ck = CheckpointManager::load_from(&self.path)?;
         Ok(ck.rollback_all().await?)
     }
+
+    async fn diffs(&self) -> Result<Vec<String>, deepseeknova_core::DeepseeknovaError> {
+        let ck = CheckpointManager::load_from(&self.path)?;
+        let entries = ck.diff_entries(crate::DEFAULT_DIFF_MAX_BYTES).await?;
+        let mut out = Vec::new();
+        for entry in entries.into_iter().flatten() {
+            out.push(format!("--- {} ---", entry.path.display()));
+            if entry.truncated {
+                out.push(format!("(truncated, +{}/-{})", entry.added, entry.removed));
+            } else {
+                out.extend(diff_lines(&entry));
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// 把一条 [`FileDiff`] 的 diff 文本切成行，供 TUI 逐行展示。
+/// diff 文本每行已带 `+` / `-` / ` ` 前缀；`str::lines()` 不会为末尾换行
+/// 产生空尾行，无需额外裁剪。
+fn diff_lines(diff: &FileDiff) -> Vec<String> {
+    if diff.diff_text.is_empty() {
+        return Vec::new();
+    }
+    diff.diff_text.lines().map(str::to_string).collect()
 }
 
 #[cfg(test)]
@@ -109,5 +134,39 @@ mod tests {
         assert_eq!(ctrl.rollback_all().await.unwrap(), 2);
         assert_eq!(fs::read_to_string(&f1).unwrap(), "AAA");
         assert_eq!(fs::read_to_string(&f2).unwrap(), "BBB");
+    }
+
+    #[tokio::test]
+    async fn diffs_returns_content_diff_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write_file(dir.path(), "a.txt", "keep\nold\n");
+        let ck_path = dir.path().join("ck.jsonl");
+        {
+            let mut ck = CheckpointManager::new().with_persistence(ck_path.clone());
+            ck.snapshot_file(&file).await.unwrap();
+        }
+        fs::write(&file, "keep\nnew\n").unwrap();
+
+        let ctrl = TuiUndoController { path: ck_path };
+        let lines = ctrl.diffs().await.unwrap();
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("---") && l.contains("a.txt")));
+        assert!(lines.iter().any(|l| l == "-old"), "应含删除行: {lines:?}");
+        assert!(lines.iter().any(|l| l == "+new"), "应含新增行: {lines:?}");
+    }
+
+    #[tokio::test]
+    async fn diffs_empty_when_no_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write_file(dir.path(), "a.txt", "same");
+        let ck_path = dir.path().join("ck.jsonl");
+        {
+            let mut ck = CheckpointManager::new().with_persistence(ck_path.clone());
+            ck.snapshot_file(&file).await.unwrap();
+        }
+
+        let ctrl = TuiUndoController { path: ck_path };
+        assert!(ctrl.diffs().await.unwrap().is_empty(), "无变更应返回空");
     }
 }
