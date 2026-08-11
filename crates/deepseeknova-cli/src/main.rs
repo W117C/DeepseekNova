@@ -27,6 +27,22 @@ mod worktree;
 /// checkpoint diff 单文件内容超过该字节数时只统计行数、不展开全文。
 const DEFAULT_DIFF_MAX_BYTES: usize = 256 * 1024;
 
+/// 导入来源的显示名（`import` 命令提示用）。
+fn source_label(source: cli::ImportSource) -> &'static str {
+    match source {
+        cli::ImportSource::Claude => "claude",
+        cli::ImportSource::Codex => "codex",
+    }
+}
+
+/// 导入写入层级的显示名。
+fn scope_label(scope: deepseeknova_config::compat::ImportScope) -> &'static str {
+    match scope {
+        deepseeknova_config::compat::ImportScope::User => "user",
+        deepseeknova_config::compat::ImportScope::Project => "project",
+    }
+}
+
 /// 进程退出码常量（集中定义，避免各处魔数冲突）。
 ///
 /// 退出码分区：
@@ -1249,6 +1265,73 @@ async fn main() -> Result<(), DeepseeknovaError> {
                     ck.clear();
                     println!("cleared {n} snapshot(s)");
                 }
+            }
+        }
+
+        // ── Import（外部 Agent 配置导入：Claude / Codex）──────────────
+        Some(Commands::Import {
+            source,
+            apply,
+            scope,
+        }) => {
+            use deepseeknova_config::compat;
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let scope = match compat::import_scope_from_arg(scope) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(exit_code::CONFIG);
+                }
+            };
+
+            let plan = match source {
+                cli::ImportSource::Claude => compat::claude::build_plan(&cwd),
+                cli::ImportSource::Codex => compat::codex::build_plan(&cwd),
+            };
+
+            if plan.sources.is_empty() {
+                println!(
+                    "no {} configuration found (searched: ~/.claude/settings.json, ./.claude/settings.json, ./.mcp.json)",
+                    source_label(*source)
+                );
+                return Ok(());
+            }
+            println!(
+                "source: {} — {} source file(s)",
+                plan.source.label(),
+                plan.sources.len()
+            );
+            for s in &plan.sources {
+                println!("  found: {}", s.display());
+            }
+            for item in &plan.items {
+                println!("  {}", item.preview_line());
+            }
+            if !plan.unmapped.is_empty() {
+                println!("warnings ({})", plan.unmapped.len());
+                for w in &plan.unmapped {
+                    println!("  ! {w}");
+                }
+            }
+            if plan.is_empty() && plan.unmapped.is_empty() {
+                println!("no importable items found");
+                return Ok(());
+            }
+            println!(
+                "would write {} item(s) to {} ({})",
+                plan.items.len(),
+                scope.path(&cwd).display(),
+                scope_label(scope)
+            );
+
+            if *apply {
+                let (path, applied, skipped) = compat::apply::apply(&plan, scope, &cwd)?;
+                println!(
+                    "applied {applied} item(s) to {} (skipped {skipped})",
+                    path.display()
+                );
+            } else {
+                println!("run with --apply to write");
             }
         }
 

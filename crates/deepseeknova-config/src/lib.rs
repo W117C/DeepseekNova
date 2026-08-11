@@ -21,6 +21,9 @@
     )
 )]
 
+/// 外部 Agent 工具配置导入（Claude Code / Codex → 分层配置）。
+pub mod compat;
+
 use deepseeknova_core::DeepseeknovaError;
 use serde::{Deserialize, Serialize};
 
@@ -1328,7 +1331,7 @@ pub struct McpServerConfig {
 }
 
 /// 环境变量键值对。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnvEntry {
     /// 变量名。
     pub name: String,
