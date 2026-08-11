@@ -177,6 +177,18 @@ impl ImportPlan {
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
+
+    /// 预览计数：`items.len()` 减去 `Env` 项（配置层无顶层 env 目标，apply
+    /// 一律跳过）。注意这是**启发式上限**——`apply` 还会跳过目标配置中
+    /// 已存在的同名 MCP server（`mcp_exists` 去重），因此实际写入数可能
+    /// 小于此值；CLI 预览用此数而非 `items.len()`，避免把 env 项也算进
+    /// 「会写 N 项」。
+    pub fn applicable_len(&self) -> usize {
+        self.items
+            .iter()
+            .filter(|i| !matches!(i, ImportItem::Env { .. }))
+            .count()
+    }
 }
 
 /// 目标配置文件路径的解析结果，供 CLI 预览。
@@ -187,5 +199,61 @@ pub fn import_scope_from_arg(arg: &str) -> Result<ImportScope, DeepseeknovaError
         other => Err(DeepseeknovaError::config(format!(
             "invalid import scope '{other}' (expected 'user' | 'project')"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::PermissionMode;
+
+    #[test]
+    fn applicable_len_excludes_env_items() {
+        let plan = ImportPlan {
+            source: ImportSource::Claude,
+            items: vec![
+                ImportItem::Permission {
+                    tool: "bash".into(),
+                    subject: None,
+                    mode: PermissionMode::Allow,
+                },
+                ImportItem::Env {
+                    key: "FOO".into(),
+                    value: "bar".into(),
+                },
+                ImportItem::McpServer {
+                    name: "s".into(),
+                    command: "npx".into(),
+                    args: vec![],
+                    env: vec![],
+                },
+            ],
+            unmapped: vec![],
+            sources: vec![],
+        };
+        assert_eq!(plan.items.len(), 3);
+        assert_eq!(plan.applicable_len(), 2, "env 项不计入可写数");
+    }
+
+    #[test]
+    fn env_preview_line_is_report_only_style() {
+        let item = ImportItem::Env {
+            key: "FOO".into(),
+            value: "bar".into(),
+        };
+        assert_eq!(item.preview_line(), "[env] FOO=bar");
+    }
+
+    #[test]
+    fn scope_arg_parses_user_and_project() {
+        assert!(matches!(
+            import_scope_from_arg("user").unwrap(),
+            ImportScope::User
+        ));
+        assert!(matches!(
+            import_scope_from_arg("project").unwrap(),
+            ImportScope::Project
+        ));
+        assert!(import_scope_from_arg("bogus").is_err());
     }
 }
