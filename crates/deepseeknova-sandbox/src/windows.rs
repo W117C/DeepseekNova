@@ -244,6 +244,8 @@ mod tests {
         let sb = JobSandbox::default();
         let mut cmd = Command::new("cmd");
         cmd.args(["/C", "echo job-ok"]);
+        cmd.stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
         let child = sb.spawn(cmd).expect("spawn under job object");
         let out = child.wait_with_output().await.expect("wait for child");
         assert!(
