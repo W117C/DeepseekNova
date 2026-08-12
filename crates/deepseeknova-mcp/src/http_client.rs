@@ -336,7 +336,7 @@ impl McpHttpConnection {
             builder = builder.header("Mcp-Session-Id", session);
         }
 
-        let resp = builder.send().await.map_err(|e| {
+        let mut resp = builder.send().await.map_err(|e| {
             SendError::Other(DeepseeknovaError::runner(format!(
                 "MCP HTTP POST failed: {e}"
             )))
@@ -354,7 +354,10 @@ impl McpHttpConnection {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("")
             .to_lowercase();
-        let body = resp.text().await.unwrap_or_default();
+        let body = match read_response_body_limited(&mut resp, MAX_HTTP_RESPONSE_BYTES).await {
+            Ok(body) => body,
+            Err(e) => return Err(SendError::Other(e)),
+        };
 
         // Persist or update the session id, following server-side rotations.
         // An empty value — or a 404 carrying the header — terminates the
@@ -463,7 +466,7 @@ impl McpHttpConnection {
             builder = builder.header("Mcp-Session-Id", session);
         }
 
-        let resp = builder
+        let mut resp = builder
             .send()
             .await
             .map_err(|e| DeepseeknovaError::runner(format!("MCP HTTP POST failed: {e}")))?;
@@ -486,7 +489,10 @@ impl McpHttpConnection {
             }
         }
         // 读取并丢弃响应体：可能夹带更多服务器消息，且不读会占用连接。
-        let _ = resp.text().await;
+        // 施加体积上限，超限立即中止（T-H2）。
+        if let Err(e) = read_response_body_limited(&mut resp, MAX_HTTP_RESPONSE_BYTES).await {
+            warn!("MCP server-request answer: failed to read response body: {e}");
+        }
 
         if status != StatusCode::OK
             && status != StatusCode::ACCEPTED
@@ -535,6 +541,36 @@ impl McpHttpConnection {
     }
 }
 
+/// 单次 HTTP 响应体的体积上限（T-H2）：超过即中止读取并报错，防止攻击者
+/// 服务器在超时窗口内推送无界响应体占满内存。SSE discovery 沿用同口径。
+/// HTTP 传输 JSON-RPC 响应体上限：对齐 stdio 传输的 16 MiB 上限
+/// （`connection::MAX_MCP_LINE_BYTES`）。此前 1 MiB 会拒绝合法的大工具
+/// 结果（如大文件读取），同一响应 stdio 成功、HTTP 失败（审查#6）。
+const MAX_HTTP_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+
+/// 流式读取响应体并施加体积上限：边收边检查，超限立即中止，不先全量缓冲
+/// 再判上限。读取失败或非 UTF-8 也返回明确错误。供 `send_full` 与
+/// `post_jsonrpc_value` 共用（不新增跨模块依赖）。
+async fn read_response_body_limited(
+    resp: &mut reqwest::Response,
+    max_bytes: usize,
+) -> Result<String, DeepseeknovaError> {
+    let mut buf = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| {
+        DeepseeknovaError::runner(format!("failed to read MCP HTTP response body: {e}"))
+    })? {
+        buf.extend_from_slice(&chunk);
+        if buf.len() > max_bytes {
+            return Err(DeepseeknovaError::runner(format!(
+                "MCP HTTP response body exceeds {max_bytes} bytes"
+            )));
+        }
+    }
+    String::from_utf8(buf).map_err(|e| {
+        DeepseeknovaError::runner(format!("MCP HTTP response body is not valid UTF-8: {e}"))
+    })
+}
+
 /// Try to discover the legacy SSE POST endpoint by streaming the SSE endpoint
 /// until the `endpoint` event arrives. Legacy servers keep the stream open
 /// after the event, so waiting for EOF would hang — hence incremental reads.
@@ -566,7 +602,7 @@ async fn discover_post_url(
                 DeepseeknovaError::runner(format!("failed to read MCP SSE stream: {e}"))
             })?;
             buffer.push_str(&String::from_utf8_lossy(&chunk));
-            if buffer.len() > 1 << 20 {
+            if buffer.len() > MAX_HTTP_RESPONSE_BYTES {
                 return Err(DeepseeknovaError::runner(
                     "MCP SSE: endpoint event too large".to_string(),
                 ));
@@ -1064,6 +1100,41 @@ data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"second\":true}}
             err.to_string()
                 .contains("failed to parse MCP HTTP response"),
             "unexpected error: {err}"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn oversized_http_response_body_is_aborted_not_buffered() {
+        let _guard = ENV_LOCK.lock().await;
+        clear_proxy_env();
+        // 响应体超过 1MB 上限时必须在流式读取中立即报"超限"：旧实现
+        // `resp.text()` 无上限，会把整份响应体读入内存后才 parse。
+        let (url, server) = spawn_http_mock(
+            || (404, "no sse".to_string()),
+            |req_text| {
+                let id = extract_id(&req_text);
+                if is_initialize(&req_text) {
+                    (200, init_json_body(id, "2025-06-18"), Vec::new())
+                } else if req_text.contains("\"method\":\"notifications/initialized\"") {
+                    (202, String::new(), Vec::new())
+                } else {
+                    // 超限响应体：1MB+1 字节，客户端必须在读取时中止而非缓存后报错。
+                    (200, "x".repeat(MAX_HTTP_RESPONSE_BYTES + 1), Vec::new())
+                }
+            },
+        );
+
+        let conn = McpHttpConnection::connect(&url, Duration::from_secs(5))
+            .await
+            .expect("connect");
+        let err = conn
+            .request("ping", None, Duration::from_secs(5))
+            .await
+            .expect_err("oversized body must fail");
+        assert!(
+            err.to_string().contains("exceeds"),
+            "expected size error, got: {err}"
         );
         server.abort();
     }

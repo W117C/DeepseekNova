@@ -135,6 +135,20 @@ fn redact_config_for_display(config: &deepseeknova_config::Config) -> deepseekno
     copy
 }
 
+/// 分层加载配置（路径显式版）：用户层 `user_path` → 项目层 `project_path`。
+///
+/// 与 [`deepseeknova_config::Config::load`] 语义一致：任一文件不存在时跳过
+/// 该层（正常情况，继续使用默认值）；返回 `Err` 仅当某层配置文件存在但
+/// 读取/解析/校验失败——错误消息含具体文件路径。调用方对 `Err` 必须硬错误
+/// 退出，不得静默回退默认配置（否则用户层的 deny 规则、`[security]` 白名单、
+/// `[sandbox]` enabled=true 等安全配置会在解析失败时全部丢失）。
+fn load_config_layers(
+    user_path: Option<&std::path::Path>,
+    project_path: &std::path::Path,
+) -> Result<deepseeknova_config::Config, DeepseeknovaError> {
+    deepseeknova_config::Config::load_from_layers(user_path, project_path)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), DeepseeknovaError> {
     // `run_cli` 持有 `_telemetry_guard`：函数返回时 guard 已被 drop（Drop 中
@@ -160,10 +174,44 @@ async fn run_cli() -> Result<i32, DeepseeknovaError> {
 
     // Config is loaded before any subscriber exists, so load-time diagnostics
     // go to stderr directly.
-    let mut config = deepseeknova_config::Config::load().unwrap_or_else(|e| {
-        eprintln!("warning: failed to load config, using defaults: {e}");
-        deepseeknova_config::Config::default()
-    });
+    let mut config = match load_config_layers(
+        // 与 `Config::load` 同款路径：用户层 `~/.deepseeknova/config.toml`，
+        // 项目层 `./deepseeknova.toml`。显式传入路径，失败时错误消息能定位
+        // 到具体层/文件。
+        dirs::home_dir()
+            .map(|home| home.join(".deepseeknova").join("config.toml"))
+            .as_deref(),
+        std::path::Path::new("deepseeknova.toml"),
+    ) {
+        Ok(config) => config,
+        Err(e) => {
+            // `load_config_layers` 内部（`load_from_layers`）已通过 exists()
+            // 跳过"文件不存在"的层，因此这里的 `Err` 只可能是某层配置文件
+            // 存在但读取/解析/校验失败（最常见是项目层 deepseeknova.toml
+            // 语法错误）。安全回归路径：必须 fail-closed——打印具体错误并以
+            // CONFIG 退出码退出，绝不静默回退默认配置（否则用户层 deny 规则、
+            // [security] 白名单、[sandbox] enabled=true 等全部丢失）。
+            //
+            // 例外：配置修复类子命令（Setup 配置向导 / Init 项目初始化 / Audit
+            // 审查 / Config 查看）必须豁免 fail-closed——损坏的配置正是它们要
+            // 修复的对象，硬退出会让用户无法用 wizard 修复，只能手改/删文件
+            //（审查#10 P2：恢复路径回归）。
+            let repair_cmd = matches!(
+                &cli.command,
+                Some(Commands::Setup { .. })
+                    | Some(Commands::Init { .. })
+                    | Some(Commands::Audit { .. })
+                    | Some(Commands::Config)
+            );
+            if repair_cmd {
+                eprintln!("warning: failed to load config ({e}); running with defaults");
+                deepseeknova_config::Config::default()
+            } else {
+                eprintln!("error: failed to load config: {e}");
+                return Ok(exit_code::CONFIG);
+            }
+        }
+    };
 
     // `--secure-defaults` 一键档：权限门控（已默认开启）保持开启 + 沙箱启用
     // （若 OS 支持）。平台后端缺失（未知平台回落 NoOpSandbox）时由下方
@@ -2634,5 +2682,63 @@ mod exit_code_semantics_tests {
     async fn stream_coordinator_done_returns_zero_exit_code() {
         let code = stream_coordinator(&DoneRunner, input()).await.unwrap();
         assert_eq!(code, 0);
+    }
+}
+
+// V-H2：配置加载 fail-open 回归测试。`load_from_layers` 内部已通过 exists()
+// 跳过"文件不存在"的层，因此任何 `Err` 都意味着某层配置文件存在但解析/校验
+// 失败——此时必须硬错误（CLI 打印错误并以 CONFIG=6 退出），而非静默回退默认
+// 配置导致用户层 deny 规则、[security] 白名单、[sandbox] enabled=true 等丢失。
+#[cfg(test)]
+mod config_loading_tests {
+    use super::*;
+
+    /// 在临时目录写入一份 TOML 语法错误的项目层配置文件，返回其路径。
+    fn write_broken_project_toml(dir: &std::path::Path) -> std::path::PathBuf {
+        let path = dir.join("deepseeknova.toml");
+        std::fs::write(&path, "this is not [valid toml ===").expect("write broken toml");
+        path
+    }
+
+    #[test]
+    fn broken_project_toml_returns_err_not_default() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project = write_broken_project_toml(temp.path());
+
+        // 语法错误的项目层配置必须返回 Err（fail-closed），而非静默回退默认。
+        let err =
+            load_config_layers(None, &project).expect_err("broken project toml must fail load");
+        // 错误链应定位到具体文件（项目层 deepseeknova.toml）。
+        let message = err.to_string();
+        assert!(
+            message.contains("deepseeknova.toml"),
+            "error should name the failing file, got: {message}"
+        );
+    }
+
+    #[test]
+    fn missing_config_files_load_defaults_ok() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        // 用户层/项目层均不存在配置文件：正常路径，加载默认配置（Ok）。
+        let config = load_config_layers(None, &temp.path().join("nope.toml"))
+            .expect("missing config files must load defaults");
+        assert!(!config.sandbox.enabled, "default sandbox should stay off");
+    }
+
+    #[test]
+    fn broken_user_toml_is_also_a_hard_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        // 用户层配置解析失败同样必须硬错误，项目层是否完好不影响该判定。
+        let user = temp.path().join("config.toml");
+        std::fs::write(&user, "broken").expect("write broken user toml");
+        let project = temp.path().join("deepseeknova.toml");
+        std::fs::write(&project, "[tools]").expect("write project toml");
+
+        let err =
+            load_config_layers(Some(&user), &project).expect_err("broken user toml must fail load");
+        assert!(
+            err.to_string().contains("config.toml"),
+            "error should name the failing user file, got: {err}"
+        );
     }
 }
