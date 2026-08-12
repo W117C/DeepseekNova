@@ -375,11 +375,6 @@ impl Provider for OpenAIProvider {
 // emits parsed Chunks as they arrive.
 // ---------------------------------------------------------------------------
 
-/// 单条 SSE 行的最大字节数（含 `data:` 前缀，tool arguments 累积同样受此
-/// 上限约束）。恶意/损坏网关可在超时窗口内塞入无换行大块数据；超限即视为
-/// 协议异常并返回明确错误，防止内存无限累积。
-const MAX_SSE_LINE_BYTES: usize = 1024 * 1024;
-
 /// Accumulator for a single streaming tool call.
 #[derive(Debug, Default)]
 struct AccToolCall {
@@ -390,65 +385,52 @@ struct AccToolCall {
     started: bool,
 }
 
+/// 单次流式解析的累计状态，随 `crate::sse::for_each_sse_line` 逐行按值
+/// 传递（闭包不能捕获 `&mut` 累计状态——返回的 future 会借走它，违反
+/// `FnMut` 逃逸规则）。
+struct OpenAiSseState<'a> {
+    tx: &'a mpsc::Sender<Result<Chunk, DeepseeknovaError>>,
+    tool_acc: Vec<AccToolCall>,
+    sent_any: bool,
+    /// [DONE] 标记是否已发出——防止流正常结束 + 显式 [DONE] 造成双重 Done。
+    done_sent: bool,
+}
+
 async fn stream_sse_response(
     response: reqwest::Response,
     tx: &mpsc::Sender<Result<Chunk, DeepseeknovaError>>,
     sent_any: &mut bool,
 ) -> Result<(), DeepseeknovaError> {
-    // Accumulate raw bytes per line to avoid UTF-8 corruption across TCP chunks
-    let mut line_bytes: Vec<u8> = Vec::new();
-    let mut tool_acc: Vec<AccToolCall> = Vec::new();
-    // [DONE] 标记是否已发出——防止流正常结束 + 显式 [DONE] 造成双重 Done。
-    let mut done_sent = false;
-
-    let mut byte_stream = response.bytes_stream();
-
-    while let Some(chunk_result) = byte_stream.next().await {
-        let bytes = chunk_result.map_err(|e| {
-            DeepseeknovaError::provider(format!("failed to read chunk from stream: {e}"))
-        })?;
-
-        for &b in bytes.iter() {
-            match b {
-                b'\n' => {
-                    if line_bytes.is_empty() {
-                        continue;
-                    }
-                    let line_str = String::from_utf8(line_bytes.clone()).map_err(|e| {
-                        DeepseeknovaError::provider(format!("invalid UTF-8 in SSE stream: {e}"))
-                    })?;
-                    line_bytes.clear();
-                    let trimmed = line_str.trim().to_string();
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-                    process_sse_line(&trimmed, tx, &mut tool_acc, sent_any, &mut done_sent).await?;
-                }
-                b'\r' => { /* skip — handled by \n */ }
-                _ => {
-                    // 单行无长度上限会被恶意/损坏网关的无换行大块数据撑爆内存；
-                    // 超限视为协议异常直接报错（未换行的尾行同样受此约束）。
-                    if line_bytes.len() >= MAX_SSE_LINE_BYTES {
-                        return Err(DeepseeknovaError::provider(
-                            "SSE line exceeds maximum allowed length (protocol anomaly)",
-                        ));
-                    }
-                    line_bytes.push(b);
-                }
+    // 行切分统一走共享的 crate::sse::for_each_sse_line（逐字节切行、`\r`
+    // 跳过、超限报错、尾行冲刷）；空行跳过与数据行处理留在闭包内。
+    let state = crate::sse::for_each_sse_line(
+        response.bytes_stream(),
+        "OpenAI",
+        OpenAiSseState {
+            tx,
+            tool_acc: Vec::new(),
+            sent_any: *sent_any,
+            done_sent: false,
+        },
+        |line, mut st| async move {
+            if !line.is_empty() {
+                process_sse_line(
+                    &line,
+                    st.tx,
+                    &mut st.tool_acc,
+                    &mut st.sent_any,
+                    &mut st.done_sent,
+                )
+                .await?;
             }
-        }
-    }
+            Ok(st)
+        },
+    )
+    .await?;
 
-    // Process any remaining buffered data
-    if !line_bytes.is_empty() {
-        let tail_str = String::from_utf8(line_bytes).map_err(|e| {
-            DeepseeknovaError::provider(format!("invalid UTF-8 in SSE stream tail: {e}"))
-        })?;
-        let trimmed = tail_str.trim().to_string();
-        if !trimmed.is_empty() {
-            process_sse_line(&trimmed, tx, &mut tool_acc, sent_any, &mut done_sent).await?;
-        }
-    }
+    let mut tool_acc = state.tool_acc;
+    *sent_any = state.sent_any;
+    let done_sent = state.done_sent;
 
     // Flush any pending tool calls
     flush_pending_tool_calls(tx, &mut tool_acc, sent_any).await?;
@@ -581,7 +563,8 @@ async fn process_sse_line(
                     if let Some(ref func) = tc.function {
                         if let Some(ref args) = func.arguments {
                             if !args.is_empty() {
-                                if acc.arguments.len() + args.len() > MAX_SSE_LINE_BYTES {
+                                if acc.arguments.len() + args.len() > crate::sse::MAX_SSE_LINE_BYTES
+                                {
                                     return Err(DeepseeknovaError::provider(
                                         "streaming tool arguments exceed maximum allowed size (protocol anomaly)",
                                     ));
@@ -1199,7 +1182,7 @@ data: [DONE]
         let _guard = ENV_LOCK.lock().await;
         clear_proxy_env();
 
-        let overlong = format!("data: {}\n\n", "x".repeat(MAX_SSE_LINE_BYTES));
+        let overlong = format!("data: {}\n\n", "x".repeat(crate::sse::MAX_SSE_LINE_BYTES));
         let response = fetch_raw_sse_body(overlong).await;
 
         let (tx, _rx) = mpsc::channel::<Result<Chunk, DeepseeknovaError>>(64);

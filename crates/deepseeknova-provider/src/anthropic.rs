@@ -761,86 +761,70 @@ impl AnthropicUsageAcc {
 // True SSE streaming — bytes_stream() with incremental event parsing
 // ---------------------------------------------------------------------------
 
-/// 单条 SSE 行的最大字节数（含 `data:`/`event:` 前缀，tool arguments 累积
-/// 同样受此上限约束）。恶意/损坏网关可在超时窗口内塞入无换行大块数据；超限
-/// 即视为协议异常并返回明确错误，防止内存无限累积。
-const MAX_SSE_LINE_BYTES: usize = 1024 * 1024;
+/// 单次 Anthropic 流式解析的累计状态，随 `crate::sse::for_each_sse_line`
+/// 逐行按值传递（闭包不能捕获 `&mut` 累计状态——返回的 future 会借走它，
+/// 违反 `FnMut` 逃逸规则）。
+struct AnthropicSseState<'a> {
+    tx: &'a mpsc::Sender<Result<Chunk, DeepseeknovaError>>,
+    current_event_type: Option<String>,
+    current_data: Option<String>,
+    tool_acc: Vec<AccToolCall>,
+    usage_acc: AnthropicUsageAcc,
+}
 
 async fn stream_anthropic_sse(
     response: reqwest::Response,
     tx: &mpsc::Sender<Result<Chunk, DeepseeknovaError>>,
 ) -> Result<(), DeepseeknovaError> {
-    let mut line_bytes: Vec<u8> = Vec::new();
-    let mut current_event_type: Option<String> = None;
-    let mut current_data: Option<String> = None;
-    let mut tool_acc: Vec<AccToolCall> = Vec::new();
-    let mut usage_acc = AnthropicUsageAcc::default();
-
-    let mut byte_stream = response.bytes_stream();
-
-    while let Some(chunk_result) = byte_stream.next().await {
-        let bytes = chunk_result.map_err(|e| {
-            DeepseeknovaError::provider(format!("failed to read chunk from Anthropic stream: {e}"))
-        })?;
-
-        for &b in bytes.iter() {
-            match b {
-                b'\n' => {
-                    let line_str = String::from_utf8(line_bytes.clone()).map_err(|e| {
-                        DeepseeknovaError::provider(format!("invalid UTF-8 in Anthropic SSE: {e}"))
-                    })?;
-                    line_bytes.clear();
-
-                    let trimmed = line_str.trim().to_string();
-                    if trimmed.is_empty() {
-                        if let Some(ref data) = current_data {
-                            process_anthropic_event(
-                                current_event_type.as_deref(),
-                                data,
-                                tx,
-                                &mut tool_acc,
-                                &mut usage_acc,
-                            )
-                            .await?;
-                        }
-                        current_event_type = None;
-                        current_data = None;
-                        continue;
-                    }
-
-                    if let Some(event_type) = trimmed.strip_prefix("event: ") {
-                        current_event_type = Some(event_type.trim().to_string());
-                    } else if let Some(data) = trimmed.strip_prefix("data: ") {
-                        current_data = Some(data.trim().to_string());
-                    }
+    // 行切分统一走共享的 crate::sse::for_each_sse_line（逐字节切行、`\r`
+    // 跳过、超限报错、尾行冲刷）；Anthropic 以空行作为事件分发边界——
+    // `event:`/`data:` 前缀行累积到 current_*，空行触发 process_anthropic_event。
+    let mut state = crate::sse::for_each_sse_line(
+        response.bytes_stream(),
+        "Anthropic",
+        AnthropicSseState {
+            tx,
+            current_event_type: None,
+            current_data: None,
+            tool_acc: Vec::new(),
+            usage_acc: AnthropicUsageAcc::default(),
+        },
+        |line, mut st| async move {
+            if line.is_empty() {
+                if let Some(ref data) = st.current_data {
+                    process_anthropic_event(
+                        st.current_event_type.as_deref(),
+                        data,
+                        st.tx,
+                        &mut st.tool_acc,
+                        &mut st.usage_acc,
+                    )
+                    .await?;
                 }
-                b'\r' => {}
-                _ => {
-                    // 单行无长度上限会被恶意/损坏网关的无换行大块数据撑爆内存；
-                    // 超限视为协议异常直接报错（未换行的尾行同样受此约束）。
-                    if line_bytes.len() >= MAX_SSE_LINE_BYTES {
-                        return Err(DeepseeknovaError::provider(
-                            "Anthropic SSE line exceeds maximum allowed length (protocol anomaly)",
-                        ));
-                    }
-                    line_bytes.push(b);
-                }
+                st.current_event_type = None;
+                st.current_data = None;
+            } else if let Some(event_type) = line.strip_prefix("event: ") {
+                st.current_event_type = Some(event_type.trim().to_string());
+            } else if let Some(data) = line.strip_prefix("data: ") {
+                st.current_data = Some(data.trim().to_string());
             }
-        }
-    }
+            Ok(st)
+        },
+    )
+    .await?;
 
-    if let Some(ref data) = current_data {
+    if let Some(ref data) = state.current_data {
         process_anthropic_event(
-            current_event_type.as_deref(),
+            state.current_event_type.as_deref(),
             data,
             tx,
-            &mut tool_acc,
-            &mut usage_acc,
+            &mut state.tool_acc,
+            &mut state.usage_acc,
         )
         .await?;
     }
 
-    flush_anthropic_tool_calls(tx, &mut tool_acc).await?;
+    flush_anthropic_tool_calls(tx, &mut state.tool_acc).await?;
     let _ = tx.send(Ok(Chunk::Done)).await;
 
     Ok(())
@@ -929,7 +913,7 @@ async fn process_anthropic_event(
                     }
                     // tool arguments 累积设上限，防止损坏网关上无限累积；
                     // 超限视为协议异常直接报错。
-                    if tc.arguments.len() + partial.len() > MAX_SSE_LINE_BYTES {
+                    if tc.arguments.len() + partial.len() > crate::sse::MAX_SSE_LINE_BYTES {
                         return Err(DeepseeknovaError::provider(
                             "Anthropic tool arguments exceed maximum allowed size (protocol anomaly)",
                         ));
