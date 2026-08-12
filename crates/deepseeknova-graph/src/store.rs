@@ -1067,41 +1067,18 @@ impl Store {
         let mut frontier: Vec<String> = vec![id.to_string()];
         let mut found: Vec<String> = Vec::new();
 
-        let mut callers_stmt = self
-            .conn
-            .prepare("SELECT src, kind FROM edges WHERE dst = ?1")?;
-        let mut callees_stmt = self
-            .conn
-            .prepare("SELECT dst, kind FROM edges WHERE src = ?1")?;
-
         for _ in 0..hops {
             let mut next: Vec<String> = Vec::new();
-            for cur in &frontier {
-                let expand =
-                    |stmt: &mut rusqlite::Statement<'_>| -> Result<Vec<String>, GraphError> {
-                        let rows = stmt.query_map([cur], |row| {
-                            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                        })?;
-                        let mut out = Vec::new();
-                        for row in rows {
-                            let (other, kind_s) = row?;
-                            let matches_kind = edge_kinds.is_empty()
-                                || EdgeKind::parse(&kind_s)
-                                    .is_some_and(|k| edge_kinds.contains(&k));
-                            if matches_kind {
-                                out.push(other);
-                            }
-                        }
-                        Ok(out)
-                    };
-                let mut candidates: Vec<String> = Vec::new();
-                if matches!(dir, Direction::Callers | Direction::Both) {
-                    candidates.extend(expand(&mut callers_stmt)?);
+            if matches!(dir, Direction::Callers | Direction::Both) {
+                for cand in self.collect_neighbors(&frontier, edge_kinds, true)? {
+                    if visited.insert(cand.clone()) {
+                        found.push(cand.clone());
+                        next.push(cand);
+                    }
                 }
-                if matches!(dir, Direction::Callees | Direction::Both) {
-                    candidates.extend(expand(&mut callees_stmt)?);
-                }
-                for cand in candidates {
+            }
+            if matches!(dir, Direction::Callees | Direction::Both) {
+                for cand in self.collect_neighbors(&frontier, edge_kinds, false)? {
                     if visited.insert(cand.clone()) {
                         found.push(cand.clone());
                         next.push(cand);
@@ -1124,8 +1101,57 @@ impl Store {
             b.score
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.id.cmp(&b.id))
         });
         Ok(nodes)
+    }
+
+    /// 批量取一跳邻居 id：`callers=true` 沿入边（`dst IN (...)`），否则沿出边
+    /// （`src IN (...)`）。frontier 分块 500 一次 IN 查询，规避 SQLite 变量数
+    /// 上限（默认 999）；非空 `edge_kinds` 时 kind 过滤下沉到 SQL。
+    fn collect_neighbors(
+        &self,
+        frontier: &[String],
+        edge_kinds: &[EdgeKind],
+        callers: bool,
+    ) -> Result<Vec<String>, GraphError> {
+        let (col, other) = if callers {
+            ("dst", "src")
+        } else {
+            ("src", "dst")
+        };
+        let kind_sql = if edge_kinds.is_empty() {
+            String::new()
+        } else {
+            let placeholders = vec!["?"; edge_kinds.len()].join(",");
+            format!(" AND kind IN ({placeholders})")
+        };
+        let mut out: Vec<String> = Vec::new();
+        for chunk in frontier.chunks(500) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "SELECT {other}, kind FROM edges WHERE {col} IN ({placeholders}){kind_sql}"
+            );
+            let mut params: Vec<&str> = Vec::new();
+            for id in chunk {
+                params.push(id.as_str());
+            }
+            if !edge_kinds.is_empty() {
+                for k in edge_kinds {
+                    params.push(k.as_str());
+                }
+            }
+            let mut stmt = self.conn.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
+                row.get::<_, String>(0)
+            })?;
+            for row in rows {
+                out.push(row?);
+            }
+        }
+        out.sort();
+        out.dedup();
+        Ok(out)
     }
 
     /// 深度受限的路径追踪：从 `id` 出发沿 `edge_kinds` 按方向 DFS，
@@ -1137,7 +1163,7 @@ impl Store {
         dir: Direction,
         max_hops: usize,
     ) -> Result<TraceResult, GraphError> {
-        let edges = self.all_edges()?;
+        let edges = self.edges_of_kinds(edge_kinds)?;
         let mut expander = TraceExpander::new(&edges, edge_kinds, dir, max_hops);
         let mut visited: HashSet<String> = HashSet::new();
         visited.insert(id.to_string());
@@ -1319,14 +1345,68 @@ impl Store {
         Ok(out)
     }
 
-    /// 批量更新 nodes.score。
-    pub fn set_scores(&self, scores: &[(String, f64)]) -> Result<(), GraphError> {
-        let mut stmt = self
-            .conn
-            .prepare("UPDATE nodes SET score = ?1 WHERE id = ?2")?;
-        for (id, score) in scores {
-            stmt.execute((score, id))?;
+    /// 按边类型集合取全部边：空集合 = 全部边（等价 [`Self::all_edges`]），
+    /// 非空 = 单次 `WHERE kind IN (...)` 查询（避免全表扫描后内存过滤）。
+    fn edges_of_kinds(&self, edge_kinds: &[EdgeKind]) -> Result<Vec<EdgeRec>, GraphError> {
+        if edge_kinds.is_empty() {
+            return self.all_edges();
         }
+        let placeholders = vec!["?"; edge_kinds.len()].join(",");
+        let sql = format!("SELECT src, dst, kind FROM edges WHERE kind IN ({placeholders})");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let params: Vec<&str> = edge_kinds.iter().map(|k| k.as_str()).collect();
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (src, dst, kind_s) = row?;
+            if let Some(kind) = EdgeKind::parse(&kind_s) {
+                out.push(EdgeRec { src, dst, kind });
+            }
+        }
+        Ok(out)
+    }
+
+    /// 沿 Contains 边向上递归收集全部祖先节点名（单条递归 CTE，深度上限 32）。
+    /// `resolve` 限定名匹配用；替代逐跳 `parents()` 查询消除 N+1。
+    pub(crate) fn ancestor_names(&self, id: &str) -> Result<Vec<String>, GraphError> {
+        let mut stmt = self.conn.prepare(
+            "WITH RECURSIVE ancestor_names(id, name, depth) AS (\n\
+             SELECT n.id, n.name, 1\n\
+             FROM edges e JOIN nodes n ON n.id = e.src\n\
+             WHERE e.dst = ?1 AND e.kind = 'contains'\n\
+             UNION ALL\n\
+             SELECT n.id, n.name, a.depth + 1\n\
+             FROM ancestor_names a\n\
+             JOIN edges e ON e.dst = a.id AND e.kind = 'contains'\n\
+             JOIN nodes n ON n.id = e.src\n\
+             WHERE a.depth < 32\n\
+             )\n\
+             SELECT name FROM ancestor_names",
+        )?;
+        let rows = stmt.query_map([id], |row| row.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// 批量更新 nodes.score（单事务提交，避免每条 UPDATE 独立事务开销）。
+    pub fn set_scores(&self, scores: &[(String, f64)]) -> Result<(), GraphError> {
+        let tx = self.conn.unchecked_transaction()?;
+        {
+            let mut stmt = tx.prepare("UPDATE nodes SET score = ?1 WHERE id = ?2")?;
+            for (id, score) in scores {
+                stmt.execute((score, id))?;
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 

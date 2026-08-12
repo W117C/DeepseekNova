@@ -268,20 +268,8 @@ impl GraphIndex {
             let mut filtered = Vec::new();
             for n in hits {
                 // (a) 祖先链匹配（Python 类 / Go / JS 类等有 Contains 边）。
-                let mut cur = n.id.clone();
-                let mut hops = 0;
-                let mut found = false;
-                while let Some(parent) = self.store.parents(&cur)?.into_iter().next() {
-                    hops += 1;
-                    if hops > 32 {
-                        break;
-                    }
-                    if qualifiers.contains(&parent.name) {
-                        found = true;
-                        break;
-                    }
-                    cur = parent.id;
-                }
+                let ancestors = self.store.ancestor_names(&n.id)?;
+                let mut found = ancestors.iter().any(|name| qualifiers.contains(name));
                 // (b) 引用/调用/实现目标匹配：Rust 固有 impl 方法没有
                 // Contains 归属边，但方法体引用/调用/实现类型名（如
                 // `GraphIndex {}` → References GraphIndex）。
