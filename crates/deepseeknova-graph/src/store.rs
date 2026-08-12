@@ -531,11 +531,11 @@ impl Store {
             (EdgeKind::Calls.as_str(), EdgeKind::Imports.as_str()),
         )?;
 
-        // 名称级边解析：全库定义节点 name → [(id, path)]（排除 File/Directory 节点）
+        // 名称级边解析：全库定义节点 name → [(id, path)]（排除 File 节点）
         let mut by_name: HashMap<String, Vec<(String, String)>> = HashMap::new();
         {
             let mut stmt = tx.prepare(
-                "SELECT name, id, path FROM nodes WHERE kind NOT IN ('file', 'directory')\n                 ORDER BY path, start_line",
+                "SELECT name, id, path FROM nodes WHERE kind != 'file'\n                 ORDER BY path, start_line",
             )?;
             let rows = stmt.query_map([], |row| {
                 Ok((
@@ -1369,10 +1369,10 @@ fn insert_node(
         "INSERT INTO symbol_fts_cjk(name, signature, doc, id, path) VALUES(?1, ?2, ?3, ?4, ?5)",
         (&node.name, &node.signature, &node.doc, &node.id, &node.path),
     )?;
-    // 写入即嵌入（仅符号节点；File/Directory 只有路径名，无语义价值）。
+    // 写入即嵌入（仅符号节点；File 只有路径名，无语义价值）。
     // 嵌入失败跳过——fail-open，下次刷新该文件时自愈重试。
     if let Some(emb) = embedder {
-        if !matches!(node.kind, NodeKind::File | NodeKind::Directory) {
+        if !matches!(node.kind, NodeKind::File) {
             let text = format!("{}\n{}\n{}", node.name, node.signature, node.doc);
             if let Ok(vec) = emb.embed(&text) {
                 let blob: Vec<u8> = vec.iter().flat_map(|f| f.to_le_bytes()).collect();

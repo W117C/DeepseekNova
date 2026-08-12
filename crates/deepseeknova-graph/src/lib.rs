@@ -286,7 +286,7 @@ impl GraphIndex {
                 // Contains 归属边，但方法体引用/调用/实现类型名（如
                 // `GraphIndex {}` → References GraphIndex）。
                 if !found {
-                    for kind in [EdgeKind::References, EdgeKind::Calls, EdgeKind::Implements] {
+                    for kind in [EdgeKind::References, EdgeKind::Calls] {
                         let neighbors =
                             self.store
                                 .neighbors(&n.id, &[kind], Direction::Callees, 1)?;

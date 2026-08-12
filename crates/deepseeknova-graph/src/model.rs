@@ -6,8 +6,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeKind {
-    /// 目录节点（依赖图按文件组织，目录仅作组织层级）。
-    Directory,
     /// 源文件节点。
     File,
     /// Rust/Go 的 struct 类型。
@@ -28,7 +26,6 @@ impl NodeKind {
     /// 序列化为存储与 JSON 使用的 snake_case 字符串（`parse` 的反函数）。
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Directory => "directory",
             Self::File => "file",
             Self::Struct => "struct",
             Self::Enum => "enum",
@@ -41,7 +38,6 @@ impl NodeKind {
     /// 反序列化：字符串 → [`NodeKind`]；无法识别返回 None。
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
-            "directory" => Self::Directory,
             "file" => Self::File,
             "struct" => Self::Struct,
             "enum" => Self::Enum,
@@ -64,8 +60,6 @@ pub enum EdgeKind {
     Imports,
     /// 调用关系（callee 名级匹配）。
     Calls,
-    /// 实现关系：类实现接口 / trait impl。
-    Implements,
     /// 引用关系：定义体引用的标识符（名称级，call callee 不在内）。
     References,
     /// 动态分发桥：trait 方法 → 同名 impl 方法（Rust trait 多态，名称级匹配）。
@@ -79,7 +73,6 @@ impl EdgeKind {
             Self::Contains => "contains",
             Self::Imports => "imports",
             Self::Calls => "calls",
-            Self::Implements => "implements",
             Self::References => "references",
             Self::Dispatch => "dispatch",
         }
@@ -90,7 +83,6 @@ impl EdgeKind {
             "contains" => Self::Contains,
             "imports" => Self::Imports,
             "calls" => Self::Calls,
-            "implements" => Self::Implements,
             "references" => Self::References,
             "dispatch" => Self::Dispatch,
             _ => return None,
@@ -187,7 +179,6 @@ mod tests {
     #[test]
     fn kind_roundtrip() {
         for k in [
-            NodeKind::Directory,
             NodeKind::File,
             NodeKind::Struct,
             NodeKind::Enum,
@@ -203,7 +194,6 @@ mod tests {
             EdgeKind::Contains,
             EdgeKind::Imports,
             EdgeKind::Calls,
-            EdgeKind::Implements,
             EdgeKind::References,
         ] {
             assert_eq!(EdgeKind::parse(e.as_str()), Some(e));
