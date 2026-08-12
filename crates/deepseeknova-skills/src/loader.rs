@@ -29,6 +29,7 @@
 use deepseeknova_core::registry::{Skill, SkillScope};
 use deepseeknova_core::DeepseeknovaError;
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
@@ -55,6 +56,8 @@ pub struct SkillLoader {
     /// 来源层级；同名覆盖与 `/skills` 展示用。`new()` 默认
     /// [`SkillScope::Project`]（既有调用均为项目级路径，保持兼容）。
     scope: SkillScope,
+    /// 已弃用技能名集合；`load_all` 时跳过这些技能。
+    deprecated: HashSet<String>,
 }
 
 impl SkillLoader {
@@ -64,12 +67,19 @@ impl SkillLoader {
         Self {
             root: path.into(),
             scope: SkillScope::Project,
+            deprecated: HashSet::new(),
         }
     }
 
     /// 显式设置来源层级（builtin / user / project）。
     pub fn with_scope(mut self, scope: SkillScope) -> Self {
         self.scope = scope;
+        self
+    }
+
+    /// 设置需过滤的已弃用技能名集合（[`Self::load_all`] 跳过这些技能）。
+    pub fn with_deprecated(mut self, deprecated: HashSet<String>) -> Self {
+        self.deprecated = deprecated;
         self
     }
 
@@ -107,6 +117,14 @@ impl SkillLoader {
             }
             match parse_skill_file(path, self.scope) {
                 Ok(skill) => {
+                    if self.deprecated.contains(&skill.name) {
+                        tracing::debug!(
+                            name = %skill.name,
+                            path = %path.display(),
+                            "skipping deprecated skill"
+                        );
+                        continue;
+                    }
                     tracing::debug!(name = %skill.name, path = %path.display(), "loaded skill");
                     skills.push(skill);
                 }

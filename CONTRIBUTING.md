@@ -44,7 +44,6 @@ crates/
 ├── deepseeknova-config/     # Configuration
 ├── deepseeknova-context/    # Workspace indexing, context
 ├── deepseeknova-permission/ # Permission gating
-├── deepseeknova-event/      # Event bus
 ├── deepseeknova-runtime/    # Composition root
 ├── deepseeknova-sandbox/    # Process sandbox
 ├── deepseeknova-security/   # Security policy (capabilities/paths/commands/domains/limits)

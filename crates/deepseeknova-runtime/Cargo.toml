@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Composition root wiring registry, context, event bus, permission, security, and LLM provider into an agent runtime."
+description = "Composition root wiring registry, context, permission, security, and LLM provider into an agent runtime."
 readme = "README.md"
 documentation = "https://docs.rs/deepseeknova-runtime"
 
@@ -23,7 +23,6 @@ deepseeknova-permission = { workspace = true }
 deepseeknova-sandbox = { workspace = true }
 deepseeknova-context = { workspace = true }
 deepseeknova-checkpoint = { workspace = true }
-deepseeknova-event = { workspace = true }
 deepseeknova-security = { workspace = true }
 deepseeknova-mcp = { workspace = true }
 deepseeknova-metrics = { workspace = true }

@@ -45,7 +45,7 @@
 
 ## 2. 项目简介
 
-DeepseekNova 是一个 Rust 编写的 AI Agent 框架，包含 22 个 crate。主要结构：
+DeepseekNova 是一个 Rust 编写的 AI Agent 框架，包含 21 个 crate。主要结构：
 
 ```
 crates/
@@ -60,7 +60,6 @@ crates/
 ├── deepseeknova-context/      # 上下文管理
 ├── deepseeknova-runtime/      # 运行时编排
 ├── deepseeknova-permission/   # 权限系统
-├── deepseeknova-event/        # 事件系统
 ├── deepseeknova-graph/        # 代码图检索引擎（tree-sitter + SQLite FTS5 + PageRank + repo map）
 ├── deepseeknova-checkpoint/   # 检查点
 ├── deepseeknova-store/        # 存储层
@@ -78,8 +77,8 @@ crates/
 > （README 截图生成脚本）。
 
 > 桌面端前端工程（`crates/deepseeknova-desktop`）已于 2026-08-08 整体移除
-> （非 cargo 脚手架，不在 22 crate 清单内；历史可经 git 追溯，先例
-> `3ab55d7`）。当前仓库为纯 Rust 22-crate workspace。
+> （非 cargo 脚手架，不在 21 crate 清单内；历史可经 git 追溯，先例
+> `3ab55d7`）。当前仓库为纯 Rust 21-crate workspace。
 
 ---
 

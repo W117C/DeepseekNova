@@ -42,7 +42,6 @@ LIBS=(
     "deepseeknova-core"
     "deepseeknova-config"
     "deepseeknova-telemetry"
-    "deepseeknova-event"
     "deepseeknova-store"
     "deepseeknova-context"
     "deepseeknova-sandbox"

@@ -1,6 +1,6 @@
 # DeepseekNova 编译与构建说明
 
-本项目是纯 Rust 工作区（22 个 crate，无 GUI 桌面端），编译工作区或在 Linux 环境下运行本地开发测试时，按需安装系统原生库即可。
+本项目是纯 Rust 工作区（21 个 crate，无 GUI 桌面端），编译工作区或在 Linux 环境下运行本地开发测试时，按需安装系统原生库即可。
 
 ## Ubuntu / Debian 依赖安装
 

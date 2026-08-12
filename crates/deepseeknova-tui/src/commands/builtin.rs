@@ -611,7 +611,21 @@ impl CommandHandler for SkillsCmd {
         let user_skills = dirs::home_dir()
             .map(|h| h.join(".deepseeknova/skills"))
             .unwrap_or_default();
+        // 激活 deprecated 过滤：从工作区 fitness.json 读取已弃用技能名（与
+        // runtime 装配点同源同路径语义），这些技能不在 `/skills` 展示；工作区
+        // 未知时（caps.workspace_root=None）视为无 fitness 上下文，不过滤。
+        let deprecated = ctx
+            .caps
+            .workspace_root
+            .as_ref()
+            .map(|ws| {
+                deepseeknova_skills::fitness::load_deprecated_set(
+                    &ws.join(".deepseeknova").join("skills").join("fitness.json"),
+                )
+            })
+            .unwrap_or_default();
         let mut resolver = SkillResolver::new()
+            .with_deprecated(deprecated)
             .add_preloaded(
                 SkillScope::Builtin,
                 deepseeknova_skills::load_builtin_skills(),
@@ -1899,5 +1913,41 @@ mod tests {
             "无 title 有预览回退预览: {echo}"
         );
         assert!(echo.contains("(当前)"), "当前标记: {echo}");
+    }
+
+    #[tokio::test]
+    async fn skills_cmd_excludes_deprecated_skills() {
+        // 工作区 fitness.json 标记一个内置技能 deprecated：/skills 不再展示。
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("ws");
+        std::fs::create_dir_all(ws.join(".deepseeknova/skills")).unwrap();
+        let fitness_path = ws.join(".deepseeknova/skills/fitness.json");
+        let mut store = deepseeknova_skills::fitness::FitnessStore::load(&fitness_path).unwrap();
+        store.mark_deprecated("coding-copilot");
+        store.save().unwrap();
+
+        let caps = TuiCaps {
+            workspace_root: Some(ws),
+            ..empty_caps()
+        };
+        let mut app = AppState {
+            tr: Tr::new(crate::i18n::Lang::Zh),
+            ..Default::default()
+        };
+        run_cmd("skills", "", &mut app, &caps).await;
+        let echo: String = app
+            .echo
+            .iter()
+            .map(|l| l.text.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !echo.contains("coding-copilot"),
+            "deprecated skill must be hidden from /skills, got: {echo}"
+        );
+        assert!(
+            echo.contains("frontend-developer"),
+            "non-deprecated builtin must still be shown, got: {echo}"
+        );
     }
 }

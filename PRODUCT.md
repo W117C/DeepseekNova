@@ -19,7 +19,7 @@ terminal
 
 ## Product Purpose
 
-DeepseekNova 是 Rust 编写的 AI Agent 框架（22 个 crate），计划开源。本轮工作目标：TUI 达到**产品级完成度**——首次上手体验、视觉一致性、功能完整性都要经得起社区检验。成功 = 开源发布后能作为该品类中完成度可信的替代品被采用。
+DeepseekNova 是 Rust 编写的 AI Agent 框架（21 个 crate），计划开源。本轮工作目标：TUI 达到**产品级完成度**——首次上手体验、视觉一致性、功能完整性都要经得起社区检验。成功 = 开源发布后能作为该品类中完成度可信的替代品被采用。
 
 ## Positioning
 

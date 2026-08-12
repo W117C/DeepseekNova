@@ -26,23 +26,6 @@ use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
-// ContextProvider trait — Runtime depends on this, not a concrete engine
-// ---------------------------------------------------------------------------
-
-/// Provides access to the runtime's contextual state: workspace index,
-/// working memory, and project memory. The runtime depends on this trait
-/// rather than on a concrete engine.
-#[async_trait::async_trait]
-pub trait ContextProvider: Send + Sync {
-    /// Returns the scanned workspace index.
-    fn workspace(&self) -> &WorkspaceIndex;
-    /// Returns the session-scoped working memory.
-    fn working_memory(&self) -> &WorkingMemory;
-    /// Returns the project-scoped memory loaded from the workspace.
-    fn project_memory(&self) -> &ProjectMemory;
-}
-
-// ---------------------------------------------------------------------------
 // WorkspaceIndex — scan real filesystem
 // ---------------------------------------------------------------------------
 
@@ -1053,57 +1036,6 @@ pub enum MemoryType {
     Project,
     /// Reference material that is not project-specific.
     Reference,
-}
-
-// ---------------------------------------------------------------------------
-// ContextEngine — concrete implementation
-// ---------------------------------------------------------------------------
-
-/// Concrete [`ContextProvider`]: owns the workspace index, prompt builder,
-/// working memory, and project memory for one session.
-pub struct ContextEngine {
-    /// The scanned workspace index.
-    pub workspace: WorkspaceIndex,
-    /// Builder used to assemble provider messages.
-    pub prompt_builder: PromptBuilder,
-    /// Session-scoped conversation memory.
-    pub working_memory: WorkingMemory,
-    /// Project-scoped memory loaded from the workspace.
-    pub project_memory: ProjectMemory,
-}
-
-impl ContextEngine {
-    /// Create a context engine for the given workspace root: scans the
-    /// workspace and loads project memory (DEEPSEEKNOVA.md, memory files,
-    /// custom commands).
-    pub fn new(root: PathBuf) -> Result<Self, DeepseeknovaError> {
-        let workspace = WorkspaceIndex::scan(&root)?;
-        let mut project_memory = ProjectMemory::new();
-        project_memory.load_deepseeknova_md(&root);
-        project_memory.load_memory_files(&root);
-        project_memory.load_custom_commands(&root);
-
-        Ok(Self {
-            workspace,
-            prompt_builder: PromptBuilder,
-            working_memory: WorkingMemory::new(),
-            project_memory,
-        })
-    }
-}
-
-impl ContextProvider for ContextEngine {
-    fn workspace(&self) -> &WorkspaceIndex {
-        &self.workspace
-    }
-
-    fn working_memory(&self) -> &WorkingMemory {
-        &self.working_memory
-    }
-
-    fn project_memory(&self) -> &ProjectMemory {
-        &self.project_memory
-    }
 }
 
 // ---------------------------------------------------------------------------
