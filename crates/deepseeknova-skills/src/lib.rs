@@ -38,6 +38,7 @@ mod loader;
 
 pub mod fitness;
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 pub use loader::SkillLoader;
@@ -117,6 +118,8 @@ pub fn load_builtin_skills() -> Vec<Skill> {
 #[derive(Default)]
 pub struct SkillResolver {
     sources: Vec<(SkillScope, SkillSource)>,
+    /// 已弃用技能名集合；[`Self::resolve`] 跳过这些技能。
+    deprecated: HashSet<String>,
 }
 
 /// 一个技能来源：目录（惰性加载）或预载列表。
@@ -145,6 +148,13 @@ impl SkillResolver {
         self
     }
 
+    /// 设置需过滤的已弃用技能名集合（[`Self::resolve`] 跳过这些技能，
+    /// 目录来源同时透传给底层 [`SkillLoader`]）。
+    pub fn with_deprecated(mut self, deprecated: HashSet<String>) -> Self {
+        self.deprecated = deprecated;
+        self
+    }
+
     /// 已注册的来源数。
     pub fn source_count(&self) -> usize {
         self.sources.len()
@@ -158,7 +168,9 @@ impl SkillResolver {
         for (scope, source) in &self.sources {
             let skills: Vec<Skill> = match source {
                 SkillSource::Dir(root) => {
-                    let loader = SkillLoader::new(root).with_scope(*scope);
+                    let loader = SkillLoader::new(root)
+                        .with_scope(*scope)
+                        .with_deprecated(self.deprecated.clone());
                     match loader.load_all() {
                         Ok(skills) => skills,
                         Err(e) => {
@@ -170,6 +182,10 @@ impl SkillResolver {
                 SkillSource::Preloaded(skills) => skills.clone(),
             };
             for skill in skills {
+                // 已弃用技能整体跳过（覆盖 preloaded 等不经 loader 过滤的来源）。
+                if self.deprecated.contains(&skill.name) {
+                    continue;
+                }
                 let key = skill.name.clone();
                 match by_name.get(&key) {
                     // 仅当既有来源层级更高时保留；同 scope 或更低时由
@@ -433,5 +449,41 @@ mod tests {
             .resolve();
         assert!(resolved.is_empty(), "缺失目录不应报错");
         assert!(SkillResolver::new().resolve().is_empty());
+    }
+
+    #[test]
+    fn resolver_excludes_deprecated_skills() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("skills");
+        std::fs::create_dir_all(&dir).unwrap();
+        write_skill(&dir, "active", "active version");
+        write_skill(&dir, "retired", "retired version");
+
+        let deprecated = HashSet::from(["retired".to_string()]);
+        // 目录来源：deprecated 经 with_deprecated 透传 loader 过滤。
+        let resolved = SkillResolver::new()
+            .with_deprecated(deprecated.clone())
+            .add_source(SkillScope::User, &dir)
+            .resolve();
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].name, "active");
+
+        // preloaded 来源：不经 loader，由 resolve 自身过滤。
+        let builtin: Vec<Skill> = ["retired".to_string()]
+            .into_iter()
+            .map(|name| Skill {
+                name,
+                description: "preloaded".into(),
+                model: None,
+                tools_allowed: vec![],
+                system_prompt: "preloaded body".into(),
+                scope: SkillScope::Builtin,
+            })
+            .collect();
+        let resolved = SkillResolver::new()
+            .with_deprecated(deprecated)
+            .add_preloaded(SkillScope::Builtin, builtin)
+            .resolve();
+        assert!(resolved.is_empty(), "preloaded deprecated 技能应被过滤");
     }
 }

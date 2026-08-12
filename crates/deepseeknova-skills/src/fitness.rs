@@ -250,6 +250,14 @@ impl FitnessStore {
         self.deprecated.contains(name)
     }
 
+    /// 标记某技能为已弃用（下次 [`FitnessStore::save`] 时持久化）。
+    ///
+    /// 幂等：重复标记同一技能名无副作用。已弃用技能不会被删除，只从
+    /// 加载/解析结果中过滤。
+    pub fn mark_deprecated(&mut self, name: &str) {
+        self.deprecated.insert(name.to_string());
+    }
+
     fn empty(path: &Path) -> Self {
         Self {
             records: HashMap::new(),
@@ -668,5 +676,20 @@ mod tests {
         let reloaded = FitnessStore::load(&path).unwrap();
         assert!(reloaded.is_deprecated("legacy-skill"));
         assert!(!reloaded.is_deprecated("other"));
+    }
+
+    #[test]
+    fn mark_deprecated_then_save_load_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fitness.json");
+        let mut store = FitnessStore::load(&path).unwrap();
+        store.mark_deprecated("legacy-skill");
+        assert!(store.is_deprecated("legacy-skill"));
+        assert!(!store.is_deprecated("other"));
+        store.save().unwrap();
+
+        let loaded = FitnessStore::load(&path).unwrap();
+        assert!(loaded.is_deprecated("legacy-skill"));
+        assert!(!loaded.is_deprecated("other"));
     }
 }
