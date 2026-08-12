@@ -86,6 +86,15 @@ git config diff.renames true  # diff/log 统计启用重命名检测
   易 flaky），性能退化由比对历史 artifact 发现。注意 criterion 0.8 已移除
   `--output-format json`，基线保存是现版本可用的 JSON 记录手段。
 
+- **运行 eval 基准（CI 门禁，成本优先 F3）**：
+  ```bash
+  make eval-ci
+  ```
+  跑 `evals/core.jsonl` 基准任务集并施加 CI 门槛（综合分均值 `--require-min-score 3.5`
+  且关键维度 `--require-dimension governance>=0.7`，成本优先 F3）。需已配置 LLM
+  provider（`DEEPSEEKNOVA_API_KEY` 或 `DEEPSEEK_API_KEY`）；无 key 时打印跳过信息
+  并 `exit 0`（不视为失败），故本地无 key 也不会阻断开发。
+
 > 桌面端前端（`crates/deepseeknova-desktop`）已于 2026-08-08 整体移除，
 > 历史可经 git 追溯（先例 `3ab55d7`）。当前无 Node 工程，本仓库为纯
 > Rust workspace。
