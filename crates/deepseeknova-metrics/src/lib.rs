@@ -25,7 +25,7 @@ use deepseeknova_core::tool_hook::{FindingSeverity, QualityFinding};
 use deepseeknova_provider::cost::CostReport;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -183,8 +183,76 @@ pub fn write_report(report: &SessionReport, dir: &Path) -> std::io::Result<std::
     let path = dir.join(format!("{}.json", report.session_id));
     let bytes = serde_json::to_vec_pretty(report)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(&path, bytes)?;
+    write_atomic(&path, &bytes)?;
     Ok(path)
+}
+
+/// 将 `bytes` 原子写入 `path`：先写同目录临时文件（unix 下创建即 0600），
+/// rename 原子替换目标，再 set_permissions 收敛为 0600。写一半崩溃/中断不会
+/// 留下半截目标文件（对齐 skills crate `FitnessStore::save` 的持久化先例）。
+///
+/// 临时文件名带进程 PID 与纳秒时间戳：多进程（serve 多会话 / CLI+serve 双进程
+/// 共享工作区）并发写同一路径时 tmp 文件互不踩踏，rename 仍是原子替换。
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let tmp_path = PathBuf::from(format!(
+        "{}.{}.{}.tmp",
+        path.display(),
+        std::process::id(),
+        nanos
+    ));
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true).mode(0o600);
+        let mut f = opts.open(&tmp_path).map_err(|e| {
+            std::io::Error::new(
+                e.kind(),
+                format!("failed to create {}: {e}", tmp_path.display()),
+            )
+        })?;
+        f.write_all(bytes).map_err(|e| {
+            std::io::Error::new(
+                e.kind(),
+                format!("failed to write {}: {e}", tmp_path.display()),
+            )
+        })?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&tmp_path, bytes).map_err(|e| {
+            std::io::Error::new(
+                e.kind(),
+                format!("failed to write {}: {e}", tmp_path.display()),
+            )
+        })?;
+    }
+    std::fs::rename(&tmp_path, path).map_err(|e| {
+        std::io::Error::new(
+            e.kind(),
+            format!(
+                "failed to rename {} to {}: {e}",
+                tmp_path.display(),
+                path.display()
+            ),
+        )
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|e| {
+            std::io::Error::new(
+                e.kind(),
+                format!("failed to chmod 0600 {}: {e}", path.display()),
+            )
+        })?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -443,7 +511,7 @@ pub fn write_scorecard(card: &Scorecard, dir: &Path) -> std::io::Result<std::pat
     let path = dir.join(format!("{}.scorecard.json", card.session_id));
     let bytes = serde_json::to_vec_pretty(card)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(&path, bytes)?;
+    write_atomic(&path, &bytes)?;
     Ok(path)
 }
 
