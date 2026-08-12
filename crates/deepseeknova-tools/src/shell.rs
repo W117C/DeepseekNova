@@ -273,8 +273,10 @@ where
 }
 
 /// Drain a child's stdout/stderr into `out`/`err`, bounding the combined bytes
-/// to `cap` (when `Some`). Returns `Ok(true)` if the cap was exceeded before
-/// EOF; the caller must kill the child.
+/// to `cap` (when `Some`). Returns `Ok(true)` as soon as **either** stream
+/// exceeds the cap — the other stream's drain is cancelled — so the caller can
+/// kill the child promptly. If both streams reach EOF without overflowing,
+/// returns `Ok(false)`.
 async fn collect_output(
     child: &mut tokio::process::Child,
     cap: Option<usize>,
@@ -285,17 +287,42 @@ async fn collect_output(
     let so = child.stdout.take();
     let se = child.stderr.take();
 
-    let (so_res, se_res) = match (so, se) {
-        (Some(so), Some(se)) => tokio::join!(
-            drain_stream(so, cap, &counter, out),
-            drain_stream(se, cap, &counter, err),
-        ),
-        (Some(so), None) => (drain_stream(so, cap, &counter, out).await, Ok(false)),
-        (None, Some(se)) => (Ok(false), drain_stream(se, cap, &counter, err).await),
-        (None, None) => (Ok(false), Ok(false)),
-    };
+    match (so, se) {
+        (Some(so), Some(se)) => {
+            // `join!` 会等两条 drain 都完成才返回：一条流溢出后另一条流若
+            // 无数据且 fd 保持打开（子进程仍持有），kill 会被推迟到外层
+            // 超时。改用 select! 在任一流溢出时立即返回并取消另一条。
+            let so_fut = drain_stream(so, cap, &counter, out);
+            let se_fut = drain_stream(se, cap, &counter, err);
+            tokio::pin!(so_fut);
+            tokio::pin!(se_fut);
 
-    Ok(so_res? || se_res?)
+            let mut so_done = false;
+            let mut se_done = false;
+            loop {
+                tokio::select! {
+                    r = &mut so_fut, if !so_done => {
+                        so_done = true;
+                        if r? {
+                            return Ok(true);
+                        }
+                    }
+                    r = &mut se_fut, if !se_done => {
+                        se_done = true;
+                        if r? {
+                            return Ok(true);
+                        }
+                    }
+                }
+                if so_done && se_done {
+                    return Ok(false);
+                }
+            }
+        }
+        (Some(so), None) => drain_stream(so, cap, &counter, out).await,
+        (None, Some(se)) => drain_stream(se, cap, &counter, err).await,
+        (None, None) => Ok(false),
+    }
 }
 
 /// Returns (shell, flag) for the current platform.
@@ -501,6 +528,37 @@ mod tests {
         assert!(
             elapsed.as_secs() < 5,
             "应在 5s 超时前返回（超限即 kill），实际耗时 {elapsed:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shell_kills_overflow_promptly_when_other_stream_stays_open() {
+        // A1 回归：stdout 先溢出 cap，随后 `sleep 5` 静默持有 stderr（无数据
+        // 但 fd 保持打开）。collect_output 必须在 stdout 溢出时立即返回并
+        // kill，而不是等 stderr EOF（那要等 sleep 5 结束）或外层 2s 超时。
+        let mut sec = SecurityContext::with_safe_defaults();
+        sec.limits.max_output_bytes = 64;
+        sec.limits.max_execution_time = std::time::Duration::from_secs(2);
+        let ctx = ctx_with(sec);
+
+        let start = std::time::Instant::now();
+        let res = ShellTool::default()
+            .execute(&ctx, r#"{"command":"seq 1 100000; sleep 5"}"#)
+            .await;
+        let elapsed = start.elapsed();
+
+        match res {
+            Ok(out) => assert!(out.contains("[truncated"), "got: {out}"),
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(!msg.contains("timed out"), "不得等外层超时: {msg}");
+                assert!(msg.contains("[truncated"), "被 kill 后必须截断: {msg}");
+            }
+        }
+        assert!(
+            elapsed.as_secs() < 2,
+            "应在 2s 超时前返回（stdout 溢出即 kill），实际耗时 {elapsed:?}"
         );
     }
 
