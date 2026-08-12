@@ -739,7 +739,7 @@ impl ThinkCallback for CoordinatorCallbacks {
                 ))
             })?;
         let result = self.provider.generate(validated).await?;
-        Ok((result.content, deepseeknova_core::chunk::Usage::default()))
+        Ok((result.content, result.usage.unwrap_or_default()))
     }
 }
 
