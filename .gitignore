@@ -25,3 +25,6 @@ __pycache__/
 !.deepseeknova/skills/
 # 审计日志等运行时产物可能在各 crate 的 cwd 落盘（测试/子命令运行目录）。
 **/.deepseeknova/security/
+
+# Isolated git worktrees (subagent-driven development)
+.worktrees/
