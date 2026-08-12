@@ -25,7 +25,7 @@ use deepseeknova_core::tool_hook::{FindingSeverity, QualityFinding};
 use deepseeknova_provider::cost::CostReport;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -183,8 +183,76 @@ pub fn write_report(report: &SessionReport, dir: &Path) -> std::io::Result<std::
     let path = dir.join(format!("{}.json", report.session_id));
     let bytes = serde_json::to_vec_pretty(report)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(&path, bytes)?;
+    write_atomic(&path, &bytes)?;
     Ok(path)
+}
+
+/// 将 `bytes` 原子写入 `path`：先写同目录临时文件（unix 下创建即 0600），
+/// rename 原子替换目标，再 set_permissions 收敛为 0600。写一半崩溃/中断不会
+/// 留下半截目标文件（对齐 skills crate `FitnessStore::save` 的持久化先例）。
+///
+/// 临时文件名带进程 PID 与纳秒时间戳：多进程（serve 多会话 / CLI+serve 双进程
+/// 共享工作区）并发写同一路径时 tmp 文件互不踩踏，rename 仍是原子替换。
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let tmp_path = PathBuf::from(format!(
+        "{}.{}.{}.tmp",
+        path.display(),
+        std::process::id(),
+        nanos
+    ));
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true).mode(0o600);
+        let mut f = opts.open(&tmp_path).map_err(|e| {
+            std::io::Error::new(
+                e.kind(),
+                format!("failed to create {}: {e}", tmp_path.display()),
+            )
+        })?;
+        f.write_all(bytes).map_err(|e| {
+            std::io::Error::new(
+                e.kind(),
+                format!("failed to write {}: {e}", tmp_path.display()),
+            )
+        })?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&tmp_path, bytes).map_err(|e| {
+            std::io::Error::new(
+                e.kind(),
+                format!("failed to write {}: {e}", tmp_path.display()),
+            )
+        })?;
+    }
+    std::fs::rename(&tmp_path, path).map_err(|e| {
+        std::io::Error::new(
+            e.kind(),
+            format!(
+                "failed to rename {} to {}: {e}",
+                tmp_path.display(),
+                path.display()
+            ),
+        )
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|e| {
+            std::io::Error::new(
+                e.kind(),
+                format!("failed to chmod 0600 {}: {e}", path.display()),
+            )
+        })?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -429,10 +497,10 @@ pub struct ScorecardAggregate {
     pub count: usize,
     /// 各维度的平均值。
     pub avg: ScoreDimensions,
-    /// 四维 overall 的平均值。
+    /// 综合指数（composite）的平均值（加权口径，见 [`composite_index`]）。
     pub avg_overall: f32,
-    /// 平均分最低的维度名（governance/verification/reflection/review）；
-    /// 空输入为 `""`。
+    /// 平均分最低的维度名（governance/verification/reflection/review/
+    /// protocol/composite 六维，固定顺序取首个最小值）；空输入为 `""`。
     pub worst_dimension: String,
 }
 
@@ -443,7 +511,7 @@ pub fn write_scorecard(card: &Scorecard, dir: &Path) -> std::io::Result<std::pat
     let path = dir.join(format!("{}.scorecard.json", card.session_id));
     let bytes = serde_json::to_vec_pretty(card)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(&path, bytes)?;
+    write_atomic(&path, &bytes)?;
     Ok(path)
 }
 
@@ -500,7 +568,7 @@ pub fn list_scorecards(dir: &Path) -> Vec<Scorecard> {
     cards
 }
 
-/// 聚合多张评分卡：各维均值、overall 均值与平均分最低的维度。
+/// 聚合多张评分卡：各维均值、composite 均值与平均分最低的维度。
 /// 空输入返回全零聚合、`worst_dimension = ""`。
 pub fn aggregate_scorecards(cards: &[Scorecard]) -> ScorecardAggregate {
     let count = cards.len();
@@ -544,14 +612,18 @@ pub fn aggregate_scorecards(cards: &[Scorecard]) -> ScorecardAggregate {
         protocol: sum.protocol / n,
         composite: sum.composite / n,
     };
-    let avg_overall = (avg.governance + avg.verification + avg.reflection + avg.review) / 4.0;
-    // 固定顺序扫描取首个最小值，保证同名维度结果稳定。
+    // 综合指数均值（覆盖 protocol/composite，设计 §7.1 聚合口径：
+    // composite 已含五维加权信息，avg_overall 直接取 composite 均值）。
+    let avg_overall = avg.composite;
+    // 固定顺序扫描六维取首个最小值，保证同名维度结果稳定。
     let mut worst = "governance";
     let mut worst_value = avg.governance;
     for (name, value) in [
         ("verification", avg.verification),
         ("reflection", avg.reflection),
         ("review", avg.review),
+        ("protocol", avg.protocol),
+        ("composite", avg.composite),
     ] {
         if value < worst_value {
             worst = name;
@@ -842,13 +914,42 @@ mod tests {
         assert!((agg.avg.verification - 0.5).abs() < 1e-6);
         assert_eq!(agg.avg.reflection, 0.0);
         assert!((agg.avg.review - 0.5).abs() < 1e-6);
-        assert!((agg.avg_overall - 0.375).abs() < 1e-6);
+        // avg_overall 现为 composite 均值（两卡 composite 显式 0.0 → 0.0）。
+        assert_eq!(agg.avg_overall, 0.0);
         assert_eq!(agg.worst_dimension, "reflection");
         // 空输入：全零 + 空 worst_dimension。
         let empty = aggregate_scorecards(&[]);
         assert_eq!(empty.count, 0);
         assert_eq!(empty.worst_dimension, "");
         assert_eq!(empty.avg_overall, 0.0);
+    }
+
+    #[test]
+    fn aggregate_worst_dimension_surfaces_protocol() {
+        // 六维中 protocol 均值最低 → worst_dimension 必须命中 protocol
+        // （回归：旧实现只扫四维，protocol 维度缺陷在聚合中不可见）。
+        let mk = |id: &str, protocol: f32, composite: f32| Scorecard {
+            session_id: id.to_string(),
+            started_at_ms: 1,
+            dimensions: ScoreDimensions {
+                governance: 1.0,
+                verification: 1.0,
+                reflection: 1.0,
+                review: 1.0,
+                protocol,
+                composite,
+            },
+            first_pass: true,
+            retry_rounds: 0,
+        };
+        let cards = vec![mk("a", 0.2, 0.9), mk("b", 0.4, 0.8)];
+        let agg = aggregate_scorecards(&cards);
+        assert_eq!(agg.count, 2);
+        assert!((agg.avg.protocol - 0.3).abs() < 1e-6);
+        // 其余维均值 1.0，protocol 0.3 为唯一最低 → 扫六维必须命中 protocol。
+        assert_eq!(agg.worst_dimension, "protocol");
+        // avg_overall 为 composite 均值。
+        assert!((agg.avg_overall - 0.85).abs() < 1e-6);
     }
 
     #[test]

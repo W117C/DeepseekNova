@@ -251,59 +251,44 @@ impl AnthropicProvider {
             let body = body.clone();
             let url = url.clone();
             Box::pin(async move {
-                match client
-                    .post(&url)
-                    .header("x-api-key", &api_key)
-                    .header("anthropic-version", &api_version)
-                    .json(&body)
-                    .send()
-                    .await
-                {
-                    Ok(response) => {
-                        let status = response.status();
-                        if status.is_success() {
-                            HttpAttempt::Success(response)
-                        } else if crate::retry::is_retryable_status(status.as_u16()) {
-                            let error_text = response.text().await.unwrap_or_default();
-                            HttpAttempt::Retryable {
-                                message: format!("HTTP {status}: {error_text}"),
-                                status: Some(status.as_u16()),
-                                retry_after: None,
-                            }
-                        } else {
-                            let error_text = response.text().await.unwrap_or_default();
-                            HttpAttempt::Fatal {
-                                message: format!("HTTP {status}: {error_text}"),
-                                status: Some(status.as_u16()),
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        let err_str = e.to_string();
-                        if crate::retry::is_retryable_error(&err_str) {
-                            HttpAttempt::Retryable {
-                                message: err_str,
-                                status: None,
-                                retry_after: None,
-                            }
-                        } else {
-                            HttpAttempt::Fatal {
-                                message: err_str,
-                                status: None,
-                            }
-                        }
-                    }
-                }
+                // 统一走 retry::classify_response：anthropic 与 openai 共用
+                // 同一套响应分类，且 429 时同样解析 `Retry-After` 头（修复
+                // #3——此前 anthropic 分支不读取该头，429 一律默认指数退避）。
+                crate::retry::classify_response(
+                    client
+                        .post(&url)
+                        .header("x-api-key", &api_key)
+                        .header("anthropic-version", &api_version)
+                        .json(&body)
+                        .send()
+                        .await,
+                )
+                .await
             })
         })
         .await;
 
         match result {
             HttpAttempt::Success(response) => Ok(response),
-            HttpAttempt::Retryable { message, .. } => Err(DeepseeknovaError::provider_retryable(
-                format!("request failed after retries: {message}"),
-            )),
-            HttpAttempt::Fatal { message, .. } => Err(DeepseeknovaError::provider(message)),
+            HttpAttempt::Retryable {
+                message, status, ..
+            } => {
+                // 保留 anthropic 最终错误映射：`HTTP {status}:` 前缀不变。
+                let detail = match status {
+                    Some(st) => format!("HTTP {st}: {message}"),
+                    None => message,
+                };
+                Err(DeepseeknovaError::provider_retryable(format!(
+                    "request failed after retries: {detail}"
+                )))
+            }
+            HttpAttempt::Fatal { message, status } => {
+                let detail = match status {
+                    Some(st) => format!("HTTP {st}: {message}"),
+                    None => message,
+                };
+                Err(DeepseeknovaError::provider(detail))
+            }
         }
     }
 }
@@ -402,6 +387,7 @@ impl Provider for AnthropicProvider {
                 Some(reasoning)
             },
             reasoning_signature,
+            usage: resp.usage.as_ref().map(|u| u.to_usage()),
         })
     }
 
@@ -654,6 +640,26 @@ struct AnthropicOutputTokensDetails {
     reasoning_tokens: u32,
 }
 
+impl AnthropicUsage {
+    /// 把 Anthropic 原生用量映射为核心 `Usage`，保留 context-cache 读/写与
+    /// 计费推理 token（与流式路径 `AnthropicUsageAcc::to_usage` 口径一致）。
+    fn to_usage(&self) -> Usage {
+        let prompt_tokens =
+            self.input_tokens + self.cache_read_input_tokens + self.cache_creation_input_tokens;
+        Usage {
+            prompt_tokens,
+            completion_tokens: self.output_tokens,
+            total_tokens: prompt_tokens + self.output_tokens,
+            cache_hit_tokens: self.cache_read_input_tokens,
+            cache_miss_tokens: self.cache_creation_input_tokens,
+            reasoning_tokens: self
+                .output_tokens_details
+                .as_ref()
+                .map_or(0, |d| d.reasoning_tokens),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
@@ -776,86 +782,70 @@ impl AnthropicUsageAcc {
 // True SSE streaming — bytes_stream() with incremental event parsing
 // ---------------------------------------------------------------------------
 
-/// 单条 SSE 行的最大字节数（含 `data:`/`event:` 前缀，tool arguments 累积
-/// 同样受此上限约束）。恶意/损坏网关可在超时窗口内塞入无换行大块数据；超限
-/// 即视为协议异常并返回明确错误，防止内存无限累积。
-const MAX_SSE_LINE_BYTES: usize = 1024 * 1024;
+/// 单次 Anthropic 流式解析的累计状态，随 `crate::sse::for_each_sse_line`
+/// 逐行按值传递（闭包不能捕获 `&mut` 累计状态——返回的 future 会借走它，
+/// 违反 `FnMut` 逃逸规则）。
+struct AnthropicSseState<'a> {
+    tx: &'a mpsc::Sender<Result<Chunk, DeepseeknovaError>>,
+    current_event_type: Option<String>,
+    current_data: Option<String>,
+    tool_acc: Vec<AccToolCall>,
+    usage_acc: AnthropicUsageAcc,
+}
 
 async fn stream_anthropic_sse(
     response: reqwest::Response,
     tx: &mpsc::Sender<Result<Chunk, DeepseeknovaError>>,
 ) -> Result<(), DeepseeknovaError> {
-    let mut line_bytes: Vec<u8> = Vec::new();
-    let mut current_event_type: Option<String> = None;
-    let mut current_data: Option<String> = None;
-    let mut tool_acc: Vec<AccToolCall> = Vec::new();
-    let mut usage_acc = AnthropicUsageAcc::default();
-
-    let mut byte_stream = response.bytes_stream();
-
-    while let Some(chunk_result) = byte_stream.next().await {
-        let bytes = chunk_result.map_err(|e| {
-            DeepseeknovaError::provider(format!("failed to read chunk from Anthropic stream: {e}"))
-        })?;
-
-        for &b in bytes.iter() {
-            match b {
-                b'\n' => {
-                    let line_str = String::from_utf8(line_bytes.clone()).map_err(|e| {
-                        DeepseeknovaError::provider(format!("invalid UTF-8 in Anthropic SSE: {e}"))
-                    })?;
-                    line_bytes.clear();
-
-                    let trimmed = line_str.trim().to_string();
-                    if trimmed.is_empty() {
-                        if let Some(ref data) = current_data {
-                            process_anthropic_event(
-                                current_event_type.as_deref(),
-                                data,
-                                tx,
-                                &mut tool_acc,
-                                &mut usage_acc,
-                            )
-                            .await?;
-                        }
-                        current_event_type = None;
-                        current_data = None;
-                        continue;
-                    }
-
-                    if let Some(event_type) = trimmed.strip_prefix("event: ") {
-                        current_event_type = Some(event_type.trim().to_string());
-                    } else if let Some(data) = trimmed.strip_prefix("data: ") {
-                        current_data = Some(data.trim().to_string());
-                    }
+    // 行切分统一走共享的 crate::sse::for_each_sse_line（逐字节切行、`\r`
+    // 跳过、超限报错、尾行冲刷）；Anthropic 以空行作为事件分发边界——
+    // `event:`/`data:` 前缀行累积到 current_*，空行触发 process_anthropic_event。
+    let mut state = crate::sse::for_each_sse_line(
+        response.bytes_stream(),
+        "Anthropic",
+        AnthropicSseState {
+            tx,
+            current_event_type: None,
+            current_data: None,
+            tool_acc: Vec::new(),
+            usage_acc: AnthropicUsageAcc::default(),
+        },
+        |line, mut st| async move {
+            if line.is_empty() {
+                if let Some(ref data) = st.current_data {
+                    process_anthropic_event(
+                        st.current_event_type.as_deref(),
+                        data,
+                        st.tx,
+                        &mut st.tool_acc,
+                        &mut st.usage_acc,
+                    )
+                    .await?;
                 }
-                b'\r' => {}
-                _ => {
-                    // 单行无长度上限会被恶意/损坏网关的无换行大块数据撑爆内存；
-                    // 超限视为协议异常直接报错（未换行的尾行同样受此约束）。
-                    if line_bytes.len() >= MAX_SSE_LINE_BYTES {
-                        return Err(DeepseeknovaError::provider(
-                            "Anthropic SSE line exceeds maximum allowed length (protocol anomaly)",
-                        ));
-                    }
-                    line_bytes.push(b);
-                }
+                st.current_event_type = None;
+                st.current_data = None;
+            } else if let Some(event_type) = line.strip_prefix("event: ") {
+                st.current_event_type = Some(event_type.trim().to_string());
+            } else if let Some(data) = line.strip_prefix("data: ") {
+                st.current_data = Some(data.trim().to_string());
             }
-        }
-    }
+            Ok(st)
+        },
+    )
+    .await?;
 
-    if let Some(ref data) = current_data {
+    if let Some(ref data) = state.current_data {
         process_anthropic_event(
-            current_event_type.as_deref(),
+            state.current_event_type.as_deref(),
             data,
             tx,
-            &mut tool_acc,
-            &mut usage_acc,
+            &mut state.tool_acc,
+            &mut state.usage_acc,
         )
         .await?;
     }
 
-    flush_anthropic_tool_calls(tx, &mut tool_acc).await?;
+    flush_anthropic_tool_calls(tx, &mut state.tool_acc).await?;
     let _ = tx.send(Ok(Chunk::Done)).await;
 
     Ok(())
@@ -944,7 +934,7 @@ async fn process_anthropic_event(
                     }
                     // tool arguments 累积设上限，防止损坏网关上无限累积；
                     // 超限视为协议异常直接报错。
-                    if tc.arguments.len() + partial.len() > MAX_SSE_LINE_BYTES {
+                    if tc.arguments.len() + partial.len() > crate::sse::MAX_SSE_LINE_BYTES {
                         return Err(DeepseeknovaError::provider(
                             "Anthropic tool arguments exceed maximum allowed size (protocol anomaly)",
                         ));
@@ -1070,6 +1060,7 @@ mod tests {
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         }];
         let body = provider.build_request(&msgs, &[], false);
         let v = serde_json::to_value(&body).unwrap();
@@ -1099,6 +1090,7 @@ mod tests {
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         }];
         let body = provider.build_request(&msgs, &[], false);
         let v = serde_json::to_value(&body).unwrap();
@@ -1129,6 +1121,7 @@ mod tests {
                 tool_call_id: None,
                 reasoning_content: None,
                 reasoning_signature: None,
+                usage: None,
             },
             Message {
                 role: Role::User,
@@ -1138,6 +1131,7 @@ mod tests {
                 tool_call_id: None,
                 reasoning_content: None,
                 reasoning_signature: None,
+                usage: None,
             },
         ];
 
@@ -1175,6 +1169,7 @@ mod tests {
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         }];
         let body = provider.build_request(&msgs, &[], false);
         let v = serde_json::to_value(&body).unwrap();
@@ -1204,6 +1199,7 @@ mod tests {
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         }];
         let body = provider.build_request(&msgs, &[], false);
         let v = serde_json::to_value(&body).unwrap();
@@ -1235,6 +1231,7 @@ mod tests {
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         }];
         let body = provider.build_request(&msgs, &[], false);
         let v = serde_json::to_value(&body).unwrap();
@@ -1266,6 +1263,7 @@ mod tests {
                 tool_call_id: None,
                 reasoning_content: None,
                 reasoning_signature: None,
+                usage: None,
             },
             Message {
                 role: Role::Assistant,
@@ -1282,6 +1280,7 @@ mod tests {
                 tool_call_id: None,
                 reasoning_content: Some("用户想查杭州天气，需要调用工具。".into()),
                 reasoning_signature: None,
+                usage: None,
             },
             Message {
                 role: Role::Tool,
@@ -1291,6 +1290,7 @@ mod tests {
                 tool_call_id: Some("toolu_abc123".into()),
                 reasoning_content: None,
                 reasoning_signature: None,
+                usage: None,
             },
         ];
 
@@ -1367,6 +1367,7 @@ mod tests {
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         }];
 
         let body = provider.build_request(&msgs, &[], false);
@@ -1404,6 +1405,7 @@ mod tests {
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         }];
 
         let body = provider.build_request(&msgs, &[], false);
@@ -1450,6 +1452,7 @@ mod tests {
             tool_call_id: None,
             reasoning_content: Some("thinking text".into()),
             reasoning_signature: Some("sig-abc123".into()),
+            usage: None,
         }];
 
         let body = provider.build_request(&msgs, &[], false);
@@ -1491,6 +1494,7 @@ mod tests {
             tool_call_id: None,
             reasoning_content: Some("plain reasoning".into()),
             reasoning_signature: None,
+            usage: None,
         }];
 
         let body = provider.build_request(&msgs, &[], false);
@@ -1768,6 +1772,7 @@ mod tests {
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         }];
         let tool_refs: Vec<&dyn Tool> = Vec::new();
         let validated = ValidatedRequest::new(&msgs, &tool_refs).unwrap();
@@ -1841,6 +1846,7 @@ mod tests {
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         }];
         let tool_refs: Vec<&dyn Tool> = Vec::new();
         let validated = ValidatedRequest::new(&msgs, &tool_refs).unwrap();

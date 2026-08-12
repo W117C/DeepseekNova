@@ -74,7 +74,7 @@ impl Tool for SearchCodeTool {
                     },
                     "kind": {
                         "type": "string",
-                        "enum": ["directory", "file", "struct", "enum", "trait", "class", "function", "method"],
+                        "enum": ["file", "struct", "enum", "trait", "class", "function", "method"],
                         "description": "Kind (optional)."
                     },
                     "limit": {
@@ -186,7 +186,7 @@ impl Tool for TraverseGraphTool {
                         "type": "array",
                         "items": {
                             "type": "string",
-                            "enum": ["contains", "imports", "calls", "implements", "references", "dispatch"]
+                            "enum": ["contains", "imports", "calls", "references", "dispatch"]
                         },
                         "description": "Edges (default calls)."
                     },
@@ -450,7 +450,7 @@ impl Tool for TraceCodeTool {
                         "type": "array",
                         "items": {
                             "type": "string",
-                            "enum": ["contains", "imports", "calls", "implements", "references", "dispatch"]
+                            "enum": ["contains", "imports", "calls", "references", "dispatch"]
                         },
                         "description": "Edges (default calls,references,dispatch)."
                     },

@@ -588,6 +588,7 @@ impl SubAgentRunner {
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         });
 
         info!(
@@ -758,6 +759,7 @@ async fn run_sub_agent_loop(
         tool_call_id: None,
         reasoning_content: None,
         reasoning_signature: None,
+        usage: None,
     });
 
     // T12：资源限额步级检查（对齐主循环 loop_impl.rs 的 step 边界判定）。
@@ -944,6 +946,7 @@ async fn run_sub_agent_loop(
                     Some(reasoning_buf.clone())
                 },
                 reasoning_signature: reasoning_signature.clone(),
+                usage: None,
             });
 
             // 2) 逐个执行（gate 检查 → ToolHook before → 执行 → ToolHook after），
@@ -1261,6 +1264,7 @@ async fn run_sub_agent_loop(
                     tool_call_id: Some(id.clone()),
                     reasoning_content: None,
                     reasoning_signature: None,
+                    usage: None,
                 });
             }
             // T12：工具执行被父取消中断 → 立即中止（不再续步跑满 max_steps）。
@@ -1292,6 +1296,7 @@ async fn run_sub_agent_loop(
                     Some(reasoning_buf.clone())
                 },
                 reasoning_signature: reasoning_signature.clone(),
+                usage: None,
             });
 
             // 输出净化：中和权限修改指令形状，防父上下文被注入
@@ -1327,6 +1332,7 @@ async fn run_sub_agent_loop(
                 Some(reasoning_buf.clone())
             },
             reasoning_signature: reasoning_signature.clone(),
+            usage: None,
         });
     }
 
@@ -1367,6 +1373,7 @@ async fn compact_with_provider(
         tool_call_id: None,
         reasoning_content: None,
         reasoning_signature: None,
+        usage: None,
     }];
 
     let validated =
@@ -1478,6 +1485,7 @@ mod tests {
                     tool_call_id: None,
                     reasoning_content: None,
                     reasoning_signature: None,
+                    usage: None,
                 })
             }
 
@@ -1631,6 +1639,7 @@ mod tests {
                 tool_call_id: None,
                 reasoning_content: None,
                 reasoning_signature: None,
+                usage: None,
             })
         }
     }
@@ -1696,6 +1705,7 @@ mod tests {
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         }];
         let tokens = estimate_tokens(&msgs);
         assert!(tokens > 0);
@@ -1995,6 +2005,7 @@ mod tests {
                 tool_call_id: None,
                 reasoning_content: None,
                 reasoning_signature: None,
+                usage: None,
             })
         }
         async fn stream(

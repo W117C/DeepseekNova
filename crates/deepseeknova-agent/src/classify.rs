@@ -98,6 +98,7 @@ mod tests {
                 tool_call_id: None,
                 reasoning_content: None,
                 reasoning_signature: None,
+                usage: None,
             });
             assert!(
                 !classify_quick_step(&mem.get_all()),
@@ -125,6 +126,7 @@ mod tests {
                 tool_call_id: None,
                 reasoning_content: None,
                 reasoning_signature: None,
+                usage: None,
             });
             assert!(
                 classify_quick_step(&mem.get_all()),
@@ -144,6 +146,7 @@ mod tests {
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         });
         assert!(!classify_quick_step(&mem.get_all()), "非工具消息不判 quick");
         assert!(

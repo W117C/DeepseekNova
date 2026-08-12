@@ -33,6 +33,9 @@ pub mod embeddings;
 pub mod openai;
 pub mod retry;
 pub mod router;
+/// 共享 SSE（Server-Sent Events）行切分，OpenAI 兼容与 Anthropic 端点
+/// 流式解析共用的字节级帧切分。
+pub mod sse;
 pub mod tool_cache;
 /// Owned wire request/response types shared by the provider backends.
 pub mod types;
@@ -672,6 +675,7 @@ pub mod factory {
                 tool_call_id: None,
                 reasoning_content: None,
                 reasoning_signature: None,
+                usage: None,
             }
         }
 

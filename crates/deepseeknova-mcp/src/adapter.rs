@@ -10,6 +10,7 @@ pub struct McpToolAdapter {
     schema: ToolSchema,
     server_name: String,
     client: Arc<McpClient>,
+    read_only: bool,
 }
 
 impl McpToolAdapter {
@@ -25,6 +26,14 @@ impl McpToolAdapter {
             .clone()
             .unwrap_or_else(|| format!("MCP tool: {}", tool_def.name));
 
+        // D.1：遵循 MCP `ToolAnnotations.readOnlyHint`——服务器显式标记只读
+        // 的工具直接放行只读路径，未提供 annotations 时默认可写（false）。
+        let read_only = tool_def
+            .annotations
+            .as_ref()
+            .map(|a| a.read_only_hint)
+            .unwrap_or(false);
+
         Self {
             schema: ToolSchema {
                 name: namespaced,
@@ -33,6 +42,7 @@ impl McpToolAdapter {
             },
             server_name,
             client,
+            read_only,
         }
     }
 
@@ -92,8 +102,7 @@ impl Tool for McpToolAdapter {
     }
 
     fn read_only(&self) -> bool {
-        // MCP tools default to read_only=false — caller can override
-        false
+        self.read_only
     }
 }
 
@@ -122,13 +131,14 @@ pub async fn discover_mcp_tools(
 mod tests {
     use super::*;
     use crate::connection::McpConnection;
-    use crate::types::ToolDef;
+    use crate::types::{ToolAnnotations, ToolDef};
 
     fn make_tool_def(name: &str) -> ToolDef {
         ToolDef {
             name: name.into(),
             description: None,
             input_schema: serde_json::json!({"type": "object"}),
+            annotations: None,
         }
     }
 
@@ -171,5 +181,34 @@ mod tests {
         let tool = make_tool_def("any");
         let adapter = make_adapter("srv", &tool);
         assert!(!adapter.read_only());
+    }
+
+    #[test]
+    fn test_adapter_read_only_from_hint() {
+        // 服务器标记 readOnlyHint=true → 适配器只读。
+        let tool = ToolDef {
+            name: "read_only_tool".into(),
+            description: None,
+            input_schema: serde_json::json!({"type": "object"}),
+            annotations: Some(ToolAnnotations {
+                read_only_hint: true,
+                ..Default::default()
+            }),
+        };
+        let adapter = make_adapter("srv", &tool);
+        assert!(adapter.read_only(), "readOnlyHint=true 应使适配器只读");
+
+        // readOnlyHint 显式为 false → 适配器可写。
+        let tool = ToolDef {
+            name: "writable_tool".into(),
+            description: None,
+            input_schema: serde_json::json!({"type": "object"}),
+            annotations: Some(ToolAnnotations {
+                read_only_hint: false,
+                ..Default::default()
+            }),
+        };
+        let adapter = make_adapter("srv", &tool);
+        assert!(!adapter.read_only(), "readOnlyHint=false 应保持可写");
     }
 }

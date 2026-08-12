@@ -2286,6 +2286,7 @@ impl deepseeknova_tui::SessionController for TuiSessionController {
                 tool_call_id: None,
                 reasoning_content: None,
                 reasoning_signature: None,
+                usage: None,
             },
             deepseeknova_core::Message {
                 role: deepseeknova_core::Role::Assistant,
@@ -2295,6 +2296,7 @@ impl deepseeknova_tui::SessionController for TuiSessionController {
                 tool_call_id: None,
                 reasoning_content: None,
                 reasoning_signature: None,
+                usage: None,
             },
         ];
         let stored_input = RunInput {
@@ -2380,6 +2382,7 @@ impl deepseeknova_tui::SessionCheckpointController for TuiCheckpointController {
                         tool_call_id: None,
                         reasoning_content: None,
                         reasoning_signature: None,
+                        usage: None,
                     });
                 }
                 drop(hist);

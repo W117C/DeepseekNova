@@ -223,6 +223,7 @@ pub(crate) async fn run_agent_loop(
         tool_call_id: None,
         reasoning_content: None,
         reasoning_signature: None,
+        usage: None,
     });
 
     // Auto 模型+思考路由：每 run 决策一次（而非每步），决策状态随 run 隔离，
@@ -760,6 +761,7 @@ pub(crate) async fn run_agent_loop(
                                         tool_call_id: None,
                                         reasoning_content: None,
                                         reasoning_signature: None,
+                                        usage: None,
                                     });
                                     continue; // 回炉修复，下一次 Complete 再验证
                                 }
@@ -843,6 +845,7 @@ pub(crate) async fn run_agent_loop(
                                         tool_call_id: None,
                                         reasoning_content: None,
                                         reasoning_signature: None,
+                                        usage: None,
                                     });
                                     continue; // 回炉修复，下一次 Complete 再验证
                                 }
@@ -958,6 +961,7 @@ pub(crate) async fn run_agent_loop(
                                     tool_call_id: None,
                                     reasoning_content: None,
                                     reasoning_signature: None,
+                                    usage: None,
                                 });
                                 continue; // 回炉修复，下一次 Complete 再审
                             }
@@ -1400,6 +1404,7 @@ async fn stream_and_process_turn(
                 Some(reasoning_buf.clone())
             },
             reasoning_signature: reasoning_signature.clone(),
+            usage: None,
         });
 
         let final_calls: Vec<ToolCall> = pending_calls
@@ -1450,6 +1455,7 @@ async fn stream_and_process_turn(
                 Some(reasoning_buf.clone())
             },
             reasoning_signature: reasoning_signature.clone(),
+            usage: None,
         });
 
         // ── 协议门控（阶段3）：Execute 阶段边界（工具执行前）──
@@ -2080,6 +2086,7 @@ async fn stream_and_process_turn(
                 tool_call_id: Some(call.id.clone()),
                 reasoning_content: None,
                 reasoning_signature: None,
+                usage: None,
             });
         }
 
@@ -2229,6 +2236,7 @@ async fn compress_observation(obs: &ObserveSettings, tool: &str, raw: &str) -> O
         tool_call_id: None,
         reasoning_content: None,
         reasoning_signature: None,
+        usage: None,
     }];
     let validated = deepseeknova_provider::ValidatedRequest::new(&msgs, &[]).ok()?;
     let msg = obs.provider.generate(validated).await.ok()?;

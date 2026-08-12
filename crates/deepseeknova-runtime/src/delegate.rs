@@ -404,6 +404,7 @@ mod tests {
                 tool_call_id: None,
                 reasoning_content: None,
                 reasoning_signature: None,
+                usage: None,
             })
         }
     }
@@ -592,6 +593,7 @@ mod tests {
                     tool_call_id: None,
                     reasoning_content: None,
                     reasoning_signature: None,
+                    usage: None,
                 })
             }
         }
@@ -703,6 +705,7 @@ mod tests {
                 tool_call_id: None,
                 reasoning_content: None,
                 reasoning_signature: None,
+                usage: None,
             })
         }
     }

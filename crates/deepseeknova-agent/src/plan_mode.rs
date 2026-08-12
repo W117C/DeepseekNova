@@ -111,6 +111,7 @@ async fn run_plan_mode(
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         },
         Message {
             role: Role::User,
@@ -120,6 +121,7 @@ async fn run_plan_mode(
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         },
     ];
 
@@ -291,6 +293,7 @@ mod tests {
                 tool_call_id: None,
                 reasoning_content: None,
                 reasoning_signature: None,
+                usage: None,
             })
         }
 

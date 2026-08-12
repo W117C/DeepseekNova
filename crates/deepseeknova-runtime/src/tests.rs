@@ -37,6 +37,7 @@ async fn sub_agent_task_spec_inputs_render_into_prompt() {
                 tool_call_id: None,
                 reasoning_content: None,
                 reasoning_signature: None,
+                usage: None,
             })
         }
     }
@@ -358,6 +359,7 @@ async fn build_agent_distill_writes_auto_skill_and_recall_injects() {
                     tool_call_id: None,
 reasoning_content: None,
 reasoning_signature: None,
+usage: None,
                 })
         }
     }

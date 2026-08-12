@@ -33,6 +33,7 @@ fn tool_turn_messages() -> Vec<Message> {
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         },
         Message {
             role: Role::Assistant,
@@ -49,6 +50,7 @@ fn tool_turn_messages() -> Vec<Message> {
             tool_call_id: None,
             reasoning_content: Some("need the file content first".into()),
             reasoning_signature: None,
+            usage: None,
         },
         Message {
             role: Role::Tool,
@@ -58,6 +60,7 @@ fn tool_turn_messages() -> Vec<Message> {
             tool_call_id: Some("call_9".into()),
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         },
     ]
 }

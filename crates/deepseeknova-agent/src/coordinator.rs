@@ -171,6 +171,7 @@ fn build_planning_prompt(goal: &str, read_only_tools: &[&dyn Tool]) -> Vec<Messa
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         },
         Message {
             role: Role::User,
@@ -180,6 +181,7 @@ fn build_planning_prompt(goal: &str, read_only_tools: &[&dyn Tool]) -> Vec<Messa
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         },
     ]
 }
@@ -722,7 +724,11 @@ impl CoordinatorCallbacks {
 
 #[async_trait::async_trait]
 impl ThinkCallback for CoordinatorCallbacks {
-    async fn think(&self, prompt: &str) -> Result<String, deepseeknova_core::DeepseeknovaError> {
+    async fn think(
+        &self,
+        prompt: &str,
+    ) -> Result<(String, deepseeknova_core::chunk::Usage), deepseeknova_core::DeepseeknovaError>
+    {
         let mut messages = Vec::new();
         // Pass planner's reasoning as context so executor benefits from DeepSeek thinking
         if let Some(ref reasoning) = self.planner_reasoning {
@@ -734,6 +740,7 @@ impl ThinkCallback for CoordinatorCallbacks {
                 tool_call_id: None,
                 reasoning_content: Some(reasoning.clone()),
                 reasoning_signature: None,
+                usage: None,
             });
         }
         let mut content = prompt.to_string();
@@ -755,6 +762,7 @@ impl ThinkCallback for CoordinatorCallbacks {
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         });
         let validated =
             deepseeknova_provider::ValidatedRequest::new(&messages, &[]).map_err(|violations| {
@@ -767,7 +775,7 @@ impl ThinkCallback for CoordinatorCallbacks {
                 ))
             })?;
         let result = self.provider.generate(validated).await?;
-        Ok(result.content)
+        Ok((result.content, result.usage.unwrap_or_default()))
     }
 }
 
@@ -843,6 +851,7 @@ impl ReflectCallback for CoordinatorCallbacks {
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         }];
 
         let validated =
@@ -1297,7 +1306,7 @@ mod tests {
         };
 
         let out = callbacks.think("Count the files.").await.unwrap();
-        assert_eq!(out, "mock response");
+        assert_eq!(out.0, "mock response");
         let last = mock.last_prompt().unwrap();
         assert!(
             last.contains("## Previous step results"),
