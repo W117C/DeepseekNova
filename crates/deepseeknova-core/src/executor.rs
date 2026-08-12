@@ -5,6 +5,7 @@ use crate::graph::{
 use rand::Rng;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::{Deref, DerefMut};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::task::JoinSet;
@@ -20,11 +21,12 @@ type SharedOutputs = Option<Arc<RwLock<HashMap<NodeId, NodeOutput>>>>;
 // Callbacks — injected by Runtime to execute actions
 // ---------------------------------------------------------------------------
 
-/// ThinkCallback is called for Think actions. Returns the model's text response.
+/// ThinkCallback is called for Think actions. Returns the model's text response
+/// together with the token usage of that generation.
 #[async_trait::async_trait]
 pub trait ThinkCallback: Send + Sync {
-    /// 用给定 prompt 调用模型，返回模型生成的文本。
-    async fn think(&self, prompt: &str) -> Result<String, crate::DeepseeknovaError>;
+    /// 用给定 prompt 调用模型，返回（模型生成的文本, 该次生成的 token 用量）。
+    async fn think(&self, prompt: &str) -> Result<(String, Usage), crate::DeepseeknovaError>;
 }
 
 /// ToolCallback is called for CallTool actions. Returns the tool output.
@@ -83,6 +85,59 @@ pub trait AttributionHook: Send + Sync {
     fn on_node_failure(&self, node_id: &NodeId, error: &NodeOutput) -> Option<String> {
         let _ = (self, node_id, error);
         None
+    }
+}
+
+// ---------------------------------------------------------------------------
+// UsageAccumulator — lock-free token-usage aggregation across graph nodes
+// ---------------------------------------------------------------------------
+
+/// 无锁 token 用量累加器：六个 `AtomicU64` 字段分别累计
+/// prompt/completion/total/cache_hit/cache_miss/reasoning token。
+///
+/// `GraphExecutor::execute` 为整张图建一个累加器，各节点（含 Parallel
+/// 子节点）执行 Think 动作时把返回的 [`Usage`] 累加进来，执行结束时
+/// `snapshot()` 收敛为最终的 `ExecutionResult::total_usage`。
+#[derive(Debug, Default)]
+pub struct UsageAccumulator {
+    prompt: AtomicU64,
+    completion: AtomicU64,
+    total: AtomicU64,
+    cache_hit: AtomicU64,
+    cache_miss: AtomicU64,
+    reasoning: AtomicU64,
+}
+
+impl UsageAccumulator {
+    /// 把一次生成的用量叠加进累加器。
+    pub fn add(&self, usage: &Usage) {
+        self.prompt
+            .fetch_add(u64::from(usage.prompt_tokens), Ordering::Relaxed);
+        self.completion
+            .fetch_add(u64::from(usage.completion_tokens), Ordering::Relaxed);
+        self.total
+            .fetch_add(u64::from(usage.total_tokens), Ordering::Relaxed);
+        self.cache_hit
+            .fetch_add(u64::from(usage.cache_hit_tokens), Ordering::Relaxed);
+        self.cache_miss
+            .fetch_add(u64::from(usage.cache_miss_tokens), Ordering::Relaxed);
+        self.reasoning
+            .fetch_add(u64::from(usage.reasoning_tokens), Ordering::Relaxed);
+    }
+
+    /// 收敛当前累计值（原子读），返回一份 `Usage` 快照。
+    ///
+    /// `u64` 内部累计防止并发下 `u32` 回绕；收敛时钳回 `u32` 上限。
+    pub fn snapshot(&self) -> Usage {
+        let clamp = |v: u64| -> u32 { v.min(u64::from(u32::MAX)) as u32 };
+        Usage {
+            prompt_tokens: clamp(self.prompt.load(Ordering::Relaxed)),
+            completion_tokens: clamp(self.completion.load(Ordering::Relaxed)),
+            total_tokens: clamp(self.total.load(Ordering::Relaxed)),
+            cache_hit_tokens: clamp(self.cache_hit.load(Ordering::Relaxed)),
+            cache_miss_tokens: clamp(self.cache_miss.load(Ordering::Relaxed)),
+            reasoning_tokens: clamp(self.reasoning.load(Ordering::Relaxed)),
+        }
     }
 }
 
@@ -169,6 +224,7 @@ impl GraphExecutor {
         let sorted = topological_sort(graph)?;
         let outputs: Arc<RwLock<HashMap<NodeId, NodeOutput>>> =
             Arc::new(RwLock::new(HashMap::new()));
+        let usage = Arc::new(UsageAccumulator::default());
         let mut completed = true;
 
         // Group nodes by "wave" — nodes at the same topological depth
@@ -194,7 +250,11 @@ impl GraphExecutor {
                     continue;
                 }
 
-                match self.clone().execute_node(node, &outputs, &None).await {
+                match self
+                    .clone()
+                    .execute_node(node, &outputs, &None, &usage)
+                    .await
+                {
                     Ok(output) => {
                         outputs
                             .write()
@@ -222,6 +282,7 @@ impl GraphExecutor {
                         })?
                         .clone();
                     let outputs_shared = Arc::clone(&outputs);
+                    let usage_shared = Arc::clone(&usage);
                     let this = Arc::clone(&self);
 
                     if should_skip_node(&node, graph, &outputs_shared) {
@@ -236,7 +297,8 @@ impl GraphExecutor {
                     set.spawn(async move {
                         (
                             node.id.clone(),
-                            this.execute_node(&node, &outputs_shared, &None).await,
+                            this.execute_node(&node, &outputs_shared, &None, &usage_shared)
+                                .await,
                         )
                     });
                 }
@@ -273,7 +335,7 @@ impl GraphExecutor {
         );
         Ok(ExecutionResult {
             node_outputs,
-            total_usage: Usage::default(),
+            total_usage: usage.snapshot(),
             completed,
         })
     }
@@ -288,6 +350,7 @@ impl GraphExecutor {
         node: &ExecutionNode,
         outputs: &Arc<RwLock<HashMap<NodeId, NodeOutput>>>,
         shared: &SharedOutputs,
+        usage: &Arc<UsageAccumulator>,
     ) -> Result<NodeOutput, crate::DeepseeknovaError> {
         let mut attempt = 0u32;
         loop {
@@ -297,7 +360,7 @@ impl GraphExecutor {
                     let this = Arc::clone(&self);
                     match tokio::time::timeout(
                         d,
-                        this.execute_action(&node.action, outputs, shared),
+                        this.execute_action(&node.action, outputs, shared, usage),
                     )
                     .await
                     {
@@ -311,7 +374,8 @@ impl GraphExecutor {
                 }
                 None => {
                     let this = Arc::clone(&self);
-                    this.execute_action(&node.action, outputs, shared).await
+                    this.execute_action(&node.action, outputs, shared, usage)
+                        .await
                 }
             };
             match action_result {
@@ -354,6 +418,7 @@ impl GraphExecutor {
         action: &'a Action,
         outputs: &'a Arc<RwLock<HashMap<NodeId, NodeOutput>>>,
         shared: &'a SharedOutputs,
+        usage: &'a Arc<UsageAccumulator>,
     ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<Output = Result<NodeOutput, crate::DeepseeknovaError>>
@@ -364,7 +429,8 @@ impl GraphExecutor {
         Box::pin(async move {
             match action {
                 Action::Think { prompt } => {
-                    let text = self.think.think(prompt).await?;
+                    let (text, u) = self.think.think(prompt).await?;
+                    usage.add(&u);
                     Ok(NodeOutput::Text(text))
                 }
                 Action::CallTool { tool, args } => {
@@ -444,10 +510,16 @@ impl GraphExecutor {
                         let child = child.clone();
                         let outputs = outputs.clone();
                         let shared_lock = shared_lock.clone();
+                        let usage = usage.clone();
                         let this = Arc::clone(&self);
                         set.spawn(async move {
                             let result = this
-                                .execute_action(&child.action, &outputs, &Some(shared_lock.clone()))
+                                .execute_action(
+                                    &child.action,
+                                    &outputs,
+                                    &Some(shared_lock.clone()),
+                                    &usage,
+                                )
                                 .await;
                             let output = match &result {
                                 Ok(output) => output.clone(),
@@ -507,7 +579,10 @@ impl GraphExecutor {
                     condition: _,
                     then,
                     r#else: _,
-                } => self.execute_action(&then.action, outputs, shared).await,
+                } => {
+                    self.execute_action(&then.action, outputs, shared, usage)
+                        .await
+                }
             }
         })
     }
@@ -842,8 +917,8 @@ mod tests {
     struct MockThink;
     #[async_trait::async_trait]
     impl ThinkCallback for MockThink {
-        async fn think(&self, prompt: &str) -> Result<String, crate::DeepseeknovaError> {
-            Ok(format!("thought: {prompt}"))
+        async fn think(&self, prompt: &str) -> Result<(String, Usage), crate::DeepseeknovaError> {
+            Ok((format!("thought: {prompt}"), Usage::default()))
         }
     }
 
@@ -925,6 +1000,52 @@ mod tests {
         let result = exec.execute(&g).await.unwrap();
         assert!(result.completed);
         assert_eq!(result.node_outputs.len(), 3);
+    }
+
+    /// 每个 Think 调用返回固定用量的 mock：prompt=10/completion=4、
+    /// total=14、cache_hit=6、cache_miss=4、reasoning=2。
+    struct MockUsageThink;
+
+    #[async_trait::async_trait]
+    impl ThinkCallback for MockUsageThink {
+        async fn think(&self, prompt: &str) -> Result<(String, Usage), crate::DeepseeknovaError> {
+            Ok((
+                format!("usage-thought: {prompt}"),
+                Usage {
+                    prompt_tokens: 10,
+                    completion_tokens: 4,
+                    total_tokens: 14,
+                    cache_hit_tokens: 6,
+                    cache_miss_tokens: 4,
+                    reasoning_tokens: 2,
+                },
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn executor_accumulates_total_usage() {
+        // 两个 Think 节点（同波并发执行）→ total_usage 聚合两次调用。
+        let mut g = ExecutionGraph::new("a".into());
+        g.add_node(make_think_node("a", "one"));
+        g.add_node(make_think_node("b", "two"));
+
+        let exec = Arc::new(GraphExecutor::new(
+            Arc::new(MockUsageThink),
+            Arc::new(MockTool),
+            Arc::new(MockReflect),
+        ));
+
+        let result = exec.execute(&g).await.unwrap();
+        assert!(result.completed);
+
+        let usage = &result.total_usage;
+        assert_eq!(usage.prompt_tokens, 20);
+        assert_eq!(usage.completion_tokens, 8);
+        assert_eq!(usage.total_tokens, 28);
+        assert_eq!(usage.cache_hit_tokens, 12);
+        assert_eq!(usage.cache_miss_tokens, 8);
+        assert_eq!(usage.reasoning_tokens, 4);
     }
 
     #[tokio::test]
@@ -1132,10 +1253,10 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ThinkCallback for MockSlowThink {
-        async fn think(&self, prompt: &str) -> Result<String, crate::DeepseeknovaError> {
+        async fn think(&self, prompt: &str) -> Result<(String, Usage), crate::DeepseeknovaError> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             sleep(self.delay).await;
-            Ok(format!("slow: {prompt}"))
+            Ok((format!("slow: {prompt}"), Usage::default()))
         }
     }
 
@@ -1325,7 +1446,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ThinkCallback for MockHeartbeatThink {
-        async fn think(&self, _prompt: &str) -> Result<String, crate::DeepseeknovaError> {
+        async fn think(&self, _prompt: &str) -> Result<(String, Usage), crate::DeepseeknovaError> {
             // Infinite heartbeat loop: keeps bumping the counter as long as
             // the task is polled. Cancellation (abort) freezes the counter.
             loop {
