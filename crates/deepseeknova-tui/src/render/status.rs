@@ -1,14 +1,13 @@
 //! 状态行与提示行：model 标签用 accent，次要信息 dim，随焦点显示键位。
 
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthStr;
 
 use crate::app::actions::ActionContext;
 use crate::app::focus::Focus;
 use crate::app::state::AppState;
 use crate::i18n::{Key, Tr};
-use crate::theme::Theme;
+use crate::theme::{SemanticTone, Theme};
 
 /// 状态行分段优先级（数字越大越先保留）。宽度不足时按此顺序丢弃：
 /// 先丢 ctx → 模型/运行态/权限模式 → 退出警示。
@@ -18,8 +17,21 @@ const PRIO_QUIT: u8 = 10;
 const PRIO_MODEL: u8 = 9;
 const PRIO_MODE: u8 = 9;
 const PRIO_CTX: u8 = 8;
+/// turn 计数段（三栏中栏；优先级低于 ctx、高于 workspace）。
+const PRIO_TURN: u8 = 6;
 /// 工作区/git 分支：信息性最低优先级，窄终端最先丢弃。
 const PRIO_WORKSPACE: u8 = 2;
+
+/// grok 状态栏段间分隔符（xai-grok-pager context_bar.rs 同款）。
+const SEPARATOR: &str = "│";
+
+/// 统一徽章样式：状态行主信息标签（模型/成本等）——accent 前景 + 加粗，
+/// 所有标签共用同一视觉语言（参考 [`crate::theme::Theme::style_for`] 的 Agent 观感）。
+fn badge_style(theme: &Theme) -> Style {
+    Style::default()
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD)
+}
 
 /// 状态行分段（Claude Code 风格精简，语义色分层）：
 /// 1) 运行态 + 模型（主信息，accent/bold）
@@ -27,33 +39,36 @@ const PRIO_WORKSPACE: u8 = 2;
 /// 3) 权限模式（安全相关，窄终端优先保留）
 ///
 /// 仅测试使用：生产渲染走 [`fit_status_line`]（宽度感知）。保留裸段构造
-/// 供测试直接断言各段内容与样式。
+/// 供测试直接断言各段内容与样式（每段内多个 span 拍平为独立 span）。
 #[cfg(test)]
 pub fn status_segments(app: &AppState, theme: &Theme) -> Vec<Span<'static>> {
     tagged_segments(app, theme)
         .into_iter()
-        .map(|(_, s)| s)
+        .flat_map(|(_, line)| line.spans)
         .collect()
 }
 
 /// 带优先级的 segment 构建（fit 与直接展示共用，避免两份逻辑漂移）。
-fn tagged_segments(app: &AppState, theme: &Theme) -> Vec<(u8, Span<'static>)> {
+/// 每段为一条 [Line]：可容纳多个 span（如 token 预算条的逐格渐变），
+/// 宽度不足时整段一起保留或一起丢弃。
+///
+/// 生产渲染走三栏 [`fit_status_line`]（宽度感知 + 栏内优先级丢弃）；
+/// 本函数保留给测试入口 [`status_segments`] 直接断言段内容与样式。
+#[cfg(test)]
+fn tagged_segments(app: &AppState, theme: &Theme) -> Vec<(u8, Line<'static>)> {
     let dim = Style::default().add_modifier(Modifier::DIM);
     let mut segments = Vec::new();
     // ── 组 1：运行态 + 模型 ──────────────────────────────
     let state = if app.running {
         Span::styled(
             "●",
-            Style::default().fg(theme
-                .verification_ok
-                .fg
-                .unwrap_or(ratatui::style::Color::Green)),
+            Style::default().fg(theme.semantic(SemanticTone::Success)),
         )
     } else {
         Span::styled("○", dim)
     };
-    segments.push((PRIO_MODEL, state));
-    segments.push((PRIO_MODEL, Span::styled(" ", dim)));
+    segments.push((PRIO_MODEL, Line::from(vec![state])));
+    segments.push((PRIO_MODEL, Line::from(vec![Span::styled(" ", dim)])));
     // 模型 + effort 后缀（thinking off 时无后缀）。
     let model_text = if app.effort_label.is_empty() {
         app.model_label.clone()
@@ -62,16 +77,14 @@ fn tagged_segments(app: &AppState, theme: &Theme) -> Vec<(u8, Span<'static>)> {
     };
     segments.push((
         PRIO_MODEL,
-        Span::styled(
-            model_text,
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Line::from(vec![Span::styled(model_text, badge_style(theme))]),
     ));
     // ── 组 0：工作区 + git 分支（信息性，最优先丢弃）──
     if let Some(branch) = &app.git_branch {
-        segments.push((PRIO_WORKSPACE, Span::styled(format!(" ⎇ {branch}"), dim)));
+        segments.push((
+            PRIO_WORKSPACE,
+            Line::from(vec![Span::styled(format!(" ⎇ {branch}"), dim)]),
+        ));
     } else if !app.workspace_cwd.is_empty() {
         // 非 git 工作区：显示目录 basename（兼容 / 与 \ 分隔符）。
         let normalized = app.workspace_cwd.replace('\\', "/");
@@ -79,46 +92,21 @@ fn tagged_segments(app: &AppState, theme: &Theme) -> Vec<(u8, Span<'static>)> {
             .rsplit('/')
             .find(|s| !s.is_empty())
             .unwrap_or(&normalized);
-        segments.push((PRIO_WORKSPACE, Span::styled(format!(" {name}"), dim)));
+        segments.push((
+            PRIO_WORKSPACE,
+            Line::from(vec![Span::styled(format!(" {name}"), dim)]),
+        ));
     }
     // ── 组 2：token 预算条 ──────────────────────────────
-    if let Some((used, window)) = app.context_usage {
-        let pct = used.saturating_mul(100).checked_div(window).unwrap_or(0);
-        let style = if pct >= 95 {
-            Style::default().fg(theme
-                .verification_fail
-                .fg
-                .unwrap_or(ratatui::style::Color::Red))
-        } else if pct >= 80 {
-            Style::default().fg(ratatui::style::Color::Yellow)
-        } else {
-            dim
-        };
-        let bar = token_bar(pct);
-        // ctx 标签 + 进度条合并为单个段：宽度不足时整体保留或整体丢弃，
-        // 避免出现"进度条在、标签被丢"的残缺形态。
-        segments.push((
-            PRIO_CTX,
-            Span::styled(
-                app.tr.t_args(
-                    Key::CtxUsage,
-                    &[
-                        ("bar", &bar),
-                        ("pct", &pct.to_string()),
-                        ("used", &fmt_tokens(used)),
-                        ("window", &fmt_tokens(window)),
-                    ],
-                ),
-                style,
-            ),
-        ));
+    if let Some(seg) = ctx_segment(app, theme, dim) {
+        segments.push(seg);
     }
     // 权限模式预设指示：高优先级（安全相关，窄终端优先保留）。
     // gate 未注入（permission_mode=None）时不显示。
     if let Some(mode) = app.permission_mode {
         segments.push((
             PRIO_MODE,
-            Span::styled(
+            Line::from(vec![Span::styled(
                 app.tr.t_args(
                     Key::PermModeIndicator,
                     &[(
@@ -128,7 +116,7 @@ fn tagged_segments(app: &AppState, theme: &Theme) -> Vec<(u8, Span<'static>)> {
                     )],
                 ),
                 dim,
-            ),
+            )]),
         ));
     }
     // 配置状态警示（高优先级，红色/黄色）：CLI 入口通常已拦截，此处为
@@ -137,58 +125,168 @@ fn tagged_segments(app: &AppState, theme: &Theme) -> Vec<(u8, Span<'static>)> {
     if !app.provider_configured {
         segments.push((
             PRIO_MODE,
-            Span::styled(
+            Line::from(vec![Span::styled(
                 format!(" ⚠ {}", app.tr.t(Key::StatusNoProvider)),
-                warn_style(
-                    theme
-                        .verification_fail
-                        .fg
-                        .unwrap_or(ratatui::style::Color::Red),
-                ),
-            ),
+                warn_style(theme.semantic(SemanticTone::Danger)),
+            )]),
         ));
     } else if !app.api_key_configured {
         segments.push((
             PRIO_MODE,
-            Span::styled(
+            Line::from(vec![Span::styled(
                 format!(" ⚠ {}", app.tr.t(Key::StatusNoApiKey)),
-                warn_style(ratatui::style::Color::Yellow),
-            ),
+                warn_style(theme.semantic(SemanticTone::Warning)),
+            )]),
         ));
     }
     // 退出确认警示（最高优先级，红色加粗）。
     if app.quit_armed {
         segments.push((
             PRIO_QUIT,
-            Span::styled(
+            Line::from(vec![Span::styled(
                 app.tr.t(Key::QuitWarning),
                 Style::default()
-                    .fg(theme
-                        .verification_fail
-                        .fg
-                        .unwrap_or(ratatui::style::Color::Red))
+                    .fg(theme.semantic(SemanticTone::Danger))
                     .add_modifier(Modifier::BOLD),
-            ),
+            )]),
         ));
     }
     segments
 }
 
-/// 宽度感知的状态行：总宽超过 `width` 时按优先级丢弃最次要的 segment，
-/// 仍放不下则对最右侧剩余内容截断。返回可直接渲染的 [Line]。
+/// 宽度感知的状态行（grok 三栏对齐）：左栏 context（工作区/模型/ctx）、
+/// 中栏 turn（回合计数 + 视图标签）、右栏 mode（运行态/权限/警示/退出）。
 ///
-/// 参考 Codex footer 的"回退链"：教学性/次要信息最先牺牲，最后只留
-/// 运行态 + 模型（+ 退出警示），避免窄终端上静默截断丢失关键信息。
+/// 总宽超过 `width` 时按栏内优先级丢弃：先丢左栏 workspace → 左栏 ctx →
+/// 中栏 turn → 最后保留右栏核心（运行态 + 权限模式 + 退出警示），
+/// 仍放不下则对整行截断加省略号。参考 Codex footer 的回退链思路。
 pub fn fit_status_line(app: &AppState, theme: &Theme, width: usize) -> Line<'static> {
-    let mut segs = tagged_segments(app, theme);
-    let total: usize = segs.iter().map(|(_, s)| s.content.width()).sum();
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    // ── 三栏：左 context / 中 turn / 右 mode ──────────────
+    // 左栏：工作区 + 模型 + ctx 预算条（信息性，优先丢弃）。
+    let mut left: Vec<(u8, Line<'static>)> = Vec::new();
+    if let Some(branch) = &app.git_branch {
+        left.push((
+            PRIO_WORKSPACE,
+            Line::from(vec![Span::styled(format!(" ⎇ {branch}"), dim)]),
+        ));
+    } else if !app.workspace_cwd.is_empty() {
+        let normalized = app.workspace_cwd.replace('\\', "/");
+        let name = normalized
+            .rsplit('/')
+            .find(|s| !s.is_empty())
+            .unwrap_or(&normalized);
+        left.push((
+            PRIO_WORKSPACE,
+            Line::from(vec![Span::styled(format!(" {name}"), dim)]),
+        ));
+    }
+    let state = if app.running {
+        Span::styled(
+            "●",
+            Style::default().fg(theme.semantic(SemanticTone::Success)),
+        )
+    } else {
+        Span::styled("○", dim)
+    };
+    let model_text = if app.effort_label.is_empty() {
+        app.model_label.clone()
+    } else {
+        format!("{}·{}", app.model_label, app.effort_label)
+    };
+    left.push((PRIO_MODEL, Line::from(vec![state.clone()])));
+    left.push((
+        PRIO_MODEL,
+        Line::from(vec![Span::styled(model_text, badge_style(theme))]),
+    ));
+    if let Some(seg) = grok_ctx_segment(app, theme) {
+        left.push(seg);
+    }
+    // 中栏：回合计数 + 视图标签（All 显示总数，Single 显示 `选中/总数`）。
+    let mut middle: Vec<(u8, Line<'static>)> = Vec::new();
+    let turns = app.conversation.turn_count();
+    if turns > 0 {
+        let turn_text = if app.turn_view == crate::app::state::TurnView::Single {
+            let sel = app.selected_turn.map(|t| t + 1).unwrap_or(1);
+            format!(" ♯{sel}/{turns} {}", app.tr.t(Key::TurnViewSingle))
+        } else {
+            format!(" ♯{turns} {}", app.tr.t(Key::TurnViewAll))
+        };
+        middle.push((PRIO_TURN, Line::from(vec![Span::styled(turn_text, dim)])));
+    }
+    // 右栏：权限模式 + 配置警示 + 退出警示（安全相关，最后丢弃）。
+    let mut right: Vec<(u8, Line<'static>)> = Vec::new();
+    if let Some(mode) = app.permission_mode {
+        right.push((
+            PRIO_MODE,
+            Line::from(vec![Span::styled(
+                app.tr.t_args(
+                    Key::PermModeIndicator,
+                    &[(
+                        "mode",
+                        app.tr
+                            .t(crate::app::state::permission_mode_label(Some(mode))),
+                    )],
+                ),
+                dim,
+            )]),
+        ));
+    }
+    let warn_style = |c: ratatui::style::Color| Style::default().fg(c).add_modifier(Modifier::BOLD);
+    if !app.provider_configured {
+        right.push((
+            PRIO_MODE,
+            Line::from(vec![Span::styled(
+                format!(" ⚠ {}", app.tr.t(Key::StatusNoProvider)),
+                warn_style(theme.semantic(SemanticTone::Danger)),
+            )]),
+        ));
+    } else if !app.api_key_configured {
+        right.push((
+            PRIO_MODE,
+            Line::from(vec![Span::styled(
+                format!(" ⚠ {}", app.tr.t(Key::StatusNoApiKey)),
+                warn_style(theme.semantic(SemanticTone::Warning)),
+            )]),
+        ));
+    }
+    if app.quit_armed {
+        right.push((
+            PRIO_QUIT,
+            Line::from(vec![Span::styled(
+                app.tr.t(Key::QuitWarning),
+                Style::default()
+                    .fg(theme.semantic(SemanticTone::Danger))
+                    .add_modifier(Modifier::BOLD),
+            )]),
+        ));
+    }
+
+    // ── 合并 + 宽度感知丢弃 ─────────────────────────────
+    // grok 风格：栏间用 `│` 分隔（只在有相邻栏内容时插入，避免空栏
+    // 产生双分隔符）；分隔符优先级同 turn 段，窄终端可随栏一起被丢弃。
+    let mut segs: Vec<(u8, Line<'static>)> = Vec::new();
+    segs.extend(left);
+    if !middle.is_empty() {
+        if !segs.is_empty() {
+            segs.push((PRIO_TURN, Line::from(vec![Span::styled(SEPARATOR, dim)])));
+        }
+        segs.extend(middle);
+    }
+    if !right.is_empty() {
+        if !segs.is_empty() {
+            segs.push((PRIO_TURN, Line::from(vec![Span::styled(SEPARATOR, dim)])));
+        }
+        segs.extend(right);
+    }
+    let total: usize = segs.iter().map(|(_, s)| s.width()).sum();
     if total <= width.max(1) {
-        return Line::from(segs.into_iter().map(|(_, s)| s).collect::<Vec<_>>());
+        return flatten_lines(segs);
     }
     // 丢弃非核心 segment（优先级低于 PRIO_MODEL 的都可丢），按优先级升序丢最次要的，
-    // 直到放得下或只剩核心（运行态 + 模型 + 退出警示）。
+    // 直到放得下或只剩核心（运行态 + 模型 + 权限模式 + 退出警示）。
     loop {
-        let total: usize = segs.iter().map(|(_, s)| s.content.width()).sum();
+        let total: usize = segs.iter().map(|(_, s)| s.width()).sum();
         if total <= width.max(1) {
             break;
         }
@@ -201,20 +299,20 @@ pub fn fit_status_line(app: &AppState, theme: &Theme, width: usize) -> Line<'sta
         segs.remove(idx);
     }
     // 丢弃后放得下：直接返回，不再截断/加省略号。
-    let remaining: usize = segs.iter().map(|(_, s)| s.content.width()).sum();
+    let remaining: usize = segs.iter().map(|(_, s)| s.width()).sum();
     if remaining <= width.max(1) {
-        return Line::from(segs.into_iter().map(|(_, s)| s).collect::<Vec<_>>());
+        return flatten_lines(segs);
     }
     // 核心仍超宽：对整行做显示宽度截断并加省略号。
     let mut line = String::new();
     let mut used = 0usize;
     let budget = width.saturating_sub(1);
     for (_, s) in &segs {
-        let w = s.content.width();
+        let w = s.width();
         if used + w > budget && !line.is_empty() {
             break;
         }
-        line.push_str(s.content.as_ref());
+        line.push_str(&s.to_string());
         used += w;
     }
     let mut spans: Vec<Span<'static>> = Vec::new();
@@ -232,6 +330,15 @@ pub fn fit_status_line(app: &AppState, theme: &Theme, width: usize) -> Line<'sta
         ));
     }
     Line::from(spans)
+}
+
+/// 把带优先级的 segment 列表拍平为单行（丢弃优先级，合并所有 span）。
+fn flatten_lines(segs: Vec<(u8, Line<'static>)>) -> Line<'static> {
+    Line::from(
+        segs.into_iter()
+            .flat_map(|(_, line)| line.spans)
+            .collect::<Vec<_>>(),
+    )
 }
 
 /// 上下文感知提示行：随焦点显示当前键位。键位文本从 action 注册表
@@ -277,27 +384,181 @@ fn ctx_for(focus: Focus) -> crate::app::actions::ActionContext {
     }
 }
 
-/// token 数的人类可读格式：>=1M 显示 `x.xM`，>=1k 显示 `x.xk`，否则原值。
+/// token 数的人类可读格式（grok 对齐，K/M 大写，≤4 字符）：<1000 原值、
+/// <10K `1.2K`、<1M `12K`、<10M `1.2M`、否则 `12M`。
 pub fn fmt_tokens(n: u64) -> String {
-    if n >= 1_000_000 {
+    if n >= 10_000_000 {
+        format!("{}M", n / 1_000_000)
+    } else if n >= 1_000_000 {
         format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 10_000 {
+        format!("{}K", n / 1_000)
     } else if n >= 1_000 {
-        format!("{:.1}k", n as f64 / 1_000.0)
+        format!("{:.1}K", n as f64 / 1_000.0)
     } else {
         n.to_string()
     }
 }
 
+/// 5 字符百分比（grok 对齐）：<10 用两位小数 `0.00%`、10–99 用一位小数
+/// `42.0%`、≥100 显示 `MAX %`。供 hover 进度条百分比等定宽展示用。
+pub fn fmt_pct5(pct: u64) -> String {
+    if pct >= 100 {
+        "MAX %".to_string()
+    } else if pct < 10 {
+        format!("{:.2}%", pct as f64)
+    } else {
+        format!("{:.1}%", pct as f64)
+    }
+}
+
+/// 两个颜色间的线性插值（t 在 0.0..=1.0，RGB 通道级混合）。
+///
+/// 任一端不是 RGB（终端默认 Reset/命名色）时无法混合：按 t 就近取
+/// 端点色，保证断点语义不漂移（低 t 取起点、高 t 取终点）。
+fn lerp_rgb(a: Color, b: Color, t: f64) -> Color {
+    let (Color::Rgb(ar, ag, ab), Color::Rgb(br, bg, bb)) = (a, b) else {
+        return if t < 0.5 { a } else { b };
+    };
+    let mix = |x: u8, y: u8| (x as f64 + (y as f64 - x as f64) * t).round() as u8;
+    Color::Rgb(mix(ar, br), mix(ag, bg), mix(ab, bb))
+}
+
+/// ctx 使用率 → 渐变前景色（grok 断点对齐）：
+/// - 0% 用 [`Theme::text_primary`]；
+/// - 50–65% 保持 [`Theme::accent_user`]（0→50 lerp 渐入）；
+/// - 75–85% 保持 [`Theme::warning`]（65→75 lerp 渐入）；
+/// - 85→95 lerp 渐入 [`Theme::accent_error`]，95%+ 钳制 accent_error。
+fn ctx_usage_color(theme: &Theme, pct: u64) -> Color {
+    let pct = pct.min(100) as f64;
+    let stops = [
+        (0.0, theme.text_primary),
+        (50.0, theme.accent_user),
+        (65.0, theme.accent_user),
+        (75.0, theme.warning),
+        (85.0, theme.warning),
+        (95.0, theme.accent_error),
+    ];
+    for w in stops.windows(2) {
+        let (lo, a) = w[0];
+        let (hi, b) = w[1];
+        if pct <= hi {
+            let t = if hi > lo { (pct - lo) / (hi - lo) } else { 0.0 };
+            return lerp_rgb(a, b, t);
+        }
+    }
+    stops[5].1
+}
+
+/// grok 风格 ctx 段（生产 fit 路径专用）：默认 `8.5K / 1.0M`（used/total），
+/// 鼠标 hover 状态栏时切换为 `█████ 42.0%` 进度条 + 百分比（grok
+/// context_bar 同款——hover 与默认同宽，不位移）；前景色按使用率
+/// [`ctx_usage_color`] 渐变。
+///
+/// 旧格式 `ctx_segment` 保留给 status_segments 测试路径（i18n 模板）。
+fn grok_ctx_segment(app: &AppState, theme: &Theme) -> Option<(u8, Line<'static>)> {
+    let (used, window) = app.context_usage?;
+    let pct = used.saturating_mul(100).checked_div(window).unwrap_or(0);
+    let hovered = app.mouse_pos.is_some();
+    let text = if hovered {
+        // hover：进度条（10 格）+ 5 字符百分比（grok context_bar hover 观感）。
+        let filled = (pct.min(100) * 10).div_ceil(100) as usize;
+        let bar = "█".repeat(filled) + &"░".repeat(10 - filled);
+        format!("{bar} {}", fmt_pct5(pct))
+    } else {
+        format!("{} / {}", fmt_tokens(used), fmt_tokens(window))
+    };
+    Some((
+        PRIO_CTX,
+        Line::from(vec![Span::styled(
+            text,
+            Style::default().fg(ctx_usage_color(theme, pct)),
+        )]),
+    ))
+}
+
+/// ctx 预算条段（旧格式，仅 status_segments 测试路径使用；生产走
+/// [`grok_ctx_segment`] 的 grok 风格 `8.5K / 1.0M`）。
+///
+/// 返回带优先级的整段（`PRIO_CTX`）：标签 + 逐格渐变进度条合并为
+/// 单段，宽度不足时整体保留或整体丢弃，避免"进度条在、标签被丢"。
+#[cfg(test)]
+fn ctx_segment(app: &AppState, theme: &Theme, dim: Style) -> Option<(u8, Line<'static>)> {
+    let (used, window) = app.context_usage?;
+    let pct = used.saturating_mul(100).checked_div(window).unwrap_or(0);
+    let style = if pct >= 95 {
+        Style::default().fg(theme.semantic(SemanticTone::Danger))
+    } else if pct >= 80 {
+        Style::default().fg(theme.semantic(SemanticTone::Warning))
+    } else {
+        dim
+    };
+    let bar = token_bar(pct);
+    let text = app.tr.t_args(
+        Key::CtxUsage,
+        &[
+            ("bar", &bar),
+            ("pct", &pct.to_string()),
+            ("used", &fmt_tokens(used)),
+            ("window", &fmt_tokens(window)),
+        ],
+    );
+    // 定位 `[{bar}]` 括号：预算条替换为逐格渐变分段，`[`/`]` 与前后缀
+    // 沿用阈值样式，保证模板观感（含括号）不变。
+    let open = text.find('[');
+    let close = text.rfind(']');
+    let mut spans = Vec::new();
+    match (open, close) {
+        (Some(open), Some(close)) if open < close => {
+            spans.push(Span::styled(text[..=open].to_string(), style));
+            spans.extend(ctx_bar_cells(pct, theme, style));
+            spans.push(Span::styled(text[close..].to_string(), style));
+        }
+        _ => {
+            // 模板不含括号（防御）：退化为单 span 阈值样式。
+            spans.push(Span::styled(text, style));
+        }
+    }
+    Some((PRIO_CTX, Line::from(spans)))
+}
+
 /// 10 格 token 预算条：占用百分比 → `████░░░░░░`（Claude Code
-/// token 预算条的资源可见性设计；有占用即至少 1 格）。
+/// token 预算条的资源可见性设计；有占用即至少 1 格）。仅测试路径使用。
+#[cfg(test)]
 fn token_bar(pct: u64) -> String {
     let filled = (pct.min(100) * 10).div_ceil(100) as usize;
     format!("{}{}", "█".repeat(filled), "░".repeat(10 - filled))
 }
 
+/// token 预算条的逐格渐变分段：按格位把已占格拆成 success/info/warning/danger
+/// 四段语义色（0-40% success、50-60% info、70-80% warning、90%+ danger），
+/// 未占格沿用上下文阈值样式。颜色一律从 theme 语义色取，不硬编码。
+/// 仅测试路径使用。
+#[cfg(test)]
+fn ctx_bar_cells(pct: u64, theme: &Theme, base: Style) -> Vec<Span<'static>> {
+    let filled = (pct.min(100) * 10).div_ceil(100) as usize;
+    (0..10)
+        .map(|i| {
+            let tone = match i {
+                0..=4 => SemanticTone::Success,
+                5..=6 => SemanticTone::Info,
+                7..=8 => SemanticTone::Warning,
+                _ => SemanticTone::Danger,
+            };
+            let style = if i < filled {
+                Style::default().fg(theme.semantic(tone))
+            } else {
+                base
+            };
+            Span::styled(if i < filled { "█" } else { "░" }, style)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use unicode_width::UnicodeWidthStr;
 
     #[test]
     fn status_segments_style_model_and_secondary_info() {
@@ -344,7 +605,7 @@ mod tests {
         let theme = Theme::default();
         let dim = Style::default().add_modifier(Modifier::DIM);
 
-        // 30%：dim 常规。
+        // 30%：dim 常规 + 前 3 格 success 渐变分段。
         let app = AppState {
             context_usage: Some((30_000, 100_000)),
             ..Default::default()
@@ -355,29 +616,69 @@ mod tests {
             .find(|s| s.content.contains("30%"))
             .expect("ctx 预算段存在");
         assert!(
-            ctx.content.contains("[███░░░░░░░]"),
-            "bar 渲染: {}",
+            ctx.content.contains(']'),
+            "预算条后缀保留括号: {}",
             ctx.content
         );
         assert_eq!(ctx.style, dim);
+        let bar_cells: Vec<&Span<'static>> = segments
+            .iter()
+            .filter(|s| s.content == "█" || s.content == "░")
+            .collect();
+        assert_eq!(bar_cells.len(), 10, "预算条共 10 格");
+        assert_eq!(
+            bar_cells.iter().filter(|s| s.content == "█").count(),
+            3,
+            "30% 占 3 格"
+        );
+        assert!(
+            bar_cells[..3]
+                .iter()
+                .all(|s| { s.style.fg == Some(theme.semantic(SemanticTone::Success)) }),
+            "低占用格用 success 语义色"
+        );
 
-        // 85%：黄色警示。
+        // 85%：黄色警示（theme.warning），高占用格渐入 warning 段。
         let app = AppState {
             context_usage: Some((85_000, 100_000)),
             ..Default::default()
         };
         let segments = status_segments(&app, &theme);
         let ctx = segments.iter().find(|s| s.content.contains("85%")).unwrap();
-        assert_eq!(ctx.style.fg, Some(ratatui::style::Color::Yellow));
+        assert_eq!(
+            ctx.style.fg,
+            Some(theme.semantic(SemanticTone::Warning)),
+            "≥80% 用 warning 语义色"
+        );
+        let bar_cells: Vec<&Span<'static>> = segments.iter().filter(|s| s.content == "█").collect();
+        assert!(
+            bar_cells
+                .iter()
+                .skip(7)
+                .all(|s| s.style.fg == Some(theme.semantic(SemanticTone::Warning))),
+            "7/8 格用 warning 语义色"
+        );
 
-        // 97%：红色（verification_fail 的 fg）。
+        // 97%：红色（theme.danger），第 10 格用 danger 语义色。
         let app = AppState {
             context_usage: Some((97_000, 100_000)),
             ..Default::default()
         };
         let segments = status_segments(&app, &theme);
         let ctx = segments.iter().find(|s| s.content.contains("97%")).unwrap();
-        assert_eq!(ctx.style.fg, theme.verification_fail.fg);
+        assert_eq!(
+            ctx.style.fg,
+            Some(theme.semantic(SemanticTone::Danger)),
+            "≥95% 用 danger 语义色"
+        );
+        let bar_cells: Vec<&Span<'static>> = segments.iter().filter(|s| s.content == "█").collect();
+        assert_eq!(bar_cells.len(), 10, "97% 满格");
+        assert!(
+            bar_cells
+                .last()
+                .is_some_and(|s| s.style.fg == Some(theme.semantic(SemanticTone::Danger))),
+            "第 10 格用 danger 语义色"
+        );
 
         // 无 context_usage：不渲染 ctx 段。
         let app = AppState::default();
@@ -428,7 +729,11 @@ mod tests {
             .iter()
             .find(|s| s.content.contains("no-provider"))
             .expect("未配置 provider tag 存在");
-        assert_eq!(no_provider.style.fg, theme.verification_fail.fg);
+        assert_eq!(
+            no_provider.style.fg,
+            Some(theme.semantic(SemanticTone::Danger)),
+            "未配置 provider 用 danger 语义色"
+        );
         // provider 就绪但 key 缺失 → 黄色 tag。
         let app = AppState {
             provider_configured: true,
@@ -511,9 +816,12 @@ mod tests {
     fn fmt_tokens_human_readable() {
         assert_eq!(fmt_tokens(0), "0");
         assert_eq!(fmt_tokens(999), "999");
-        assert_eq!(fmt_tokens(1_500), "1.5k");
-        assert_eq!(fmt_tokens(240_000), "240.0k");
+        assert_eq!(fmt_tokens(1_500), "1.5K");
+        assert_eq!(fmt_tokens(240_000), "240K");
         assert_eq!(fmt_tokens(1_200_000), "1.2M");
+        assert_eq!(fmt_tokens(12_345_678), "12M");
+        assert_eq!(fmt_tokens(9_600), "9.6K");
+        assert_eq!(fmt_tokens(12_000), "12K");
     }
 
     #[test]
@@ -535,7 +843,14 @@ mod tests {
         };
         let segments = status_segments(&app, &theme);
         let ctx = segments.iter().find(|s| s.content.contains("46%")).unwrap();
-        assert!(ctx.content.contains('█'), "预算条渲染: {}", ctx.content);
+        assert!(
+            segments.iter().any(|s| s.content.contains('█')),
+            "预算条渲染: {:?}",
+            segments
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<Vec<_>>()
+        );
         assert!(ctx.content.contains("46%"));
     }
 
@@ -564,7 +879,10 @@ mod tests {
         let wide = fit_status_line(&app, &theme, 400);
         let wide_text = wide.to_string();
         assert!(wide_text.contains("deepseek-v4-flash-0731"));
-        assert!(wide_text.contains("ctx"), "宽行含 ctx: {wide_text}");
+        assert!(
+            wide_text.contains("4.0K / 128K"),
+            "宽行含 grok ctx: {wide_text}"
+        );
         assert!(
             !wide_text.contains("lines 30"),
             "宽行也不含 lines: {wide_text}"

@@ -11,9 +11,9 @@ use ratatui::Frame;
 use crate::app::focus::HelpOverlay;
 use unicode_width::UnicodeWidthChar;
 
-use crate::app::state::{AppState, DisplayMode};
+use crate::app::state::{AppState, DisplayMode, TurnView};
 use crate::i18n::{Key, Tr};
-use crate::model::conversation::{LineKind, Segment};
+use crate::model::conversation::{LineKind, SegId, Segment, TOOL_RESULT_PREVIEW};
 use crate::render::input::spinner_frame;
 use crate::theme::Theme;
 
@@ -182,6 +182,22 @@ pub fn kind_tag(kind: LineKind) -> &'static str {
     }
 }
 
+/// 工具结果截断标记：模型层（`apply::RESULT_PREVIEW`）按字节截断结果并缀 `…`，
+/// 渲染层据长度阈值（[`TOOL_RESULT_PREVIEW`]）判定并补明确标记，避免用户把
+/// 截断结果误认为完整输出。结果已以 `…` 结尾（模型层截断）时只补
+/// `(truncated)`，否则连省略号一起补（直接构造/恢复的段兜底）。
+fn tool_result_truncation_marker(result: &str) -> Option<&'static str> {
+    if result.len() > TOOL_RESULT_PREVIEW {
+        Some(if result.ends_with('…') {
+            " (truncated)"
+        } else {
+            " … (truncated)"
+        })
+    } else {
+        None
+    }
+}
+
 /// 折叠摘要文本。
 fn folded_summary(seg: &Segment, tr: Tr) -> String {
     match seg {
@@ -249,30 +265,81 @@ fn thinking_verb(tr: Tr, elapsed: std::time::Duration) -> &'static str {
 /// 把会话消息树按「回合」分组成消息块（Claude Code 风格：无边框无角色头，
 /// `❯` 标用户输入、`⏺` 标 agent 输出、`  ⎿  ` 缩进树形展示工具结果）：
 /// 每回合一个用户块 + 一个 agent 块，回合间空行分隔。
+///
+/// 按 `app.turn_view` 过滤：`All` 渲染全部段；`Single` 只渲染
+/// `app.selected_turn` 对应回合的段（`selected_turn` 为 None 时回退 All）。
 pub fn build_conversation_blocks(app: &AppState, theme: &Theme) -> Vec<MessageBlock> {
+    build_blocks_with_anchor_lines(app, theme).0
+}
+
+/// 锚点行信息：段 id + 行类型 + 块序号 + 块内行号（K/J 锚点跳转用）。
+type AnchorLine = (SegId, LineKind, usize, usize);
+
+/// 构建对话消息块，并顺带记录每个段在渲染行流中的锚点。
+///
+/// 返回 `(blocks, anchors)`：`anchors` 为 [`AnchorLine`] 列表，顺序与
+/// 渲染一致，供 K/J 锚点跳转把段定位换算成全局物理行号（锚点计数取
+/// 「段在 agent 缓冲中的起始行」——缓冲整体落盘为一块，故块内行号 =
+/// 缓冲行号；全局行号需叠加上游块高度，见 [`anchor_scroll_target`]）。
+/// 与 [`build_conversation_blocks`] 完全同源。
+fn build_blocks_with_anchor_lines(
+    app: &AppState,
+    theme: &Theme,
+) -> (Vec<MessageBlock>, Vec<AnchorLine>) {
     let mut blocks: Vec<MessageBlock> = Vec::new();
+    let mut anchors: Vec<AnchorLine> = Vec::new();
     // 首次启动（还没有任何回合）显示欢迎区，替代“空面板 + 加载中噪声”。
     // /help 浮层打开时不显示欢迎区：浮层锚定在输入框上方，但欢迎区仍占
     // 对话区顶部，两者同屏显得拥挤（C1）。
     if app.conversation.turn_count() == 0 && !app.running && app.help_overlay.is_none() {
         blocks.push(welcome_block(app, theme));
     }
+    // 单回合视图过滤：Single 且 selected_turn 有效时只渲染选中回合的段
+    //（selected_turn 越界钳制到末回合；无回合/None 回退 All）。
+    let total = app.conversation.turn_count();
+    let single_turn = match (app.turn_view, app.selected_turn) {
+        (TurnView::Single, Some(t)) if total > 0 => Some(t.min(total - 1)),
+        _ => None,
+    };
     let mut last_turn: Option<u64> = None;
     let mut agent_lines: Vec<Line<'static>> = Vec::new();
+    // 待落盘锚点：(seg, kind, 缓冲行号)；flush 时换算成 (seg, kind, 块序号, 块内行号)。
+    let mut pending_anchors: Vec<(SegId, LineKind, usize)> = Vec::new();
 
-    let flush_agent = |blocks: &mut Vec<MessageBlock>, lines: &mut Vec<Line<'static>>| {
-        if !lines.is_empty() {
-            blocks.push(MessageBlock {
-                lines: std::mem::take(lines),
-            });
+    let flush_agent = |blocks: &mut Vec<MessageBlock>,
+                       agent_lines: &mut Vec<Line<'static>>,
+                       pending: &mut Vec<(SegId, LineKind, usize)>,
+                       anchors: &mut Vec<(SegId, LineKind, usize, usize)>| {
+        if agent_lines.is_empty() {
+            return;
         }
+        let block_idx = blocks.len();
+        for &(seg, kind, line) in pending.iter() {
+            anchors.push((seg, kind, block_idx, line));
+        }
+        pending.clear();
+        blocks.push(MessageBlock {
+            lines: std::mem::take(agent_lines),
+        });
     };
 
     for (seg_id, seg) in app.conversation.iter_segments() {
         let (turn_id, _) = seg_id;
+        if let Some(t) = single_turn {
+            // 只渲染选中回合的段；其余回合整段跳过（不触发回合切换）。
+            let idx = app.conversation.turn_index_of(seg_id).unwrap_or(usize::MAX);
+            if idx != t {
+                continue;
+            }
+        }
         if last_turn != Some(turn_id) {
             // 回合切换：落盘上一个 agent 块，开新用户块。
-            flush_agent(&mut blocks, &mut agent_lines);
+            flush_agent(
+                &mut blocks,
+                &mut agent_lines,
+                &mut pending_anchors,
+                &mut anchors,
+            );
             last_turn = Some(turn_id);
             if let Some(user_text) = app.conversation.user_text_of(turn_id) {
                 let mut lines: Vec<Line<'static>> = Vec::new();
@@ -288,7 +355,25 @@ pub fn build_conversation_blocks(app: &AppState, theme: &Theme) -> Vec<MessageBl
                 } else {
                     let mut body =
                         span_lines(vec![Span::styled(user_text.to_string(), theme.user)]);
-                    prefix_lines(&mut body, "❯ ", "  ", theme.system);
+                    // grok 对齐：用户块首行左侧时间戳列（HH:MM:SS，取自
+                    // turn created_at；对齐 xai-grok-pager 时间戳展示）。
+                    let ts = app
+                        .conversation
+                        .turn_created_at(turn_id)
+                        .map(fmt_hm_time)
+                        .unwrap_or_default();
+                    let turn_prefix = format!("{ts}  ");
+                    let cont_indent = " ".repeat(turn_prefix.chars().count());
+                    for (i, line) in body.iter_mut().enumerate() {
+                        let prefix = if i == 0 {
+                            Span::styled(turn_prefix.clone(), Style::default().fg(theme.gray_dim))
+                        } else {
+                            Span::styled(cont_indent.clone(), Style::default().fg(theme.gray_dim))
+                        };
+                        let mut spans = vec![prefix];
+                        spans.append(&mut line.spans);
+                        *line = Line::from(spans);
+                    }
                     lines.extend(body);
                 }
                 blocks.push(MessageBlock { lines });
@@ -299,77 +384,148 @@ pub fn build_conversation_blocks(app: &AppState, theme: &Theme) -> Vec<MessageBl
         if app.display_mode == DisplayMode::Lite && kind == LineKind::Reasoning {
             continue;
         }
-        let folded = app.is_folded(seg_id, kind);
-        let mut lines = if folded {
-            let summary = folded_summary(seg, app.tr);
-            let mut folded_lines = span_lines(vec![Span::styled(summary, theme.system)]);
-            if kind == LineKind::Tool {
-                prefix_lines(&mut folded_lines, "⏺ ", "  ", theme.system);
+        // 三态折叠渲染（grok DisplayMode 对齐）：
+        // - Collapsed：单行摘要（folded_summary）；
+        // - Truncated：保留前 TRUNCATED_LINES 行 + "…N more"；
+        // - Expanded：全文。
+        let run_elapsed = app.run_started_at.map(|t| t.elapsed()).unwrap_or_default();
+        let running_frame = app
+            .running
+            .then(|| crate::render::input::spinner_frame(run_elapsed));
+        let state = app.fold_state(seg_id, kind);
+        let mut lines = match state {
+            crate::app::state::FoldState::Collapsed => {
+                let summary = folded_summary(seg, app.tr);
+                let mut folded_lines = span_lines(vec![Span::styled(summary, theme.system)]);
+                if kind == LineKind::Tool {
+                    prefix_lines(&mut folded_lines, "⏺ ", "  ", theme.system);
+                }
+                folded_lines
             }
-            folded_lines
-        } else {
-            segment_lines(seg, app.display_mode, app.tr, theme)
+            crate::app::state::FoldState::Truncated => {
+                let mut full = segment_lines(seg, app.display_mode, app.tr, theme, running_frame);
+                if kind == LineKind::Tool {
+                    prefix_lines(&mut full, "⏺ ", "  ", theme.system);
+                }
+                truncated_lines(full, seg, app.tr)
+            }
+            crate::app::state::FoldState::Expanded => {
+                segment_lines(seg, app.display_mode, app.tr, theme, running_frame)
+            }
         };
         if app.selected == Some(seg_id) {
             for line in &mut lines {
                 *line = line.clone().patch_style(theme.selection);
             }
+            // grok 对齐：选中条目左侧 accent 竖线（SelectedEntryArea 边框观感）。
+            if let Some(first) = lines.first_mut() {
+                let mut spans = vec![Span::styled(
+                    "│ ",
+                    Style::default()
+                        .fg(theme.accent_user)
+                        .add_modifier(Modifier::BOLD),
+                )];
+                spans.extend(first.spans.clone());
+                first.spans = spans;
+            }
         }
+        // grok 对齐：运行中工具段左侧 accent 流式线（running accent 动画）——
+        // 与选中竖线不同位置，标示「正在执行」；spinner 前缀由 segment_lines
+        // 的 running_frame 提供，配合左侧线形成流式动效。
+        if app.running && kind == LineKind::Tool && !lines.is_empty() {
+            if let Some(first) = lines.first_mut() {
+                let mut spans = vec![Span::styled(
+                    "│ ",
+                    Style::default()
+                        .fg(theme.accent_user)
+                        .add_modifier(Modifier::BOLD),
+                )];
+                spans.extend(first.spans.clone());
+                first.spans = spans;
+            }
+        }
+        // grok 对齐：对话内搜索命中段弱高亮（bg_highlight 背景，区别于选中反色）。
+        if app
+            .search
+            .as_ref()
+            .is_some_and(|s| !s.query.is_empty() && s.matches.contains(&seg_id))
+        {
+            for line in &mut lines {
+                *line = line
+                    .clone()
+                    .patch_style(Style::default().bg(theme.bg_highlight));
+            }
+        }
+        // 锚点：记录段在 agent 缓冲中的起始行号（缓冲整体成为一块）。
+        pending_anchors.push((seg_id, kind, agent_lines.len()));
         agent_lines.extend(lines);
     }
     // 流式 pending 与当前回合段合并，再统一落盘，避免分离的空块。
-    if !app.conversation.pending_reasoning().is_empty() && app.display_mode != DisplayMode::Lite {
-        let text = if app.display_mode == DisplayMode::Raw {
-            format!("[reasoning] {}", app.conversation.pending_reasoning())
-        } else {
-            app.conversation.pending_reasoning().to_string()
-        };
-        agent_lines.extend(span_lines(vec![Span::styled(
-            text,
-            theme.style_for(LineKind::Reasoning),
-        )]));
-    }
-    if !app.conversation.pending_text().is_empty() {
-        if app.display_mode == DisplayMode::Raw {
+    // 单回合视图下只有选中回合才是当前回合时并入 pending。
+    let current_turn_idx = app
+        .conversation
+        .current()
+        .and_then(|cur| app.conversation.turn_index_of((cur.id, 0)));
+    let show_pending = match single_turn {
+        None => true,
+        Some(t) => current_turn_idx == Some(t),
+    };
+    if show_pending {
+        if !app.conversation.pending_reasoning().is_empty() && app.display_mode != DisplayMode::Lite
+        {
+            let text = if app.display_mode == DisplayMode::Raw {
+                format!("[reasoning] {}", app.conversation.pending_reasoning())
+            } else {
+                app.conversation.pending_reasoning().to_string()
+            };
             agent_lines.extend(span_lines(vec![Span::styled(
-                format!("[agent] {}", app.conversation.pending_text()),
-                theme.style_for(LineKind::Agent),
+                text,
+                theme.style_for(LineKind::Reasoning),
             )]));
-        } else {
-            agent_lines.extend(agent_marked_lines(
-                app.conversation.pending_text(),
-                theme.style_for(LineKind::Agent),
-                theme,
-            ));
+        }
+        if !app.conversation.pending_text().is_empty() {
+            if app.display_mode == DisplayMode::Raw {
+                agent_lines.extend(span_lines(vec![Span::styled(
+                    format!("[agent] {}", app.conversation.pending_text()),
+                    theme.style_for(LineKind::Agent),
+                )]));
+            } else {
+                agent_lines.extend(agent_marked_lines(
+                    app.conversation.pending_text(),
+                    theme.style_for(LineKind::Agent),
+                    theme,
+                ));
+            }
+        }
+        // 等待 agent 首批 delta：在对话区（agent 位置）显示转圈 + 随机动词
+        // + 已耗时间（Claude Code 风格），而不是只有输入框里的“等待响应”。
+        if app.running
+            && app.conversation.current().is_some()
+            && app.conversation.pending_reasoning().is_empty()
+            && app.conversation.pending_text().is_empty()
+        {
+            let elapsed = app.run_started_at.map(|t| t.elapsed()).unwrap_or_default();
+            let frame = spinner_frame(elapsed);
+            let verb = thinking_verb(app.tr, elapsed);
+            agent_lines.push(Line::from(Span::styled(
+                app.tr.t_args(
+                    Key::ThinkingWait,
+                    &[
+                        ("frame", &frame.to_string()),
+                        ("verb", verb),
+                        ("secs", &elapsed.as_secs().to_string()),
+                    ],
+                ),
+                theme.system,
+            )));
         }
     }
-    // 等待 agent 首批 delta：在对话区（agent 位置）显示转圈 + 随机动词
-    // + 已耗时间（Claude Code 风格），而不是只有输入框里的“等待响应”。
-    if app.running
-        && app.conversation.current().is_some()
-        && app.conversation.pending_reasoning().is_empty()
-        && app.conversation.pending_text().is_empty()
-    {
-        let elapsed = app.run_started_at.map(|t| t.elapsed()).unwrap_or_default();
-        let frame = spinner_frame(elapsed);
-        let verb = thinking_verb(app.tr, elapsed);
-        agent_lines.push(Line::from(Span::styled(
-            app.tr.t_args(
-                Key::ThinkingWait,
-                &[
-                    ("frame", &frame.to_string()),
-                    ("verb", verb),
-                    ("secs", &elapsed.as_secs().to_string()),
-                ],
-            ),
-            theme.system,
-        )));
-    }
-    if !agent_lines.is_empty() {
-        blocks.push(MessageBlock {
-            lines: std::mem::take(&mut agent_lines),
-        });
-    }
+    flush_agent(
+        &mut blocks,
+        &mut agent_lines,
+        &mut pending_anchors,
+        &mut anchors,
+    );
 
     // 命令反馈 echo：无前缀轻量块。
     for ui in &app.echo {
@@ -382,7 +538,178 @@ pub fn build_conversation_blocks(app: &AppState, theme: &Theme) -> Vec<MessageBl
             lines: span_lines(vec![Span::styled(text, theme.style_for(ui.kind))]),
         });
     }
-    blocks
+    (blocks, anchors)
+}
+
+/// 回合创建时刻 → `HH:MM:SS` 时间戳文本（用户块时间戳列展示；
+/// 对齐 xai-grok-pager 的 `HH:MM:SS` 观感）。用 chrono `Local` 做真实
+/// 本地时区转换（此前 `epoch % 86400` 实为 UTC 时刻，非 UTC 用户时间
+/// 偏几小时——审查#4）；转换失败（极早期纪元等）回退空串。
+fn fmt_hm_time(t: std::time::SystemTime) -> String {
+    let local: chrono::DateTime<chrono::Local> = t.into();
+    format!("{}", local.format("%H:%M:%S"))
+}
+
+/// Truncated 截断态保留的字符预算（超出行数/字符均折叠为 `…N more`）。
+const TRUNCATED_CHARS: usize = 200;
+
+/// Truncated 态渲染（grok DisplayMode::Truncated 对齐）：按**字符预算**
+/// 截断——保留前 [`TRUNCATED_CHARS`] 字符（跨行累计），余量折叠为
+/// `…N more` 摘要行。单行超长文本（如推理）也正确截断；总长不足时
+/// 原样返回（退化为全文）。
+fn truncated_lines(lines: Vec<Line<'static>>, seg: &Segment, tr: Tr) -> Vec<Line<'static>> {
+    let total = seg.char_len();
+    if total <= TRUNCATED_CHARS {
+        return lines;
+    }
+    let mut out: Vec<Line<'static>> = Vec::new();
+    let mut used = 0usize;
+    for line in lines {
+        let text = line.to_string();
+        let w = text.chars().count();
+        if used + w > TRUNCATED_CHARS && !out.is_empty() {
+            break;
+        }
+        out.push(line);
+        used += w;
+    }
+    // 截断首行剩余字符：把超预算部分的尾部压成 `…`。
+    if let Some(last) = out.last_mut() {
+        let text = last.to_string();
+        let chars: Vec<char> = text.chars().collect();
+        if chars.len() > TRUNCATED_CHARS {
+            let head: String = chars[..TRUNCATED_CHARS].iter().collect();
+            *last = Line::from(Span::styled(
+                format!("{head}…"),
+                Style::default().add_modifier(Modifier::DIM),
+            ));
+            used = TRUNCATED_CHARS;
+        }
+    }
+    let remaining = total.saturating_sub(used);
+    if remaining > 0 {
+        out.push(Line::from(Span::styled(
+            tr.t_args(Key::FoldedMore, &[("n", &remaining.to_string())]),
+            Style::default().add_modifier(Modifier::DIM),
+        )));
+    }
+    out
+}
+
+/// 锚点跳转缺省面板宽度（列）：调用方拿不到真实对话区宽度时，用它估算
+/// wrap 行数（与 [`anchor_scroll_target`] 的 `width` 参数同口径）。
+#[allow(dead_code)]
+pub const ANCHOR_DEFAULT_WIDTH: usize = 100;
+
+/// turn sticky 头部行：会话标题（None 时不显示）+ 回合计数（如 `3/7`）
+/// + 视图标签（全部回合/单回合），末行铺满分隔线。
+///
+/// 无任何回合时不渲染头部（欢迎屏/空会话返回 None）。样式走 theme 既有
+/// 字段：标题 accent、计数/标签 dim、分隔线 border。
+fn turn_header_lines(app: &AppState, theme: &Theme, width: u16) -> Option<Vec<Line<'static>>> {
+    let total = app.conversation.turn_count();
+    if total == 0 {
+        return None;
+    }
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    if let Some(title) = app.session_title.as_deref() {
+        // 长会话标题截断（sticky 头部宽度保护）：超出宽度-12 列时截断缀 `…`，
+        // 避免长标题把回合计数/视图标签挤出屏外（实测反馈）。按字符截断，
+        // 中文等多字节安全。
+        let budget = width.saturating_sub(12).max(1) as usize;
+        let title = if title.chars().count() > budget {
+            let head: String = title.chars().take(budget).collect();
+            format!("{head}…")
+        } else {
+            title.to_string()
+        };
+        spans.push(Span::styled(
+            title,
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled("  ", Style::default()));
+    }
+    // 回合计数：All 显示总回合数；Single 显示 `当前/总数`（未选中时按末回合）。
+    let count = match app.turn_view {
+        TurnView::All => total.to_string(),
+        TurnView::Single => app
+            .selected_turn
+            .map(|t| format!("{}/{}", (t + 1).min(total), total))
+            .unwrap_or_else(|| format!("{total}/{total}")),
+    };
+    let dim = Style::default().add_modifier(theme.dim);
+    spans.push(Span::styled(count, dim));
+    spans.push(Span::styled(
+        format!(
+            "  {}",
+            app.tr.t(match app.turn_view {
+                TurnView::All => Key::TurnViewAll,
+                TurnView::Single => Key::TurnViewSingle,
+            })
+        ),
+        dim,
+    ));
+    let sep: String = "─".repeat(width.max(1) as usize);
+    Some(vec![
+        Line::from(spans),
+        Line::from(Span::styled(sep, theme.border)),
+    ])
+}
+
+/// 锚点跳转（K/J）：查询上一个/下一个 response（`LineKind::Agent` 起始段）
+/// 在对话渲染行流中的目标滚动位置。
+///
+/// 基准取「当前选中段所在行」；无选中时取「当前滚动偏移所在行」。`next=true`
+/// 找其后第一个 response，`next=false` 找其前最后一个 response；找不到（已
+/// 在最前/最后，或会话无 response）返回 None。`width` 为对话区面板宽度
+/// （wrap 行数估算口径，与 [`block_height`]/[`estimate_wrapped_lines`]
+/// 一致；调用方无真实宽度时可传 [`ANCHOR_DEFAULT_WIDTH`]）。
+///
+/// WP-A 在 dispatch 接线 `ConvAnchorPrev`/`ConvAnchorNext`：取返回值写入
+/// `app.scroll_offset` 并复位 `auto_scroll=false`（找不到目标时保持现状）。
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn anchor_scroll_target(app: &AppState, next: bool, width: usize) -> Option<usize> {
+    let (blocks, anchors) = build_blocks_with_anchor_lines(app, &app.theme);
+    // 每块累计高度：把 (块序号, 块内行号) 换算成全局物理行号。
+    let mut prefix: Vec<usize> = Vec::with_capacity(blocks.len());
+    let mut acc = 0usize;
+    for b in &blocks {
+        prefix.push(acc);
+        acc += block_height(b, width.max(1));
+    }
+    // 只把 agent 正文（Segment::Text 起始段）当作锚点。
+    let mut agent_anchors: Vec<(SegId, usize)> = Vec::new();
+    for &(seg, kind, block_idx, line_in_block) in &anchors {
+        if kind == LineKind::Agent {
+            agent_anchors.push((seg, prefix[block_idx] + line_in_block));
+        }
+    }
+    if agent_anchors.is_empty() {
+        return None;
+    }
+    // 基准行：选中段所在行，否则当前滚动偏移所在行。
+    let ref_line = app
+        .selected
+        .and_then(|seg| {
+            anchors
+                .iter()
+                .find(|(s, ..)| *s == seg)
+                .map(|(_, _, bi, l)| prefix[*bi] + *l)
+        })
+        .unwrap_or(app.scroll_offset);
+    let cur = agent_anchors
+        .iter()
+        .rposition(|(_, l)| *l <= ref_line)
+        .unwrap_or(0);
+    if next {
+        agent_anchors.get(cur + 1).map(|(_, l)| *l)
+    } else {
+        cur.checked_sub(1)
+            .and_then(|i| agent_anchors.get(i))
+            .map(|(_, l)| *l)
+    }
 }
 
 /// 首次启动欢迎区：Claude Code 风格的简洁文字块（logo + 副标题 + 关键提示
@@ -455,11 +782,46 @@ pub fn block_height(block: &MessageBlock, width: usize) -> usize {
 /// 对话区叠放渲染：按 `offset`（物理行）裁剪可见窗口，逐块绘制。
 /// 每块一个独立 Paragraph（无边框，内容行自带 ❯/⏺ 前缀），块内用 `scroll`
 /// 跳过窗口上方的行，与整区滚动语义一致。
+///
+/// 便捷入口：内部先估算各块高度再委托 [`render_blocks_with_heights`]。
+/// `AppState::draw` 直接走带高度的变体（单帧内只估算一遍 wrap 行数）；
+/// 本函数保留给测试与外部调用方。
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn render_blocks(f: &mut Frame, area: Rect, blocks: &[MessageBlock], offset: usize) {
-    let pane_width = area.width as usize;
+    let heights: Vec<usize> = blocks
+        .iter()
+        .map(|b| block_height(b, area.width as usize))
+        .collect();
+    render_blocks_with_heights(f, area, blocks, offset, &heights);
+}
+
+/// 叠放渲染（复用调用方已估算的块高度，`heights` 与 `blocks` 等长）。
+/// 供 `AppState::draw` 消费：单帧内同一批块的 wrap 行数只估算一次。
+pub fn render_blocks_with_heights(
+    f: &mut Frame,
+    area: Rect,
+    blocks: &[MessageBlock],
+    offset: usize,
+    heights: &[usize],
+) {
+    // hover=None 时不使用 theme，占位 Theme::default() 即可。
+    let theme = Theme::default();
+    render_blocks_with_heights_hover(f, area, blocks, offset, heights, None, &theme)
+}
+
+/// 行级 hover 高亮（grok scrollback 同款）：`hover_row` 为全局物理行
+/// （offset 前坐标），命中行叠加 `bg_highlight` 背景，随鼠标移动实时更新。
+pub(crate) fn render_blocks_with_heights_hover(
+    f: &mut Frame,
+    area: Rect,
+    blocks: &[MessageBlock],
+    offset: usize,
+    heights: &[usize],
+    hover_row: Option<usize>,
+    theme: &Theme,
+) {
     let mut y = 0usize; // 全局物理行游标
-    for block in blocks {
-        let bh = block_height(block, pane_width);
+    for (block, &bh) in blocks.iter().zip(heights) {
         if y + bh <= offset {
             // 整块在窗口上方：跳过。
             y += bh;
@@ -483,7 +845,19 @@ pub fn render_blocks(f: &mut Frame, area: Rect, blocks: &[MessageBlock], offset:
             width: area.width,
             height: height as u16,
         };
-        let paragraph = Paragraph::new(block.lines.clone())
+        // 行级 hover：命中块内某行时 patch 该行背景（grok scrollback hover）。
+        let mut lines = block.lines.clone();
+        if let Some(hover) = hover_row {
+            if hover >= y && hover < y + bh {
+                let line_idx = hover - y;
+                if let Some(line) = lines.get_mut(line_idx) {
+                    *line = line
+                        .clone()
+                        .patch_style(Style::default().bg(theme.bg_highlight));
+                }
+            }
+        }
+        let paragraph = Paragraph::new(lines)
             .wrap(Wrap { trim: false })
             .scroll((skip_in_block as u16, 0));
         f.render_widget(paragraph, rect);
@@ -493,7 +867,13 @@ pub fn render_blocks(f: &mut Frame, area: Rect, blocks: &[MessageBlock], offset:
 
 /// 段 → 显示行组（展开态，Claude Code 风格 ⏺/⎿ 标记；Raw 模式退化为
 /// `[kind]` 纯文本前缀，便于复制与解析）。验证行文案按 `tr` 语言取词表。
-fn segment_lines(seg: &Segment, mode: DisplayMode, tr: Tr, theme: &Theme) -> Vec<Line<'static>> {
+fn segment_lines(
+    seg: &Segment,
+    mode: DisplayMode,
+    tr: Tr,
+    theme: &Theme,
+    running_frame: Option<char>,
+) -> Vec<Line<'static>> {
     let raw_mode = mode == DisplayMode::Raw;
     let plain = |kind: LineKind, text: String, style: Style| -> Vec<Line<'static>> {
         let text = if raw_mode {
@@ -523,18 +903,27 @@ fn segment_lines(seg: &Segment, mode: DisplayMode, tr: Tr, theme: &Theme) -> Vec
             if raw_mode {
                 let mut lines = plain(LineKind::Tool, format!("{name}({arguments})"), theme.tool);
                 if let Some(r) = result {
-                    lines.extend(plain(LineKind::ToolResult, r.clone(), theme.tool_result));
+                    let text = match tool_result_truncation_marker(r) {
+                        Some(m) => format!("{r}{m}"),
+                        None => r.clone(),
+                    };
+                    lines.extend(plain(LineKind::ToolResult, text, theme.tool_result));
                 }
                 return lines;
             }
-            // ⏺ 颜色编码状态：运行中=dim、成功=accent、失败=红。
+            // ⏺ 颜色编码状态：运行中=accent_user + 流式 spinner（grok running
+            // accent 动画对齐）、成功=accent、失败=红。
             let dot_style = match status {
-                ToolStatus::Running => theme.system,
+                ToolStatus::Running => Style::default().fg(theme.accent_user),
                 ToolStatus::Ok => Style::default().fg(theme.accent),
                 ToolStatus::Failed => theme.verification_fail,
             };
+            let dot = match (status, running_frame) {
+                (ToolStatus::Running, Some(frame)) => format!("{frame} "),
+                _ => "⏺ ".to_string(),
+            };
             let mut lines = vec![Line::from(vec![
-                Span::styled("⏺ ", dot_style),
+                Span::styled(dot, dot_style),
                 Span::styled(name.clone(), Style::default()),
                 Span::styled(format!("({arguments})"), theme.tool),
             ])];
@@ -545,6 +934,13 @@ fn segment_lines(seg: &Segment, mode: DisplayMode, tr: Tr, theme: &Theme) -> Vec
                 let styled = theme.diff_spans(r, theme.tool_result);
                 let mut body = span_lines(styled);
                 prefix_lines(&mut body, "  ⎿  ", "     ", theme.system);
+                // 截断标记追加到结果末行（独立 span，保留 ⎿ 前缀与 diff 染色）。
+                if let Some(marker) = tool_result_truncation_marker(r) {
+                    if let Some(last) = body.last_mut() {
+                        last.spans
+                            .push(Span::styled(marker.to_string(), theme.system));
+                    }
+                }
                 lines.extend(body);
             }
             lines
@@ -672,12 +1068,60 @@ impl AppState {
         let theme = self.theme.clone();
         let full = area;
 
-        // 横向：侧边栏可见时切分。
+        // grok 对齐：整屏填充 bg_base 背景（深灰底，xai-grok-pager Theme
+        // 的 bg_base 语义位）——不填充则终端默认底色透出。用 buffer 级
+        // set_style 显式铺色（Block::default() 无边框时部分 ratatui 版本
+        // 不铺满，实测反馈"背景没填充"）。
+        {
+            let buf = f.buffer_mut();
+            let style = Style::default().bg(theme.bg_base);
+            for cell in buf.content.iter_mut() {
+                cell.set_style(style);
+            }
+        }
+
+        // 全屏欢迎屏优先：启动且尚无对话时渲染欢迎屏（logo + 菜单 +
+        // 配置警示），替代对话区布局；输入区仍由底部渲染，Enter 提交后
+        // `welcome` 清除回到正常对话布局（grok build welcome 屏对齐）。
+        if self.welcome && self.conversation.turn_count() == 0 && !self.running {
+            crate::render::welcome::render_welcome(self, &theme, f, full);
+            let input_area = Rect {
+                x: full.x,
+                y: full.y + full.height.saturating_sub(3),
+                width: full.width,
+                height: 3,
+            };
+            crate::render::input::render_input(self, &theme, f, input_area);
+            // 欢迎屏也可叠加模态覆盖层（如 `?` 快捷键速查）。
+            crate::render::render_modal_overlay(self, &theme, f, full);
+            // 欢迎屏输入光标：主路径末尾会 set_cursor_position，这里提前
+            // return 必须手动设置，否则用户输入看不到光标在输入框里
+            //（实测反馈"输入文字不显示在输入框里"的根因之一）。
+            if !self.running && self.focus == crate::app::focus::Focus::Input {
+                let pane_width = input_area.width.saturating_sub(2) as usize;
+                let view = crate::input::editor::input_view(
+                    &self.input.text,
+                    self.input.cursor,
+                    pane_width.max(1),
+                    1,
+                );
+                let col = view.cursor_col.min(pane_width as u16);
+                // 欢迎屏输入区同主路径：首行 `❯ ` 前缀占 2 列，光标 x 需 +2。
+                let prefix_offset = if view.cursor_row == 0 { 2 } else { 0 };
+                f.set_cursor_position((input_area.x + 1 + prefix_offset + col, input_area.y + 1));
+            }
+            return;
+        }
+
+        // 横向：侧边栏可见时切分，宽度跟随 app.sidebar_width（`[`/`]` 调整）。
         let (main_area, sidebar_area) = if crate::render::layout::sidebar_visible(full.width, self)
         {
             let chunks = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([Constraint::Min(0), Constraint::Length(30)])
+                .constraints([
+                    Constraint::Min(0),
+                    crate::render::layout::sidebar_constraint(self),
+                ])
                 .split(full);
             (chunks[0], Some(chunks[1]))
         } else {
@@ -686,24 +1130,74 @@ impl AppState {
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints(crate::render::layout::layout_constraints())
+            .constraints(crate::render::layout::layout_constraints_for(self))
             .split(main_area);
-        let conv_area = chunks[0];
-        let status_area = chunks[1];
+        // grok 对齐：状态栏在顶部（chunks[0]），对话区弹性在中间（chunks[1]），
+        // prompt 输入区与 shortcuts 栏在底部（chunks[2]/[3]）。
+        let status_area = chunks[0];
+        let conv_area = chunks[1];
         let input_area = chunks[2];
         let hint_area = chunks[3];
+        // 记录对话区屏幕范围：事件循环左键点击据此判断是否落在对话区内
+        //（审查#5：此前无条件转发，点输入框/状态栏也会折叠消息）。
+        self.conv_area = Some(conv_area);
 
         // 消息块布局：无边框无角色头（Claude Code 风格），归属靠 ❯/⏺ 标记。
-        // 先估算总物理高度再钳制滚动。
+        // 先估算总物理高度再钳制滚动。块高度只估算一遍：既用于总行数/滚动
+        // 钳制，也复用给 render_blocks（避免每帧对同一批块做两遍 wrap 估算）。
         let blocks = crate::render::message::build_conversation_blocks(self, &theme);
         let pane_width = conv_area.width as usize;
-        self.rendered_lines = blocks
+        let heights: Vec<usize> = blocks
             .iter()
             .map(|b| crate::render::message::block_height(b, pane_width))
-            .sum();
-        let viewport = conv_area.height as usize;
+            .collect();
+        self.rendered_lines = heights.iter().sum();
+
+        // turn sticky 头部：会话标题 + 回合计数 + 视图标签（有回合时显示，
+        // 钉在对话区顶部，消息列表在下方滚动）。面板太矮时放弃头部。
+        let header = crate::render::message::turn_header_lines(self, &theme, conv_area.width);
+        let header_h = header.as_ref().map(|l| l.len() as u16).unwrap_or(0);
+        let show_header = header_h > 0 && header_h < conv_area.height;
+        let blocks_area = if show_header {
+            Rect {
+                x: conv_area.x,
+                y: conv_area.y + header_h,
+                width: conv_area.width,
+                height: conv_area.height - header_h,
+            }
+        } else {
+            conv_area
+        };
+        let viewport = blocks_area.height as usize;
         self.clamp_scroll(viewport.max(1));
-        crate::render::message::render_blocks(f, conv_area, &blocks, self.scroll_offset);
+        if show_header {
+            if let Some(lines) = header {
+                f.render_widget(
+                    Paragraph::new(lines),
+                    Rect {
+                        x: conv_area.x,
+                        y: conv_area.y,
+                        width: conv_area.width,
+                        height: header_h,
+                    },
+                );
+            }
+        }
+        // 行级 hover（grok scrollback 对齐）：鼠标在对话区内时，把屏幕行
+        // 换算成全局物理行（scroll_offset 前坐标），命中行 bg_highlight 高亮。
+        let hover_row = self
+            .mouse_pos
+            .filter(|(_, row)| *row >= blocks_area.y && *row < blocks_area.y + blocks_area.height)
+            .map(|(_, row)| row as usize - blocks_area.y as usize + self.scroll_offset);
+        crate::render::message::render_blocks_with_heights_hover(
+            f,
+            blocks_area,
+            &blocks,
+            self.scroll_offset,
+            &heights,
+            hover_row,
+            &theme,
+        );
 
         // 滚动位置指示：用户上滚（非贴底）时在对话区右上角画 ▍N%
         //（Claude Code 同款），比例 = scroll_offset / 总物理行数。
@@ -719,12 +1213,48 @@ impl AppState {
             f.render_widget(
                 Paragraph::new(Span::styled(marker, theme.system)),
                 Rect {
-                    x: conv_area.right().saturating_sub(marker_w),
-                    y: conv_area.y,
+                    x: blocks_area.right().saturating_sub(marker_w),
+                    y: blocks_area.y,
                     width: marker_w,
                     height: 1,
                 },
             );
+        }
+
+        // grok 对齐：对话区右侧竖向滚动条（track bg_highlight、thumb gray、
+        // 宽 1 列）；总行数超视口时按 scroll_offset/rendered_lines 定位 thumb。
+        if self.rendered_lines > viewport {
+            let track_h = blocks_area.height as usize;
+            let thumb_h = (track_h as u64 * viewport as u64 / self.rendered_lines as u64)
+                .max(1)
+                .min(track_h as u64) as u16;
+            let max_scroll = self.rendered_lines.saturating_sub(viewport);
+            let ratio = if max_scroll > 0 {
+                self.scroll_offset as u64 * (track_h.saturating_sub(thumb_h as usize) as u64)
+                    / max_scroll as u64
+            } else {
+                0
+            } as u16;
+            let thumb_y = blocks_area.y + ratio.min(blocks_area.height.saturating_sub(thumb_h));
+            let track_x = blocks_area.right().saturating_sub(1);
+            for row in 0..blocks_area.height {
+                let in_thumb = row >= thumb_y.saturating_sub(blocks_area.y)
+                    && row < thumb_y.saturating_sub(blocks_area.y) + thumb_h;
+                let cell = if in_thumb {
+                    ratatui::text::Span::styled("█", Style::default().fg(theme.gray))
+                } else {
+                    ratatui::text::Span::styled("│", Style::default().fg(theme.bg_highlight))
+                };
+                f.render_widget(
+                    Paragraph::new(cell),
+                    Rect {
+                        x: track_x,
+                        y: blocks_area.y + row,
+                        width: 1,
+                        height: 1,
+                    },
+                );
+            }
         }
 
         // ── 状态行 ────────────────────────────────────────
@@ -735,18 +1265,18 @@ impl AppState {
         ));
         f.render_widget(status, status_area);
 
-        // 临时命令反馈（状态变更类命令）：画在状态行上方，超时自动消失，
+        // 临时命令反馈（状态变更类命令）：画在输入区上方，超时自动消失，
         // 不进入对话面板的永久 echo 通道。
         if let Some((text, _)) = &self.notice {
             let lines: Vec<Line> = text
                 .lines()
                 .map(|l| Line::from(Span::styled(l.to_string(), theme.system)))
                 .collect();
-            let height = lines.len().min(status_area.y.max(1) as usize).max(1);
+            let height = lines.len().min(input_area.y.max(1) as usize).max(1);
             let notice_area = Rect {
-                x: status_area.x,
-                y: status_area.y.saturating_sub(height as u16),
-                width: status_area.width,
+                x: input_area.x,
+                y: input_area.y.saturating_sub(height as u16),
+                width: input_area.width,
                 height: height as u16,
             };
             f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), notice_area);
@@ -754,7 +1284,7 @@ impl AppState {
 
         // ── 输入区 ────────────────────────────────────────
         crate::render::input::render_input(self, &theme, f, input_area);
-        // 斜杠命令行内候选：画在状态行上方（输入区正上方），就地展开。
+        // 斜杠命令行内候选：画在输入区正上方，就地展开。
         // 高度 = 候选行数 + 边框 2 行（render_command_hint 的 Block 边框）。
         if self.command_hint.is_some() {
             let hint_h = self
@@ -762,23 +1292,72 @@ impl AppState {
                 .as_ref()
                 .map(|h| h.visible_rows() + 2)
                 .unwrap_or(3);
-            // 短终端保护：候选浮层高度不超过状态行上方可用行数，
+            // 短终端保护：候选浮层高度不超过输入区上方可用行数，
             // 避免浮层 Rect 溢出终端底部导致绘制异常。
-            let hint_h = hint_h.min(status_area.y.max(1) as usize).max(1);
+            let hint_h = hint_h.min(input_area.y.max(1) as usize).max(1);
             let hint_area = Rect {
-                x: status_area.x,
-                y: status_area.y.saturating_sub(hint_h as u16),
-                width: status_area.width,
+                x: input_area.x,
+                y: input_area.y.saturating_sub(hint_h as u16),
+                width: input_area.width,
                 height: hint_h as u16,
             };
             crate::render::input::render_command_hint(self, &theme, f, hint_area);
         }
+        // Ctrl+P 命令面板：模态浮层，居中展示（全命令模糊搜索 + 最近使用）。
+        if self.command_palette.is_some() {
+            let pal_h = 10u16.min(input_area.y.max(1));
+            let pal_area = Rect {
+                x: input_area.x,
+                y: input_area.y.saturating_sub(pal_h),
+                width: input_area.width.min(80),
+                height: pal_h,
+            };
+            // 水平居中：面板宽度 80 或全宽，x 居中。
+            let pal_area = Rect {
+                x: input_area.x + input_area.width.saturating_sub(pal_area.width) / 2,
+                ..pal_area
+            };
+            crate::render::input::render_command_palette(self, &theme, f, pal_area);
+        }
+        // Tasks 面板：Ctrl+G 切换，模态浮层（进行中的工具/子代理任务）。
+        if self.tasks_visible {
+            let tasks_h = 6u16.min(input_area.y.max(1));
+            let tasks_area = Rect {
+                x: input_area.x,
+                y: input_area.y.saturating_sub(tasks_h),
+                width: input_area.width.min(70),
+                height: tasks_h,
+            };
+            let tasks_area = Rect {
+                x: input_area.x + input_area.width.saturating_sub(tasks_area.width) / 2,
+                ..tasks_area
+            };
+            crate::render::tasks::render_tasks(self, &theme, f, tasks_area);
+        }
 
-        // ── 提示行 ────────────────────────────────────────
-        let hint = Paragraph::new(Span::styled(
-            crate::render::status::hint_for(self.focus, self.tr),
-            Style::default().add_modifier(Modifier::DIM),
-        ));
+        // ── shortcuts 栏（grok 对齐 ShortcutsBar）──────────
+        // 由 hint_for 文案按 ` · ` 分段，段间 `  │  ` 分隔（key 加粗
+        // text_secondary、动作 gray），替代旧单行 dim 文本。
+        let hint_text = crate::render::status::hint_for(self.focus, self.tr);
+        let mut hint_spans: Vec<Span<'static>> = Vec::new();
+        for (i, seg) in hint_text.split(" · ").enumerate() {
+            if i > 0 {
+                hint_spans.push(Span::styled("  │  ", Style::default().fg(theme.gray_dim)));
+            }
+            // 段内首个 `Ctrl+`/`Shift+`/`Esc`/`Tab` 键位前缀加粗。
+            let styled_seg = if seg.len() >= 3 && seg[..3].contains('+') {
+                Span::styled(
+                    seg.to_string(),
+                    Style::default()
+                        .fg(theme.text_secondary)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Span::styled(seg.to_string(), Style::default().fg(theme.gray))
+            };
+            hint_spans.push(styled_seg);
+        }
+        let hint = Paragraph::new(Line::from(hint_spans));
         f.render_widget(hint, hint_area);
 
         // ── 浮层（信任确认 / 审批居中 / @ 补全与 /help 锚定输入框上方）────
@@ -810,10 +1389,10 @@ impl AppState {
                 self,
                 &theme,
                 f,
-                input_overlay(status_area, (n + 2) as u16),
+                input_overlay(input_area, (n + 2) as u16),
             );
         } else if let Some(help) = &self.help_overlay {
-            render_help_overlay(help, &theme, self.tr, f, input_overlay(status_area, 20));
+            render_help_overlay(help, &theme, self.tr, f, input_overlay(input_area, 20));
         }
 
         // ── 侧边栏 ────────────────────────────────────────
@@ -833,14 +1412,25 @@ impl AppState {
             );
             let col = view.cursor_col.min(pane_width as u16);
             let row = (view.cursor_row - view.scroll_row) as u16;
-            f.set_cursor_position((input_area.x + 1 + col, input_area.y + 1 + row));
+            // 前缀偏移：只有光标在首行（且首行可见）时 `❯ `/`! ` 前缀占 2 列，
+            // 光标 x 需 +2 对齐实际文本；续行无前缀，直接按 pane 列定位
+            //（修复实测光标位置偏移：此前漏加前缀宽度）。
+            let prefix_offset = if view.cursor_row == 0 { 2 } else { 0 };
+            f.set_cursor_position((
+                input_area.x + 1 + prefix_offset + col,
+                input_area.y + 1 + row,
+            ));
         }
+
+        // ── 帧末 overlay 接线（grok 对齐）：模态 + toast ───
+        crate::render::render_overlays(self, &theme, f, full);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::state::FoldPolicy;
     use crate::model::conversation::{done_output, ToolStatus};
     use deepseeknova_core::runner::RunEvent;
     use ratatui::style::Color;
@@ -890,11 +1480,14 @@ mod tests {
         let theme = Theme::default();
         let blocks = build_conversation_blocks(&app, &theme);
         assert_eq!(blocks.len(), 3, "用户块 + agent 块 + echo 块");
-        // Claude Code 风格：用户块 `❯ ` 前缀、agent 块 `⏺ ` 前缀，无角色头。
+        // grok 对齐：用户块时间戳列前缀（HH:MM:SS，取自 turn created_at）、
+        // agent 块 `⏺ ` 前缀，无角色头。
         let user_texts = block_texts(&blocks[0]);
         assert!(
-            user_texts.iter().any(|t| t == "❯ "),
-            "用户块 ❯ 前缀: {user_texts:?}"
+            user_texts
+                .iter()
+                .any(|t| t.len() >= 8 && t.as_bytes()[2] == b':' && t.as_bytes()[5] == b':'),
+            "用户块时间戳前缀 HH:MM:SS: {user_texts:?}"
         );
         assert!(user_texts.iter().any(|t| t.contains("问题")));
         let agent_texts = block_texts(&blocks[1]);
@@ -931,7 +1524,8 @@ mod tests {
             ..Default::default()
         };
         app.conversation.begin_turn("q".into());
-        let long = format!("推理内容 {}", "x".repeat(80));
+        // 超长推理（> TRUNCATED_CHARS 预算）触发 Truncated 截断。
+        let long = format!("推理内容 {}", "x".repeat(300));
         app.apply_run_event(RunEvent::ReasoningDelta {
             text: long.clone(),
             signature: None,
@@ -941,13 +1535,22 @@ mod tests {
         let theme = Theme::default();
         let blocks = build_conversation_blocks(&app, &theme);
         let texts: String = blocks.iter().flat_map(block_texts).collect();
-        assert!(texts.contains("推理 ▸ 折叠"), "推理默认折叠摘要");
+        // Auto 策略下推理默认 Truncated：字符预算截断 + "…N 更多" 提示
+        //（grok DisplayMode::Truncated 对齐），而非单行摘要。
         assert!(
-            texts.contains("「推理内容 xxxx"),
-            "折叠摘要带首句预览: {texts}"
+            texts.contains("更多") || texts.contains("more"),
+            "推理默认 Truncated 截断提示: {texts}"
         );
-        // 预览截断在 40 字符内，不显示长正文的尾部。
-        assert!(!texts.contains(&"x".repeat(80)), "折叠态不显示完整正文");
+        assert!(
+            texts.contains("推理内容"),
+            "Truncated 保留推理开头: {texts}"
+        );
+        // 截断态不显示完整长正文的尾部。
+        assert!(
+            !texts.contains(&"x".repeat(300)),
+            "截断态不显示完整正文: {}",
+            texts.chars().count()
+        );
     }
 
     fn block_texts(block: &MessageBlock) -> Vec<String> {
@@ -1172,7 +1775,8 @@ mod tests {
         assert!(texts.contains(&"a".repeat(400)), "展开态显示截断结果");
 
         // 显式折叠后回退摘要行（⏺ + 折叠摘要）。
-        app.fold.insert((id, 0), true);
+        app.fold
+            .insert((id, 0), crate::app::state::FoldState::Collapsed);
         let blocks = build_conversation_blocks(&app, &theme);
         let texts: String = blocks.iter().flat_map(block_texts).collect();
         assert!(
@@ -1180,6 +1784,109 @@ mod tests {
             "显式折叠摘要: {texts}"
         );
         assert!(!texts.contains(&"a".repeat(500)), "折叠态不显示结果");
+    }
+
+    #[test]
+    fn tool_result_truncation_gets_marker() {
+        // 模型层截断（> TOOL_RESULT_PREVIEW 字节）的结果补明确标记，避免
+        // 用户把截断预览误认为完整输出；短结果不带标记。
+        let mut app = AppState::default();
+        app.conversation.begin_turn("q".into());
+        app.apply_run_event(RunEvent::ToolCallStart {
+            id: "1".into(),
+            name: "grep".into(),
+        });
+        app.apply_run_event(RunEvent::ToolResult {
+            call_id: "1".into(),
+            result: "x".repeat(5000),
+        });
+        app.apply_run_event(RunEvent::Done(done_output("")));
+        let theme = Theme::default();
+        let blocks = build_conversation_blocks(&app, &theme);
+        let texts: String = blocks.iter().flat_map(block_texts).collect();
+        assert!(
+            texts.contains("(truncated)"),
+            "截断结果带 (truncated) 标记: {texts}"
+        );
+
+        // 短结果（未截断）不追加标记。
+        let mut app = AppState::default();
+        app.conversation.begin_turn("q".into());
+        app.apply_run_event(RunEvent::ToolCallStart {
+            id: "2".into(),
+            name: "ls".into(),
+        });
+        app.apply_run_event(RunEvent::ToolResult {
+            call_id: "2".into(),
+            result: "ok".into(),
+        });
+        app.apply_run_event(RunEvent::Done(done_output("")));
+        let blocks = build_conversation_blocks(&app, &theme);
+        let texts: String = blocks.iter().flat_map(block_texts).collect();
+        assert!(!texts.contains("(truncated)"), "短结果无截断标记: {texts}");
+    }
+
+    #[test]
+    fn compact_policy_folds_tool_by_default() {
+        // 紧凑策略：推理与工具调用均默认折叠，工具结果不出现在展开态。
+        let mut app = AppState {
+            fold_policy: FoldPolicy::Compact,
+            tr: Tr::new(crate::i18n::Lang::Zh),
+            ..Default::default()
+        };
+        app.conversation.begin_turn("q".into());
+        app.apply_run_event(RunEvent::ToolCallStart {
+            id: "1".into(),
+            name: "grep".into(),
+        });
+        app.apply_run_event(RunEvent::ToolResult {
+            call_id: "1".into(),
+            result: "hit".into(),
+        });
+        app.apply_run_event(RunEvent::Done(done_output("")));
+        let theme = Theme::default();
+        let blocks = build_conversation_blocks(&app, &theme);
+        let texts: String = blocks.iter().flat_map(block_texts).collect();
+        assert!(
+            texts.contains("工具 ▸ grep 已折叠"),
+            "紧凑策略下工具默认折叠摘要: {texts}"
+        );
+        assert!(!texts.contains("  ⎿  "), "紧凑策略下不渲染工具结果正文");
+    }
+
+    #[test]
+    fn open_policy_expands_reasoning_by_default() {
+        // open 策略：推理与工具均默认展开（显式折叠仍优先）。
+        let mut app = AppState {
+            fold_policy: FoldPolicy::Open,
+            tr: Tr::new(crate::i18n::Lang::Zh),
+            ..Default::default()
+        };
+        app.conversation.begin_turn("q".into());
+        app.apply_run_event(RunEvent::ReasoningDelta {
+            text: "推理过程".into(),
+            signature: None,
+        });
+        app.apply_run_event(RunEvent::ToolCallStart {
+            id: "1".into(),
+            name: "grep".into(),
+        });
+        app.apply_run_event(RunEvent::ToolResult {
+            call_id: "1".into(),
+            result: "hit".into(),
+        });
+        app.apply_run_event(RunEvent::Done(done_output("")));
+        let theme = Theme::default();
+        let blocks = build_conversation_blocks(&app, &theme);
+        let texts: String = blocks.iter().flat_map(block_texts).collect();
+        assert!(
+            texts.contains("推理过程"),
+            "open 策略下推理默认展开: {texts}"
+        );
+        assert!(
+            texts.contains("  ⎿  "),
+            "open 策略下工具结果默认展开: {texts}"
+        );
     }
 
     #[test]
@@ -1408,5 +2115,124 @@ mod tests {
         );
         // 顶部块不应出现在视口（被滚出）。
         assert!(!flat.contains("第一轮问题"), "顶部块已被滚出");
+    }
+
+    #[test]
+    fn single_turn_view_renders_only_selected_turn() {
+        let mut app = AppState::default();
+        let theme = Theme::default();
+        for i in 0..3 {
+            app.conversation.begin_turn(format!("问题{i}"));
+            app.apply_run_event(RunEvent::TextDelta(format!("回答{i}")));
+            app.apply_run_event(RunEvent::Done(done_output("")));
+        }
+        // All 视图：全部回合可见。
+        let all_texts: String = build_conversation_blocks(&app, &theme)
+            .iter()
+            .flat_map(block_texts)
+            .collect();
+        assert!(all_texts.contains("问题0") && all_texts.contains("回答2"));
+
+        // Single 视图：只渲染选中回合（selected_turn=1 → 只含「问题1/回答1」）。
+        app.turn_view = TurnView::Single;
+        app.selected_turn = Some(1);
+        let single_texts: String = build_conversation_blocks(&app, &theme)
+            .iter()
+            .flat_map(block_texts)
+            .collect();
+        assert!(
+            single_texts.contains("问题1") && single_texts.contains("回答1"),
+            "单回合视图含选中回合: {single_texts}"
+        );
+        assert!(
+            !single_texts.contains("问题0") && !single_texts.contains("回答2"),
+            "单回合视图只含选中回合: {single_texts}"
+        );
+
+        // selected_turn=None → 回退 All 行为。
+        app.selected_turn = None;
+        let fallback_texts: String = build_conversation_blocks(&app, &theme)
+            .iter()
+            .flat_map(block_texts)
+            .collect();
+        assert!(fallback_texts.contains("问题0") && fallback_texts.contains("回答2"));
+
+        // 越界钳制：selected_turn=99 视为末回合（只含「问题2/回答2」）。
+        app.selected_turn = Some(99);
+        let clamped_texts: String = build_conversation_blocks(&app, &theme)
+            .iter()
+            .flat_map(block_texts)
+            .collect();
+        assert!(
+            clamped_texts.contains("回答2") && !clamped_texts.contains("问题0"),
+            "越界钳制到末回合: {clamped_texts}"
+        );
+    }
+
+    #[test]
+    fn turn_header_lines_show_title_count_and_view_label() {
+        let mut app = AppState {
+            session_title: Some("我的会话".into()),
+            tr: Tr::new(crate::i18n::Lang::Zh),
+            ..Default::default()
+        };
+        let theme = Theme::default();
+        // 无回合：不渲染头部（欢迎屏/空会话）。
+        assert_eq!(
+            turn_header_lines(&app, &theme, 80),
+            None,
+            "空会话无 sticky 头部"
+        );
+
+        for i in 0..3 {
+            app.conversation.begin_turn(format!("问题{i}"));
+            app.apply_run_event(RunEvent::TextDelta(format!("回答{i}")));
+            app.apply_run_event(RunEvent::Done(done_output("")));
+        }
+
+        // All 视图：标题 + 总回合数 + 标签。
+        app.turn_view = TurnView::All;
+        let lines = turn_header_lines(&app, &theme, 80).expect("有回合即有头部");
+        assert_eq!(lines.len(), 2, "文本行 + 分隔线");
+        let first: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(first.contains("我的会话"), "标题: {first}");
+        assert!(first.contains('3'), "总回合数: {first}");
+        assert!(first.contains("全部回合"), "视图标签: {first}");
+
+        // Single 视图：`当前/总数`。
+        app.turn_view = TurnView::Single;
+        app.selected_turn = Some(1);
+        let lines = turn_header_lines(&app, &theme, 80).expect("有回合即有头部");
+        let first: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(first.contains("2/3"), "选中回合 2/3: {first}");
+        assert!(first.contains("单回合"), "视图标签: {first}");
+
+        // 分隔线铺满面板宽度（border 样式）。
+        let sep: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(sep.chars().count(), 80, "分隔线铺满面板宽度");
+    }
+
+    #[test]
+    fn anchor_scroll_target_jumps_between_responses() {
+        let mut app = AppState::default();
+        for i in 0..3 {
+            app.conversation.begin_turn(format!("问题{i}"));
+            app.apply_run_event(RunEvent::TextDelta(format!("回答{i}")));
+            app.apply_run_event(RunEvent::Done(done_output("")));
+        }
+        let width = 80; // 无换行：块高 = 物理行数。
+                        // 未选中、滚动在顶部：next 跳到第 2 个 response，prev 无目标。
+        assert_eq!(anchor_scroll_target(&app, true, width), Some(4));
+        assert_eq!(anchor_scroll_target(&app, false, width), None);
+
+        // 选中第 2 回合正文段：prev 回第 1 个 response，next 到第 3 个。
+        app.selected = Some((2, 0));
+        assert_eq!(anchor_scroll_target(&app, false, width), Some(1));
+        assert_eq!(anchor_scroll_target(&app, true, width), Some(7));
+
+        // 无 response（空会话）：None。
+        let empty = AppState::default();
+        assert_eq!(anchor_scroll_target(&empty, true, width), None);
+        assert_eq!(anchor_scroll_target(&empty, false, width), None);
     }
 }

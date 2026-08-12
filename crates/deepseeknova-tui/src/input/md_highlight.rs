@@ -2,11 +2,13 @@
 //!
 //! 规则（逐行、不做嵌套解析）：
 //! - `#` 开头的标题行 → `theme.title`；
-//! - `- `/`* `/`数字. ` 列表行 → 前缀用 dim+accent，正文保持默认；
+//! - `- `/`* `/`+ `/`数字. ` 列表行 → 前缀用 dim+accent，正文保持默认；
 //! - `> ` 引用行 → `theme.reasoning` 风格；
-//! - ` ``` ` 围栏切换代码态，围栏行用 accent，代码内容用 `theme.tool`。
+//! - ` ``` ` 围栏切换代码态，围栏行用 accent，代码内容用 `theme.tool`；
+//! - 普通行内再做 span 级着色：行内反引号段用 `theme.tool`，
+//!   `[text](url)` 链接的 label 用 accent+下划线、url 用 `theme.tool`。
 
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
 
 use crate::theme::Theme;
@@ -36,29 +38,103 @@ pub fn md_spans(text: &str, theme: &Theme) -> Vec<Span<'static>> {
         }
         // 标题
         if line.starts_with('#') {
-            spans.push(Span::styled(line.to_string(), theme.title));
+            spans.extend(inline_spans(line, theme, theme.title));
             continue;
         }
         // 引用
         if line.starts_with("> ") {
-            spans.push(Span::styled(line.to_string(), theme.reasoning));
+            spans.extend(inline_spans(line, theme, theme.reasoning));
             continue;
         }
-        // 列表：前缀 dim+accent，正文默认
+        // 列表：前缀 dim+accent，正文默认（正文内仍做行内着色）
         if let Some(prefix) = list_prefix(line) {
             let style = Style::default().fg(theme.accent).add_modifier(theme.dim);
             spans.push(Span::styled(prefix.to_string(), style));
-            spans.push(Span::styled(line[prefix.len()..].to_string(), plain));
+            spans.extend(inline_spans(&line[prefix.len()..], theme, plain));
             continue;
         }
-        spans.push(Span::styled(line.to_string(), plain));
+        // 普通行：整行按行内规则拆分着色
+        spans.extend(inline_spans(line, theme, plain));
     }
     spans
 }
 
-/// 列表前缀：`- `/`* ` 或 `数字. `，返回前缀字节区间；否则返回 None。
+/// 行内 markdown 着色：把一行文本拆成 Span 序列。
+/// 识别行内代码（一对反引号包裹的段，含反引号一起用 `theme.tool` 着色）
+/// 与行链接 `[text](url)`（label 用 accent+下划线、url 用 `theme.tool`）。
+/// 未闭合的反引号/链接按普通文本处理；`base` 为未命中任何规则时的底色样式。
+pub fn inline_spans(line: &str, theme: &Theme, base: Style) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut plain = String::new();
+    let mut i = 0;
+    while i < line.len() {
+        let Some(ch) = line[i..].chars().next() else {
+            break;
+        };
+        match ch {
+            // 行内代码：`...`
+            '`' => {
+                if let Some(rel) = line[i + 1..].find('`') {
+                    let end = i + 1 + rel;
+                    let end_ch = end + 1;
+                    flush_plain(&mut spans, &mut plain, base);
+                    spans.push(Span::styled(line[i..end_ch].to_string(), theme.tool));
+                    i = end_ch;
+                } else {
+                    plain.push(ch);
+                    i += 1;
+                }
+            }
+            // 行链接：[text](url)
+            '[' => {
+                if let Some(rel) = line[i..].find("](") {
+                    let close = i + rel;
+                    if let Some(rel_end) = line[close + 2..].find(')') {
+                        let end = close + 2 + rel_end;
+                        let end_ch = end + 1;
+                        flush_plain(&mut spans, &mut plain, base);
+                        let label = &line[i + 1..close];
+                        let url = &line[close + 2..end];
+                        spans.push(Span::styled("[".to_string(), base));
+                        spans.push(Span::styled(
+                            label.to_string(),
+                            Style::default()
+                                .fg(theme.accent)
+                                .add_modifier(Modifier::UNDERLINED),
+                        ));
+                        spans.push(Span::styled("](".to_string(), base));
+                        spans.push(Span::styled(url.to_string(), theme.tool));
+                        spans.push(Span::styled(")".to_string(), base));
+                        i = end_ch;
+                    } else {
+                        plain.push(ch);
+                        i += 1;
+                    }
+                } else {
+                    plain.push(ch);
+                    i += 1;
+                }
+            }
+            _ => {
+                plain.push(ch);
+                i += ch.len_utf8();
+            }
+        }
+    }
+    flush_plain(&mut spans, &mut plain, base);
+    spans
+}
+
+/// 把累积的普通文本段刷成一个 Span 并清空缓冲区。
+fn flush_plain(spans: &mut Vec<Span<'static>>, plain: &mut String, base: Style) {
+    if !plain.is_empty() {
+        spans.push(Span::styled(std::mem::take(plain), base));
+    }
+}
+
+/// 列表前缀：`- `/`* `/`+ ` 或 `数字. `，返回前缀字节区间；否则返回 None。
 fn list_prefix(line: &str) -> Option<&str> {
-    if line.starts_with("- ") || line.starts_with("* ") {
+    if line.starts_with("- ") || line.starts_with("* ") || line.starts_with("+ ") {
         return Some(&line[..2]);
     }
     let bytes = line.as_bytes();
@@ -168,5 +244,78 @@ mod tests {
             Some(Color::Rgb(77, 107, 254)),
             "默认 DeepSeek accent"
         );
+    }
+
+    #[test]
+    fn plus_list_prefix_is_dim_accent() {
+        let t = Theme::default();
+        let spans = md_spans("+ 加法", &t);
+        assert_eq!(spans.len(), 2, "前缀 + 正文两段");
+        assert_eq!(spans[0].content, "+ ");
+        assert_eq!(spans[0].style.fg, Some(t.accent));
+        assert!(spans[0].style.add_modifier.contains(t.dim));
+        assert_eq!(spans[1].content, "加法");
+        assert_eq!(spans[1].style, Style::default());
+    }
+
+    #[test]
+    fn inline_code_segments_use_tool_style() {
+        let t = Theme::default();
+        let spans = md_spans("使用 `let x = 1;` 说明", &t);
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].content, "使用 ");
+        assert_eq!(spans[0].style, Style::default());
+        assert_eq!(spans[1].content, "`let x = 1;`");
+        assert_eq!(spans[1].style, t.tool, "行内代码（含反引号）用 tool(dim)");
+        assert_eq!(spans[2].content, " 说明");
+        assert_eq!(spans[2].style, Style::default());
+    }
+
+    #[test]
+    fn link_syntax_colors_label_and_url() {
+        let t = Theme::default();
+        let spans = md_spans("见 [文档](https://example.com) 结尾", &t);
+        assert_eq!(spans.len(), 7);
+        assert_eq!(spans[0].content, "见 ");
+        assert_eq!(spans[2].content, "文档");
+        assert_eq!(spans[2].style.fg, Some(t.accent), "链接 label 用 accent");
+        assert!(
+            spans[2].style.add_modifier.contains(Modifier::UNDERLINED),
+            "链接 label 带下划线"
+        );
+        assert_eq!(spans[4].content, "https://example.com");
+        assert_eq!(spans[4].style, t.tool, "url 用 tool(dim)");
+        assert_eq!(spans[6].content, " 结尾");
+    }
+
+    #[test]
+    fn unclosed_inline_code_and_link_stay_plain() {
+        let t = Theme::default();
+        // 未闭合反引号：整体按普通文本
+        let spans = md_spans("孤零零的 `反引号", &t);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content, "孤零零的 `反引号");
+        assert_eq!(spans[0].style, Style::default());
+        // 未闭合链接：整体按普通文本
+        let spans = md_spans("见 [文档](https://example.com 未闭合", &t);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].style, Style::default());
+    }
+
+    #[test]
+    fn inline_highlight_applies_inside_list_body() {
+        let t = Theme::default();
+        let spans = md_spans("- 安装 `cargo` 或看 [说明](https://r.rs)", &t);
+        // 前缀 + 正文三段（正文、代码段、链接 5 段 + 末尾空？）——按整行拆分：
+        // [前缀] [安装 ] [`cargo`] [ 或看 ] [[] [说明] [](] [https://r.rs] [)] = 9
+        assert_eq!(spans.len(), 9);
+        assert_eq!(spans[0].content, "- ");
+        assert_eq!(spans[0].style.fg, Some(t.accent));
+        assert_eq!(spans[2].content, "`cargo`");
+        assert_eq!(spans[2].style, t.tool);
+        assert_eq!(spans[5].content, "说明");
+        assert_eq!(spans[5].style.fg, Some(t.accent));
+        assert_eq!(spans[7].content, "https://r.rs");
+        assert_eq!(spans[7].style, t.tool);
     }
 }

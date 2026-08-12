@@ -357,7 +357,12 @@ impl TuiRunner {
         // 启用 bracketed paste：多行粘贴以整段文本到达（Event::Paste），
         // 而不是把内嵌换行当作 Enter 提交（曾导致贴一半就发出）。
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste);
+        // 启用焦点变化上报：macOS 终端（Terminal/iTerm2）上不启用时输入法
+        // 切换（中英文）行为异常——终端需要 FocusGained/FocusLost 事件才能
+        // 正确维护 IME 状态（实测反馈"切换不了中英文"的根因）。
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableFocusChange);
         let result = self.run_inner(&mut terminal).await;
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableFocusChange);
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
         ratatui::restore();
@@ -416,6 +421,9 @@ impl TuiRunner {
                 .to_string(),
             workspace_cwd: self.workspace_cwd.clone(),
             git_branch: self.git_branch.clone(),
+            // 侧边栏默认宽度 30（替换旧硬编码 Length(30)）：derive Default
+            // 会把它置 0，导致 Ctrl+\ 打开侧边栏时零宽不可见（审查#3）。
+            sidebar_width: 30,
             ..Default::default()
         };
         // 权限模式显示态：从 gate 首读（Ctrl+P 前即正确）。
@@ -436,6 +444,8 @@ impl TuiRunner {
         }
         // 与上方 EnableMouseCapture 保持一致：鼠标捕获默认开启。
         app.mouse_capture = true;
+        // 全屏欢迎屏：启动时激活（首次提交后清除，见 dispatch ChatSubmit）。
+        app.welcome = true;
         // 侧边栏 MCP 面板数据源：从 caps 复制已启用 server 清单。
         app.mcp_servers = caps.mcp_servers.clone();
         // 用户键位定制（keybindings.json）：启动时加载，事件循环轮询热重载。

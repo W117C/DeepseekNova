@@ -40,6 +40,31 @@ impl InputState {
         self.cursor += s.len();
     }
 
+    /// 回车换行：在光标处插入换行，并继承当前行行首的前导空白（空格/Tab），
+    /// 光标落在新行行首空白之后。用于多行输入时保持缩进层级。
+    pub fn insert_newline(&mut self) {
+        let (start, end) = self.current_line_bounds();
+        let line = &self.text[start..end];
+        let lead_len = line.len() - line.trim_start_matches([' ', '\t']).len();
+        let mut newline = String::with_capacity(1 + lead_len);
+        newline.push('\n');
+        if lead_len > 0 {
+            newline.push_str(&line[..lead_len]);
+        }
+        self.text.insert_str(self.cursor, &newline);
+        self.cursor += newline.len();
+    }
+
+    /// 括号配对：在光标处同时插入一对括号/引号，并把光标落在中间
+    /// （如输入 `(` 后文本 `|` 变为 `(|)`），方便直接填写括号内容。
+    pub fn insert_pair(&mut self, open: char, close: char) {
+        let mut pair = String::with_capacity(open.len_utf8() + close.len_utf8());
+        pair.push(open);
+        pair.push(close);
+        self.text.insert_str(self.cursor, &pair);
+        self.cursor += open.len_utf8();
+    }
+
     /// 删除光标前一个字符（UTF-8 安全）。
     pub fn backspace(&mut self) {
         if self.cursor == 0 {
@@ -52,6 +77,25 @@ impl InputState {
             .unwrap_or(0);
         self.text.replace_range(prev..self.cursor, "");
         self.cursor = prev;
+    }
+
+    /// 成对删除：当光标两侧恰为一对配对括号/引号（`()`、`[]`、`{}`、`<>`、
+    /// `""`、`''` 或一对反引号）时一次删除两个，否则退化为普通 `backspace`。
+    /// 例如光标停在 `(|)` 中间时按删除键直接清空整对括号。
+    pub fn delete_pair(&mut self) {
+        let before = self.text[..self.cursor].chars().next_back();
+        let after = self.text[self.cursor..].chars().next();
+        if let (Some(open), Some(close)) = (before, after) {
+            if is_matching_pair(open, close) {
+                let open_len = open.len_utf8();
+                let close_len = close.len_utf8();
+                self.text
+                    .replace_range(self.cursor - open_len..self.cursor + close_len, "");
+                self.cursor -= open_len;
+                return;
+            }
+        }
+        self.backspace();
     }
 
     /// 删除光标后一个字符（UTF-8 安全）。
@@ -209,6 +253,14 @@ impl InputState {
     }
 }
 
+/// 判断 `open`/`close` 是否构成一对可成对删除的括号/引号。
+fn is_matching_pair(open: char, close: char) -> bool {
+    matches!(
+        (open, close),
+        ('(', ')') | ('[', ']') | ('{', '}') | ('<', '>') | ('"', '"') | ('\'', '\'') | ('`', '`')
+    )
+}
+
 /// 单行水平窗口：让 `cursor`（行内字节下标）落在 `width`（显示列数）内，
 /// UTF-8 边界安全。宽度按 Unicode 显示宽度计（中文等宽字符占 2 列），
 /// 不再按字节截断——修复中文输入时光标错位/内容提前截断。
@@ -267,6 +319,10 @@ pub fn input_view(text: &str, cursor: usize, width: usize, max_rows: usize) -> I
     let cursor_in_line = cursor.saturating_sub(line_start).min(line_end - line_start);
     let (win_start, _) = window_slice(cursor_line, cursor_in_line, width);
     let cursor_col = text_width(&cursor_line[win_start..cursor_in_line]) as u16;
+    // 所有行使用**同一水平窗口**（win_start 偏移）：此前非光标行从第 0
+    // 列截断前 width 列，多行输入时各行窗口不同步，中文宽字符下视觉上
+    // 呈现"输入顺序正确但显示乱序"（实测反馈）。非光标行同样从 win_start
+    // 列起取 width 列窗口，行首不足 win_start 列时从 0 起。
     let rows = lines
         .iter()
         .enumerate()
@@ -274,8 +330,9 @@ pub fn input_view(text: &str, cursor: usize, width: usize, max_rows: usize) -> I
             if i == cursor_row {
                 window_slice(l, cursor_in_line, width).1.to_string()
             } else {
-                let end = col_end_from(l, 0, width);
-                l[..end].to_string()
+                let start = col_ceil_boundary(l, win_start.min(text_width(l)));
+                let end = col_end_from(l, start, text_width(&l[..start]) + width);
+                l[start..end].to_string()
             }
         })
         .collect();
@@ -567,5 +624,115 @@ mod tests {
         let view4 = input_view("abcdef\nxy", 8, 3, 2);
         assert_eq!(view4.rows[0], "abc", "非光标行只显示行首窗口");
         assert_eq!(view4.cursor_row, 1);
+    }
+
+    #[test]
+    fn insert_newline_inherits_leading_whitespace() {
+        // 空格缩进：回车后新行继承当前行前导空白
+        let mut input = InputState {
+            text: "    if x {".into(),
+            cursor: "    if x {".len(),
+        };
+        input.insert_newline();
+        assert_eq!(input.text, "    if x {\n    ");
+        assert_eq!(input.cursor, "    if x {\n    ".len());
+
+        // Tab 缩进
+        let mut input = InputState {
+            text: "\tfn main()".into(),
+            cursor: "\tfn main()".len(),
+        };
+        input.insert_newline();
+        assert_eq!(input.text, "\tfn main()\n\t");
+
+        // 光标在行中：换行发生在光标处，新行继承整行行首空白；
+        // 光标后的剩余文本自带的前导空格一并保留
+        let mut input = InputState {
+            text: "  ab  cd".into(),
+            cursor: "  ab".len(),
+        };
+        input.insert_newline();
+        assert_eq!(input.text, "  ab\n    cd");
+        assert_eq!(input.cursor, "  ab\n  ".len());
+
+        // 无前导空白：只换行
+        let mut input = InputState {
+            text: "x".into(),
+            cursor: 1,
+        };
+        input.insert_newline();
+        assert_eq!(input.text, "x\n");
+        assert_eq!(input.cursor, 2);
+    }
+
+    #[test]
+    fn insert_pair_auto_closes_and_places_cursor_inside() {
+        let mut input = InputState {
+            text: "fn ".into(),
+            cursor: 3,
+        };
+        input.insert_pair('(', ')');
+        assert_eq!(input.text, "fn ()");
+        assert_eq!(input.cursor, "fn (".len(), "光标落在括号中间");
+        // 继续输入内容仍处于括号内
+        input.insert_char('x');
+        assert_eq!(input.text, "fn (x)");
+        assert_eq!(input.cursor, "fn (x".len());
+
+        // 中文字符前的配对插入（UTF-8 安全）
+        let mut input = InputState {
+            text: "你好".into(),
+            cursor: "你".len(),
+        };
+        input.insert_pair('[', ']');
+        assert_eq!(input.text, "你[]好");
+        assert_eq!(input.cursor, "你[".len());
+    }
+
+    #[test]
+    fn delete_pair_removes_matching_brackets_at_once() {
+        // 光标停在括号中间：一次删除两个
+        let mut input = InputState {
+            text: "()".into(),
+            cursor: 1,
+        };
+        input.delete_pair();
+        assert_eq!(input.text, "");
+        assert_eq!(input.cursor, 0);
+
+        // 成对引号
+        let mut input = InputState {
+            text: "\"\"x".into(),
+            cursor: 1,
+        };
+        input.delete_pair();
+        assert_eq!(input.text, "x");
+        assert_eq!(input.cursor, 0);
+
+        // 中文两侧的成对删除（UTF-8 安全）
+        let mut input = InputState {
+            text: "你()好".into(),
+            cursor: "你".len() + 1,
+        };
+        input.delete_pair();
+        assert_eq!(input.text, "你好");
+        assert_eq!(input.cursor, "你".len());
+
+        // 非配对：退化为普通 backspace（只删前一个字符）
+        let mut input = InputState {
+            text: "(a)".into(),
+            cursor: 2,
+        };
+        input.delete_pair();
+        assert_eq!(input.text, "()");
+        assert_eq!(input.cursor, 1);
+
+        // 光标在文本边界：退化为 backspace（无操作）
+        let mut input = InputState {
+            text: "()".into(),
+            cursor: 0,
+        };
+        input.delete_pair();
+        assert_eq!(input.text, "()");
     }
 }

@@ -8,7 +8,7 @@ use deepseeknova_provider::cost::ModelRole;
 use deepseeknova_provider::factory::ReasoningEffort;
 
 use super::{ArgsSpec, Command, CommandCtx, CommandHandler, CommandOutcome, CommandRegistry};
-use crate::app::state::{display_mode_label, McpStatus};
+use crate::app::state::{display_mode_label, fold_policy_label, FoldPolicy, McpStatus, TurnView};
 use crate::i18n::{Key, Tr};
 use crate::model::conversation::LineKind;
 use crate::model::scorecard::{dim_label_key, Scorecard};
@@ -787,6 +787,24 @@ impl CommandHandler for FoldCmd {
                 ctx.app.fold_reset();
                 ctx.app.show_notice(tr.t(Key::FoldReset));
             }
+            // 策略级设置：auto 回智能默认（清显式折叠 + 切回 Auto 策略），
+            // open/compact 直接设 fold_policy（字段 pub），全部走 notice 指示。
+            "auto" => {
+                ctx.app.fold_reset();
+                ctx.app.fold_policy = FoldPolicy::Auto;
+                ctx.app
+                    .show_notice(tr.t(fold_policy_label(FoldPolicy::Auto)));
+            }
+            "open" => {
+                ctx.app.fold_policy = FoldPolicy::Open;
+                ctx.app
+                    .show_notice(tr.t(fold_policy_label(FoldPolicy::Open)));
+            }
+            "compact" => {
+                ctx.app.fold_policy = FoldPolicy::Compact;
+                ctx.app
+                    .show_notice(tr.t(fold_policy_label(FoldPolicy::Compact)));
+            }
             "" => ctx.app.show_notice(tr.t(Key::FoldUsage)),
             other => ctx
                 .app
@@ -1034,6 +1052,36 @@ static COPY: CopyCmd = CopyCmd;
 static MODE: ModeCmd = ModeCmd;
 static QUIT: QuitCmd = QuitCmd;
 static WORKSPACE: WorkspaceCmd = WorkspaceCmd;
+static JUMP: JumpCmd = JumpCmd;
+
+/// /jump：跳转到指定回合（`/jump <n>`，n ∈ 1..=总回合数）。
+///
+/// 切到单回合视图并选中目标回合（grok 的 turn jump 对齐）；参数非法时
+/// 回显用法提示，不破坏当前视图。
+struct JumpCmd;
+
+#[async_trait]
+impl CommandHandler for JumpCmd {
+    async fn run(&self, ctx: &mut CommandCtx<'_>, args: &str) -> CommandOutcome {
+        let tr = ctx.app.tr;
+        let total = ctx.app.conversation.turn_count();
+        match args.trim().parse::<usize>() {
+            Ok(n) if n >= 1 && n <= total => {
+                ctx.app.selected_turn = Some(n - 1);
+                ctx.app.turn_view = TurnView::Single;
+                ctx.app.show_notice(tr.t_args(
+                    Key::JumpedTo,
+                    &[("n", &n.to_string()), ("total", &total.to_string())],
+                ));
+            }
+            _ => {
+                ctx.app
+                    .show_notice(tr.t_args(Key::JumpUsage, &[("total", &total.to_string())]));
+            }
+        }
+        CommandOutcome::Handled
+    }
+}
 
 /// 内建命令表（顺序即 /help 与命令面板展示顺序）。
 pub const BUILTIN: &[Command] = &[
@@ -1158,8 +1206,8 @@ pub const BUILTIN: &[Command] = &[
         name: "fold",
         desc: &Key::CmdFoldDesc,
         keywords: &["折叠", "展开"],
-        args_spec: ArgsSpec::Enum(&["all", "none", "reset"]),
-        args_hint: Some(&["all", "none", "reset"]),
+        args_spec: ArgsSpec::Enum(&["all", "none", "reset", "auto", "open", "compact"]),
+        args_hint: Some(&["all", "none", "reset", "auto", "open", "compact"]),
         handler: &FOLD,
     },
     Command {
@@ -1177,6 +1225,14 @@ pub const BUILTIN: &[Command] = &[
         args_spec: ArgsSpec::None,
         args_hint: None,
         handler: &WORKSPACE,
+    },
+    Command {
+        name: "jump",
+        desc: &Key::CmdJumpDesc,
+        keywords: &["跳转", "回合", "turn"],
+        args_spec: ArgsSpec::FreeText,
+        args_hint: Some(&["<n>"]),
+        handler: &JUMP,
     },
     Command {
         name: "mode",
@@ -1226,7 +1282,7 @@ fn effort_label(effort: ReasoningEffort) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::state::{AppState, DisplayMode};
+    use crate::app::state::{AppState, DisplayMode, FoldPolicy};
     use crate::commands::{CommandRegistry, TuiCaps, TuiRuntime};
     use crate::model::conversation::{done_output, LineKind as LK};
     use deepseeknova_core::runner::RunEvent;
@@ -1359,6 +1415,58 @@ mod tests {
         run_cmd("fold", "reset", &mut app, &caps).await;
         assert!(app.is_folded((id, 0), LK::Reasoning));
         assert!(!app.is_folded((id, 1), LK::Agent));
+    }
+
+    #[tokio::test]
+    async fn fold_auto_open_compact_set_fold_policy() {
+        let caps = empty_caps();
+        let mut app = AppState::default();
+        let id = app.conversation.begin_turn("q".into());
+        app.apply_run_event(RunEvent::ReasoningDelta {
+            text: "r".into(),
+            signature: None,
+        });
+        app.apply_run_event(RunEvent::ToolCallStart {
+            id: "t1".into(),
+            name: "grep".into(),
+        });
+        app.apply_run_event(RunEvent::ToolResult {
+            call_id: "t1".into(),
+            result: "hit".into(),
+        });
+        app.apply_run_event(RunEvent::TextDelta("a".into()));
+        app.apply_run_event(RunEvent::Done(done_output("")));
+
+        // compact：推理 + 工具均默认折叠（含紧凑策略下工具折叠的契约）。
+        run_cmd("fold", "compact", &mut app, &caps).await;
+        assert_eq!(app.fold_policy, FoldPolicy::Compact);
+        assert!(app.is_folded((id, 1), LK::Tool), "紧凑策略下工具默认折叠");
+        assert!(app.is_folded((id, 0), LK::Reasoning));
+        assert!(
+            app.notice
+                .as_ref()
+                .is_some_and(|(t, _)| t.contains("compact")),
+            "compact 分支有 notice 指示"
+        );
+
+        // open：推理与工具默认展开。
+        run_cmd("fold", "open", &mut app, &caps).await;
+        assert_eq!(app.fold_policy, FoldPolicy::Open);
+        assert!(!app.is_folded((id, 0), LK::Reasoning));
+        assert!(!app.is_folded((id, 1), LK::Tool));
+
+        // auto：清显式折叠 + 回智能默认（推理折叠、工具展开）。
+        app.fold
+            .insert((id, 1), crate::app::state::FoldState::Collapsed);
+        run_cmd("fold", "auto", &mut app, &caps).await;
+        assert_eq!(app.fold_policy, FoldPolicy::Auto);
+        assert!(app.fold.is_empty(), "auto 清空显式折叠设置");
+        assert!(!app.is_folded((id, 1), LK::Tool));
+        assert!(app.is_folded((id, 0), LK::Reasoning));
+        assert!(
+            app.notice.as_ref().is_some_and(|(t, _)| t.contains("auto")),
+            "auto 分支有 notice 指示"
+        );
     }
 
     #[tokio::test]

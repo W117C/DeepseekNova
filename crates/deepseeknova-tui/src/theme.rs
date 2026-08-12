@@ -46,6 +46,53 @@ pub struct Theme {
     pub title: Style,
     /// 选中消息的背景高亮。
     pub selection: Style,
+    /// 成功语义色（状态行运行态圆点、token 条低占用段）。
+    pub success: Color,
+    /// 警示语义色（ctx 阈值 ≥80%、缺 API key 等临界提示）。
+    pub warning: Color,
+    /// 危险语义色（ctx 阈值 ≥95%、未配置 provider、退出警示等）。
+    pub danger: Color,
+    /// 中性信息语义色（token 条中占用渐变段）。
+    pub info: Color,
+    // ── grok build 语义位（对齐 xai-grok-pager theme.rs）────────
+    /// 主文本前景色（正文、hover 高亮；Reset = 终端默认）。
+    pub text_primary: Color,
+    /// 次文本前景色（次要信息、hover 进度条百分比）。
+    pub text_secondary: Color,
+    /// 用户 accent（prompt 前缀 ❯、选中强调、fuzzy 匹配）。
+    pub accent_user: Color,
+    /// 错误 accent（ctx 高占用端、失败强调）。
+    pub accent_error: Color,
+    /// 中性灰（模态提示、未聚焦 chrome）。
+    pub gray: Color,
+    /// 暗灰（未聚焦 prompt 前缀/accent 线）。
+    pub gray_dim: Color,
+    /// 背景底色（状态栏/进度条底、模态 Clear 背景）。
+    pub bg_base: Color,
+    /// 高亮背景（进度条轨道、hover 行）。
+    pub bg_highlight: Color,
+    /// 粘贴 chip 底色（paste badge）。
+    pub paste_bg: Color,
+    /// 模糊匹配强调色（fzf 风格选中行文字色）。
+    pub fuzzy_accent: Color,
+    /// prompt 边框色（未聚焦）。
+    pub prompt_border: Color,
+    /// prompt 边框色（聚焦态）。
+    pub prompt_border_active: Color,
+}
+
+/// 语义色调分类：状态行阈值配色、token 预算条渐变分段、徽章等
+/// 通用语义色的取色入口。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SemanticTone {
+    /// 成功/通过（绿色系）。
+    Success,
+    /// 警示/临界（黄色系）。
+    Warning,
+    /// 危险/失败（红色系）。
+    Danger,
+    /// 中性信息（青色或蓝色系）。
+    Info,
 }
 
 /// 默认 DeepSeek 色板（Claude Code 观感：正文用终端默认前景色，
@@ -75,6 +122,22 @@ impl Default for Theme {
             selection: Style::default()
                 .bg(Color::Rgb(38, 50, 100))
                 .add_modifier(Modifier::REVERSED),
+            success: Color::Green,
+            warning: Color::Yellow,
+            danger: Color::Red,
+            info: Color::Cyan,
+            text_primary: Color::Reset,
+            text_secondary: Color::Rgb(140, 148, 168),
+            accent_user: Color::Rgb(77, 107, 254),
+            accent_error: Color::Red,
+            gray: Color::Rgb(120, 128, 148),
+            gray_dim: Color::Rgb(90, 98, 118),
+            bg_base: Color::Rgb(20, 22, 26),
+            bg_highlight: Color::Rgb(38, 44, 66),
+            paste_bg: Color::Rgb(48, 60, 120),
+            fuzzy_accent: Color::Rgb(77, 107, 254),
+            prompt_border: Color::Rgb(90, 98, 118),
+            prompt_border_active: Color::Rgb(77, 107, 254),
         }
     }
 }
@@ -98,6 +161,17 @@ impl Theme {
             LineKind::System => self.system,
             LineKind::Error => self.error,
             LineKind::Paused => self.paused,
+        }
+    }
+
+    /// 语义色调 → 主题对应语义色（状态行阈值、token 渐变分段、徽章等
+    /// 统一经此取色，杜绝散落硬编码）。
+    pub fn semantic(&self, tone: SemanticTone) -> Color {
+        match tone {
+            SemanticTone::Success => self.success,
+            SemanticTone::Warning => self.warning,
+            SemanticTone::Danger => self.danger,
+            SemanticTone::Info => self.info,
         }
     }
 
@@ -149,12 +223,17 @@ pub fn theme_from_name(name: &str, tr: Tr) -> (Theme, Option<String>) {
 }
 
 /// 深色终端强调版：accent 用 DeepSeek 蓝的亮化版，标题用亮白，对比度更高。
+/// 语义色沿用深色档：成功=绿、警示=黄、危险=红、信息=青。
 fn dark_theme() -> Theme {
     Theme {
         accent: Color::Rgb(110, 140, 255),
         title: Style::default()
             .fg(Color::White)
             .add_modifier(Modifier::BOLD),
+        success: Color::Green,
+        warning: Color::Yellow,
+        danger: Color::Red,
+        info: Color::Cyan,
         ..Theme::default()
     }
 }
@@ -162,6 +241,7 @@ fn dark_theme() -> Theme {
 /// 浅色终端版（印刷星图）：纸白底 + 墨线 + 深化品牌蓝，
 /// token 与 `docs/superpowers/specs/2026-08-07-observatory-frontend-design.md`
 /// §1.1 浅色档逐项对齐。
+/// 语义色加深对比：成功=深绿、警示=深橙、危险=深红、信息=深蓝。
 fn light_theme() -> Theme {
     Theme {
         user: Style::default(),
@@ -187,6 +267,22 @@ fn light_theme() -> Theme {
         selection: Style::default()
             .bg(Color::Rgb(221, 228, 251))
             .add_modifier(Modifier::REVERSED),
+        success: Color::Rgb(14, 122, 66),
+        warning: Color::Rgb(200, 112, 0),
+        danger: Color::Rgb(192, 48, 58),
+        info: Color::Rgb(59, 85, 217),
+        text_primary: Color::Reset,
+        text_secondary: Color::Rgb(106, 115, 144),
+        accent_user: Color::Rgb(59, 85, 217),
+        accent_error: Color::Rgb(192, 48, 58),
+        gray: Color::Rgb(106, 115, 144),
+        gray_dim: Color::Rgb(150, 158, 178),
+        bg_base: Color::Rgb(248, 249, 251),
+        bg_highlight: Color::Rgb(221, 228, 251),
+        paste_bg: Color::Rgb(221, 228, 251),
+        fuzzy_accent: Color::Rgb(59, 85, 217),
+        prompt_border: Color::Rgb(216, 221, 236),
+        prompt_border_active: Color::Rgb(59, 85, 217),
     }
 }
 
@@ -223,6 +319,43 @@ mod tests {
         assert_eq!(
             t.style_for(LineKind::Paused).fg,
             Some(Color::Rgb(77, 107, 254))
+        );
+    }
+
+    #[test]
+    fn semantic_tone_maps_to_preset_colors() {
+        let t = Theme::default();
+        // 默认（deepseek/dark 同源）：成功=绿、警示=黄、危险=红、信息=青。
+        assert_eq!(t.semantic(SemanticTone::Success), Color::Green);
+        assert_eq!(t.semantic(SemanticTone::Warning), Color::Yellow);
+        assert_eq!(t.semantic(SemanticTone::Danger), Color::Red);
+        assert_eq!(t.semantic(SemanticTone::Info), Color::Cyan);
+        let dark = dark_theme();
+        assert_eq!(dark.semantic(SemanticTone::Success), Color::Green);
+        assert_eq!(dark.semantic(SemanticTone::Warning), Color::Yellow);
+        assert_eq!(dark.semantic(SemanticTone::Danger), Color::Red);
+        assert_eq!(dark.semantic(SemanticTone::Info), Color::Cyan);
+        // 浅色档加深：深绿/深橙/深红/深蓝。
+        let light = light_theme();
+        assert_eq!(
+            light.semantic(SemanticTone::Success),
+            Color::Rgb(14, 122, 66),
+            "success=深绿 #0E7A42"
+        );
+        assert_eq!(
+            light.semantic(SemanticTone::Warning),
+            Color::Rgb(200, 112, 0),
+            "warning=深橙 #C87000"
+        );
+        assert_eq!(
+            light.semantic(SemanticTone::Danger),
+            Color::Rgb(192, 48, 58),
+            "danger=深红 #C0303A"
+        );
+        assert_eq!(
+            light.semantic(SemanticTone::Info),
+            Color::Rgb(59, 85, 217),
+            "info=深蓝 #3B55D9"
         );
     }
 

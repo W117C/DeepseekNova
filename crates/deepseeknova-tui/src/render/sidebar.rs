@@ -14,11 +14,13 @@ use crate::theme::Theme;
 
 /// 侧边栏渲染：Tab 条 + 当前面板内容。
 pub fn render_sidebar(app: &AppState, theme: &Theme, f: &mut Frame, area: Rect) {
+    // 标题跟随当前 tab（Sessions/Tools/MCP/Cost/Skills），比泛称 "Panel"
+    // 语义清晰——用户一眼知道当前面板是什么（实测反馈"组件不知道干什么的"）。
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(theme.border)
         .title(Line::from(Span::styled(
-            app.tr.t(Key::PanelTitle),
+            app.tr.t(app.sidebar_tab.label()),
             theme.title,
         )));
     let inner = block.inner(area);
@@ -54,9 +56,11 @@ pub fn render_sidebar(app: &AppState, theme: &Theme, f: &mut Frame, area: Rect) 
     };
     f.render_widget(Paragraph::new(tab_line), tab_area);
 
-    // 面板内容。
+    // 面板内容。宽度来源为 `block.inner(area)` 的内容区宽度（`area.width - 边框`），
+    // 由 `sidebar_constraint(app)`（跟随 `app.sidebar_width`）切分而来；
+    // 会话面板据此自适应预览截断长度，其余面板无宽度相关常量，无需传宽。
     let lines: Vec<Line> = match app.sidebar_tab {
-        SidebarTab::Sessions => render_sessions(app, theme),
+        SidebarTab::Sessions => render_sessions(app, theme, inner.width),
         SidebarTab::Tools => render_tools(app, theme),
         SidebarTab::Mcp => render_mcp(app, theme),
         SidebarTab::Cost => render_cost(app, theme),
@@ -65,10 +69,19 @@ pub fn render_sidebar(app: &AppState, theme: &Theme, f: &mut Frame, area: Rect) 
     f.render_widget(Paragraph::new(lines), body_area);
 }
 
-fn render_sessions(app: &AppState, theme: &Theme) -> Vec<Line<'static>> {
+/// 会话预览截断长度：随侧边栏内容区宽度（`block.inner` 的宽度）自适应。
+/// 保留行首标记与尾缀空间，避免窄栏时整行被“…”占满；最小 12、最大 48 字符。
+fn preview_truncate_width(width: u16) -> usize {
+    (width as usize).saturating_sub(6).clamp(12, 48)
+}
+
+/// 会话面板：磁盘保存会话（工作区 × 夜次分组）+ 当前会话回合，截断随宽度自适应。
+fn render_sessions(app: &AppState, theme: &Theme, width: u16) -> Vec<Line<'static>> {
     // 会话列表可见行数：优先展示磁盘保存的会话（上一轮/更早的对话），
     // 当前会话的回合折叠在下方小节，避免“看不到上个对话”。
     const MAX_SAVED_ROWS: usize = 16;
+    // 预览截断长度随内容区宽度（`width`）自适应。
+    let preview_max = preview_truncate_width(width);
     let mut lines = Vec::new();
     // 首次加载（一两帧内）保持安静，不显示“加载中”噪声；
     // 加载完确实没有历史会话时才给一句轻提示。
@@ -132,14 +145,14 @@ fn render_sessions(app: &AppState, theme: &Theme) -> Vec<Line<'static>> {
                         .filter(|p| !p.is_empty());
                     let label = match preview {
                         Some(p) => {
-                            let cut: String = p.chars().take(16).collect();
-                            if p.chars().count() > 16 {
+                            let cut: String = p.chars().take(preview_max).collect();
+                            if p.chars().count() > preview_max {
                                 format!("{cut}…")
                             } else {
                                 cut
                             }
                         }
-                        None => short_session_id(id, 16),
+                        None => short_session_id(id, preview_max),
                     };
                     let suffix = if current {
                         app.tr.t(Key::SessionCurrentSuffix)
@@ -186,8 +199,11 @@ fn render_sessions(app: &AppState, theme: &Theme) -> Vec<Line<'static>> {
                 .trim();
             let preview = if user.is_empty() {
                 app.tr.t_args(Key::TurnEmpty, &[("id", &id.to_string())])
-            } else if user.chars().count() > 18 {
-                format!("#{id} {}…", user.chars().take(18).collect::<String>())
+            } else if user.chars().count() > preview_max {
+                format!(
+                    "#{id} {}…",
+                    user.chars().take(preview_max).collect::<String>()
+                )
             } else {
                 format!("#{id} {user}")
             };
@@ -472,7 +488,8 @@ mod tests {
         app.apply_run_event(RunEvent::TextDelta("b".into()));
         app.apply_run_event(RunEvent::Done(done_output("")));
         let theme = Theme::default();
-        let lines = render_sessions(&app, &theme);
+        // 内容区宽度 28（默认侧边栏 30 减去左右边框）足以完整显示短预览。
+        let lines = render_sessions(&app, &theme, 28);
         let texts: String = lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
@@ -480,6 +497,43 @@ mod tests {
         let pos1 = texts.find("#2").unwrap();
         let pos0 = texts.find("#1").unwrap();
         assert!(pos1 < pos0, "最新回合在前");
+    }
+
+    #[test]
+    fn sessions_preview_truncation_adapts_to_sidebar_width() {
+        // 长预览：窄栏截断附“…”，宽栏完整显示（宽度自适应）。
+        let app = AppState {
+            sessions_loaded: true,
+            saved_sessions: vec![crate::app::state::SessionMeta {
+                id: "chat-20260806-112831".to_string(),
+                preview: "这是一个非常长的会话预览标题用于验证宽度自适应截断行为".to_string(),
+                title: None,
+                workspace: None,
+            }],
+            tr: crate::i18n::Tr::new(crate::i18n::Lang::Zh),
+            ..Default::default()
+        };
+        let theme = Theme::default();
+        let narrow = render_sessions(&app, &theme, 24);
+        let narrow_text: String = narrow
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(narrow_text.contains('…'), "窄栏应截断: {narrow_text}");
+        let wide = render_sessions(&app, &theme, 58);
+        let wide_text: String = wide
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(
+            wide_text.contains("这是一个非常长的会话预览标题用于验证宽度自适应截断行为"),
+            "宽栏应完整显示: {wide_text}"
+        );
+        // 截断长度本身也随宽度单调变化（helper 单测）。
+        assert!(
+            preview_truncate_width(58) > preview_truncate_width(24),
+            "宽栏允许更长预览"
+        );
     }
 
     #[test]
@@ -509,7 +563,7 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            render_sessions(&loading, &theme).is_empty(),
+            render_sessions(&loading, &theme, 28).is_empty(),
             "未加载完成不渲染占位噪声"
         );
         // 已加载但确实无会话：显示“暂无保存的会话”。
@@ -518,7 +572,7 @@ mod tests {
             tr: crate::i18n::Tr::new(crate::i18n::Lang::Zh),
             ..Default::default()
         };
-        assert!(render_sessions(&empty, &theme)[0].spans[0]
+        assert!(render_sessions(&empty, &theme, 28)[0].spans[0]
             .content
             .contains("暂无历史会话"));
         let app = AppState {
@@ -554,7 +608,7 @@ mod tests {
             ..Default::default()
         };
         let theme = Theme::default();
-        let lines = render_sessions(&app, &theme);
+        let lines = render_sessions(&app, &theme, 28);
         let texts: String = lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
@@ -644,7 +698,7 @@ mod tests {
             ..Default::default()
         };
         let theme = Theme::default();
-        let lines = render_sessions(&app, &theme);
+        let lines = render_sessions(&app, &theme, 28);
         let texts: String = lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))

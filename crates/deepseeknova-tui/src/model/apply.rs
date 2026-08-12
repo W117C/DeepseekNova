@@ -14,8 +14,10 @@ use super::conversation::{
 
 /// 工具参数单行预览上限（字符）。
 const ARGS_PREVIEW: usize = 200;
-/// 工具结果单行预览上限（字符）。
-const RESULT_PREVIEW: usize = 400;
+/// 工具结果单行预览上限（字符）：原 400 太短，agent 修改代码后的大段
+/// diff 被截掉大半，"看不出代码差异"（实测反馈）。提升到 4000 保留
+/// 完整 diff 视图（渲染层仍有截断标记兜底）。
+const RESULT_PREVIEW: usize = 4000;
 
 /// 把 agent 的 Paused reason 转成对用户可读的说明（保留原始原因信息）。
 ///
@@ -715,7 +717,7 @@ mod tests {
         c.apply(
             RunEvent::ToolResult {
                 call_id: "1".into(),
-                result: "z".repeat(1000),
+                result: "z".repeat(5000),
             },
             Tr::new(Lang::En),
         );

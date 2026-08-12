@@ -5,6 +5,7 @@
 //! [`crate::model::apply::ConversationApply`]。
 
 pub mod actions;
+pub mod dispatch;
 pub mod focus;
 pub mod keybindings;
 pub mod state;
@@ -20,7 +21,7 @@ use crate::commands::TuiCaps;
 use crate::commands::{CommandCtx, CommandOutcome, CommandRegistry};
 use crate::i18n::Key;
 use crate::model::conversation::LineKind;
-use state::{AppState, KeyAction};
+use state::{AppState, KeyAction, PasteChip, PasteChipKind};
 
 /// ctx 计量的有效窗口：`min(context_window, budget_window)`——预算才是真实
 /// 压力点，窗口配置过大（如 1M）时进度条不至于永远接近 0%。预算缺省或为 0
@@ -125,6 +126,26 @@ pub async fn run_loop(
         // 临时命令反馈超时自动清除（不进入对话面板永久 echo）。
         if app.notice_expired() {
             app.notice = None;
+        }
+        // grok 对齐：toast 通知超时自动清除（TTL 与 notice 一致）。
+        if app
+            .toast
+            .as_ref()
+            .is_some_and(|(_, at)| at.elapsed() >= state::NOTICE_TTL)
+        {
+            app.toast = None;
+        }
+        // grok 对齐：vim 双键序列 3 秒超时自动清除（未按第二键时）。
+        if app
+            .vim_chord
+            .as_ref()
+            .is_some_and(|(_, at)| at.elapsed() >= std::time::Duration::from_secs(3))
+        {
+            app.vim_chord = None;
+        }
+        // grok 对齐：消费 rewind 回退请求（截断会话到选中回合之前）。
+        if app.rewind_pending {
+            app.consume_rewind();
         }
         // Ctrl+T 切换鼠标捕获：状态变化时同步终端模式（滚轮滚动对话 vs
         // 鼠标选中复制文本）。
@@ -398,6 +419,15 @@ pub async fn run_loop(
                                     app.turn += 1;
                                     app.last_prompt = Some(prompt.clone());
                                     app.conversation.begin_turn(prompt.clone());
+                                    // grok 对齐：首次提交生成会话标题
+                                    //（首条 user 消息首行，截 60 字符）。
+                                    if app.session_title.is_none() {
+                                        let head = prompt.lines().next().unwrap_or("").trim();
+                                        let title: String = head.chars().take(60).collect();
+                                        if !title.is_empty() {
+                                            app.session_title = Some(title);
+                                        }
+                                    }
                                     // 新回合强制贴底：用户此前滚动查看历史
                                     // 也不影响新消息可见性。
                                     app.auto_scroll = true;
@@ -484,6 +514,23 @@ pub async fn run_loop(
                                 let normalized = text.replace("\r\n", "\n");
                                 app.input.insert_str(&normalized);
                                 app.refresh_command_hint();
+                                // grok 对齐：Paste Chip 元素化（文本首行摘要，
+                                // 上限 20 条）。
+                                let label: String = normalized
+                                    .lines()
+                                    .next()
+                                    .unwrap_or("")
+                                    .trim()
+                                    .chars()
+                                    .take(60)
+                                    .collect();
+                                if !label.is_empty() {
+                                    app.paste_chips.push(PasteChip {
+                                        kind: PasteChipKind::Text,
+                                        label,
+                                    });
+                                    app.paste_chips.truncate(20);
+                                }
                             }
                         }
                         AppEvent::Input(CEvent::Mouse(m)) => {
@@ -499,8 +546,39 @@ pub async fn run_loop(
                                     app.scroll_offset = app.scroll_offset.saturating_add(3);
                                     app.auto_scroll = false;
                                 }
+                                // 左键点击 = 消息导航焦点下按行定位段并折叠/展开
+                                // （WP5 契约：AppState::handle_mouse_click 已实现并单测）。
+                                // 仅当点击行落在对话区内才转发——此前无条件转发，
+                                // 点输入框/状态栏也会触发折叠（审查#5）。
+                                MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                                    let inside = app
+                                        .conv_area
+                                        .is_some_and(|r| {
+                                            m.row >= r.y && m.row < r.y + r.height
+                                        });
+                                    if inside {
+                                        app.handle_mouse_click(m.row);
+                                    }
+                                }
+                                // grok 对齐：鼠标移动 = hover 高亮数据源（坐标入
+                                // AppState.mouse_pos，渲染层菜单/模态快捷键高亮）。
+                                // crossterm 无标准"鼠标离开"事件，坐标随 Moved 持续
+                                // 刷新；移出窗口后终端不再上报，旧坐标自然过期。
+                                MouseEventKind::Moved => {
+                                    app.mouse_pos = Some((m.column, m.row));
+                                }
                                 _ => {}
                             }
+                        }
+                        AppEvent::Input(CEvent::FocusGained) => {
+                            // 焦点恢复（macOS 输入法切换后/从其他窗口回来）：
+                            // 请求整屏重绘，清除终端侧可能的残影/IME 预编辑残留。
+                            app.redraw_requested = true;
+                        }
+                        AppEvent::Input(CEvent::FocusLost) => {
+                            // 焦点丢失（切到其他应用/输入法候选窗）：清除鼠标
+                            // hover 坐标，避免残留高亮；IME 状态由终端维护。
+                            app.mouse_pos = None;
                         }
                         AppEvent::Input(_) => {}
                         AppEvent::Sessions { metas, current } => {

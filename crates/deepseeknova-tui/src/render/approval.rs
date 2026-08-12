@@ -94,17 +94,53 @@ pub fn render_approval(
     }
     lines.push(Line::from(Span::styled(
         tr.t(Key::ApprovalHint),
-        Style::default().fg(theme.accent),
+        Style::default().fg(theme.accent_user),
     )));
 
+    // grok 对齐：Clear 背景 + accent_user 方角边框 + 粗体标题（modal_window
+    // chrome 同款），替代原先的红色警示边框——审批框与统一模态观感一致。
+    f.render_widget(ratatui::widgets::Clear, area);
+    let border = Style::default().fg(theme.prompt_border_active);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border)
-        .title(Line::from(Span::styled(tr.t(Key::ApprovalTitle), border)));
-    let widget = Paragraph::new(lines)
-        .block(block)
-        .wrap(Wrap { trim: false });
-    f.render_widget(widget, area);
+        .title(Line::from(Span::styled(
+            format!(" {} ", tr.t(Key::ApprovalTitle)),
+            Style::default()
+                .fg(theme.accent_user)
+                .add_modifier(Modifier::BOLD),
+        )))
+        // grok 对齐：右上角 [✗]（Esc 关闭，modal_window.rs 同款）。
+        .title(Line::from(Span::styled(" [✗]", Style::default().fg(theme.gray))).right_aligned());
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    f.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }),
+        Rect {
+            x: inner.x,
+            y: inner.y,
+            width: inner.width,
+            height: inner.height.saturating_sub(1),
+        },
+    );
+    // grok 对齐：footer shortcuts 行（y 允许 / n 拒绝，accent_user 加粗）。
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "y 允许",
+                Style::default()
+                    .fg(theme.accent_user)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("   n 拒绝 · Esc 取消", Style::default().fg(theme.gray)),
+        ])),
+        Rect {
+            x: inner.x,
+            y: inner.y + inner.height.saturating_sub(1),
+            width: inner.width,
+            height: 1,
+        },
+    );
 }
 
 #[cfg(test)]

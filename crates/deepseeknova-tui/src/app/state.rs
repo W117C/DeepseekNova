@@ -40,6 +40,50 @@ pub fn display_mode_label(mode: DisplayMode) -> Key {
     }
 }
 
+/// 折叠策略（`/fold auto|open|compact` 切换；auto 为智能默认）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FoldPolicy {
+    /// 智能默认：推理折叠、工具展开、成功结果截断。
+    #[default]
+    Auto,
+    /// 全部默认展开（显式折叠仍优先）。
+    Open,
+    /// 紧凑：推理与工具调用均默认折叠。
+    Compact,
+}
+
+/// 段的折叠态（grok build DisplayMode 三态对齐）：
+/// Collapsed = 单行摘要；Truncated = 保留前几行 + "N more"（推理/长工具
+/// 结果默认）；Expanded = 全文展开。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FoldState {
+    /// 折叠为单行摘要。
+    Collapsed,
+    /// 截断显示：前几行 + 余量提示。
+    Truncated,
+    /// 全文展开（默认）。
+    #[default]
+    Expanded,
+}
+
+/// 折叠策略循环顺序：auto → open → compact → auto。
+pub fn next_fold_policy(current: FoldPolicy) -> FoldPolicy {
+    match current {
+        FoldPolicy::Auto => FoldPolicy::Open,
+        FoldPolicy::Open => FoldPolicy::Compact,
+        FoldPolicy::Compact => FoldPolicy::Auto,
+    }
+}
+
+/// 折叠策略的用户可见标签键（状态栏/notice 指示）。
+pub fn fold_policy_label(policy: FoldPolicy) -> Key {
+    match policy {
+        FoldPolicy::Auto => Key::FoldPolicyAuto,
+        FoldPolicy::Open => Key::FoldPolicyOpen,
+        FoldPolicy::Compact => Key::FoldPolicyCompact,
+    }
+}
+
 /// 权限模式预设的用户可见标签键（状态栏/浮层指示）。
 pub fn permission_mode_label(mode: Option<deepseeknova_permission::PermissionMode>) -> Key {
     use deepseeknova_permission::PermissionMode::*;
@@ -300,9 +344,19 @@ pub struct AppState {
     pub focus: Focus,
     /// 消息导航选中的段。
     pub selected: Option<SegId>,
-    /// 折叠态（独立存储，不嵌消息树）。
-    pub fold: HashMap<SegId, bool>,
+    /// 折叠态（独立存储，不嵌消息树）。三态：Collapsed/Truncated/Expanded。
+    pub fold: HashMap<SegId, FoldState>,
     pub sidebar_visible: bool,
+    /// 侧边栏宽度（列）。`[`/`]` 调整，范围 26..=60 钳制（WP2/WP5 契约）。
+    pub sidebar_width: u16,
+    /// 全屏模式：隐藏状态行与提示行，最大化对话/输入区（Ctrl+Shift+F 切换）。
+    pub fullscreen: bool,
+    /// 当前折叠策略（`/fold auto|open|compact` 切换；渲染层默认折叠依据）。
+    pub fold_policy: FoldPolicy,
+    /// 全屏欢迎屏激活态：启动时置位，首次提交后清除。
+    /// 激活时 `draw` 渲染全屏欢迎屏（logo + 菜单 + 底部提示词输入），
+    /// 替代对话区；清除后回到正常对话布局（grok build welcome 屏对齐）。
+    pub welcome: bool,
     /// 鼠标捕获开关：开启时应用消费滚轮滚动对话历史，终端文本无法用
     /// 鼠标选中复制；Ctrl+T 切换。启动时由 TUI 注入为 true（与
     /// EnableMouseCapture 状态一致）。
@@ -321,6 +375,12 @@ pub struct AppState {
     pub completion: Option<CompletionState>,
     /// 斜杠命令行内候选（输入 `/` 开头时触发，Claude Code 风格）。
     pub command_hint: Option<crate::commands::CommandHintState>,
+    /// Ctrl+P 命令面板（模态浮层：模糊搜索 + 最近使用排序；None = 关闭）。
+    pub command_palette: Option<CommandPaletteState>,
+    /// Tasks 面板可见性（Ctrl+G 切换；展示进行中的工具/子代理任务）。
+    pub tasks_visible: bool,
+    /// 最近执行的命令名（最近优先；命令面板排序依据，上限 20）。
+    pub recent_commands: Vec<String>,
     /// /help 帮助浮层：全量帮助文本 + 滚动位置。Esc/q 关闭，j/k 滚动。
     pub help_overlay: Option<HelpOverlay>,
     /// 磁盘保存的会话（最新优先；事件循环经 SessionController 刷新）。
@@ -363,6 +423,189 @@ pub struct AppState {
     /// `quit_armed` 的置位时间戳（纳秒，monotonic）。
     /// `pub(crate)`：结构体在其他模块以 `..Default::default()` 构造。
     pub(crate) quit_armed_at: Option<std::time::Instant>,
+    /// grok 对齐：idle 非空 prompt 时 Esc Esc = 清空输入（非退出）。
+    /// 首次 Esc 置位并提示，3 秒内再按 Esc 清空；非 Esc 键复位。
+    pub clear_prompt_armed: bool,
+    /// `clear_prompt_armed` 的置位时间戳。
+    pub(crate) clear_prompt_armed_at: Option<std::time::Instant>,
+    /// grok 对齐：bash 模式（空 prompt 输入 `!` 进入，前缀 `! ` 黄色，
+    /// 提交即执行 shell 命令；Esc 或提交后退出）。
+    pub bash_mode: bool,
+    /// grok 对齐：vim 双键序列首键（`gg`/`H`/`M`/`L`/`zz`/`zt`/`zb`），
+    /// 等待第二键（3 秒窗）；None = 无挂起序列。
+    pub vim_chord: Option<(char, std::time::Instant)>,
+    /// grok 对齐：对话内搜索（Ctrl+F；None = 关闭）。
+    pub search: Option<SearchState>,
+    /// grok 对齐：历史搜索（Ctrl+R；None = 关闭）。
+    pub history_search: Option<HistorySearchState>,
+    /// grok 对齐：rewind 回退浮层（Esc Esc 空 prompt；None = 关闭）。
+    pub rewind: Option<RewindState>,
+    /// grok 对齐：rewind 确认回退的待消费标记（dispatch 置位，
+    /// 事件循环消费：截断会话到选中回合后复位）。
+    pub rewind_pending: bool,
+    /// grok 对齐：多行模式开关（提示行指示；与 ChatNewline 共存）。
+    pub multiline_mode: bool,
+    /// grok 对齐：turn 视图（全回合/单回合）。
+    pub turn_view: TurnView,
+    /// grok 对齐：turn 导航选中的回合序号（None = 未选中）。
+    pub selected_turn: Option<usize>,
+    /// grok 对齐：会话标题（sticky 头部显示；首次提交后由 CLI 生成）。
+    pub session_title: Option<String>,
+    /// grok 对齐：粘贴内容元素化（Paste Chip；事件循环注入）。
+    pub paste_chips: Vec<PasteChip>,
+    /// grok 对齐：toast 通知（临时色块，TTL 后消失；None = 无）。
+    pub toast: Option<(String, std::time::Instant)>,
+    /// grok 对齐：统一模态基础设施（ShortcutsHelp/Settings 等；None = 关闭）。
+    pub active_modal: Option<ActiveModal>,
+    /// grok 对齐：模态内滚动偏移（快捷键速查表等长内容 j/k/↑↓ 滚动）。
+    pub modal_scroll: usize,
+    /// grok 对齐：鼠标坐标（hover 高亮数据源；事件循环随 Moved 更新、
+    /// Leave 清空；None = 指针不在窗口内）。
+    pub mouse_pos: Option<(u16, u16)>,
+    /// 对话区当前屏幕范围（draw 时写入；事件循环左键点击据此判断是否
+    /// 落在对话区内——审查#5：此前无条件转发，点输入框/状态栏也会折叠）。
+    pub conv_area: Option<ratatui::layout::Rect>,
+}
+
+/// Ctrl+P 命令面板状态：模态浮层，模糊搜索 + 最近使用排序
+/// （grok build 命令面板对齐）。
+#[derive(Clone, Default, PartialEq)]
+pub struct CommandPaletteState {
+    /// 当前查询文本。
+    pub query: String,
+    /// 模糊匹配候选（`CommandRegistry::search`，最近使用优先）。
+    pub candidates: Vec<&'static crate::commands::Command>,
+    /// 当前选中项。
+    pub selected: usize,
+}
+
+impl CommandPaletteState {
+    /// 打开命令面板：候选 = 全部命令按最近使用排序（未使用过的按注册序）。
+    pub fn open(app: &AppState) -> Self {
+        let mut all: Vec<&'static crate::commands::Command> =
+            crate::commands::CommandRegistry::builtin().iter().collect();
+        Self::sort_by_recent(&mut all, &app.recent_commands);
+        Self {
+            query: String::new(),
+            candidates: all,
+            selected: 0,
+        }
+    }
+
+    /// 输入查询字符：过滤候选并复位选中。`recent` 为最近使用命令快照
+    /// （调用方已 clone，避免与面板可变借用冲突）。
+    pub fn type_char_snapshot(&mut self, recent: &[String], c: char) {
+        self.query.push(c);
+        self.refresh_snapshot(recent);
+    }
+
+    /// 回退查询字符：过滤候选并复位选中。`recent` 同上。
+    pub fn backspace_snapshot(&mut self, recent: &[String]) {
+        self.query.pop();
+        self.refresh_snapshot(recent);
+    }
+
+    /// 按当前 query 重新搜索（复用 `CommandRegistry::search`），最近使用优先。
+    fn refresh_snapshot(&mut self, recent: &[String]) {
+        let mut matched = crate::commands::CommandRegistry::search(&self.query);
+        Self::sort_by_recent(&mut matched, recent);
+        self.candidates = matched;
+        self.selected = 0;
+    }
+
+    /// 最近使用优先排序：命中的命令按 `recent_commands` 出现位置升序，
+    /// 未使用过的排在末尾（保持注册序）。
+    fn sort_by_recent(cmds: &mut Vec<&'static crate::commands::Command>, recent: &[String]) {
+        cmds.sort_by_key(|c| {
+            recent
+                .iter()
+                .position(|n| n == c.name)
+                .unwrap_or(usize::MAX)
+        });
+    }
+}
+
+/// grok 对齐：对话内搜索状态（Ctrl+F 打开；None = 关闭）。
+///
+/// 匹配按消息树段正文（`segment_plain_text`）进行；`matches` 保存
+/// 命中段的 SegId（按会话顺序），`selected` 为当前选中命中。
+#[derive(Clone, Default, PartialEq)]
+pub struct SearchState {
+    /// 当前查询文本。
+    pub query: String,
+    /// 命中段列表（会话顺序）。
+    pub matches: Vec<SegId>,
+    /// 当前选中命中（`matches` 下标；越界时渲染层按最近值钳制）。
+    pub selected: usize,
+    /// 命中次数（渲染层统计展示 `n/m` 用；-1 表示未计算）。
+    pub total: isize,
+}
+
+/// grok 对齐：历史搜索状态（Ctrl+R 打开；None = 关闭）。
+///
+/// 在 `history`（已提交 prompt 列表）中模糊匹配，↑↓/Ctrl+R 循环
+/// 选择，Enter 采纳到输入框。
+#[derive(Clone, Default, PartialEq)]
+pub struct HistorySearchState {
+    /// 当前查询文本（前缀匹配 history）。
+    pub query: String,
+    /// 匹配的 history 下标（倒序：最近的在先）。
+    pub matches: Vec<usize>,
+    /// 当前选中项（`matches` 下标）。
+    pub selected: usize,
+}
+
+/// grok 对齐：rewind 回退浮层状态（Esc Esc 空 prompt 打开；None = 关闭）。
+///
+/// rewind 目标 = 会话中的 turn 边界（每条 user 消息为一个可回退点），
+/// 选中后由事件循环消费：截断会话到该回合。
+#[derive(Clone, Default, PartialEq)]
+pub struct RewindState {
+    /// 可回退回合标题（`"#N  <首行摘要>"`，最早的在先）。
+    pub turns: Vec<String>,
+    /// 当前选中项下标。
+    pub selected: usize,
+}
+
+/// grok 对齐：turn 视图模式（全回合/单回合）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TurnView {
+    /// 全回合视图：显示全部消息（默认）。
+    #[default]
+    All,
+    /// 单回合视图：只显示选中的回合（`h`/`l` 切换）。
+    Single,
+}
+
+/// grok 对齐：粘贴内容元素（Paste Chip）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct PasteChip {
+    /// Chip 类型（文本/图片）。
+    pub kind: PasteChipKind,
+    /// 展示标签（图片显示 `[Image #N]`，文本显示首行摘要）。
+    pub label: String,
+}
+
+/// Paste Chip 类型。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PasteChipKind {
+    /// 文本粘贴。
+    Text,
+    /// 图片引用（`[Image #N]`）。
+    Image,
+}
+
+/// grok 对齐：统一模态基础设施（ModalWindow chrome + 模态枚举）。
+///
+/// 渲染层用统一 ModalWindow 边框（圆角/强调线 + 标题），
+/// 各模态内容由对应 render 模块提供。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ActiveModal {
+    /// 快捷键速查表（`?` 打开）。
+    #[default]
+    ShortcutsHelp,
+    /// 设置面板（预留位；当前无设置项，保持可达性）。
+    Settings,
 }
 
 impl AppState {
@@ -483,32 +726,85 @@ impl AppState {
         self.fold.clear();
     }
 
-    /// 折叠判断：显式设置优先，默认按智能策略（Claude Code 风格：推理折叠、
-    /// 工具调用展开，其余展开）。工具调用默认展开——参数与截断结果直接可见，
-    /// 需要整洁视图时用 `/fold all` 或 Enter 折叠单个段。
+    /// 折叠判断（兼容两态语义）：显式设置优先，否则按当前折叠策略
+    /// （auto：推理折叠、工具展开；open：全部展开；compact：推理与工具
+    /// 均折叠）。Collapsed/Truncated 均视为"折叠"。
     pub fn is_folded(&self, seg: SegId, kind: crate::model::conversation::LineKind) -> bool {
+        self.fold_state(seg, kind) != FoldState::Expanded
+    }
+
+    /// 三态折叠查询：显式设置优先，否则按当前折叠策略。
+    /// - Auto：推理折叠（Truncated）、工具展开；
+    /// - Open：全部 Expanded；
+    /// - Compact：推理与工具 Collapsed。
+    pub fn fold_state(&self, seg: SegId, kind: crate::model::conversation::LineKind) -> FoldState {
         match self.fold.get(&seg) {
             Some(f) => *f,
-            None => kind == crate::model::conversation::LineKind::Reasoning,
+            None => match self.fold_policy {
+                FoldPolicy::Auto => {
+                    if kind == crate::model::conversation::LineKind::Reasoning {
+                        FoldState::Truncated
+                    } else {
+                        FoldState::Expanded
+                    }
+                }
+                FoldPolicy::Open => FoldState::Expanded,
+                FoldPolicy::Compact => {
+                    if matches!(
+                        kind,
+                        crate::model::conversation::LineKind::Reasoning
+                            | crate::model::conversation::LineKind::Tool
+                    ) {
+                        FoldState::Collapsed
+                    } else {
+                        FoldState::Expanded
+                    }
+                }
+            },
         }
     }
 
-    /// 切换折叠态；以**有效**折叠态（含默认策略）为基准取反，
-    /// 默认值也物化为显式设置（便于重置）。
-    pub fn toggle_fold(&mut self, seg: SegId) {
-        let folded = self
-            .conversation
-            .segment_kind(seg)
-            .map(|kind| self.is_folded(seg, kind))
-            .unwrap_or(false);
-        self.fold.insert(seg, !folded);
+    /// 调整侧边栏宽度（`[`/`]`），范围 26..=60 钳制。
+    pub fn adjust_sidebar_width(&mut self, delta: i16) {
+        self.sidebar_width = (self.sidebar_width as i16 + delta).clamp(26, 60) as u16;
     }
 
-    /// 批量折叠/展开全部段（`/fold all|none`）。
+    /// 全屏切换：隐藏状态行与提示行（Ctrl+Shift+F）。
+    pub fn toggle_fullscreen(&mut self) {
+        self.fullscreen = !self.fullscreen;
+    }
+
+    /// 循环切换折叠策略（auto → open → compact → auto）。
+    pub fn cycle_fold_policy(&mut self) {
+        self.fold_policy = next_fold_policy(self.fold_policy);
+    }
+
+    /// 切换折叠态（三态循环）：Expanded → Collapsed → Truncated → Expanded。
+    /// 以**有效**折叠态（含默认策略）为基准循环，默认值也物化为显式设置。
+    pub fn toggle_fold(&mut self, seg: SegId) {
+        let cur = self
+            .conversation
+            .segment_kind(seg)
+            .map(|kind| self.fold_state(seg, kind))
+            .unwrap_or(FoldState::Expanded);
+        let next = match cur {
+            FoldState::Expanded => FoldState::Collapsed,
+            FoldState::Collapsed => FoldState::Truncated,
+            FoldState::Truncated => FoldState::Expanded,
+        };
+        self.fold.insert(seg, next);
+    }
+
+    /// 批量折叠/展开全部段（`/fold all|none`）：all → Collapsed、none → Expanded。
     pub fn fold_all(&mut self, folded: bool) {
         self.fold.clear();
+        let state = if folded {
+            FoldState::Collapsed
+        } else {
+            FoldState::Expanded
+        };
         for (seg, _) in self.conversation.iter_segments() {
-            self.fold.insert(seg, folded);
+            self.fold.insert(seg, state);
         }
     }
 
@@ -525,11 +821,11 @@ impl AppState {
         }
         let mut all_folded = true;
         let mut all_open = true;
-        for folded in self.fold.values() {
-            if *folded {
-                all_open = false;
-            } else {
+        for state in self.fold.values() {
+            if *state == FoldState::Expanded {
                 all_folded = false;
+            } else {
+                all_open = false;
             }
         }
         if all_folded {
@@ -838,6 +1134,13 @@ impl AppState {
     /// 编辑器按键（Input 焦点）：keymap 定制层优先，回落编译期绑定表，
     /// 均未命中再走保留键/自由插入的硬编码语义。
     pub fn handle_editor_key(&mut self, key: &KeyEvent) -> KeyAction {
+        // grok 对齐：非 Esc 键复位「Esc Esc 清空输入」的双键待命（审查#11）——
+        // 此前只有 Esc arm 赋值/清除，字符输入、Backspace、导航等路径都不复位，
+        // 用户误按一次 Esc 后继续输入，3 秒内再按 Esc 会把新输入一起清空。
+        if key.code != KeyCode::Esc {
+            self.clear_prompt_armed = false;
+            self.clear_prompt_armed_at = None;
+        }
         // 斜杠候选优先（浮层打开时 Enter/↑↓/Tab/Esc 由它消费）。
         if let Some(action) = self.handle_command_hint_key(key) {
             return action;
@@ -865,17 +1168,61 @@ impl AppState {
                 if self.running {
                     // 生成中按 Esc：取消当前生成（Claude Code Chat context 行为）。
                     KeyAction::Cancel
+                } else if !self.input.text.is_empty() {
+                    // grok 对齐：idle 非空 prompt 时 Esc Esc = 清空输入
+                    //（首次 Esc 提示，3 秒内再按清空；非 Esc 键复位）。
+                    let armed = self.clear_prompt_armed
+                        && self
+                            .clear_prompt_armed_at
+                            .map(|t| t.elapsed() < std::time::Duration::from_secs(3))
+                            .unwrap_or(false);
+                    if armed {
+                        self.input.clear();
+                        self.refresh_command_hint();
+                        self.clear_prompt_armed = false;
+                        self.clear_prompt_armed_at = None;
+                    } else {
+                        self.clear_prompt_armed = true;
+                        self.clear_prompt_armed_at = Some(std::time::Instant::now());
+                        self.show_notice(self.tr.t(Key::PressEscClearPrompt));
+                    }
+                    KeyAction::None
                 } else {
-                    // 空闲按 Esc：二次确认退出（防误触）。
+                    // 空闲空 prompt 按 Esc：二次确认退出（防误触）。
                     self.confirm_quit()
                 }
             }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if self.running {
+                if !self.input.text.is_empty() {
+                    // grok 对齐：prompt 有文本时 Ctrl+C 清空输入（即使运行中）。
+                    self.input.clear();
+                    self.refresh_command_hint();
+                    KeyAction::None
+                } else if self.running {
+                    // 空 prompt + 运行中：取消当前 run。
                     KeyAction::Cancel
                 } else {
-                    // 空闲 Ctrl+C：与 Esc 同语义的二次确认退出。
+                    // 空 prompt 空闲 Ctrl+C：与 Esc 同语义的二次确认退出。
                     self.confirm_quit()
+                }
+            }
+            KeyCode::Char('!') => {
+                if !self.running
+                    && !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT)
+                    && self.input.text.is_empty()
+                {
+                    // grok 对齐：空 prompt 输入 `!` 进入 bash 模式（`! ` 前缀）。
+                    self.bash_mode = true;
+                    self.show_notice(self.tr.t(Key::BashModeNotice));
+                    KeyAction::None
+                } else {
+                    // 非 bash 触发场景（prompt 已有文本/运行中/带修饰键）：
+                    // `!` 必须落入字符插入，否则输入框永远打不出 `!`
+                    //（如 `ls -la !`、`echo hi!`——审查#8 P1 回归）。
+                    self.input.insert_char('!');
+                    self.refresh_command_hint();
+                    KeyAction::None
                 }
             }
             KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -930,139 +1277,13 @@ impl AppState {
     }
 
     /// 按 action 执行 Input 编辑语义（keymap 定制层与默认绑定表共用，
-    /// 保证改键后行为一致）。
+    /// 保证改键后行为一致）。执行收敛到 [`crate::app::dispatch`] 单一分发点
+    /// （对齐 grok 的 Action→Effect 架构），本方法只做副作用折叠。
     fn handle_input_action(&mut self, action: crate::app::actions::Action) -> KeyAction {
-        use crate::app::actions::Action::*;
-        match action {
-            ChatSubmit => {
-                if self.running {
-                    return KeyAction::None;
-                }
-                let prompt = std::mem::take(&mut self.input);
-                let prompt = prompt.text.trim().to_string();
-                if prompt.is_empty() {
-                    return KeyAction::None;
-                }
-                if prompt.starts_with('/') {
-                    return KeyAction::Submit(prompt);
-                }
-                self.history.push(prompt.clone());
-                self.history_idx = None;
-                KeyAction::Submit(prompt)
-            }
-            ChatNewline => {
-                if !self.running {
-                    self.input.insert_char('\n');
-                }
-                KeyAction::None
-            }
-            ChatClearInput => {
-                if !self.running {
-                    self.input.clear();
-                    self.refresh_command_hint();
-                }
-                KeyAction::None
-            }
-            ChatDeleteWord => {
-                if !self.running {
-                    self.input.delete_word_before();
-                    self.refresh_command_hint();
-                }
-                KeyAction::None
-            }
-            ChatHistoryPrev => {
-                if !self.running {
-                    if self.command_hint.is_some() {
-                        // 候选选择已由 handle_command_hint_key 处理；兜底无操作。
-                    } else if self.input.text.contains('\n') {
-                        self.input.move_line_up();
-                    } else {
-                        self.history_prev();
-                        self.refresh_command_hint();
-                    }
-                }
-                KeyAction::None
-            }
-            ChatHistoryNext => {
-                if !self.running {
-                    if self.command_hint.is_some() {
-                        // 同上。
-                    } else if self.input.text.contains('\n') {
-                        self.input.move_line_down();
-                    } else {
-                        self.history_next();
-                        self.refresh_command_hint();
-                    }
-                }
-                KeyAction::None
-            }
-            ChatMoveLeft => {
-                if !self.running {
-                    self.input.move_left();
-                }
-                KeyAction::None
-            }
-            ChatMoveRight => {
-                if !self.running {
-                    self.input.move_right();
-                }
-                KeyAction::None
-            }
-            ChatMoveLineUp => {
-                if !self.running {
-                    self.input.move_line_up();
-                }
-                KeyAction::None
-            }
-            ChatMoveLineDown => {
-                if !self.running {
-                    self.input.move_line_down();
-                }
-                KeyAction::None
-            }
-            ChatHome => {
-                if self.running {
-                    self.scroll_offset = 0;
-                    self.auto_scroll = false;
-                } else {
-                    self.input.home();
-                }
-                KeyAction::None
-            }
-            ChatEnd => {
-                if self.running {
-                    self.auto_scroll = true;
-                } else {
-                    self.input.end();
-                }
-                KeyAction::None
-            }
-            ChatHomeLine => {
-                if !self.running {
-                    self.input.home_line();
-                }
-                KeyAction::None
-            }
-            ChatEndLine => {
-                if !self.running {
-                    self.input.end_line();
-                }
-                KeyAction::None
-            }
-            ChatFocusConversation => {
-                // 焦点循环入口：Input（空闲）→ Conversation（消息导航）。
-                if !self.running {
-                    self.focus = Focus::Conversation;
-                }
-                KeyAction::None
-            }
-            // 全局热键（F1/Ctrl+L/Ctrl+P/Ctrl+\）经 handle_modal_shortcuts
-            // 先消费，不落到编辑分派；防御性忽略。
-            _ => KeyAction::None,
-        }
+        crate::app::dispatch::fold_effects(crate::app::dispatch::dispatch(self, action))
     }
 
-    fn history_prev(&mut self) {
+    pub(crate) fn history_prev(&mut self) {
         if self.history.is_empty() {
             return;
         }
@@ -1075,7 +1296,7 @@ impl AppState {
         self.input.set_text(self.history[idx].clone());
     }
 
-    fn history_next(&mut self) {
+    pub(crate) fn history_next(&mut self) {
         match self.history_idx {
             Some(i) if i + 1 < self.history.len() => {
                 self.history_idx = Some(i + 1);
@@ -1170,14 +1391,14 @@ mod tests {
         assert_eq!(app.tr.t(app.fold_label()), "默认");
 
         let id = app.conversation.begin_turn("q".into());
-        app.fold.insert((id, 0), true);
+        app.fold.insert((id, 0), FoldState::Collapsed);
         assert_eq!(app.tr.t(app.fold_label()), "全折叠");
         app.fold.clear();
-        app.fold.insert((id, 0), false);
+        app.fold.insert((id, 0), FoldState::Expanded);
         assert_eq!(app.tr.t(app.fold_label()), "全展开");
 
-        app.fold.insert((id, 0), true);
-        app.fold.insert((id, 1), false);
+        app.fold.insert((id, 0), FoldState::Collapsed);
+        app.fold.insert((id, 1), FoldState::Expanded);
         assert_eq!(app.tr.t(app.fold_label()), "混合");
     }
 
@@ -1409,7 +1630,7 @@ mod tests {
         app.apply_run_event(RunEvent::TextDelta("x".into()));
         app.apply_run_event(RunEvent::Done(done_output("")));
         app.echo_line(LineKind::System, "hi");
-        app.fold.insert((id, 0), true);
+        app.fold.insert((id, 0), FoldState::Collapsed);
         app.selected = Some((id, 0));
         app.clear_display();
         assert_eq!(app.conversation.segment_count(), 0);
@@ -1727,7 +1948,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_p_cycles_perm_mode_via_modal_shortcuts() {
+    fn ctrl_p_opens_palette_and_ctrl_shift_p_cycles_perm_mode() {
         let mut app = AppState {
             tr: Tr::new(crate::i18n::Lang::Zh),
             ..Default::default()
@@ -1738,9 +1959,20 @@ mod tests {
             kind: KeyEventKind::Press,
             state: crossterm::event::KeyEventState::NONE,
         };
+        // Ctrl+P = 命令面板（grok 对齐）：打开模态面板。
         assert!(
             app.handle_modal_shortcuts(&key(KeyCode::Char('p'), KeyModifiers::CONTROL)),
             "Ctrl+P 是全局热键"
+        );
+        assert!(app.command_palette.is_some(), "Ctrl+P 打开命令面板");
+        // Ctrl+Shift+P = 权限模式循环（原 Ctrl+P 语义迁移）。
+        app.command_palette = None;
+        assert!(
+            app.handle_modal_shortcuts(&key(
+                KeyCode::Char('p'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            )),
+            "Ctrl+Shift+P 是全局热键"
         );
         assert!(app.perm_mode_cycle, "置位循环标记");
         // 其余键不影响 perm_mode_cycle。

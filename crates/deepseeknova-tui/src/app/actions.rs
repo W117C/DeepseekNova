@@ -12,6 +12,12 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+/// Ctrl+Shift 组合修饰符常量。
+///
+/// bitflags 的 `|` 运算符非 const，不能直接用于编译期绑定表，故用
+/// 常量 `union` 组合（与 `Binding::new` 的 const 语义兼容）。
+const CTRL_SHIFT: KeyModifiers = KeyModifiers::CONTROL.union(KeyModifiers::SHIFT);
+
 /// 语义化动作。命名 `域:动作`，与 Claude Code 的 `chat:submit` 风格一致。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Action {
@@ -24,10 +30,18 @@ pub enum Action {
     AppToggleSidebar,
     /// 循环切换权限模式预设（plan → accept_edits → auto）。
     PermModeCycle,
+    /// 打开命令面板（Ctrl+P；模糊搜索 + 最近使用排序，复用 CommandRegistry）。
+    OpenCommandPalette,
+    /// 切换 Tasks 面板（Ctrl+G；展示进行中的工具/子代理任务，grok 对齐）。
+    ToggleTasks,
     /// 打开 /help 帮助浮层（F1）。
     AppHelp,
     /// 清屏重绘（Ctrl+L）。
     AppRedraw,
+    /// 切换全屏模式：隐藏/恢复状态行与提示行（Ctrl+Shift+F）。
+    ToggleFullscreen,
+    /// 强制全量重绘（Ctrl+Shift+R）。
+    Redraw,
     // ── 输入（Chat context）──────────────────────────────
     /// 提交输入。
     ChatSubmit,
@@ -64,6 +78,9 @@ pub enum Action {
     /// 滚动：整页/首尾/贴底。
     ConvScrollPageUp,
     ConvScrollPageDown,
+    /// 半页滚动（vim `Ctrl+U` / `Ctrl+D`）。
+    ConvScrollHalfUp,
+    ConvScrollHalfDown,
     ConvScrollTop,
     ConvScrollBottom,
     /// 回输入焦点。
@@ -77,6 +94,10 @@ pub enum Action {
     SidebarSelectNext,
     /// 侧边栏选中会话并恢复（Sessions 面板 Enter）。
     SidebarResumeSelected,
+    /// 侧边栏加宽一列（`[`，Sidebar 焦点生效）。
+    SidebarWiden,
+    /// 侧边栏收窄一列（`]`，Sidebar 焦点生效）。
+    SidebarNarrow,
     // ── 模态（Completion context）────────────────────────
     /// 关闭模态并回输入。
     ModalDismiss,
@@ -93,6 +114,65 @@ pub enum Action {
     ModalArgSubmit,
     /// 取消参数子输入。
     ModalArgCancel,
+    // ── grok 对齐：对话内搜索（Conversation context，Ctrl+F）──
+    /// 打开对话内搜索条（Ctrl+F；空查询关闭）。
+    ConvSearchOpen,
+    /// 搜索：输入查询字符。
+    ConvSearchType,
+    /// 下一个命中（Enter/n）。
+    ConvSearchNext,
+    /// 上一个命中（Shift+Enter/N）。
+    ConvSearchPrev,
+    /// 关闭搜索（Esc）。
+    ConvSearchClose,
+    /// 回退查询字符（Backspace）。
+    ConvSearchBackspace,
+    // ── grok 对齐：历史搜索（Chat context，Ctrl+R）──────────
+    /// 打开历史搜索（Ctrl+R；空查询回退输入框）。
+    ChatHistorySearchOpen,
+    /// 历史搜索：输入查询字符。
+    ChatHistorySearchType,
+    /// 上一个匹配（↑/Ctrl+R）。
+    ChatHistorySearchPrev,
+    /// 下一个匹配（↓）。
+    ChatHistorySearchNext,
+    /// 采纳选中项到输入框（Enter）。
+    ChatHistorySearchAccept,
+    /// 关闭历史搜索（Esc）。
+    ChatHistorySearchClose,
+    // ── grok 对齐：rewind（Esc Esc 空 prompt）──────────────
+    /// 打开 rewind 浮层（空 prompt 二次 Esc）。
+    RewindOpen,
+    /// rewind 选择上/下（k/j、↑/↓）。
+    RewindSelectPrev,
+    RewindSelectNext,
+    /// 确认回退到选中回合（Enter）。
+    RewindAccept,
+    /// 关闭 rewind（Esc）。
+    RewindClose,
+    // ── grok 对齐：vim 双键与 turn 导航 ─────────────────────
+    /// vim 双键首键（`g`/`z` 开头；等待第二键）。
+    ConvVimLead,
+    /// vim 双键动作（`gg` 顶部、`H`/`M`/`L` 屏位、`zz`/`zt`/`zb` 视位）。
+    ConvVimExec,
+    /// turn 导航：上一回合（h）。
+    ConvTurnPrev,
+    /// turn 导航：下一回合（l）。
+    ConvTurnNext,
+    /// 单回合/全回合视图切换（`v`）。
+    ConvToggleTurnView,
+    /// response 锚点：上一个 response 顶部（K）。
+    ConvAnchorPrev,
+    /// response 锚点：下一个 response 顶部（J）。
+    ConvAnchorNext,
+    // ── grok 对齐：多行模式 ─────────────────────────────────
+    /// 多行模式开关（提示行指示；与 ChatNewline 共存）。
+    ChatToggleMultiline,
+    // ── grok 对齐：统一模态（`?` 快捷键速查）─────────────────
+    /// 打开快捷键速查表（`?`）。
+    OpenShortcutsHelp,
+    /// 关闭当前模态（Esc）。
+    ModalClose,
 }
 
 impl Action {
@@ -104,8 +184,12 @@ impl Action {
             AppCancel => "app:cancel",
             AppToggleSidebar => "app:toggleSidebar",
             PermModeCycle => "perm:cycleMode",
+            OpenCommandPalette => "app:commandPalette",
+            ToggleTasks => "app:toggleTasks",
             AppHelp => "app:help",
             AppRedraw => "app:redraw",
+            ToggleFullscreen => "app:toggleFullscreen",
+            Redraw => "app:forceRedraw",
             ChatSubmit => "chat:submit",
             ChatNewline => "chat:newline",
             ChatClearInput => "chat:clearInput",
@@ -127,6 +211,8 @@ impl Action {
             ConvCopy => "conv:copy",
             ConvScrollPageUp => "conv:scrollPageUp",
             ConvScrollPageDown => "conv:scrollPageDown",
+            ConvScrollHalfUp => "conv:scrollHalfUp",
+            ConvScrollHalfDown => "conv:scrollHalfDown",
             ConvScrollTop => "conv:scrollTop",
             ConvScrollBottom => "conv:scrollBottom",
             ConvFocusInput => "conv:focusInput",
@@ -136,6 +222,8 @@ impl Action {
             SidebarSelectPrev => "sidebar:selectPrev",
             SidebarSelectNext => "sidebar:selectNext",
             SidebarResumeSelected => "sidebar:resumeSelected",
+            SidebarWiden => "sidebar:widen",
+            SidebarNarrow => "sidebar:narrow",
             ModalDismiss => "modal:dismiss",
             ModalSelectPrev => "modal:selectPrev",
             ModalSelectNext => "modal:selectNext",
@@ -144,6 +232,33 @@ impl Action {
             ModalTypeChar => "modal:typeChar",
             ModalArgSubmit => "modal:argSubmit",
             ModalArgCancel => "modal:argCancel",
+            ConvSearchOpen => "conv:searchOpen",
+            ConvSearchType => "conv:searchType",
+            ConvSearchNext => "conv:searchNext",
+            ConvSearchPrev => "conv:searchPrev",
+            ConvSearchClose => "conv:searchClose",
+            ConvSearchBackspace => "conv:searchBackspace",
+            ChatHistorySearchOpen => "chat:historySearchOpen",
+            ChatHistorySearchType => "chat:historySearchType",
+            ChatHistorySearchPrev => "chat:historySearchPrev",
+            ChatHistorySearchNext => "chat:historySearchNext",
+            ChatHistorySearchAccept => "chat:historySearchAccept",
+            ChatHistorySearchClose => "chat:historySearchClose",
+            RewindOpen => "conv:rewindOpen",
+            RewindSelectPrev => "conv:rewindSelectPrev",
+            RewindSelectNext => "conv:rewindSelectNext",
+            RewindAccept => "conv:rewindAccept",
+            RewindClose => "conv:rewindClose",
+            ConvVimLead => "conv:vimLead",
+            ConvVimExec => "conv:vimExec",
+            ConvTurnPrev => "conv:turnPrev",
+            ConvTurnNext => "conv:turnNext",
+            ConvToggleTurnView => "conv:toggleTurnView",
+            ConvAnchorPrev => "conv:anchorPrev",
+            ConvAnchorNext => "conv:anchorNext",
+            ChatToggleMultiline => "chat:toggleMultiline",
+            OpenShortcutsHelp => "app:shortcutsHelp",
+            ModalClose => "modal:close",
         }
     }
 
@@ -159,8 +274,12 @@ pub const ALL_ACTIONS: &[Action] = &[
     Action::AppCancel,
     Action::AppToggleSidebar,
     Action::PermModeCycle,
+    Action::OpenCommandPalette,
+    Action::ToggleTasks,
     Action::AppHelp,
     Action::AppRedraw,
+    Action::ToggleFullscreen,
+    Action::Redraw,
     Action::ChatSubmit,
     Action::ChatNewline,
     Action::ChatClearInput,
@@ -182,6 +301,8 @@ pub const ALL_ACTIONS: &[Action] = &[
     Action::ConvCopy,
     Action::ConvScrollPageUp,
     Action::ConvScrollPageDown,
+    Action::ConvScrollHalfUp,
+    Action::ConvScrollHalfDown,
     Action::ConvScrollTop,
     Action::ConvScrollBottom,
     Action::ConvFocusInput,
@@ -191,6 +312,8 @@ pub const ALL_ACTIONS: &[Action] = &[
     Action::SidebarSelectPrev,
     Action::SidebarSelectNext,
     Action::SidebarResumeSelected,
+    Action::SidebarWiden,
+    Action::SidebarNarrow,
     Action::ModalDismiss,
     Action::ModalSelectPrev,
     Action::ModalSelectNext,
@@ -199,6 +322,33 @@ pub const ALL_ACTIONS: &[Action] = &[
     Action::ModalTypeChar,
     Action::ModalArgSubmit,
     Action::ModalArgCancel,
+    Action::ConvSearchOpen,
+    Action::ConvSearchType,
+    Action::ConvSearchNext,
+    Action::ConvSearchPrev,
+    Action::ConvSearchClose,
+    Action::ConvSearchBackspace,
+    Action::ChatHistorySearchOpen,
+    Action::ChatHistorySearchType,
+    Action::ChatHistorySearchPrev,
+    Action::ChatHistorySearchNext,
+    Action::ChatHistorySearchAccept,
+    Action::ChatHistorySearchClose,
+    Action::RewindOpen,
+    Action::RewindSelectPrev,
+    Action::RewindSelectNext,
+    Action::RewindAccept,
+    Action::RewindClose,
+    Action::ConvVimLead,
+    Action::ConvVimExec,
+    Action::ConvTurnPrev,
+    Action::ConvTurnNext,
+    Action::ConvToggleTurnView,
+    Action::ConvAnchorPrev,
+    Action::ConvAnchorNext,
+    Action::ChatToggleMultiline,
+    Action::OpenShortcutsHelp,
+    Action::ModalClose,
 ];
 
 /// 动作所属的显示上下文（与 `Focus` 一一对应）。
@@ -350,6 +500,22 @@ pub const BINDINGS: &[(ActionContext, Binding, Action)] = &[
     (
         ActionContext::Input,
         Binding::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        Action::OpenCommandPalette,
+    ),
+    (
+        ActionContext::Input,
+        Binding::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
+        Action::ToggleTasks,
+    ),
+    (
+        // grok 对齐：Ctrl+B = 后台任务面板（与 Ctrl+G 同入口；任意焦点生效）。
+        ActionContext::Input,
+        Binding::new(KeyCode::Char('b'), KeyModifiers::CONTROL),
+        Action::ToggleTasks,
+    ),
+    (
+        ActionContext::Input,
+        Binding::new(KeyCode::Char('p'), CTRL_SHIFT),
         Action::PermModeCycle,
     ),
     (
@@ -361,6 +527,16 @@ pub const BINDINGS: &[(ActionContext, Binding, Action)] = &[
         ActionContext::Input,
         Binding::new(KeyCode::Char('l'), KeyModifiers::CONTROL),
         Action::AppRedraw,
+    ),
+    (
+        ActionContext::Input,
+        Binding::new(KeyCode::Char('F'), CTRL_SHIFT),
+        Action::ToggleFullscreen,
+    ),
+    (
+        ActionContext::Input,
+        Binding::new(KeyCode::Char('R'), CTRL_SHIFT),
+        Action::Redraw,
     ),
     // ── Chat（输入聚焦）──────────────────────────────────
     (
@@ -472,7 +648,7 @@ pub const BINDINGS: &[(ActionContext, Binding, Action)] = &[
     (
         ActionContext::Conversation,
         Binding::new(KeyCode::Char('f'), KeyModifiers::CONTROL),
-        Action::ConvScrollPageDown,
+        Action::ConvSearchOpen,
     ),
     (
         ActionContext::Conversation,
@@ -486,13 +662,53 @@ pub const BINDINGS: &[(ActionContext, Binding, Action)] = &[
     ),
     (
         ActionContext::Conversation,
+        Binding::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+        Action::ConvScrollHalfUp,
+    ),
+    (
+        ActionContext::Conversation,
+        Binding::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+        Action::ConvScrollHalfDown,
+    ),
+    (
+        ActionContext::Conversation,
         Binding::new(KeyCode::Char('g'), KeyModifiers::NONE),
-        Action::ConvScrollTop,
+        Action::ConvVimLead,
     ),
     (
         ActionContext::Conversation,
         Binding::new(KeyCode::Char('G'), KeyModifiers::NONE),
         Action::ConvScrollBottom,
+    ),
+    (
+        ActionContext::Conversation,
+        Binding::new(KeyCode::Char('h'), KeyModifiers::NONE),
+        Action::ConvTurnPrev,
+    ),
+    (
+        ActionContext::Conversation,
+        Binding::new(KeyCode::Char('l'), KeyModifiers::NONE),
+        Action::ConvTurnNext,
+    ),
+    (
+        ActionContext::Conversation,
+        Binding::new(KeyCode::Char('v'), KeyModifiers::NONE),
+        Action::ConvToggleTurnView,
+    ),
+    (
+        ActionContext::Conversation,
+        Binding::new(KeyCode::Char('K'), KeyModifiers::NONE),
+        Action::ConvAnchorPrev,
+    ),
+    (
+        ActionContext::Conversation,
+        Binding::new(KeyCode::Char('J'), KeyModifiers::NONE),
+        Action::ConvAnchorNext,
+    ),
+    (
+        ActionContext::Conversation,
+        Binding::new(KeyCode::Char('?'), KeyModifiers::NONE),
+        Action::OpenShortcutsHelp,
     ),
     (
         ActionContext::Conversation,
@@ -503,6 +719,20 @@ pub const BINDINGS: &[(ActionContext, Binding, Action)] = &[
         ActionContext::Conversation,
         Binding::new(KeyCode::Char('i'), KeyModifiers::NONE),
         Action::ConvFocusInput,
+    ),
+    // ── Chat（输入聚焦）：Ctrl+R 历史搜索 ────────────────
+    (
+        ActionContext::Input,
+        Binding::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+        Action::ChatHistorySearchOpen,
+    ),
+    // ── Chat（输入聚焦）：多行模式切换 ────────────────────
+    // grok 的 Ctrl+M 在终端层面等价 Enter，不可用；取 Alt+M 作为
+    // 多行模式开关（Enter 提交 / Alt+M 切换换行语义）。
+    (
+        ActionContext::Input,
+        Binding::new(KeyCode::Char('m'), KeyModifiers::ALT),
+        Action::ChatToggleMultiline,
     ),
     // ── Sidebar ──────────────────────────────────────────
     (
@@ -549,6 +779,16 @@ pub const BINDINGS: &[(ActionContext, Binding, Action)] = &[
         ActionContext::Sidebar,
         Binding::new(KeyCode::Enter, KeyModifiers::NONE),
         Action::SidebarResumeSelected,
+    ),
+    (
+        ActionContext::Sidebar,
+        Binding::new(KeyCode::Char('['), KeyModifiers::NONE),
+        Action::SidebarWiden,
+    ),
+    (
+        ActionContext::Sidebar,
+        Binding::new(KeyCode::Char(']'), KeyModifiers::NONE),
+        Action::SidebarNarrow,
     ),
     // ── Completion ───────────────────────────────────────
     (
@@ -670,6 +910,28 @@ mod tests {
     }
 
     #[test]
+    fn plain_question_mark_not_bound_in_input() {
+        // grok 对齐修复：裸 `?` 在 Input 上下文不再绑定命令面板，否则输入框
+        // 无法键入 `?`（shell 命令/URL/疑问句），每次按键都弹面板（审查#1）。
+        assert_eq!(
+            lookup(
+                ActionContext::Input,
+                &key(KeyCode::Char('?'), KeyModifiers::NONE)
+            ),
+            None,
+            "裸 `?` 在 Input 上下文不得命中任何 action"
+        );
+        // Conversation 上下文的 `?` → OpenShortcutsHelp 保留。
+        assert_eq!(
+            lookup(
+                ActionContext::Conversation,
+                &key(KeyCode::Char('?'), KeyModifiers::NONE)
+            ),
+            Some(Action::OpenShortcutsHelp)
+        );
+    }
+
+    #[test]
     fn chord_display_shows_platform_neutral_text() {
         assert_eq!(
             chord_for(ActionContext::Conversation, Action::ConvScrollPageUp),
@@ -696,5 +958,73 @@ mod tests {
         assert_eq!(b.display(), "Shift+Tab");
         let b = Binding::new(KeyCode::Up, KeyModifiers::NONE);
         assert_eq!(b.display(), "↑");
+    }
+
+    #[test]
+    fn new_bindings_resolve_sidebar_width_and_fullscreen() {
+        // 侧边栏 `[`/`]` 只在 Sidebar 焦点生效，不劫持输入区键入。
+        assert_eq!(
+            lookup(
+                ActionContext::Sidebar,
+                &key(KeyCode::Char('['), KeyModifiers::NONE)
+            ),
+            Some(Action::SidebarWiden)
+        );
+        assert_eq!(
+            lookup(
+                ActionContext::Sidebar,
+                &key(KeyCode::Char(']'), KeyModifiers::NONE)
+            ),
+            Some(Action::SidebarNarrow)
+        );
+        assert_eq!(
+            lookup(
+                ActionContext::Input,
+                &key(KeyCode::Char('['), KeyModifiers::NONE)
+            ),
+            None,
+            "输入区 `[` 仍是自由插入字符"
+        );
+        // 全局：Ctrl+Shift+F 全屏、Ctrl+Shift+R 重绘（经 Input 上下文注册）。
+        assert_eq!(
+            lookup(
+                ActionContext::Input,
+                &key(
+                    KeyCode::Char('F'),
+                    KeyModifiers::CONTROL | KeyModifiers::SHIFT
+                )
+            ),
+            Some(Action::ToggleFullscreen)
+        );
+        assert_eq!(
+            lookup(
+                ActionContext::Input,
+                &key(
+                    KeyCode::Char('R'),
+                    KeyModifiers::CONTROL | KeyModifiers::SHIFT
+                )
+            ),
+            Some(Action::Redraw)
+        );
+    }
+
+    #[test]
+    fn new_action_names_round_trip() {
+        // keybindings.json 可经 name/from_name 重绑新增 action。
+        assert_eq!(
+            Action::from_name("sidebar:widen"),
+            Some(Action::SidebarWiden)
+        );
+        assert_eq!(
+            Action::from_name("sidebar:narrow"),
+            Some(Action::SidebarNarrow)
+        );
+        assert_eq!(
+            Action::from_name("app:toggleFullscreen"),
+            Some(Action::ToggleFullscreen)
+        );
+        assert_eq!(Action::from_name("app:forceRedraw"), Some(Action::Redraw));
+        assert_eq!(Action::SidebarWiden.name(), "sidebar:widen");
+        assert_eq!(Action::ToggleFullscreen.name(), "app:toggleFullscreen");
     }
 }

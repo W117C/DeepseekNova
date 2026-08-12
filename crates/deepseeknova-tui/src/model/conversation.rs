@@ -9,6 +9,14 @@ use deepseeknova_core::runner::RunOutput;
 /// 会话树的段数上限（对原 2000 行回看上限的语义等价迁移：按段而非按行截断）。
 pub const MAX_SEGMENTS: usize = 2000;
 
+/// 工具结果预览截断点（**字节数**）。与 `model::apply::RESULT_PREVIEW`（4000）
+/// 保持一致：模型层超出即截断并缀 `…`，渲染层据 `result.len() >
+/// TOOL_RESULT_PREVIEW` 判定该结果被截断，并补明确标记（见 render::message）。
+pub const TOOL_RESULT_PREVIEW: usize = 4000;
+
+/// 会话标题 / 回合摘要的首行截断长度（字符数，超出缀 `…`）。
+const TURN_TITLE_MAX_CHARS: usize = 60;
+
 /// UI 行类型：渲染样式映射与显示模式过滤的依据。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineKind {
@@ -156,6 +164,9 @@ pub struct Turn {
     pub user_text: String,
     pub assistant: AssistantTurn,
     pub status: TurnStatus,
+    /// 回合创建时刻（用户消息提交时间；用户块时间戳列展示用，
+    /// 对齐 xai-grok-pager ScrollbackEntry.created_at）。
+    pub created_at: std::time::SystemTime,
 }
 
 /// 会话：回合序列（增量构建，段数有界）。
@@ -164,6 +175,20 @@ pub struct Conversation {
     turns: Vec<Turn>,
     current: Option<usize>,
     next_turn_id: u64,
+}
+
+/// 回合边界：一个回合的摘要信息（rewind 清单 / turn sticky 头部计数 /
+/// 单回合视图过滤共用）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnBoundary {
+    /// 回合序号（0 起始，与 `selected_turn` 下标口径一致）。
+    pub index: usize,
+    /// 回合在渲染流中的起点段 id。本模型中用户文本独立存于
+    /// `Turn.user_text`（无 `Segment::User` 变体），回合起点段即其
+    /// 助手首段 `(id, 0)`；无助手段时作为哨兵占位。
+    pub start: SegId,
+    /// 该回合用户消息的首行摘要（首行截 60 字符，超出缀 `…`）。
+    pub summary: String,
 }
 
 impl Conversation {
@@ -176,9 +201,18 @@ impl Conversation {
             user_text,
             assistant: AssistantTurn::default(),
             status: TurnStatus::Running,
+            created_at: std::time::SystemTime::now(),
         });
         self.current = Some(self.turns.len() - 1);
         id
+    }
+
+    /// 指定回合的创建时刻（时间戳列展示；无该回合返回 None）。
+    pub fn turn_created_at(&self, turn_id: u64) -> Option<std::time::SystemTime> {
+        self.turns
+            .iter()
+            .find(|t| t.id == turn_id)
+            .map(|t| t.created_at)
     }
 
     /// 当前回合的可变引用；无当前回合返回 None。
@@ -234,6 +268,54 @@ impl Conversation {
             .iter()
             .find(|t| t.id == turn_id)
             .map(|t| t.user_text.as_str())
+    }
+
+    /// 回合边界清单：每个 Turn 一个条目（以回合起点段为锚，见
+    /// [`TurnBoundary`]）。供 rewind 回退清单构建、turn sticky 头部计数
+    /// 与单回合视图过滤复用。
+    pub fn turn_boundaries(&self) -> Vec<TurnBoundary> {
+        self.turns
+            .iter()
+            .enumerate()
+            .map(|(i, t)| TurnBoundary {
+                index: i,
+                start: (t.id, 0),
+                summary: Self::first_line_summary(&t.user_text, TURN_TITLE_MAX_CHARS),
+            })
+            .collect()
+    }
+
+    /// 按段 id 定位所属回合序号（`selected_turn` 下标口径）；段不存在
+    /// 返回 None。供单回合视图过滤与锚点定位复用。
+    pub fn turn_index_of(&self, seg: SegId) -> Option<usize> {
+        self.turns.iter().position(|t| t.id == seg.0)
+    }
+
+    /// 生成会话标题：取首条用户消息首行截 60 字符（超长缀 `…`），无回合
+    /// 返回 None。供 WP-A 在首次提交后接线写入 `AppState::session_title`。
+    pub fn session_title(&self) -> Option<String> {
+        let first = self.turns.first()?;
+        Some(Self::first_line_summary(
+            &first.user_text,
+            TURN_TITLE_MAX_CHARS,
+        ))
+    }
+
+    /// 首行摘要：取首行（trim 后）截前 `max_chars` 字符，超出缀 `…`；
+    /// 首行为空时回退到空白折叠后的整体文本。
+    fn first_line_summary(text: &str, max_chars: usize) -> String {
+        let first = text.lines().next().map(str::trim).unwrap_or("");
+        let base = if first.is_empty() {
+            text.split_whitespace().collect::<Vec<_>>().join(" ")
+        } else {
+            first.to_string()
+        };
+        if base.chars().count() > max_chars {
+            let head: String = base.chars().take(max_chars).collect();
+            format!("{head}…")
+        } else {
+            base
+        }
     }
 
     /// 追加一条系统事件段到当前回合（暂停/授权/信息/错误）。
@@ -404,5 +486,51 @@ mod tests {
         assert_eq!(out.text, "done");
         assert!(out.tool_calls.is_empty());
         assert!(out.usage.is_none());
+    }
+
+    #[test]
+    fn turn_boundaries_and_index_of_map_turns() {
+        let mut c = Conversation::default();
+        c.begin_turn("第一个问题\n第二行".into());
+        c.current_mut()
+            .unwrap()
+            .assistant
+            .segments
+            .push(Segment::Text { text: "a".into() });
+        c.begin_turn("第二个问题".into());
+        c.current_mut()
+            .unwrap()
+            .assistant
+            .segments
+            .push(Segment::Text { text: "b".into() });
+        let bounds = c.turn_boundaries();
+        assert_eq!(bounds.len(), 2);
+        assert_eq!(bounds[0].index, 0);
+        assert_eq!(bounds[0].start, (1, 0));
+        assert_eq!(bounds[0].summary, "第一个问题", "首行摘要取首行");
+        assert_eq!(bounds[1].index, 1);
+        assert_eq!(bounds[1].start, (2, 0));
+        assert_eq!(bounds[1].summary, "第二个问题");
+        // 按段 id 定位所属回合序号（selected_turn 下标口径）。
+        assert_eq!(c.turn_index_of((1, 3)), Some(0));
+        assert_eq!(c.turn_index_of((2, 0)), Some(1));
+        assert_eq!(c.turn_index_of((99, 0)), None);
+    }
+
+    #[test]
+    fn session_title_truncates_first_line_at_60() {
+        let mut c = Conversation::default();
+        assert_eq!(c.session_title(), None, "空会话无标题");
+        let long = format!("开始{}", "x".repeat(70));
+        c.begin_turn(long.clone());
+        assert_eq!(
+            c.session_title(),
+            Some(format!("开始{}…", "x".repeat(58))),
+            "72 字符首行截 60 并缀省略号"
+        );
+        // 多行输入只取首行。
+        let mut c2 = Conversation::default();
+        c2.begin_turn("首行\n次行".into());
+        assert_eq!(c2.session_title(), Some("首行".into()));
     }
 }

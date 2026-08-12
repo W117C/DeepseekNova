@@ -23,6 +23,32 @@ pub enum Key {
     PressEscAgain,
     /// 复制时无选中消息。
     NoSelectedMessage,
+    /// grok 对齐：idle 非空 prompt 时 Esc Esc 清空输入提示。
+    PressEscClearPrompt,
+    /// grok 对齐：bash 模式提示（`!` 前缀，提交执行 shell 命令）。
+    BashModeNotice,
+    /// grok 对齐：多行模式开启提示。
+    MultilineOn,
+    /// grok 对齐：多行模式关闭提示。
+    MultilineOff,
+    /// grok 对齐：prompt placeholder（空输入时灰色示例文案）。
+    PromptPlaceholder,
+    /// grok 对齐：对话内搜索条 placeholder。
+    SearchPlaceholder,
+    /// grok 对齐：历史搜索浮层 placeholder。
+    HistorySearchPlaceholder,
+    /// grok 对齐：rewind 浮层标题。
+    RewindTitle,
+    /// grok 对齐：turn 视图标签（全部回合）。
+    TurnViewAll,
+    /// grok 对齐：turn 视图标签（单回合）。
+    TurnViewSingle,
+    /// grok 对齐：快捷键速查表标题（`?`）。
+    ShortcutsTitle,
+    /// grok 对齐：设置面板标题（预留）。
+    SettingsTitle,
+    /// grok 对齐：vim 双键序列等待提示。
+    VimChordNotice,
     /// 剪贴板不可用时回显提示（`{text}` 为消息正文）。
     ClipboardUnavailable,
     /// 折叠模式：默认。
@@ -33,6 +59,18 @@ pub enum Key {
     FoldAllOpen,
     /// 折叠模式：混合。
     FoldMixed,
+    /// 折叠策略：auto（智能默认）。
+    FoldPolicyAuto,
+    /// 折叠策略：open（全部默认展开）。
+    FoldPolicyOpen,
+    /// 折叠策略：compact（推理与工具默认折叠）。
+    FoldPolicyCompact,
+    /// 全屏模式已开启提示。
+    FullscreenOn,
+    /// 全屏模式已关闭提示。
+    FullscreenOff,
+    /// 侧边栏宽度提示（`{n}` 为当前列数）。
+    SidebarWidthNotice,
     /// 显示模式：normal。
     DisplayModeNormal,
     /// 显示模式：lite。
@@ -91,6 +129,12 @@ pub enum Key {
     CmdQuitDesc,
     /// /workspace 命令描述。
     CmdWorkspaceDesc,
+    /// /jump 命令描述（跳转到指定回合）。
+    CmdJumpDesc,
+    /// /jump 成功提示（`{n}` 目标回合、`{total}` 总回合数）。
+    JumpedTo,
+    /// /jump 参数不合法提示（`{total}` 总回合数）。
+    JumpUsage,
     /// /workspace 输出：工作区头（`{path}`、`{branch}`）。
     WorkspaceHeader,
     /// 工作区头（无 git 分支）。
@@ -343,6 +387,8 @@ pub enum Key {
     FoldedReasoning,
     /// 推理折叠摘要含首句预览（`{n}`、`{preview}`）。
     FoldedReasoningPreview,
+    /// Truncated 截断态余量提示（`{n}` 剩余字符数）。
+    FoldedMore,
     /// 工具折叠摘要（`{name}`）。
     FoldedTool,
     /// 通用折叠摘要。
@@ -367,6 +413,14 @@ pub enum Key {
     WelcomeNoProvider,
     /// 欢迎区「API key 缺失」警示。
     WelcomeNoApiKey,
+    /// 全屏欢迎屏菜单：开始新对话。
+    WelcomeMenuNew,
+    /// 全屏欢迎屏菜单：恢复会话。
+    WelcomeMenuResume,
+    /// 全屏欢迎屏菜单：命令面板。
+    WelcomeMenuPalette,
+    /// 全屏欢迎屏菜单：帮助。
+    WelcomeMenuHelp,
     /// 状态行「未配置 provider」短标记。
     StatusNoProvider,
     /// 状态行「API key 缺失」短标记。
@@ -437,6 +491,12 @@ pub enum Key {
     ToolActivityHeader,
     /// 工具计数行（`{name_col}`、`{n}`、`{suffix}`）。
     ToolCallCountLine,
+    /// Tasks 面板标题（`{n}` 为进行中任务数）。
+    TasksHeader,
+    /// Tasks 面板空态：无进行中任务。
+    TasksNoRunning,
+    /// Tasks 面板工具行（`{name}`）。
+    TasksToolRow,
     /// 会话成本（`{cost}`）。
     SessionCost,
     /// 成本不可用。
@@ -591,11 +651,30 @@ impl Key {
             // 会话/角色
             PressEscAgain => "Press Esc again to exit",
             NoSelectedMessage => "No message selected (use j/k to select)",
+            PressEscClearPrompt => "Press Esc again to clear input",
+            BashModeNotice => "bash mode: type a shell command, Enter to run",
+            MultilineOn => "Multiline mode: on (Enter = newline)",
+            MultilineOff => "Multiline mode: off",
+            PromptPlaceholder => "Build anything",
+            SearchPlaceholder => "Search conversation…",
+            HistorySearchPlaceholder => "Search history…",
+            RewindTitle => "Rewind",
+            TurnViewAll => "all turns",
+            TurnViewSingle => "single turn",
+            ShortcutsTitle => "Keyboard Shortcuts",
+            SettingsTitle => "Settings",
+            VimChordNotice => "vim: awaiting second key",
             ClipboardUnavailable => "📋 {text} (clipboard unavailable, echoed instead)",
             FoldDefault => "default",
             FoldAllFolded => "all folded",
             FoldAllOpen => "all open",
             FoldMixed => "mixed",
+            FoldPolicyAuto => "auto",
+            FoldPolicyOpen => "open",
+            FoldPolicyCompact => "compact",
+            FullscreenOn => "Fullscreen mode: on",
+            FullscreenOff => "Fullscreen mode: off",
+            SidebarWidthNotice => "Sidebar width: {n}",
             DisplayModeNormal => "normal (full)",
             DisplayModeLite => "lite (hide reasoning)",
             DisplayModeRaw => "raw (typed prefix)",
@@ -624,10 +703,13 @@ impl Key {
             CmdMcpDesc => "List configured MCP servers (live status)",
             CmdUndoDesc => "Roll back snapshots (all/list)",
             CmdRawDesc => "Cycle display mode (normal/lite/raw)",
-            CmdFoldDesc => "Fold control (all/none/reset)",
+            CmdFoldDesc => "Fold control (all/none/reset/auto/open/compact)",
             CmdCopyDesc => "Copy the selected message",
             CmdQuitDesc => "Quit TUI",
             CmdWorkspaceDesc => "Show current workspace & available worktrees",
+            CmdJumpDesc => "Jump to a turn (e.g. /jump 3)",
+            JumpedTo => "Jumped to turn {n} / {total}",
+            JumpUsage => "Usage: /jump <n> (1..={total})",
             WorkspaceHeader => "Workspace: {path} ({branch})",
             WorkspaceNoBranch => "Workspace: {path} (no git)",
             WorkspaceSessions => "Saved sessions: {n}",
@@ -737,8 +819,8 @@ impl Key {
             FoldedAll => "All messages folded (current: {state})",
             ExpandedAll => "All messages expanded (current: {state})",
             FoldReset => "Fold state reset (smart default)",
-            FoldUsage => "Usage: /fold all | none | reset",
-            FoldUnknownArg => "Unknown argument: {arg} (all|none|reset)",
+            FoldUsage => "Usage: /fold all | none | reset | auto | open | compact",
+            FoldUnknownArg => "Unknown argument: {arg} (all|none|reset|auto|open|compact)",
             EffortMissing => "No effort level provided",
             EffortUnknown => "Unknown effort level: '{effort}'",
 
@@ -759,6 +841,7 @@ impl Key {
             VerificationWithSummary => "{mark} Verify: {command} — {summary}",
             FoldedReasoning => "[reasoning ▸ folded {n} chars · Enter to expand]",
             FoldedReasoningPreview => "[reasoning ▸ folded {n} chars · \"{preview}\" · Enter to expand]",
+            FoldedMore => "…{n} more · Enter to expand",
             FoldedTool => "[tool ▸ {name} folded · Enter to expand]",
             FoldedGeneric => "[folded · Enter to expand]",
             ThinkingWait => "{frame} {verb}… ({secs}s · Ctrl+C to cancel)",
@@ -771,6 +854,10 @@ impl Key {
             WelcomeCwd => "cwd: {path}",
             WelcomeNoProvider => "⚠ No AI provider configured — run `deepseeknova-cli setup` to get started",
             WelcomeNoApiKey => "⚠ API key missing — run `deepseeknova-cli setup` or export the key",
+            WelcomeMenuNew => "Start a new chat",
+            WelcomeMenuResume => "Resume a saved session",
+            WelcomeMenuPalette => "Open the command palette",
+            WelcomeMenuHelp => "Show help and all commands",
             StatusNoProvider => "no-provider",
             StatusNoApiKey => "no-api-key",
             HelpTitle => "  Help · Keybindings",
@@ -809,6 +896,9 @@ impl Key {
             NoToolCalls => " (no tool calls yet)",
             ToolActivityHeader => " Tool activity · {n} tools",
             ToolCallCountLine => " {name_col} {n} calls  [{suffix}]",
+            TasksHeader => " Tasks · {n} running",
+            TasksNoRunning => " No running tasks",
+            TasksToolRow => " ⚙ {name}…",
             SessionCost => " Session cost: ${cost}",
             CostUnavailable => " Cost unavailable (no router)",
             UsageBrief => " ↑{up} ↓{down} Σ{total}",
@@ -893,11 +983,30 @@ impl Key {
             // 会话/角色
             PressEscAgain => "再按 Esc 退出",
             NoSelectedMessage => "没有选中的消息（先 j/k 选中）",
+            PressEscClearPrompt => "再按 Esc 清空输入",
+            BashModeNotice => "bash 模式: 输入 shell 命令，Enter 执行",
+            MultilineOn => "多行模式: 已开启（Enter 换行）",
+            MultilineOff => "多行模式: 已关闭",
+            PromptPlaceholder => "输入任务，构建任何东西",
+            SearchPlaceholder => "搜索对话…",
+            HistorySearchPlaceholder => "搜索历史…",
+            RewindTitle => "回退",
+            TurnViewAll => "全部回合",
+            TurnViewSingle => "单回合",
+            ShortcutsTitle => "快捷键",
+            SettingsTitle => "设置",
+            VimChordNotice => "vim: 等待第二键",
             ClipboardUnavailable => "📋 {text}（剪贴板不可用，已回显文本）",
             FoldDefault => "默认",
             FoldAllFolded => "全折叠",
             FoldAllOpen => "全展开",
             FoldMixed => "混合",
+            FoldPolicyAuto => "auto（智能默认）",
+            FoldPolicyOpen => "open（全部展开）",
+            FoldPolicyCompact => "compact（推理与工具折叠）",
+            FullscreenOn => "已进入全屏模式",
+            FullscreenOff => "已退出全屏模式",
+            SidebarWidthNotice => "侧边栏宽度: {n}",
             DisplayModeNormal => "normal（全量）",
             DisplayModeLite => "lite（隐藏推理）",
             DisplayModeRaw => "raw（带类型前缀）",
@@ -926,10 +1035,13 @@ impl Key {
             CmdMcpDesc => "列出已配置 MCP 服务器（实时状态）",
             CmdUndoDesc => "回滚快照（all/list）",
             CmdRawDesc => "切换显示模式（normal/lite/raw）",
-            CmdFoldDesc => "折叠控制（all/none/reset）",
+            CmdFoldDesc => "折叠控制（all/none/reset/auto/open/compact）",
             CmdCopyDesc => "复制当前选中消息",
             CmdQuitDesc => "退出 TUI",
             CmdWorkspaceDesc => "查看当前工作区与可用 worktree",
+            CmdJumpDesc => "跳转到指定回合（如 /jump 3）",
+            JumpedTo => "已跳转到第 {n} / {total} 回合",
+            JumpUsage => "用法: /jump <n>（1..={total}）",
             WorkspaceHeader => "工作区: {path}（{branch}）",
             WorkspaceNoBranch => "工作区: {path}（非 git）",
             WorkspaceSessions => "已保存会话: {n}",
@@ -1035,8 +1147,8 @@ impl Key {
             FoldedAll => "已折叠全部消息（当前: {state}）",
             ExpandedAll => "已展开全部消息（当前: {state}）",
             FoldReset => "已重置折叠态（回智能默认）",
-            FoldUsage => "用法: /fold all | none | reset",
-            FoldUnknownArg => "未知参数: {arg}（all|none|reset）",
+            FoldUsage => "用法: /fold all | none | reset | auto | open | compact",
+            FoldUnknownArg => "未知参数: {arg}（all|none|reset|auto|open|compact）",
             EffortMissing => "未提供 effort 级别",
             EffortUnknown => "未知 effort 级别: '{effort}'",
 
@@ -1056,6 +1168,7 @@ impl Key {
             VerificationWithSummary => "{mark} 验证: {command} — {summary}",
             FoldedReasoning => "[推理 ▸ 折叠 {n} 字符 · Enter 展开]",
             FoldedReasoningPreview => "[推理 ▸ 折叠 {n} 字符 · 「{preview}」· Enter 展开]",
+            FoldedMore => "…{n} 更多 · Enter 展开",
             FoldedTool => "[工具 ▸ {name} 已折叠 · Enter 展开]",
             FoldedGeneric => "[已折叠 · Enter 展开]",
             ThinkingWait => "{frame} {verb}…（{secs}s · Ctrl+C 取消）",
@@ -1068,6 +1181,10 @@ impl Key {
             WelcomeCwd => "工作目录: {path}",
             WelcomeNoProvider => "⚠ 未配置 AI provider — 运行 `deepseeknova-cli setup` 开始配置",
             WelcomeNoApiKey => "⚠ 缺少 API key — 运行 `deepseeknova-cli setup` 或导出环境变量",
+            WelcomeMenuNew => "开始新对话",
+            WelcomeMenuResume => "恢复已保存会话",
+            WelcomeMenuPalette => "打开命令面板",
+            WelcomeMenuHelp => "查看帮助与全部命令",
             StatusNoProvider => "未配置",
             StatusNoApiKey => "缺API key",
             HelpTitle => " 帮助 · 快捷键",
@@ -1105,6 +1222,9 @@ impl Key {
             NoToolCalls => " （暂无工具调用）",
             ToolActivityHeader => " 工具活动 · {n} 种工具",
             ToolCallCountLine => " {name_col} {n} 次  [{suffix}]",
+            TasksHeader => " 任务 · {n} 个进行中",
+            TasksNoRunning => " 暂无进行中任务",
+            TasksToolRow => " ⚙ {name}…",
             SessionCost => " 会话成本: ${cost}",
             CostUnavailable => " 成本不可用（无 router）",
             SidebarCostHint => " 运行 /cost 查看明细",
@@ -1197,11 +1317,30 @@ impl Key {
 pub const ALL_KEYS: &[Key] = &[
     Key::PressEscAgain,
     Key::NoSelectedMessage,
+    Key::PressEscClearPrompt,
+    Key::BashModeNotice,
+    Key::MultilineOn,
+    Key::MultilineOff,
+    Key::PromptPlaceholder,
+    Key::SearchPlaceholder,
+    Key::HistorySearchPlaceholder,
+    Key::RewindTitle,
+    Key::TurnViewAll,
+    Key::TurnViewSingle,
+    Key::ShortcutsTitle,
+    Key::SettingsTitle,
+    Key::VimChordNotice,
     Key::ClipboardUnavailable,
     Key::FoldDefault,
     Key::FoldAllFolded,
     Key::FoldAllOpen,
     Key::FoldMixed,
+    Key::FoldPolicyAuto,
+    Key::FoldPolicyOpen,
+    Key::FoldPolicyCompact,
+    Key::FullscreenOn,
+    Key::FullscreenOff,
+    Key::SidebarWidthNotice,
     Key::DisplayModeNormal,
     Key::DisplayModeLite,
     Key::DisplayModeRaw,
@@ -1228,6 +1367,9 @@ pub const ALL_KEYS: &[Key] = &[
     Key::CmdCopyDesc,
     Key::CmdQuitDesc,
     Key::CmdWorkspaceDesc,
+    Key::CmdJumpDesc,
+    Key::JumpedTo,
+    Key::JumpUsage,
     Key::WorkspaceHeader,
     Key::WorkspaceNoBranch,
     Key::WorkspaceSessions,
@@ -1346,6 +1488,7 @@ pub const ALL_KEYS: &[Key] = &[
     Key::VerificationWithSummary,
     Key::FoldedReasoning,
     Key::FoldedReasoningPreview,
+    Key::FoldedMore,
     Key::FoldedTool,
     Key::FoldedGeneric,
     Key::ThinkingWait,
@@ -1358,6 +1501,10 @@ pub const ALL_KEYS: &[Key] = &[
     Key::WelcomeCwd,
     Key::WelcomeNoProvider,
     Key::WelcomeNoApiKey,
+    Key::WelcomeMenuNew,
+    Key::WelcomeMenuResume,
+    Key::WelcomeMenuPalette,
+    Key::WelcomeMenuHelp,
     Key::StatusNoProvider,
     Key::StatusNoApiKey,
     Key::HelpTitle,
@@ -1390,6 +1537,9 @@ pub const ALL_KEYS: &[Key] = &[
     Key::NoToolCalls,
     Key::ToolActivityHeader,
     Key::ToolCallCountLine,
+    Key::TasksHeader,
+    Key::TasksNoRunning,
+    Key::TasksToolRow,
     Key::SessionCost,
     Key::CostUnavailable,
     Key::UsageBrief,
@@ -1452,4 +1602,7 @@ pub const ALL_KEYS: &[Key] = &[
     Key::ReservedCtrlBackslash,
     Key::ReservedCtrlX,
     Key::ThemeUnknownFallback,
+    Key::SnapshotDiffHeader,
+    Key::NoDiffChanges,
+    Key::DiffFailed,
 ];
