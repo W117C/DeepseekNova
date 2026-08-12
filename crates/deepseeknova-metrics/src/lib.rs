@@ -497,10 +497,10 @@ pub struct ScorecardAggregate {
     pub count: usize,
     /// 各维度的平均值。
     pub avg: ScoreDimensions,
-    /// 四维 overall 的平均值。
+    /// 综合指数（composite）的平均值（加权口径，见 [`composite_index`]）。
     pub avg_overall: f32,
-    /// 平均分最低的维度名（governance/verification/reflection/review）；
-    /// 空输入为 `""`。
+    /// 平均分最低的维度名（governance/verification/reflection/review/
+    /// protocol/composite 六维，固定顺序取首个最小值）；空输入为 `""`。
     pub worst_dimension: String,
 }
 
@@ -568,7 +568,7 @@ pub fn list_scorecards(dir: &Path) -> Vec<Scorecard> {
     cards
 }
 
-/// 聚合多张评分卡：各维均值、overall 均值与平均分最低的维度。
+/// 聚合多张评分卡：各维均值、composite 均值与平均分最低的维度。
 /// 空输入返回全零聚合、`worst_dimension = ""`。
 pub fn aggregate_scorecards(cards: &[Scorecard]) -> ScorecardAggregate {
     let count = cards.len();
@@ -612,14 +612,18 @@ pub fn aggregate_scorecards(cards: &[Scorecard]) -> ScorecardAggregate {
         protocol: sum.protocol / n,
         composite: sum.composite / n,
     };
-    let avg_overall = (avg.governance + avg.verification + avg.reflection + avg.review) / 4.0;
-    // 固定顺序扫描取首个最小值，保证同名维度结果稳定。
+    // 综合指数均值（覆盖 protocol/composite，设计 §7.1 聚合口径：
+    // composite 已含五维加权信息，avg_overall 直接取 composite 均值）。
+    let avg_overall = avg.composite;
+    // 固定顺序扫描六维取首个最小值，保证同名维度结果稳定。
     let mut worst = "governance";
     let mut worst_value = avg.governance;
     for (name, value) in [
         ("verification", avg.verification),
         ("reflection", avg.reflection),
         ("review", avg.review),
+        ("protocol", avg.protocol),
+        ("composite", avg.composite),
     ] {
         if value < worst_value {
             worst = name;
@@ -910,13 +914,42 @@ mod tests {
         assert!((agg.avg.verification - 0.5).abs() < 1e-6);
         assert_eq!(agg.avg.reflection, 0.0);
         assert!((agg.avg.review - 0.5).abs() < 1e-6);
-        assert!((agg.avg_overall - 0.375).abs() < 1e-6);
+        // avg_overall 现为 composite 均值（两卡 composite 显式 0.0 → 0.0）。
+        assert_eq!(agg.avg_overall, 0.0);
         assert_eq!(agg.worst_dimension, "reflection");
         // 空输入：全零 + 空 worst_dimension。
         let empty = aggregate_scorecards(&[]);
         assert_eq!(empty.count, 0);
         assert_eq!(empty.worst_dimension, "");
         assert_eq!(empty.avg_overall, 0.0);
+    }
+
+    #[test]
+    fn aggregate_worst_dimension_surfaces_protocol() {
+        // 六维中 protocol 均值最低 → worst_dimension 必须命中 protocol
+        // （回归：旧实现只扫四维，protocol 维度缺陷在聚合中不可见）。
+        let mk = |id: &str, protocol: f32, composite: f32| Scorecard {
+            session_id: id.to_string(),
+            started_at_ms: 1,
+            dimensions: ScoreDimensions {
+                governance: 1.0,
+                verification: 1.0,
+                reflection: 1.0,
+                review: 1.0,
+                protocol,
+                composite,
+            },
+            first_pass: true,
+            retry_rounds: 0,
+        };
+        let cards = vec![mk("a", 0.2, 0.9), mk("b", 0.4, 0.8)];
+        let agg = aggregate_scorecards(&cards);
+        assert_eq!(agg.count, 2);
+        assert!((agg.avg.protocol - 0.3).abs() < 1e-6);
+        // 其余维均值 1.0，protocol 0.3 为唯一最低 → 扫六维必须命中 protocol。
+        assert_eq!(agg.worst_dimension, "protocol");
+        // avg_overall 为 composite 均值。
+        assert!((agg.avg_overall - 0.85).abs() < 1e-6);
     }
 
     #[test]
