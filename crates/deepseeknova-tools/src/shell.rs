@@ -3,8 +3,10 @@ use deepseeknova_core::{DeepseeknovaError, Tool, ToolContext, ToolSchema};
 use deepseeknova_sandbox::{NoOpSandbox, Sandbox};
 use serde::Deserialize;
 use serde_json::json;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::time::timeout;
 
@@ -158,40 +160,78 @@ impl Tool for ShellTool {
 
         // Windows JobSandbox 覆盖 spawn：CREATE_SUSPENDED → 挂入 Job →
         // 恢复主线程；其余平台走默认 spawn。
-        let child = self.sandbox.spawn(cmd)?;
+        let mut child = self.sandbox.spawn(cmd)?;
 
-        let result = timeout(exec_timeout, child.wait_with_output()).await;
+        let mut out: Vec<u8> = Vec::new();
+        let mut err: Vec<u8> = Vec::new();
 
-        match result {
-            Ok(Ok(output)) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
-
-                if output.status.success() {
-                    Ok(cap_output(stdout.to_string(), max_output))
-                } else {
-                    let code = output.status.code().unwrap_or(-1);
-                    let mut msg = format!("command exited with code {code}");
-                    if !stdout.is_empty() {
-                        msg.push_str(&format!("\nSTDOUT:\n{stdout}"));
-                    }
-                    if !stderr.is_empty() {
-                        msg.push_str(&format!("\nSTDERR:\n{stderr}"));
-                    }
-                    Err(DeepseeknovaError::tool(cap_output(msg, max_output)))
+        // Stream stdout/stderr incrementally, enforcing the output cap. On
+        // overflow the child is killed — never buffer unbounded output (a
+        // command like `yes` could otherwise exhaust memory before the
+        // execution timeout fires).
+        let collect = collect_output(&mut child, max_output, &mut out, &mut err);
+        let (overflow, timed_out) = match timeout(exec_timeout, collect).await {
+            Ok(Ok(ovf)) => {
+                if ovf {
+                    let _ = child.kill().await;
                 }
+                (ovf, false)
             }
-            Ok(Err(e)) => Err(DeepseeknovaError::tool(format!("command failed: {e}"))),
-            Err(_elapsed) => Err(DeepseeknovaError::tool(format!(
+            Ok(Err(e)) => {
+                let _ = child.kill().await;
+                return Err(DeepseeknovaError::tool(format!("command failed: {e}")));
+            }
+            Err(_elapsed) => {
+                let _ = child.kill().await;
+                (false, true)
+            }
+        };
+
+        let status = child
+            .wait()
+            .await
+            .map_err(|e| DeepseeknovaError::tool(format!("command wait failed: {e}")))?;
+
+        if timed_out {
+            return Err(DeepseeknovaError::tool(format!(
                 "command timed out after {:?}",
                 exec_timeout
-            ))),
+            )));
+        }
+
+        let stdout = String::from_utf8_lossy(&out).to_string();
+        let stderr = String::from_utf8_lossy(&err).to_string();
+
+        if status.success() {
+            Ok(cap_output(stdout, max_output, overflow))
+        } else {
+            let code = status.code().unwrap_or(-1);
+            let mut msg = format!("command exited with code {code}");
+            if !stdout.is_empty() {
+                msg.push_str(&format!("\nSTDOUT:\n{stdout}"));
+            }
+            if !stderr.is_empty() {
+                msg.push_str(&format!("\nSTDERR:\n{stderr}"));
+            }
+            Err(DeepseeknovaError::tool(cap_output(
+                msg, max_output, overflow,
+            )))
         }
     }
 }
 
-/// Cap a string to `max` bytes (on a char boundary), appending a truncation note.
-fn cap_output(s: String, max: Option<usize>) -> String {
+/// Cap a string to `max` bytes (on a char boundary), appending a truncation
+/// note. When `overflow` is true the child was killed mid-stream after
+/// exceeding the cap, so the note reports the cap rather than an exact byte
+/// count (the true total is unknowable).
+fn cap_output(s: String, max: Option<usize>, overflow: bool) -> String {
+    if overflow {
+        let note = match max {
+            Some(c) => format!("... [truncated: output exceeded {c}-byte limit]"),
+            None => "... [truncated]".to_string(),
+        };
+        return format!("{s}{note}");
+    }
     match max {
         Some(m) if s.len() > m => {
             let end = s.floor_char_boundary(m);
@@ -199,6 +239,63 @@ fn cap_output(s: String, max: Option<usize>) -> String {
         }
         _ => s,
     }
+}
+
+/// Read one child output stream into `out`, enforcing a shared byte budget
+/// (`counter` tracks bytes across both stdout and stderr). Returns `Ok(true)`
+/// if the budget was exceeded before EOF; only bytes that fit under the
+/// budget are retained.
+async fn drain_stream<R>(
+    mut reader: R,
+    cap: Option<usize>,
+    counter: &Arc<AtomicUsize>,
+    out: &mut Vec<u8>,
+) -> std::io::Result<bool>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = reader.read(&mut buf).await?;
+        if n == 0 {
+            return Ok(false);
+        }
+        let used = counter.fetch_add(n, Ordering::Relaxed);
+        if let Some(c) = cap {
+            if used + n > c {
+                let room = c.saturating_sub(used);
+                out.extend_from_slice(&buf[..room.min(n)]);
+                return Ok(true);
+            }
+        }
+        out.extend_from_slice(&buf[..n]);
+    }
+}
+
+/// Drain a child's stdout/stderr into `out`/`err`, bounding the combined bytes
+/// to `cap` (when `Some`). Returns `Ok(true)` if the cap was exceeded before
+/// EOF; the caller must kill the child.
+async fn collect_output(
+    child: &mut tokio::process::Child,
+    cap: Option<usize>,
+    out: &mut Vec<u8>,
+    err: &mut Vec<u8>,
+) -> std::io::Result<bool> {
+    let counter = Arc::new(AtomicUsize::new(0));
+    let so = child.stdout.take();
+    let se = child.stderr.take();
+
+    let (so_res, se_res) = match (so, se) {
+        (Some(so), Some(se)) => tokio::join!(
+            drain_stream(so, cap, &counter, out),
+            drain_stream(se, cap, &counter, err),
+        ),
+        (Some(so), None) => (drain_stream(so, cap, &counter, out).await, Ok(false)),
+        (None, Some(se)) => (Ok(false), drain_stream(se, cap, &counter, err).await),
+        (None, None) => (Ok(false), Ok(false)),
+    };
+
+    Ok(so_res? || se_res?)
 }
 
 /// Returns (shell, flag) for the current platform.
@@ -224,20 +321,20 @@ mod tests {
     fn cap_output_unchanged_when_no_limit() {
         // 负例：无 SecurityContext 限额时不截断
         let s = "a".repeat(1000);
-        assert_eq!(cap_output(s.clone(), None), s);
+        assert_eq!(cap_output(s.clone(), None, false), s);
     }
 
     #[test]
     fn cap_output_unchanged_when_under_limit() {
         // 负例：未超限时原样返回，不得附加截断标记
-        let out = cap_output("short".to_string(), Some(64));
+        let out = cap_output("short".to_string(), Some(64), false);
         assert_eq!(out, "short");
         assert!(!out.contains("[truncated"));
     }
 
     #[test]
     fn cap_output_truncates_and_notes_bytes() {
-        let out = cap_output("abcdefghij".to_string(), Some(4));
+        let out = cap_output("abcdefghij".to_string(), Some(4), false);
         assert!(out.starts_with("abcd"));
         assert!(out.contains("[truncated 6 bytes]"));
     }
@@ -246,9 +343,16 @@ mod tests {
     fn cap_output_respects_utf8_boundary() {
         // 限额落在多字节字符中间时不得 panic，回退到字符边界
         let s = "中文输出".to_string(); // 每字 3 字节
-        let out = cap_output(s, Some(4));
+        let out = cap_output(s, Some(4), false);
         assert!(out.starts_with('中'));
         assert!(out.contains("[truncated"));
+    }
+
+    #[test]
+    fn cap_output_notes_overflow_without_exact_count() {
+        let out = cap_output("yyyyyyyy".to_string(), Some(64), true);
+        assert!(out.contains("[truncated"), "got: {out}");
+        assert!(out.contains("64-byte limit"), "got: {out}");
     }
 
     // --- execute with SecurityContext-driven limits (unix only) ---
@@ -356,13 +460,48 @@ mod tests {
         let ctx = ctx_with(sec);
 
         // 产生远超 32 字节的输出（直接使用 dd，避免命令替换形态
-        // 引入 shell 组合语义，测试目标只验证输出截断）
-        let out = ShellTool::default()
+        // 引入 shell 组合语义，测试目标只验证输出截断）。
+        // Task 2 新语义：超限即 kill（SIGKILL → code -1），命令以失败状态
+        // 返回；断言验证新契约——无论 Ok/Err，消息必须含截断标记且长度受限。
+        let out = match ShellTool::default()
             .execute(&ctx, r#"{"command":"dd if=/dev/zero bs=1 count=500"}"#)
             .await
-            .expect("命令应成功");
+        {
+            Ok(out) => out,
+            Err(e) => e.to_string(),
+        };
         assert!(out.contains("[truncated"), "got: {out}");
         assert!(out.len() < 500, "输出应被截断，got len {}", out.len());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shell_kills_unbounded_output_at_cap() {
+        let mut sec = SecurityContext::with_safe_defaults();
+        sec.limits.max_output_bytes = 64;
+        sec.limits.max_execution_time = std::time::Duration::from_secs(5);
+        let ctx = ctx_with(sec);
+
+        // `yes` 无限输出。流式 + 超限 kill 必须在 5s 超时前返回并截断，
+        // 而不是全量缓冲到超时。
+        let start = std::time::Instant::now();
+        let res = ShellTool::default()
+            .execute(&ctx, r#"{"command":"yes"}"#)
+            .await;
+        let elapsed = start.elapsed();
+
+        match res {
+            Ok(out) => assert!(out.contains("[truncated"), "got: {out}"),
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(!msg.contains("timed out"), "不得缓冲到超时: {msg}");
+                assert!(msg.contains("[truncated"), "被 kill 后必须截断: {msg}");
+            }
+        }
+        assert!(
+            elapsed.as_secs() < 5,
+            "应在 5s 超时前返回（超限即 kill），实际耗时 {elapsed:?}"
+        );
     }
 
     #[cfg(unix)]
