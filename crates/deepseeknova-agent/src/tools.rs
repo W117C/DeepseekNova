@@ -32,6 +32,7 @@ pub(crate) fn inject_recall(
         tool_call_id: None,
         reasoning_content: None,
         reasoning_signature: None,
+        usage: None,
     });
     true
 }

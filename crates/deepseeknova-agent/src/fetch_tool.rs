@@ -87,6 +87,7 @@ mod tests {
                 tool_call_id: Some("call_1".to_string()),
                 reasoning_content: None,
                 reasoning_signature: None,
+                usage: None,
             });
             // 预算极小：必然截断并缓存完整结果
             mem.shrink_large_results(1);

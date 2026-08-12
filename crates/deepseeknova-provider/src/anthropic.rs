@@ -387,6 +387,7 @@ impl Provider for AnthropicProvider {
                 Some(reasoning)
             },
             reasoning_signature,
+            usage: resp.usage.as_ref().map(|u| u.to_usage()),
         })
     }
 
@@ -637,6 +638,26 @@ struct AnthropicUsage {
 struct AnthropicOutputTokensDetails {
     #[serde(rename = "reasoning_tokens", default)]
     reasoning_tokens: u32,
+}
+
+impl AnthropicUsage {
+    /// 把 Anthropic 原生用量映射为核心 `Usage`，保留 context-cache 读/写与
+    /// 计费推理 token（与流式路径 `AnthropicUsageAcc::to_usage` 口径一致）。
+    fn to_usage(&self) -> Usage {
+        let prompt_tokens =
+            self.input_tokens + self.cache_read_input_tokens + self.cache_creation_input_tokens;
+        Usage {
+            prompt_tokens,
+            completion_tokens: self.output_tokens,
+            total_tokens: prompt_tokens + self.output_tokens,
+            cache_hit_tokens: self.cache_read_input_tokens,
+            cache_miss_tokens: self.cache_creation_input_tokens,
+            reasoning_tokens: self
+                .output_tokens_details
+                .as_ref()
+                .map_or(0, |d| d.reasoning_tokens),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1039,6 +1060,7 @@ mod tests {
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         }];
         let body = provider.build_request(&msgs, &[], false);
         let v = serde_json::to_value(&body).unwrap();
@@ -1068,6 +1090,7 @@ mod tests {
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         }];
         let body = provider.build_request(&msgs, &[], false);
         let v = serde_json::to_value(&body).unwrap();
@@ -1098,6 +1121,7 @@ mod tests {
                 tool_call_id: None,
                 reasoning_content: None,
                 reasoning_signature: None,
+                usage: None,
             },
             Message {
                 role: Role::User,
@@ -1107,6 +1131,7 @@ mod tests {
                 tool_call_id: None,
                 reasoning_content: None,
                 reasoning_signature: None,
+                usage: None,
             },
         ];
 
@@ -1144,6 +1169,7 @@ mod tests {
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         }];
         let body = provider.build_request(&msgs, &[], false);
         let v = serde_json::to_value(&body).unwrap();
@@ -1173,6 +1199,7 @@ mod tests {
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         }];
         let body = provider.build_request(&msgs, &[], false);
         let v = serde_json::to_value(&body).unwrap();
@@ -1204,6 +1231,7 @@ mod tests {
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         }];
         let body = provider.build_request(&msgs, &[], false);
         let v = serde_json::to_value(&body).unwrap();
@@ -1235,6 +1263,7 @@ mod tests {
                 tool_call_id: None,
                 reasoning_content: None,
                 reasoning_signature: None,
+                usage: None,
             },
             Message {
                 role: Role::Assistant,
@@ -1251,6 +1280,7 @@ mod tests {
                 tool_call_id: None,
                 reasoning_content: Some("用户想查杭州天气，需要调用工具。".into()),
                 reasoning_signature: None,
+                usage: None,
             },
             Message {
                 role: Role::Tool,
@@ -1260,6 +1290,7 @@ mod tests {
                 tool_call_id: Some("toolu_abc123".into()),
                 reasoning_content: None,
                 reasoning_signature: None,
+                usage: None,
             },
         ];
 
@@ -1336,6 +1367,7 @@ mod tests {
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         }];
 
         let body = provider.build_request(&msgs, &[], false);
@@ -1373,6 +1405,7 @@ mod tests {
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         }];
 
         let body = provider.build_request(&msgs, &[], false);
@@ -1419,6 +1452,7 @@ mod tests {
             tool_call_id: None,
             reasoning_content: Some("thinking text".into()),
             reasoning_signature: Some("sig-abc123".into()),
+            usage: None,
         }];
 
         let body = provider.build_request(&msgs, &[], false);
@@ -1460,6 +1494,7 @@ mod tests {
             tool_call_id: None,
             reasoning_content: Some("plain reasoning".into()),
             reasoning_signature: None,
+            usage: None,
         }];
 
         let body = provider.build_request(&msgs, &[], false);
@@ -1737,6 +1772,7 @@ mod tests {
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         }];
         let tool_refs: Vec<&dyn Tool> = Vec::new();
         let validated = ValidatedRequest::new(&msgs, &tool_refs).unwrap();
@@ -1810,6 +1846,7 @@ mod tests {
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         }];
         let tool_refs: Vec<&dyn Tool> = Vec::new();
         let validated = ValidatedRequest::new(&msgs, &tool_refs).unwrap();

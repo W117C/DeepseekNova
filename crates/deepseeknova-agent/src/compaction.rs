@@ -86,6 +86,7 @@ impl L3Compactor {
                         tool_call_id: None,
                         reasoning_content: None,
                         reasoning_signature: None,
+                        usage: None,
                     });
                 }
                 // 状态重建②（B3）：保留最近 N 个完整 turn（原子单元），而非
@@ -245,6 +246,7 @@ async fn summarize_with_prefix(
         tool_call_id: None,
         reasoning_content: None,
         reasoning_signature: None,
+        usage: None,
     });
     let validated = ValidatedRequest::new(&msgs, &[]).map_err(|violations| {
         DeepseeknovaError::runner(format!(
@@ -275,6 +277,7 @@ mod tests {
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         }
     }
 

@@ -22,6 +22,7 @@ impl deepseeknova_provider::Provider for StubProvider {
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         })
     }
 }
@@ -49,6 +50,7 @@ impl deepseeknova_provider::Provider for EmptyProvider {
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         })
     }
 }

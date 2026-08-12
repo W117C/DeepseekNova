@@ -171,6 +171,7 @@ fn build_planning_prompt(goal: &str, read_only_tools: &[&dyn Tool]) -> Vec<Messa
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         },
         Message {
             role: Role::User,
@@ -180,6 +181,7 @@ fn build_planning_prompt(goal: &str, read_only_tools: &[&dyn Tool]) -> Vec<Messa
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         },
     ]
 }
@@ -698,6 +700,7 @@ impl ThinkCallback for CoordinatorCallbacks {
                 tool_call_id: None,
                 reasoning_content: Some(reasoning.clone()),
                 reasoning_signature: None,
+                usage: None,
             });
         }
         let mut content = prompt.to_string();
@@ -719,6 +722,7 @@ impl ThinkCallback for CoordinatorCallbacks {
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         });
         let validated =
             deepseeknova_provider::ValidatedRequest::new(&messages, &[]).map_err(|violations| {
@@ -807,6 +811,7 @@ impl ReflectCallback for CoordinatorCallbacks {
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         }];
 
         let validated =

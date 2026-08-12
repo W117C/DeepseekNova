@@ -68,6 +68,7 @@ fn token_estimate_scales_with_content() {
         tool_call_id: None,
         reasoning_content: None,
         reasoning_signature: None,
+        usage: None,
     }];
     let tokens = estimate_tokens(&msgs);
     assert!(tokens > 0);
@@ -1705,6 +1706,7 @@ async fn recall_injects_volatile_and_keeps_system_prefix() {
                 tool_call_id: None,
                 reasoning_content: None,
                 reasoning_signature: None,
+                usage: None,
             })
         }
         async fn stream(
@@ -1869,6 +1871,7 @@ impl deepseeknova_provider::Provider for SeqProvider {
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         })
     }
     async fn stream(
@@ -2649,6 +2652,7 @@ async fn mid_run_retrieval_injects_on_seeded_tool_turn() {
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         },
         Message {
             role: Role::Assistant,
@@ -2665,6 +2669,7 @@ async fn mid_run_retrieval_injects_on_seeded_tool_turn() {
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         },
         Message {
             role: Role::Tool,
@@ -2674,6 +2679,7 @@ async fn mid_run_retrieval_injects_on_seeded_tool_turn() {
             tool_call_id: Some("x1".into()),
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         },
     ]));
     let provider = Arc::new(MockProvider::text("done"));

@@ -45,6 +45,9 @@ pub struct Message {
     /// `None`，回放时不带 signature 字段。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_signature: Option<String>,
+    /// 本次消息生成对应的 token 用量（非流式回填；瞬态记账用，不进序列化）。
+    #[serde(skip)]
+    pub usage: Option<crate::chunk::Usage>,
 }
 
 impl Message {

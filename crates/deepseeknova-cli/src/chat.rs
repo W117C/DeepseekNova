@@ -466,6 +466,7 @@ where
                                 tool_call_id: None,
                                 reasoning_content: None,
                                 reasoning_signature: None,
+                                usage: None,
                             },
                             Message {
                                 role: Role::Assistant,
@@ -475,6 +476,7 @@ where
                                 tool_call_id: None,
                                 reasoning_content: None,
                                 reasoning_signature: None,
+                                usage: None,
                             },
                         ];
                         let stored_input = RunInput {

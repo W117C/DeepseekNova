@@ -113,6 +113,7 @@ pub async fn run_llm_distill(
         tool_call_id: None,
         reasoning_content: None,
         reasoning_signature: None,
+        usage: None,
     }];
     let validated = match ValidatedRequest::new(&msgs, &[]) {
         Ok(v) => v,
@@ -305,6 +306,7 @@ mod tests {
                 tool_call_id: None,
                 reasoning_content: None,
                 reasoning_signature: None,
+                usage: None,
             })
         }
     }

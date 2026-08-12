@@ -1082,6 +1082,7 @@ impl Agent {
                     tool_call_id: None,
                     reasoning_content: None,
                     reasoning_signature: None,
+                    usage: None,
                 });
             }
 

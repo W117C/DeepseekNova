@@ -309,7 +309,9 @@ impl Provider for OpenAIProvider {
             .next()
             .ok_or(ProviderError::NoChoices)?;
 
-        Ok(choice.message)
+        let mut message = choice.message;
+        message.usage = resp_body.usage.as_ref().map(|u| u.to_usage());
+        Ok(message)
     }
 
     async fn stream(
@@ -679,6 +681,7 @@ mod tests {
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         }
     }
 
@@ -1275,6 +1278,7 @@ data: [DONE]
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         };
         let tool_refs: Vec<&dyn Tool> = Vec::new();
         let messages = [msg];
@@ -1372,6 +1376,7 @@ data: [DONE]
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         };
         let tool_refs: Vec<&dyn Tool> = Vec::new();
         let messages = [msg];

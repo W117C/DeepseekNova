@@ -140,6 +140,7 @@ mod tests {
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         };
         assert!(adversarial_review_needed(&[], &[msg]));
     }
@@ -161,6 +162,7 @@ mod tests {
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         };
         assert!(!adversarial_review_needed(&[], &[msg]));
     }
@@ -185,6 +187,7 @@ mod tests {
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         };
         // bash 无 marker → 不触发。
         assert!(!adversarial_review_needed(

@@ -222,7 +222,8 @@ fn row_cost(b: &UsageBucket, p: &ModelPrices) -> Option<f64> {
 
 /// Wraps a [`Provider`] and records usage under a fixed (role, model) into a
 /// shared [`CostLedger`]. Streaming calls are metered from `Chunk::Usage`;
-/// `generate` calls are counted as unmetered (no usage on `Message`).
+/// non-streaming `generate` calls are metered from the returned
+/// `Message.usage`（provider 已回填），缺用量时记为未计量。
 pub struct MeteredProvider {
     inner: Arc<dyn Provider>,
     role: ModelRole,
@@ -255,7 +256,11 @@ impl Provider for MeteredProvider {
         validated: ValidatedRequest<'_>,
     ) -> Result<Message, deepseeknova_core::DeepseeknovaError> {
         let out = self.inner.generate(validated).await?;
-        self.ledger.record_unmetered(self.role, &self.model);
+        if let Some(ref u) = out.usage {
+            self.ledger.record(self.role, &self.model, u);
+        } else {
+            self.ledger.record_unmetered(self.role, &self.model);
+        }
         Ok(out)
     }
 
@@ -477,6 +482,7 @@ mod tests {
                     tool_call_id: None,
                     reasoning_content: None,
                     reasoning_signature: None,
+                    usage: None,
                 })
             }
             async fn stream(
@@ -501,6 +507,7 @@ mod tests {
             tool_call_id: None,
             reasoning_content: None,
             reasoning_signature: None,
+            usage: None,
         }];
 
         // 带 Usage 的流 → 记账
@@ -533,6 +540,87 @@ mod tests {
         let mut s = p.stream(v).await.unwrap();
         while s.next().await.is_some() {}
         drop(s);
+        assert_eq!(ledger.report(&PriceTable::new()).unmetered_calls, 1);
+    }
+
+    #[tokio::test]
+    async fn metered_provider_generate_records_usage() {
+        use deepseeknova_core::{Message, Role};
+        use std::sync::Arc;
+
+        struct GenerateProvider {
+            with_usage: bool,
+        }
+        #[async_trait::async_trait]
+        impl crate::Provider for GenerateProvider {
+            async fn generate(
+                &self,
+                _v: crate::ValidatedRequest<'_>,
+            ) -> Result<Message, deepseeknova_core::DeepseeknovaError> {
+                Ok(Message {
+                    role: Role::Assistant,
+                    content: "ok".into(),
+                    name: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                    reasoning_signature: None,
+                    usage: if self.with_usage {
+                        Some(usage(10, 4, 6))
+                    } else {
+                        None
+                    },
+                })
+            }
+            async fn stream(
+                &self,
+                _v: crate::ValidatedRequest<'_>,
+            ) -> Result<deepseeknova_core::chunk::ChunkStream, deepseeknova_core::DeepseeknovaError>
+            {
+                Err(deepseeknova_core::DeepseeknovaError::provider(
+                    "stream not used in this test".to_string(),
+                ))
+            }
+        }
+
+        let msgs = vec![Message {
+            role: Role::User,
+            content: "hi".into(),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            reasoning_signature: None,
+            usage: None,
+        }];
+
+        // generate 回填 usage → 记账
+        let ledger = Arc::new(CostLedger::new());
+        let p = MeteredProvider::new(
+            Arc::new(GenerateProvider { with_usage: true }),
+            ModelRole::Main,
+            "big",
+            Arc::clone(&ledger),
+        );
+        let v = crate::ValidatedRequest::new(&msgs, &[]).unwrap();
+        let out = p.generate(v).await.unwrap();
+        assert_eq!(out.usage.as_ref().unwrap().prompt_tokens, 10);
+        let report = ledger.report(&PriceTable::new());
+        assert_eq!(report.rows[0].bucket.prompt_tokens, 10);
+        assert_eq!(report.rows[0].bucket.completion_tokens, 4);
+        assert_eq!(report.rows[0].bucket.metered_calls, 1);
+        assert_eq!(report.unmetered_calls, 0);
+
+        // generate 无 usage → 未计量
+        let ledger = Arc::new(CostLedger::new());
+        let p = MeteredProvider::new(
+            Arc::new(GenerateProvider { with_usage: false }),
+            ModelRole::Main,
+            "big",
+            Arc::clone(&ledger),
+        );
+        let v = crate::ValidatedRequest::new(&msgs, &[]).unwrap();
+        p.generate(v).await.unwrap();
         assert_eq!(ledger.report(&PriceTable::new()).unmetered_calls, 1);
     }
 }

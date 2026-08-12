@@ -249,6 +249,7 @@ pub(crate) async fn run_llm_verify_pass(
                 tool_call_id: None,
                 reasoning_content: None,
                 reasoning_signature: None,
+                usage: None,
             }];
             async move {
                 let validated = match ValidatedRequest::new(&msgs, &[]) {
@@ -506,6 +507,7 @@ mod tests {
                 tool_call_id: None,
                 reasoning_content: None,
                 reasoning_signature: None,
+                usage: None,
             })
         }
     }

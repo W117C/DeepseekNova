@@ -151,6 +151,7 @@ pub async fn run_attribution(
         tool_call_id: None,
         reasoning_content: None,
         reasoning_signature: None,
+        usage: None,
     }];
     let validated = match ValidatedRequest::new(&msgs, &[]) {
         Ok(v) => v,
@@ -338,6 +339,7 @@ mod tests {
                 tool_call_id: None,
                 reasoning_content: None,
                 reasoning_signature: None,
+                usage: None,
             })
         }
     }
