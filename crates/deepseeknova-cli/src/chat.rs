@@ -3,6 +3,7 @@ use deepseeknova_core::runner::{RunEvent, RunInput, Runner};
 use deepseeknova_core::{DeepseeknovaError, Message, Role};
 use deepseeknova_provider::factory::ReasoningEffort;
 use deepseeknova_store::{SessionStore, StoredOutput};
+use deepseeknova_tui::{McpProbe, McpServerInfo, McpStatus, UndoController};
 use std::collections::HashMap;
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::PathBuf;
@@ -131,6 +132,22 @@ enum SlashAction {
         effort: Option<ReasoningEffort>,
         model: Option<String>,
     },
+}
+
+/// REPL 斜杠命令扩展能力：`/undo` 撤销控制器与 `/mcp status` 连接探测。
+///
+/// 由 CLI 在启动时按配置构建（与 TUI 路径同一数据源），注入
+/// [`run_chat_repl`]。字段为 `Option` 以兼容「未启用」场景（无 checkpoint
+/// 配置 / 无 MCP 服务器 / 无探测器）。`undo` 与 `mcp_probe` 用 `Arc` 包装
+/// 以便跨 `/new` 循环共享（trait 对象不可 `Clone`，但 `Arc` 可）。
+#[derive(Clone, Default)]
+pub struct ReplCaps {
+    /// `/undo` 撤销控制器（与 `checkpoint` 子命令共用同一快照库）。
+    pub undo: Option<std::sync::Arc<dyn UndoController>>,
+    /// `/mcp status` 展示的已启用 MCP server。
+    pub mcp_servers: Vec<McpServerInfo>,
+    /// `/mcp status` 实时连接探测器。
+    pub mcp_probe: Option<std::sync::Arc<dyn McpProbe>>,
 }
 
 /// Run an interactive chat REPL session with rich slash commands.
@@ -918,6 +935,52 @@ fn parse_effort_command(args: &str) -> Result<ReasoningEffort, String> {
         .ok_or_else(|| format!("unknown effort level: '{trimmed}'"))
 }
 
+/// `/undo` 的子命令：空参数 → 回退一条；`all`/`list`/`diff` → 对应操作；
+/// 其他 → 未知参数（携带原字符串供提示）。
+#[derive(Debug)]
+enum UndoSubcommand {
+    /// 回退最近一个快照。
+    RollbackOne,
+    /// 回退全部快照。
+    RollbackAll,
+    /// 列出可回退快照。
+    List,
+    /// 展示内容级 diff。
+    Diff,
+    /// 未知参数（携带原字符串）。
+    Unknown(String),
+}
+
+/// 解析 `/undo` 的参数为 [`UndoSubcommand`]，与 TUI `/undo` 同语义
+/// （空 / `all` / `list` / `diff`，其余报未知参数）。
+fn parse_undo_args(args: &str) -> UndoSubcommand {
+    match args.trim() {
+        "" => UndoSubcommand::RollbackOne,
+        "all" => UndoSubcommand::RollbackAll,
+        "list" => UndoSubcommand::List,
+        "diff" => UndoSubcommand::Diff,
+        other => UndoSubcommand::Unknown(other.to_string()),
+    }
+}
+
+/// 把 `/mcp status` 的探测结果格式化成展示行（与 TUI 词表同文案口径）。
+///
+/// `statuses` 与 `servers` 按下标一一对应；`statuses` 缺失下标（探测器
+/// 未提供该 server 状态）时仅列名。
+fn format_mcp_status_lines(servers: &[McpServerInfo], statuses: &[McpStatus]) -> Vec<String> {
+    servers
+        .iter()
+        .enumerate()
+        .map(|(i, server)| match statuses.get(i) {
+            Some(McpStatus::Connected) => format!("  • {} — ✓ connected", server.name),
+            Some(McpStatus::Disconnected(reason)) => {
+                format!("  • {} — ✗ disconnected ({reason})", server.name)
+            }
+            None => format!("  • {}", server.name),
+        })
+        .collect()
+}
+
 /// 校验用户输入可安全作为会话 id 使用（防 `/resume` 路径越界读写）。
 fn validated_session_id(input: &str) -> Result<String, DeepseeknovaError> {
     let id = input.trim();
@@ -1363,5 +1426,54 @@ mod tests {
             .find(|(id, _, _, _)| id == "chat-b")
             .expect("chat-b 在列表中");
         assert_eq!(b.2, None, "未命名会话 title 为 None");
+    }
+
+    // ── parse_undo_args（/undo 参数分发）──────────────────────────────
+
+    #[test]
+    fn parse_undo_args_dispatch() {
+        assert!(matches!(parse_undo_args(""), UndoSubcommand::RollbackOne));
+        assert!(matches!(parse_undo_args("  "), UndoSubcommand::RollbackOne));
+        assert!(matches!(
+            parse_undo_args("all"),
+            UndoSubcommand::RollbackAll
+        ));
+        assert!(matches!(parse_undo_args("list"), UndoSubcommand::List));
+        assert!(matches!(parse_undo_args("diff"), UndoSubcommand::Diff));
+        match parse_undo_args("bogus") {
+            UndoSubcommand::Unknown(arg) => assert_eq!(arg, "bogus"),
+            other => panic!("expected Unknown, got {other:?}"),
+        }
+    }
+
+    // ── format_mcp_status_lines（/mcp status 展示行）─────────────────
+
+    #[test]
+    fn format_mcp_status_lines_maps_statuses() {
+        let servers = vec![
+            McpServerInfo {
+                name: "a".into(),
+                command: "x".into(),
+                args: vec![],
+            },
+            McpServerInfo {
+                name: "b".into(),
+                command: "y".into(),
+                args: vec![],
+            },
+            McpServerInfo {
+                name: "c".into(),
+                command: "z".into(),
+                args: vec![],
+            },
+        ];
+        let statuses = vec![
+            McpStatus::Connected,
+            McpStatus::Disconnected("exit 1".into()),
+        ];
+        let lines = format_mcp_status_lines(&servers, &statuses);
+        assert_eq!(lines[0], "  • a — ✓ connected");
+        assert_eq!(lines[1], "  • b — ✗ disconnected (exit 1)");
+        assert_eq!(lines[2], "  • c", "statuses 缺失下标 → 仅列名");
     }
 }
