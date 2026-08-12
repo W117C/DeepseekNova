@@ -509,11 +509,12 @@ fn validate_plan_tool_boundary(
 }
 
 /// Recursively check one node action against the read-only allowlist:
-/// a `CallTool` must name a registered read-only tool, and every
-/// `Action::Parallel` child is checked the same way (the executor runs
-/// nested children, so they are in scope of the boundary — a mutating tool
-/// smuggled inside a parallel node must be rejected just like a top-level
-/// one).
+/// a `CallTool` must name a registered read-only tool, and nested nodes
+/// (both `Action::Parallel` children and `Action::Conditional` then/else
+/// branches) are checked the same way — the executor runs those nested
+/// nodes, so they are in scope of the boundary. A mutating tool smuggled
+/// inside a parallel or conditional node must be rejected just like a
+/// top-level one.
 fn check_node_action(
     id: &str,
     action: &Action,
@@ -533,7 +534,17 @@ fn check_node_action(
                 check_node_action(&child.id, &child.action, allowed)?;
             }
         }
-        _ => {}
+        Action::Conditional { then, r#else, .. } => {
+            check_node_action(&then.id, &then.action, allowed)?;
+            if let Some(else_node) = r#else {
+                check_node_action(&else_node.id, &else_node.action, allowed)?;
+            }
+        }
+        // Leaf actions that cannot contain tool calls or nested nodes: no-op.
+        Action::Think { .. }
+        | Action::Observe { .. }
+        | Action::Reflect { .. }
+        | Action::Delegate { .. } => {}
     }
     Ok(())
 }
@@ -1016,6 +1027,30 @@ mod tests {
 
         let err = validate_plan_tool_boundary(&graph, &read_only)
             .expect_err("non-read-only tool nested in Parallel must fail closed");
+        assert!(err.to_string().contains("bash"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_plan_tool_boundary_blocks_non_read_only_tool_in_conditional() {
+        let mut graph = ExecutionGraph::new("a".to_string());
+        graph.add_node(ExecutionNode::new(
+            "a",
+            Action::Conditional {
+                condition: "x".to_string(),
+                then: Box::new(ExecutionNode::new(
+                    "t",
+                    Action::CallTool {
+                        tool: "bash".to_string(),
+                        args: serde_json::Value::Null,
+                    },
+                )),
+                r#else: None,
+            },
+        ));
+        let read_only: Vec<Arc<dyn Tool>> = vec![Arc::new(NamedTool { name: "grep" })];
+
+        let err = validate_plan_tool_boundary(&graph, &read_only)
+            .expect_err("non-read-only tool nested in Conditional must fail closed");
         assert!(err.to_string().contains("bash"), "got: {err}");
     }
 
