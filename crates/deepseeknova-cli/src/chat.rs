@@ -162,12 +162,16 @@ pub struct ReplCaps {
 ///
 /// When `router` is `Some`, the `/model use` (role-pointer hot switch) and
 /// `/cost` (token/price report) commands become available.
+///
+/// `caps` 提供 `/undo`（checkpoint 撤销）与 `/mcp status`（MCP 连接探测）
+/// 所需能力；为 `None`/空的字段表示对应功能不可用，命令会降级提示。
 pub async fn run_chat_repl<F>(
     agent_factory: F,
     baseline_effort: ReasoningEffort,
     initial_model: Option<String>,
     mut persist: Option<ChatPersistence>,
     router: Option<std::sync::Arc<deepseeknova_provider::router::ModelRouter>>,
+    caps: ReplCaps,
 ) -> Result<bool, deepseeknova_core::DeepseeknovaError>
 where
     F: Fn(
@@ -269,6 +273,7 @@ where
                 &mut current_model,
                 persist.as_mut(),
                 router.as_ref(),
+                &caps,
             )
             .await?;
             match action {
@@ -533,6 +538,7 @@ async fn handle_slash_command(
     current_model: &mut Option<String>,
     persist: Option<&mut ChatPersistence>,
     router: Option<&std::sync::Arc<deepseeknova_provider::router::ModelRouter>>,
+    caps: &ReplCaps,
 ) -> Result<SlashAction, deepseeknova_core::DeepseeknovaError> {
     // Split command and optional arguments
     let (name, args) = cmd.split_once(' ').unwrap_or((cmd, ""));
@@ -782,13 +788,36 @@ async fn handle_slash_command(
 
         // ── MCP status ────────────────────────────────────────
         "mcp" => {
-            println!("MCP servers are configured in deepseeknova.toml:");
-            println!("  [[mcp_servers]]");
-            println!("  name = \"my-server\"");
-            println!("  command = \"npx\"");
-            println!("  args = [\"-y\", \"@modelcontextprotocol/server-filesystem\"]");
-            println!();
-            println!("Use /mcp status to check connected servers (coming soon).");
+            let sub = args.trim();
+            if sub.is_empty() {
+                println!("MCP servers are configured in deepseeknova.toml:");
+                println!("  [[mcp_servers]]");
+                println!("  name = \"my-server\"");
+                println!("  command = \"npx\"");
+                println!("  args = [\"-y\", \"@modelcontextprotocol/server-filesystem\"]");
+                println!();
+                println!("Use /mcp status to check connected servers.");
+            } else if sub == "status" {
+                if caps.mcp_servers.is_empty() {
+                    println!("No MCP servers configured");
+                    println!(
+                        "Configure them in the mcp_servers array at the top of \
+                         deepseeknova.toml and restart"
+                    );
+                } else {
+                    let statuses = match &caps.mcp_probe {
+                        Some(probe) => probe.probe(&caps.mcp_servers).await,
+                        None => Vec::new(),
+                    };
+                    println!("Configured MCP servers (live status):");
+                    for line in format_mcp_status_lines(&caps.mcp_servers, &statuses) {
+                        println!("{line}");
+                    }
+                }
+            } else {
+                eprintln!("unknown /mcp sub-command: {sub}");
+                eprintln!("try /mcp status");
+            }
         }
 
         // ── Sessions (list / resume / rename) ─────────────────────────
@@ -880,10 +909,43 @@ async fn handle_slash_command(
         },
 
         // ── Undo ──────────────────────────────────────────────
-        "undo" => {
-            println!("Undo is not yet implemented in the CLI.");
-            println!("Use the checkpoint system: crates/deepseeknova-checkpoint");
-        }
+        "undo" => match &caps.undo {
+            None => println!("Undo unavailable (no UndoController)"),
+            Some(ctrl) => match parse_undo_args(args) {
+                UndoSubcommand::RollbackOne => match ctrl.rollback_one().await {
+                    Ok(Some(msg)) => println!("✓ {msg}"),
+                    Ok(None) => println!("No snapshot to roll back"),
+                    Err(e) => println!("Undo failed: {e}"),
+                },
+                UndoSubcommand::RollbackAll => match ctrl.rollback_all().await {
+                    Ok(n) => println!("Rolled back {n} snapshots"),
+                    Err(e) => println!("Undo failed: {e}"),
+                },
+                UndoSubcommand::List => match ctrl.list().await {
+                    Ok(lines) if !lines.is_empty() => {
+                        println!("Snapshot list:");
+                        for line in lines {
+                            println!("  {line}");
+                        }
+                    }
+                    Ok(_) => println!("(no snapshots)"),
+                    Err(e) => println!("Failed to list snapshots: {e}"),
+                },
+                UndoSubcommand::Diff => match ctrl.diffs().await {
+                    Ok(lines) if !lines.is_empty() => {
+                        for line in lines {
+                            println!("{line}");
+                        }
+                    }
+                    Ok(_) => println!("(no content-level changes)"),
+                    Err(e) => println!("Failed to show diff: {e}"),
+                },
+                UndoSubcommand::Unknown(arg) => println!(
+                    "Unknown argument: {arg} \
+                     (usage: /undo | /undo all | /undo list | /undo diff)"
+                ),
+            },
+        },
 
         // ── Help ──────────────────────────────────────────────
         "help" => {
@@ -895,11 +957,11 @@ async fn handle_slash_command(
             println!("  /model            — show / change model & reasoning settings");
             println!("  /cost             — show per-model token usage & estimated cost");
             println!("  /skills           — list available agent skills");
-            println!("  /mcp              — MCP server status");
+            println!("  /mcp              — MCP server status (/mcp status)");
             println!("  /sessions         — list saved sessions");
             println!("  /resume <id>      — restore a saved session's history");
             println!("  /rename <title>   — name the current session");
-            println!("  /undo             — revert changes (coming soon)");
+            println!("  /undo             — revert changes (/undo all | /undo list | /undo diff)");
             println!("  /help             — show this help");
             println!();
             println!("Display modes:");
