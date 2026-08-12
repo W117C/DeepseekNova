@@ -1254,6 +1254,7 @@ DEEPSEEKNOVA_THEME=light  deepseeknova-cli chat --tui   # 印刷星图浅色档�
 | `/undo all` | 回滚全部快照 |
 | `/undo list` | 列出快照与 ✓/✗ 状态 |
 | `/checkpoint` | 会话级检查点：`save [label]` / `list` / `rollback [id]`（快照对话行 + 容量 FIFO + JSONL 持久化，回退同步重写模型上下文） |
+| `/jump <n>` | 跳转到第 n 回合（单回合视图；n ∈ 1..=总回合数） |
 | `/mode` | 权限模式循环/切换：`plan` / `accept_edits` / `auto` / `cycle`（写工具默认裁决强度） |
 | `/quit` | 退出 TUI |
 
