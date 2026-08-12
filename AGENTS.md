@@ -91,6 +91,7 @@ make check          # CI 等价检查（fmt + clippy + test + doc）
 make test           # cargo test --all
 make fmt            # 格式化代码
 make clippy-fix     # clippy 自动修复
+make cross-linux    # 用 cross 交叉编译 x86_64-unknown-linux-gnu 的 release 二进制
 make audit          # 安全审计（先检查 cargo-deny，再执行 cargo deny --all-features check）
 make test-count     # 在 Linux 上运行 cargo test --all，按 passed 总数同步 README 测试数（非 Linux 拒绝覆盖）
 make test-count-check  # 校验 README 测试数与 Linux CI 的 passed 总数一致（CI 已接入；非 Linux 本地跳过比对）

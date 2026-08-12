@@ -58,6 +58,14 @@ git config diff.renames true  # diff/log 统计启用重命名检测
   需预装 `cargo-deny`（`cargo install cargo-deny --locked`）；目标会先检查
   `cargo-deny`，再直接执行 `cargo deny --all-features check`。
 
+- **交叉编译 Linux release（CI 对齐）**：
+  ```bash
+  make cross-linux
+  ```
+  用 `cross` 交叉编译 `x86_64-unknown-linux-gnu` 的 release 二进制
+  （`cross build --target x86_64-unknown-linux-gnu --release`），与 CI 发布的
+  Linux 资产保持一致；本地需有 Docker（cross 默认容器化工具链）。
+
 - **同步 / 校验 README 测试数**：
   ```bash
   make test-count          # 在 Linux 上按 cargo test --all 的 passed 总数更新 README
