@@ -265,18 +265,32 @@ impl AnthropicProvider {
                             HttpAttempt::Success(response)
                         } else if crate::retry::is_retryable_status(status.as_u16()) {
                             let error_text = response.text().await.unwrap_or_default();
-                            HttpAttempt::Retryable(format!("HTTP {status}: {error_text}"))
+                            HttpAttempt::Retryable {
+                                message: format!("HTTP {status}: {error_text}"),
+                                status: Some(status.as_u16()),
+                                retry_after: None,
+                            }
                         } else {
                             let error_text = response.text().await.unwrap_or_default();
-                            HttpAttempt::Fatal(format!("HTTP {status}: {error_text}"))
+                            HttpAttempt::Fatal {
+                                message: format!("HTTP {status}: {error_text}"),
+                                status: Some(status.as_u16()),
+                            }
                         }
                     }
                     Err(e) => {
                         let err_str = e.to_string();
                         if crate::retry::is_retryable_error(&err_str) {
-                            HttpAttempt::Retryable(err_str)
+                            HttpAttempt::Retryable {
+                                message: err_str,
+                                status: None,
+                                retry_after: None,
+                            }
                         } else {
-                            HttpAttempt::Fatal(err_str)
+                            HttpAttempt::Fatal {
+                                message: err_str,
+                                status: None,
+                            }
                         }
                     }
                 }
@@ -286,10 +300,10 @@ impl AnthropicProvider {
 
         match result {
             HttpAttempt::Success(response) => Ok(response),
-            HttpAttempt::Retryable(msg) => Err(DeepseeknovaError::provider_retryable(format!(
-                "request failed after retries: {msg}"
-            ))),
-            HttpAttempt::Fatal(msg) => Err(DeepseeknovaError::provider(msg)),
+            HttpAttempt::Retryable { message, .. } => Err(DeepseeknovaError::provider_retryable(
+                format!("request failed after retries: {message}"),
+            )),
+            HttpAttempt::Fatal { message, .. } => Err(DeepseeknovaError::provider(message)),
         }
     }
 }
@@ -762,6 +776,11 @@ impl AnthropicUsageAcc {
 // True SSE streaming — bytes_stream() with incremental event parsing
 // ---------------------------------------------------------------------------
 
+/// 单条 SSE 行的最大字节数（含 `data:`/`event:` 前缀，tool arguments 累积
+/// 同样受此上限约束）。恶意/损坏网关可在超时窗口内塞入无换行大块数据；超限
+/// 即视为协议异常并返回明确错误，防止内存无限累积。
+const MAX_SSE_LINE_BYTES: usize = 1024 * 1024;
+
 async fn stream_anthropic_sse(
     response: reqwest::Response,
     tx: &mpsc::Sender<Result<Chunk, DeepseeknovaError>>,
@@ -811,7 +830,16 @@ async fn stream_anthropic_sse(
                     }
                 }
                 b'\r' => {}
-                _ => line_bytes.push(b),
+                _ => {
+                    // 单行无长度上限会被恶意/损坏网关的无换行大块数据撑爆内存；
+                    // 超限视为协议异常直接报错（未换行的尾行同样受此约束）。
+                    if line_bytes.len() >= MAX_SSE_LINE_BYTES {
+                        return Err(DeepseeknovaError::provider(
+                            "Anthropic SSE line exceeds maximum allowed length (protocol anomaly)",
+                        ));
+                    }
+                    line_bytes.push(b);
+                }
             }
         }
     }
@@ -841,8 +869,16 @@ async fn process_anthropic_event(
     tool_acc: &mut Vec<AccToolCall>,
     usage_acc: &mut AnthropicUsageAcc,
 ) -> Result<(), DeepseeknovaError> {
-    let Ok(event) = serde_json::from_str::<AnthropicSseEvent>(data) else {
-        return Ok(());
+    let event = match serde_json::from_str::<AnthropicSseEvent>(data) {
+        Ok(event) => event,
+        Err(e) => {
+            warn!(
+                error = %e,
+                data_len = data.len(),
+                "skipping unparseable Anthropic SSE event (protocol anomaly)"
+            );
+            return Ok(());
+        }
     };
 
     match event.event_type.as_str() {
@@ -905,6 +941,13 @@ async fn process_anthropic_event(
                                 name: tc.name.clone().unwrap_or_default(),
                             }))
                             .await;
+                    }
+                    // tool arguments 累积设上限，防止损坏网关上无限累积；
+                    // 超限视为协议异常直接报错。
+                    if tc.arguments.len() + partial.len() > MAX_SSE_LINE_BYTES {
+                        return Err(DeepseeknovaError::provider(
+                            "Anthropic tool arguments exceed maximum allowed size (protocol anomaly)",
+                        ));
                     }
                     tc.arguments.push_str(&partial);
                     let _ = tx

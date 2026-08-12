@@ -239,20 +239,44 @@ async fn send_chat_request(
                     let status = response.status();
                     if status.is_success() {
                         HttpAttempt::Success(response)
-                    } else if crate::retry::is_retryable_status(status.as_u16()) {
-                        let error_text = response.text().await.unwrap_or_default();
-                        HttpAttempt::Retryable(format!("HTTP {status}: {error_text}"))
                     } else {
+                        let status_code = status.as_u16();
+                        // T-M1：429 时读取 `Retry-After` 头，让退避优先采用
+                        // 服务端等待时长（无法解析时回落默认退避）。
+                        let retry_after = crate::retry::parse_retry_after(
+                            response
+                                .headers()
+                                .get("retry-after")
+                                .and_then(|v| v.to_str().ok()),
+                        );
                         let error_text = response.text().await.unwrap_or_default();
-                        HttpAttempt::Fatal(format!("HTTP {status}: {error_text}"))
+                        if crate::retry::is_retryable_status(status_code) {
+                            HttpAttempt::Retryable {
+                                message: error_text,
+                                status: Some(status_code),
+                                retry_after,
+                            }
+                        } else {
+                            HttpAttempt::Fatal {
+                                message: error_text,
+                                status: Some(status_code),
+                            }
+                        }
                     }
                 }
                 Err(e) => {
                     let err_str = e.to_string();
                     if crate::retry::is_retryable_error(&err_str) {
-                        HttpAttempt::Retryable(err_str)
+                        HttpAttempt::Retryable {
+                            message: err_str,
+                            status: None,
+                            retry_after: None,
+                        }
                     } else {
-                        HttpAttempt::Fatal(err_str)
+                        HttpAttempt::Fatal {
+                            message: err_str,
+                            status: None,
+                        }
                     }
                 }
             }
@@ -262,10 +286,33 @@ async fn send_chat_request(
 
     match result {
         HttpAttempt::Success(response) => Ok(response),
-        HttpAttempt::Retryable(msg) => Err(DeepseeknovaError::provider_retryable(format!(
-            "request failed after retries: {msg}"
-        ))),
-        HttpAttempt::Fatal(msg) => Err(DeepseeknovaError::provider(msg)),
+        HttpAttempt::Retryable {
+            message,
+            status,
+            retry_after,
+        } => {
+            if status == Some(429) {
+                // T-M1：429 重试耗尽 → RateLimited（激活死变体），携带服务端
+                // Retry-After 提示；经 `From<ProviderError>` 转换保留可重试语义。
+                Err(ProviderError::RateLimited { retry_after }.into())
+            } else {
+                let detail = match status {
+                    Some(st) => format!("HTTP {st}: {message}"),
+                    None => message,
+                };
+                Err(DeepseeknovaError::provider_retryable(format!(
+                    "request failed after retries: {detail}"
+                )))
+            }
+        }
+        HttpAttempt::Fatal { message, status } => match status {
+            Some(401) => Err(ProviderError::Auth(message).into()),
+            Some(400) => Err(ProviderError::InvalidRequest(message).into()),
+            Some(other) => Err(DeepseeknovaError::provider(format!(
+                "HTTP {other}: {message}"
+            ))),
+            None => Err(DeepseeknovaError::provider(message)),
+        },
     }
 }
 
@@ -371,6 +418,11 @@ impl Provider for OpenAIProvider {
 // emits parsed Chunks as they arrive.
 // ---------------------------------------------------------------------------
 
+/// 单条 SSE 行的最大字节数（含 `data:` 前缀，tool arguments 累积同样受此
+/// 上限约束）。恶意/损坏网关可在超时窗口内塞入无换行大块数据；超限即视为
+/// 协议异常并返回明确错误，防止内存无限累积。
+const MAX_SSE_LINE_BYTES: usize = 1024 * 1024;
+
 /// Accumulator for a single streaming tool call.
 #[derive(Debug, Default)]
 struct AccToolCall {
@@ -389,6 +441,8 @@ async fn stream_sse_response(
     // Accumulate raw bytes per line to avoid UTF-8 corruption across TCP chunks
     let mut line_bytes: Vec<u8> = Vec::new();
     let mut tool_acc: Vec<AccToolCall> = Vec::new();
+    // [DONE] 标记是否已发出——防止流正常结束 + 显式 [DONE] 造成双重 Done。
+    let mut done_sent = false;
 
     let mut byte_stream = response.bytes_stream();
 
@@ -411,10 +465,19 @@ async fn stream_sse_response(
                     if trimmed.is_empty() {
                         continue;
                     }
-                    process_sse_line(&trimmed, tx, &mut tool_acc, sent_any).await?;
+                    process_sse_line(&trimmed, tx, &mut tool_acc, sent_any, &mut done_sent).await?;
                 }
                 b'\r' => { /* skip — handled by \n */ }
-                _ => line_bytes.push(b),
+                _ => {
+                    // 单行无长度上限会被恶意/损坏网关的无换行大块数据撑爆内存；
+                    // 超限视为协议异常直接报错（未换行的尾行同样受此约束）。
+                    if line_bytes.len() >= MAX_SSE_LINE_BYTES {
+                        return Err(DeepseeknovaError::provider(
+                            "SSE line exceeds maximum allowed length (protocol anomaly)",
+                        ));
+                    }
+                    line_bytes.push(b);
+                }
             }
         }
     }
@@ -426,39 +489,70 @@ async fn stream_sse_response(
         })?;
         let trimmed = tail_str.trim().to_string();
         if !trimmed.is_empty() {
-            process_sse_line(&trimmed, tx, &mut tool_acc, sent_any).await?;
+            process_sse_line(&trimmed, tx, &mut tool_acc, sent_any, &mut done_sent).await?;
         }
     }
 
     // Flush any pending tool calls
     flush_pending_tool_calls(tx, &mut tool_acc, sent_any).await?;
 
+    // 与 anthropic provider 对齐：流结束（含 EOF/断流但无 [DONE] 标记）时
+    // 无条件补发 Chunk::Done，避免下游因缺终止标记而挂死；已显式收到
+    // [DONE] 时（done_sent）不重复发送。
+    if !done_sent {
+        *sent_any = true;
+        let _ = tx.send(Ok(Chunk::Done)).await;
+    }
+
     Ok(())
 }
 
 /// Process a single SSE line (without the trailing \n).
+///
+/// `done_sent` 记录 `[DONE]` 结束标记是否已发出，供 `stream_sse_response`
+/// 在流末尾判断是否需要补发 `Chunk::Done`（防止双重 Done）。
 async fn process_sse_line(
     line: &str,
     tx: &mpsc::Sender<Result<Chunk, DeepseeknovaError>>,
     tool_acc: &mut Vec<AccToolCall>,
     sent_any: &mut bool,
+    done_sent: &mut bool,
 ) -> Result<(), DeepseeknovaError> {
-    // End-of-stream marker
-    if line == "data: [DONE]" {
+    // Only process "data:" lines——冒号后有无空格均接受（值经 trim）。
+    let Some(data) = line.strip_prefix("data:") else {
+        // 注释/keepalive（以 ":" 开头的标准 SSE 行）静默跳过；其余非 data
+        // 行视为协议异常，告警而非静默吞掉。
+        if !line.starts_with(':') {
+            warn!(
+                line = %line,
+                "ignoring non-data SSE line (protocol anomaly)"
+            );
+        }
+        return Ok(());
+    };
+    let data = data.trim();
+
+    // End-of-stream marker——`data: [DONE]`、`data:[DONE]`（无冒号空格）及
+    // 尾随空格变体（调用方已 trim）均视为流结束。
+    if data == "[DONE]" {
         flush_pending_tool_calls(tx, tool_acc, sent_any).await?;
         *sent_any = true;
+        *done_sent = true;
         let _ = tx.send(Ok(Chunk::Done)).await;
         return Ok(());
     }
 
-    // Only process "data: ..." lines
-    let Some(data) = line.strip_prefix("data: ") else {
-        return Ok(()); // skip comments, keepalive (": keepalive"), etc.
-    };
-
     // Try to parse the SSE JSON
-    let Ok(resp) = serde_json::from_str::<StreamResponse>(data) else {
-        return Ok(()); // skip unparseable lines (e.g. keepalive)
+    let resp = match serde_json::from_str::<StreamResponse>(data) {
+        Ok(resp) => resp,
+        Err(e) => {
+            warn!(
+                error = %e,
+                line_len = data.len(),
+                "skipping unparseable SSE data line (protocol anomaly)"
+            );
+            return Ok(());
+        }
     };
 
     // Final usage chunk — map all DeepSeek-specific accounting (context-cache
@@ -525,10 +619,16 @@ async fn process_sse_line(
                         }
                     }
 
-                    // Accumulate argument deltas
+                    // Accumulate argument deltas——同样设上限，防止损坏网关上
+                    // tool arguments 无限累积；超限视为协议异常直接报错。
                     if let Some(ref func) = tc.function {
                         if let Some(ref args) = func.arguments {
                             if !args.is_empty() {
+                                if acc.arguments.len() + args.len() > MAX_SSE_LINE_BYTES {
+                                    return Err(DeepseeknovaError::provider(
+                                        "streaming tool arguments exceed maximum allowed size (protocol anomaly)",
+                                    ));
+                                }
                                 let call_id = acc.id.clone().unwrap_or_default();
                                 *sent_any = true;
                                 let _ = tx
@@ -780,13 +880,14 @@ data: [DONE]
         let (tx, mut rx) = mpsc::channel(64);
         let mut tool_acc = Vec::new();
         let mut sent_any = false;
+        let mut done_sent = false;
 
         for line in sse_data.lines() {
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
             }
-            process_sse_line(trimmed, &tx, &mut tool_acc, &mut sent_any)
+            process_sse_line(trimmed, &tx, &mut tool_acc, &mut sent_any, &mut done_sent)
                 .await
                 .unwrap();
         }
@@ -837,13 +938,14 @@ data: [DONE]
         let (tx, mut rx) = mpsc::channel(64);
         let mut tool_acc = Vec::new();
         let mut sent_any = false;
+        let mut done_sent = false;
 
         for line in sse_data.lines() {
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
             }
-            process_sse_line(trimmed, &tx, &mut tool_acc, &mut sent_any)
+            process_sse_line(trimmed, &tx, &mut tool_acc, &mut sent_any, &mut done_sent)
                 .await
                 .unwrap();
         }
@@ -941,13 +1043,14 @@ data: [DONE]
         let (tx, mut rx) = mpsc::channel(64);
         let mut tool_acc = Vec::new();
         let mut sent_any = false;
+        let mut done_sent = false;
 
         for line in sse_data.lines() {
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
             }
-            process_sse_line(trimmed, &tx, &mut tool_acc, &mut sent_any)
+            process_sse_line(trimmed, &tx, &mut tool_acc, &mut sent_any, &mut done_sent)
                 .await
                 .unwrap();
         }
@@ -988,13 +1091,14 @@ data: [DONE]
         let (tx, mut rx) = mpsc::channel(64);
         let mut tool_acc = Vec::new();
         let mut sent_any = false;
+        let mut done_sent = false;
 
         for line in sse_data.lines() {
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
             }
-            process_sse_line(trimmed, &tx, &mut tool_acc, &mut sent_any)
+            process_sse_line(trimmed, &tx, &mut tool_acc, &mut sent_any, &mut done_sent)
                 .await
                 .unwrap();
         }
@@ -1026,6 +1130,131 @@ data: [DONE]
             usage.reasoning_tokens, 25,
             "billed reasoning tokens from completion_tokens_details must survive"
         );
+    }
+
+    /// 向本地 mock TCP 服务器发起一次 HTTP 请求并返回 SSE 响应体，便于直接
+    /// 测试 `stream_sse_response`，绕过 provider 的重试/环境变量路径。
+    async fn fetch_raw_sse_body(body: String) -> reqwest::Response {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 4096];
+            // 读取请求头直到 \r\n\r\n
+            loop {
+                let n = stream.read(&mut tmp).unwrap_or(0);
+                if n == 0 {
+                    return;
+                }
+                buf.extend_from_slice(&tmp[..n]);
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(resp.as_bytes());
+            drop(stream);
+        });
+        let client = reqwest::Client::new();
+        client
+            .post(format!("http://{addr}/v1/chat/completions"))
+            .body("{}")
+            .send()
+            .await
+            .unwrap()
+    }
+
+    /// T-H5：`data:[DONE]`（无冒号空格）与 `data: [DONE] `（尾随空格）必须
+    /// 与标准 `data: [DONE]` 一样被识别为流结束并各自发出 Chunk::Done。
+    #[tokio::test]
+    async fn parse_sse_done_marker_lenient_whitespace() {
+        let (tx, mut rx) = mpsc::channel(64);
+        let mut tool_acc = Vec::new();
+        let mut sent_any = false;
+        let mut done_sent = false;
+
+        for line in ["data:[DONE]", "data: [DONE] "] {
+            process_sse_line(line, &tx, &mut tool_acc, &mut sent_any, &mut done_sent)
+                .await
+                .unwrap();
+        }
+
+        drop(tx);
+
+        let mut chunks = Vec::new();
+        while let Some(chunk) = rx.recv().await {
+            chunks.push(chunk.unwrap());
+        }
+
+        assert_eq!(
+            chunks.iter().filter(|c| matches!(c, Chunk::Done)).count(),
+            2,
+            "两种 [DONE] 变体必须各自发出 Done"
+        );
+        assert!(done_sent, "done_sent 标记必须被置位");
+    }
+
+    /// T-H5：流被截断（始终未收到 `data: [DONE]`）时，流结束仍须无条件
+    /// 补发 Chunk::Done，避免下游因缺终止标记而挂死（与 anthropic 对齐）。
+    #[tokio::test]
+    async fn truncated_stream_still_emits_done() {
+        let _guard = ENV_LOCK.lock().await;
+        clear_proxy_env();
+
+        let body =
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}\n\n".to_string();
+        let response = fetch_raw_sse_body(body).await;
+
+        let (tx, mut rx) = mpsc::channel(64);
+        let mut sent_any = false;
+        stream_sse_response(response, &tx, &mut sent_any)
+            .await
+            .unwrap();
+        drop(tx);
+
+        let mut chunks = Vec::new();
+        while let Some(chunk) = rx.recv().await {
+            chunks.push(chunk.unwrap());
+        }
+
+        assert!(
+            chunks
+                .iter()
+                .any(|c| matches!(c, Chunk::TextDelta(t) if t == "hello")),
+            "内容帧必须先到达"
+        );
+        assert!(
+            chunks.iter().any(|c| matches!(c, Chunk::Done)),
+            "截断流（无 [DONE]）最终仍须补发 Done"
+        );
+    }
+
+    /// T-H4：单行超过 MAX_SSE_LINE_BYTES 上限（恶意/损坏网关塞入无换行大块
+    /// 数据）必须返回明确错误，而不是无限累积内存。
+    #[tokio::test]
+    async fn overlong_sse_line_returns_error() {
+        let _guard = ENV_LOCK.lock().await;
+        clear_proxy_env();
+
+        let overlong = format!("data: {}\n\n", "x".repeat(MAX_SSE_LINE_BYTES));
+        let response = fetch_raw_sse_body(overlong).await;
+
+        let (tx, _rx) = mpsc::channel::<Result<Chunk, DeepseeknovaError>>(64);
+        let mut sent_any = false;
+        let result = stream_sse_response(response, &tx, &mut sent_any).await;
+        drop(tx);
+
+        assert!(
+            result.is_err(),
+            "超长单行必须返回协议异常错误，got {result:?}"
+        );
+        assert!(!sent_any, "超限行发生在任何内容发出之前，不应置位 sent_any");
     }
 
     /// Usage frames without the nested `completion_tokens_details` object must
