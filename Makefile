@@ -1,7 +1,7 @@
 .PHONY: all build check test clean run release \
         release-patch release-minor release-major \
         check-all test-all test-count test-count-check clippy-fix example \
-        install dist audit eval-ci
+        install dist audit eval-ci bench-ci
 
 # ── Default ─────────────────────────────────────────────────────
 all: build
@@ -85,6 +85,19 @@ dist: release
 audit:
 	@command -v cargo-deny >/dev/null 2>&1 || { echo "cargo-deny 未安装，请先安装: cargo install cargo-deny --locked"; exit 1; }
 	cargo deny --all-features check
+
+# ── Benchmark with saved baseline（CI bench 基线记录）─────────────────
+# 运行 workspace 全部基准，criterion 结果以命名基线 "ci" 保存到
+# target/criterion（内部 JSON：estimates.json 等），并打包到
+# target/bench-ci/bench.tar.gz 供 CI 上传 artifact 人工对比。
+# 注意：criterion 0.8 已移除 --output-format json，基线保存是
+# 现版本可用的 JSON 记录手段；未设自动门禁阈值（机器噪声易 flaky），
+# 退化由人工比对历史 artifact 发现。
+bench-ci:
+	mkdir -p target/bench-ci
+	cargo bench --workspace -- --save-baseline ci
+	tar czf target/bench-ci/bench.tar.gz -C target criterion
+	@echo "基准已保存到 target/criterion（baseline: ci）并打包 target/bench-ci/bench.tar.gz"
 
 # ── Eval 基准（F3：成本优先 CI 门禁）─────────────────────────────
 # 跑核心基准任务集并施加 CI 门槛（综合分均值 + 关键维度 + 成本上限）。

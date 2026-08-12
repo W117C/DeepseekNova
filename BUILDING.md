@@ -67,6 +67,17 @@ git config diff.renames true  # diff/log 统计启用重命名检测
   权威口径为 Linux CI 的 passed 总数（`deepseeknova-sandbox` 含 Linux 专属
   测试，本地 macOS/Windows 运行结果可能更少），非 Linux 平台拒绝覆盖。
 
+- **运行基准并保存基线（CI 对齐）**：
+  ```bash
+  make bench-ci
+  ```
+  运行工作区全部基准（core 事件/注册表/记忆检索、graph 解析/PageRank/检索），
+  criterion 结果以命名基线 `ci` 保存到 `target/criterion`（内部 JSON：
+  estimates.json 等），并打包到 `target/bench-ci/bench.tar.gz`。CI bench job
+  复用本目标并上传产物为 artifact 供人工对比；未设自动门禁阈值（机器噪声
+  易 flaky），性能退化由比对历史 artifact 发现。注意 criterion 0.8 已移除
+  `--output-format json`，基线保存是现版本可用的 JSON 记录手段。
+
 > 桌面端前端（`crates/deepseeknova-desktop`）已于 2026-08-08 整体移除，
 > 历史可经 git 追溯（先例 `3ab55d7`）。当前无 Node 工程，本仓库为纯
 > Rust workspace。
