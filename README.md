@@ -24,7 +24,7 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 [![Rust](https://img.shields.io/badge/rust-stable%201.97-orange.svg)](https://www.rust-lang.org)
 [![Crates](https://img.shields.io/badge/crates-22-green.svg)](#-22-个-crate)
-<!-- 测试数由 scripts/sync-test-count.py 维护（权威口径：Linux CI 的 cargo test --all passed 总数）：Linux 上 make test-count 刷新，CI 用 make test-count-check 校验 -->
+<!-- 测试数由 scripts/sync-test-count.py 维护（权威口径：Linux CI 的 cargo test --all passed 总数）：Linux 上 make test-count 刷新，CI 用 make test-count-check 校验。CHANGELOG / AUDIT 中的测试数（如 1729 / 约 1607）为历史时点快照，非当前值。 -->
 [![Tests](https://img.shields.io/badge/tests-1926-brightgreen.svg)](#-技术栈)
 
 </div>

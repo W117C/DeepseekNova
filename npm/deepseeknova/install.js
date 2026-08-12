@@ -55,14 +55,20 @@ function platformKey() {
   return key;
 }
 
-function download(url, dest) {
+// 跟随 GitHub 302 跳转（release asset URL 会重定向到
+// release-assets.githubusercontent.com），最多 5 跳防死循环（对齐 fetchText）。
+function download(url, dest, redirectsLeft = 5) {
   return new Promise((resolve, reject) => {
     const file = fs.createWriteStream(dest);
     const req = https.get(url, { headers: { "User-Agent": "deepseeknova-npm" } }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         file.close();
         fs.unlinkSync(dest);
-        resolve(download(res.headers.location, dest));
+        if (redirectsLeft <= 0) {
+          reject(new Error(`too many redirects from ${url}`));
+          return;
+        }
+        resolve(download(res.headers.location, dest, redirectsLeft - 1));
         return;
       }
       if (res.statusCode !== 200) {

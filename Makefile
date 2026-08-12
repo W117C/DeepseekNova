@@ -1,7 +1,7 @@
 .PHONY: all build check test clean run release \
         release-patch release-minor release-major \
         check-all test-all test-count test-count-check clippy-fix example \
-        install dist audit eval-ci bench-ci
+        install dist audit eval-ci bench-ci fmt cross-linux
 
 # ── Default ─────────────────────────────────────────────────────
 all: build

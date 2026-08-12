@@ -73,9 +73,11 @@ unknown values fall back to `codex` with a notice). Programmatic injection via
 
 ### Slash commands
 
-`/help` `/clear` `/new` `/sessions` `/resume <id>` `/model` (effort / thinking /
-switch / use) `/cost` `/skills` `/mcp` `/raw` (normal/lite/raw) `/fold`
-(all/none/reset) `/copy` `/undo` (`all` / `list`) `/quit`
+`/help` `/clear` `/new` `/sessions` `/resume <id>` `/rename <title>` `/checkpoint`
+(`save [label]` / `list` / `rollback [id]`) `/model` (effort / thinking / switch /
+use) `/cost` `/scorecard` `/skills` `/mcp` `/undo` (`all` / `list`) `/raw`
+(normal/lite/raw) `/fold` (all/none/reset) `/copy` `/workspace` `/jump <n>`
+`/mode` (plan/accept_edits/auto/cycle) `/quit`
 
 Optional capabilities are enabled by builders:
 `with_agent_factory` (`/model` hot-switch), `with_model_router`

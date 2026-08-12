@@ -1,5 +1,9 @@
 # BACKEND_AUDIT — DeepseekNova 后端完整性审计
 
+> **⚠️ 过期快照（请勿作为当前事实依据）**
+>
+> 本文为 2026-08-01 的后端完整性审计快照（基线 c19898d，638 tests）。文中的测试数、crate 行数、以及「头号缺口：默认系统提示词缺失」等结论均已过期——默认系统提示词已落地（`deepseeknova_agent::DEFAULT_SYSTEM_PROMPT`），desktop crate 已移除。当前权威信息以 `AGENTS.md` §2、`DESIGN.md`、`GUIDE.md`、`README.md` badge 为准。本文仅保留作历史记录，不随代码演进追溯更新。
+
 日期：2026-08-01 ｜ 基线：feat/tui-complete@c19898d（工作树干净）｜ 方法：README/AGENTS 声明 vs 源码实测，
 每条结论带 file:line 或命令输出；`make check` EXIT=0，workspace 共 638 测试通过（633 单测/集成 + 5 doctest）、
 2 个既有 ignored（graph/provider 集成测试）。`make check` 明确排除 desktop（Makefile:16-18）。
