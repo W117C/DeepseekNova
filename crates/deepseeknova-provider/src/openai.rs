@@ -228,58 +228,15 @@ async fn send_chat_request(
         let body = body.clone();
         let url = url.clone();
         Box::pin(async move {
-            match client
-                .post(&url)
-                .bearer_auth(&api_key)
-                .json(&body)
-                .send()
-                .await
-            {
-                Ok(response) => {
-                    let status = response.status();
-                    if status.is_success() {
-                        HttpAttempt::Success(response)
-                    } else {
-                        let status_code = status.as_u16();
-                        // T-M1：429 时读取 `Retry-After` 头，让退避优先采用
-                        // 服务端等待时长（无法解析时回落默认退避）。
-                        let retry_after = crate::retry::parse_retry_after(
-                            response
-                                .headers()
-                                .get("retry-after")
-                                .and_then(|v| v.to_str().ok()),
-                        );
-                        let error_text = response.text().await.unwrap_or_default();
-                        if crate::retry::is_retryable_status(status_code) {
-                            HttpAttempt::Retryable {
-                                message: error_text,
-                                status: Some(status_code),
-                                retry_after,
-                            }
-                        } else {
-                            HttpAttempt::Fatal {
-                                message: error_text,
-                                status: Some(status_code),
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    let err_str = e.to_string();
-                    if crate::retry::is_retryable_error(&err_str) {
-                        HttpAttempt::Retryable {
-                            message: err_str,
-                            status: None,
-                            retry_after: None,
-                        }
-                    } else {
-                        HttpAttempt::Fatal {
-                            message: err_str,
-                            status: None,
-                        }
-                    }
-                }
-            }
+            crate::retry::classify_response(
+                client
+                    .post(&url)
+                    .bearer_auth(&api_key)
+                    .json(&body)
+                    .send()
+                    .await,
+            )
+            .await
         })
     })
     .await;

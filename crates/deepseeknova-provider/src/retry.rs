@@ -125,6 +125,65 @@ pub(crate) fn parse_retry_after(header_value: Option<&str>) -> Option<Duration> 
     Some(Duration::from_secs(secs))
 }
 
+/// 分类一次 HTTP 请求的结果，供 anthropic / openai 两个 provider 共用。
+///
+/// 语义与 OpenAI 侧保持一致：2xx/3xx 返回 [`HttpAttempt::Success`]；非 2xx
+/// 响应先读取 `Retry-After` 头与响应体文本，再按 [`is_retryable_status`]
+/// 归为 [`HttpAttempt::Retryable`] 或 [`HttpAttempt::Fatal`]；传输层错误按
+/// [`is_retryable_error`] 的词表归为 Retryable 或 Fatal。
+///
+/// 这是 anthropic 429 遵循 `Retry-After` 的唯一实现点：此前 anthropic 分支
+/// 不读取该头，429 一律走默认指数退避；统一走本函数后，anthropic 与 openai
+/// 的响应分类行为完全一致。
+pub(crate) async fn classify_response(
+    result: reqwest::Result<reqwest::Response>,
+) -> HttpAttempt<reqwest::Response> {
+    match result {
+        Ok(response) => {
+            let status = response.status();
+            if status.is_success() {
+                HttpAttempt::Success(response)
+            } else {
+                let status_code = status.as_u16();
+                let retry_after = parse_retry_after(
+                    response
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|v| v.to_str().ok()),
+                );
+                let error_text = response.text().await.unwrap_or_default();
+                if is_retryable_status(status_code) {
+                    HttpAttempt::Retryable {
+                        message: error_text,
+                        status: Some(status_code),
+                        retry_after,
+                    }
+                } else {
+                    HttpAttempt::Fatal {
+                        message: error_text,
+                        status: Some(status_code),
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            let err_str = e.to_string();
+            if is_retryable_error(&err_str) {
+                HttpAttempt::Retryable {
+                    message: err_str,
+                    status: None,
+                    retry_after: None,
+                }
+            } else {
+                HttpAttempt::Fatal {
+                    message: err_str,
+                    status: None,
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -251,59 +251,44 @@ impl AnthropicProvider {
             let body = body.clone();
             let url = url.clone();
             Box::pin(async move {
-                match client
-                    .post(&url)
-                    .header("x-api-key", &api_key)
-                    .header("anthropic-version", &api_version)
-                    .json(&body)
-                    .send()
-                    .await
-                {
-                    Ok(response) => {
-                        let status = response.status();
-                        if status.is_success() {
-                            HttpAttempt::Success(response)
-                        } else if crate::retry::is_retryable_status(status.as_u16()) {
-                            let error_text = response.text().await.unwrap_or_default();
-                            HttpAttempt::Retryable {
-                                message: format!("HTTP {status}: {error_text}"),
-                                status: Some(status.as_u16()),
-                                retry_after: None,
-                            }
-                        } else {
-                            let error_text = response.text().await.unwrap_or_default();
-                            HttpAttempt::Fatal {
-                                message: format!("HTTP {status}: {error_text}"),
-                                status: Some(status.as_u16()),
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        let err_str = e.to_string();
-                        if crate::retry::is_retryable_error(&err_str) {
-                            HttpAttempt::Retryable {
-                                message: err_str,
-                                status: None,
-                                retry_after: None,
-                            }
-                        } else {
-                            HttpAttempt::Fatal {
-                                message: err_str,
-                                status: None,
-                            }
-                        }
-                    }
-                }
+                // 统一走 retry::classify_response：anthropic 与 openai 共用
+                // 同一套响应分类，且 429 时同样解析 `Retry-After` 头（修复
+                // #3——此前 anthropic 分支不读取该头，429 一律默认指数退避）。
+                crate::retry::classify_response(
+                    client
+                        .post(&url)
+                        .header("x-api-key", &api_key)
+                        .header("anthropic-version", &api_version)
+                        .json(&body)
+                        .send()
+                        .await,
+                )
+                .await
             })
         })
         .await;
 
         match result {
             HttpAttempt::Success(response) => Ok(response),
-            HttpAttempt::Retryable { message, .. } => Err(DeepseeknovaError::provider_retryable(
-                format!("request failed after retries: {message}"),
-            )),
-            HttpAttempt::Fatal { message, .. } => Err(DeepseeknovaError::provider(message)),
+            HttpAttempt::Retryable {
+                message, status, ..
+            } => {
+                // 保留 anthropic 最终错误映射：`HTTP {status}:` 前缀不变。
+                let detail = match status {
+                    Some(st) => format!("HTTP {st}: {message}"),
+                    None => message,
+                };
+                Err(DeepseeknovaError::provider_retryable(format!(
+                    "request failed after retries: {detail}"
+                )))
+            }
+            HttpAttempt::Fatal { message, status } => {
+                let detail = match status {
+                    Some(st) => format!("HTTP {st}: {message}"),
+                    None => message,
+                };
+                Err(DeepseeknovaError::provider(detail))
+            }
         }
     }
 }
