@@ -2,8 +2,8 @@
 use super::*;
 use crate::test_support::*;
 use deepseeknova_config::Config;
-use deepseeknova_context::ContextEngine;
 use deepseeknova_core::memory::skill::{SkillExtractionConfig, SkillManager, SkillState};
+use deepseeknova_core::runner::{RunInput, Runner};
 
 /// 参数化任务书在 SubAgentRunner 路径的渲染生效证明：spec 含 inputs 声明
 /// 与 `${{ inputs.x }}` 占位符时，prompt 协议 `input:` 行传入的值必须渲染
@@ -654,22 +654,6 @@ fn role_providers_default_falls_back_to_compact_model_path() {
     let provider = std::sync::Arc::new(stub_provider());
     let agent = build_agent(&config, std::env::temp_dir(), provider, 5, None, vec![]).unwrap();
     let _ = agent;
-}
-
-#[test]
-fn runtime_builds_with_default_config() {
-    let config = Config::default();
-    // Use a temp dir to avoid scanning the full project tree
-    let dir = std::env::temp_dir().join(format!("deepseeknova-rt-test-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-
-    let context = ContextEngine::new(dir.clone()).unwrap();
-    let context: Arc<dyn ContextProvider> = Arc::new(context);
-
-    let runtime = Runtime::new(config, context).unwrap();
-    assert_eq!(runtime.events.receiver_count(), 0);
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 fn mid_run_test_workspace(tag: &str) -> std::path::PathBuf {

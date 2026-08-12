@@ -4,7 +4,7 @@
 
 ### A DeepSeek-Native AI Coding Agent Framework
 
-**22 Rust crates · 3 frontends (CLI / TUI / HTTP API)**
+**21 Rust crates · 3 frontends (CLI / TUI / HTTP API)**
 
 A Rust-from-scratch AI agent framework — not a wrapper. Built specifically for DeepSeek models.
 
@@ -105,8 +105,7 @@ Provider    DeepSeek V4 Pro/Flash   Tools: File · Glob · Grep · Shell
 | `deepseeknova-skills` | Markdown skill system (.claude/skills compatible) |
 | `deepseeknova-store` | JSONL session persistence + rotation + compression |
 | `deepseeknova-telemetry` | OpenTelemetry distributed tracing (OTLP) |
-| `deepseeknova-event` | Agent lifecycle event bus |
-| `deepseeknova-runtime` | Composition root: registry + context + events + permission + security |
+| `deepseeknova-runtime` | Composition root: registry + context + permission + security |
 | `deepseeknova-config` | Layered TOML config (default → user → project → env → CLI) |
 | `deepseeknova-cli` | CLI frontend: chat / plan / scan / serve / setup |
 | `deepseeknova-tui` | ratatui terminal UI |

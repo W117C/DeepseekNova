@@ -702,7 +702,6 @@ dependencies = [
 name = "deepseeknova-context"
 version = "0.5.0"
 dependencies = [
- "async-trait",
  "chrono",
  "deepseeknova-core",
  "hex",
@@ -740,16 +739,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
-]
-
-[[package]]
-name = "deepseeknova-event"
-version = "0.5.0"
-dependencies = [
- "deepseeknova-core",
- "serde",
- "serde_json",
- "tokio",
 ]
 
 [[package]]
@@ -851,7 +840,6 @@ dependencies = [
  "deepseeknova-config",
  "deepseeknova-context",
  "deepseeknova-core",
- "deepseeknova-event",
  "deepseeknova-graph",
  "deepseeknova-mcp",
  "deepseeknova-metrics",

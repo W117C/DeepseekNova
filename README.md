@@ -4,7 +4,7 @@
 
 ### DeepSeek 原生 AI 编程 Agent 框架
 
-**22 个 Rust crate · 三端覆盖（CLI / TUI / HTTP API）**
+**21 个 Rust crate · 三端覆盖（CLI / TUI / HTTP API）**
 
 Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型量身打造的原生编程助手。
 
@@ -23,7 +23,7 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 [![Release](https://github.com/W117C/DeepseekNova/actions/workflows/release.yml/badge.svg)](https://github.com/W117C/DeepseekNova/actions/workflows/release.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 [![Rust](https://img.shields.io/badge/rust-stable%201.97-orange.svg)](https://www.rust-lang.org)
-[![Crates](https://img.shields.io/badge/crates-22-green.svg)](#-22-个-crate)
+[![Crates](https://img.shields.io/badge/crates-21-green.svg)](#-21-个-crate)
 <!-- 测试数由 scripts/sync-test-count.py 维护（权威口径：Linux CI 的 cargo test --all passed 总数）：Linux 上 make test-count 刷新，CI 用 make test-count-check 校验 -->
 [![Tests](https://img.shields.io/badge/tests-1926-brightgreen.svg)](#-技术栈)
 
@@ -164,7 +164,7 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 └─────────────────────┘ └──────────────────────────────┘
 ```
 
-## 📦 22 个 Crate
+## 📦 21 个 Crate
 
 | Crate | 职责 |
 |-------|------|
@@ -184,8 +184,7 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 | `deepseeknova-skills` | Markdown 技能系统，兼容 .claude/skills 格式 |
 | `deepseeknova-store` | JSONL 会话持久化 + 轮转 + 压缩 |
 | `deepseeknova-telemetry` | OpenTelemetry 分布式追踪 (OTLP) |
-| `deepseeknova-event` | Agent 生命周期事件总线 |
-| `deepseeknova-runtime` | 组合根：注册表 + 上下文 + 事件 + 权限 + 安全 |
+| `deepseeknova-runtime` | 组合根：注册表 + 上下文 + 权限 + 安全 |
 | `deepseeknova-config` | 分层 TOML 配置（默认 → 用户 → 项目 → 环境变量 → CLI） |
 | `deepseeknova-cli` | CLI 前端：chat / plan / serve / setup |
 | `deepseeknova-tui` | ratatui 终端 UI |

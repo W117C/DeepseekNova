@@ -1,11 +1,11 @@
 //! # Runtime — Composition root
 //!
-//! Wires together all DeepseekNova subsystems: registry, context, event bus,
-//! permission, security, and LLM provider into a ready-to-use agent runtime.
+//! Wires together all DeepseekNova subsystems: registry, context, permission,
+//! security, and LLM provider into a ready-to-use agent runtime.
 //!
 //! M7b：大型装配函数已按主题拆分为子模块（security/metrics/hooks/diagnose/
-//! protocol/delegate/helpers），组合根 `build_agent_with_role_providers` 与
-//! `Runtime` 保留在此，对外 API 经 `pub use` 原样再导出。
+//! protocol/delegate/helpers），组合根 `build_agent_with_role_providers`
+//! 保留在此，对外 API 经 `pub use` 原样再导出。
 
 #![cfg_attr(
     test,
@@ -35,10 +35,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use deepseeknova_config::Config;
-use deepseeknova_context::ContextProvider;
-use deepseeknova_core::registry::RegistryHub;
-use deepseeknova_core::runner::{RunEventStream, RunInput, Runner};
-use deepseeknova_event::EventBus;
 use deepseeknova_permission::PermissionGate;
 
 // 组合根内部引用的私有装配函数（跨子模块）。
@@ -78,68 +74,6 @@ read_file once the target is confirmed;\n\
 /// 命中推进 `sessions_seen`（`verified` → `active` 的跨会话存活判据）。
 /// recall 闭包签名（`Fn(&str)`）无 session 参数，故由运行时持有。
 static SKILL_SESSION_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// Runtime is the composition root. It wires registry, context, events,
-/// and permission together. Agent, Planner, SubAgent, Server all share
-/// one Runtime.
-pub struct Runtime {
-    /// 工具/规划器注册表（读写锁保护）。
-    pub registry: Arc<std::sync::RwLock<RegistryHub>>,
-    /// 上下文提供者（workspace 索引 / prompt 构建）。
-    pub context: Arc<dyn ContextProvider>,
-    /// 事件总线（运行时事件发布/订阅）。
-    pub events: Arc<EventBus>,
-    /// 权限门（工具调用审批决策）。
-    pub permission: Arc<PermissionGate>,
-    /// 运行时配置。
-    pub config: Arc<Config>,
-}
-
-impl Runtime {
-    /// Create a Runtime with a given context provider.
-    pub fn new(
-        config: Config,
-        context: Arc<dyn ContextProvider>,
-    ) -> Result<Self, deepseeknova_core::DeepseeknovaError> {
-        let permission = build_permission_gate(&config);
-
-        Ok(Self {
-            registry: Arc::new(std::sync::RwLock::new(RegistryHub::new())),
-            context,
-            events: Arc::new(EventBus::new(256)),
-            permission: Arc::new(permission),
-            config: Arc::new(config),
-        })
-    }
-
-    /// Execute a Runner and return a stream of events.
-    /// Events emitted during execution are published on the shared EventBus.
-    pub async fn run(
-        &self,
-        runner: &dyn Runner,
-        input: RunInput,
-    ) -> Result<RunEventStream, deepseeknova_core::DeepseeknovaError> {
-        self.events
-            .publish(deepseeknova_event::AgentEvent::ModelStarted {
-                provider: "default".to_string(),
-                model: input
-                    .model_override
-                    .clone()
-                    .unwrap_or_else(|| "default".to_string()),
-            });
-
-        runner.run_stream(input).await
-    }
-
-    /// Check whether a tool call is allowed by the permission policy.
-    pub fn check_permission(
-        &self,
-        tool: &dyn deepseeknova_core::Tool,
-        args: &str,
-    ) -> deepseeknova_permission::CheckVerdict {
-        self.permission.check(tool, args)
-    }
-}
 
 /// Role-based providers injected by callers that own a ModelRouter.
 /// All fields optional; `None` falls back to legacy behaviour.
@@ -1225,7 +1159,7 @@ pub async fn discover_mcp_tools(config: &Config) -> Vec<Arc<dyn deepseeknova_cor
         .collect()
 }
 
-// 组合根集成测试（build_agent* / Runtime / MCP 发现）已随 P2-D 拆分迁至
+// 组合根集成测试（build_agent* / MCP 发现）已随 P2-D 拆分迁至
 // 同目录 tests.rs（纯行范围搬移，无内容变更），本文件仅保留模块声明。
 #[cfg(test)]
 mod tests;

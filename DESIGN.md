@@ -4,7 +4,7 @@
 
 ## 一、项目概览
 
-DeepseekNova 是一个 Rust 编写的 AI Agent 框架，包含 22 个 crate。
+DeepseekNova 是一个 Rust 编写的 AI Agent 框架，包含 21 个 crate。
 
 ### 命名现状（权威说明）
 
@@ -27,13 +27,13 @@ git config diff.renames true  # diff/log 统计启用重命名检测
 
 ### Crate 结构
 
-> **单一真相源**：22 个 crate 的权威清单以 [AGENTS.md §2「项目简介」](AGENTS.md) 为准，本文档不再重复维护 crate 列表，仅记录分层设计意图。
+> **单一真相源**：21 个 crate 的权威清单以 [AGENTS.md §2「项目简介」](AGENTS.md) 为准，本文档不再重复维护 crate 列表，仅记录分层设计意图。
 
 设计上，全部 crate 按职责分为四层：
 
 | 层 | 职责 |
 |----|------|
-| **核心层** | 类型定义、事件总线、工作区索引、持久化 |
+| **核心层** | 类型定义、工作区索引、持久化 |
 | **能力层** | LLM 接入、工具实现、协议桥接、安全隔离 |
 | **编排层** | Agent 主循环、多 Agent 协调、追踪、组合根 |
 | **前端层** | CLI、TUI、HTTP API |
