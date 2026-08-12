@@ -503,18 +503,37 @@ fn validate_plan_tool_boundary(
 ) -> Result<(), DeepseeknovaError> {
     let allowed: Vec<String> = read_only.iter().map(|t| t.schema().name.clone()).collect();
     for (id, node) in &graph.nodes {
-        let maybe_tool = match &node.action {
-            Action::CallTool { tool, .. } => Some(tool.as_str()),
-            _ => None,
-        };
-        if let Some(tool_name) = maybe_tool {
-            if !allowed.iter().any(|n| n == tool_name) {
+        check_node_action(id, &node.action, &allowed)?;
+    }
+    Ok(())
+}
+
+/// Recursively check one node action against the read-only allowlist:
+/// a `CallTool` must name a registered read-only tool, and every
+/// `Action::Parallel` child is checked the same way (the executor runs
+/// nested children, so they are in scope of the boundary — a mutating tool
+/// smuggled inside a parallel node must be rejected just like a top-level
+/// one).
+fn check_node_action(
+    id: &str,
+    action: &Action,
+    allowed: &[String],
+) -> Result<(), DeepseeknovaError> {
+    match action {
+        Action::CallTool { tool, .. } => {
+            if !allowed.iter().any(|n| n == tool) {
                 return Err(DeepseeknovaError::runner(format!(
                     "coordinator safety: plan node '{id}' attempted to call \
-                     non-read-only tool '{tool_name}' during planning — executor-only"
+                     non-read-only tool '{tool}' during planning — executor-only"
                 )));
             }
         }
+        Action::Parallel(children) => {
+            for child in children {
+                check_node_action(&child.id, &child.action, allowed)?;
+            }
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -978,6 +997,26 @@ mod tests {
 
         validate_plan_tool_boundary(&graph, &read_only)
             .expect("Think nodes must not be subject to the tool boundary check");
+    }
+
+    #[test]
+    fn validate_plan_tool_boundary_blocks_non_read_only_tool_in_parallel() {
+        let mut graph = ExecutionGraph::new("a".to_string());
+        graph.add_node(ExecutionNode::new(
+            "a",
+            Action::Parallel(vec![ExecutionNode::new(
+                "child",
+                Action::CallTool {
+                    tool: "bash".to_string(),
+                    args: serde_json::Value::Null,
+                },
+            )]),
+        ));
+        let read_only: Vec<Arc<dyn Tool>> = vec![Arc::new(NamedTool { name: "grep" })];
+
+        let err = validate_plan_tool_boundary(&graph, &read_only)
+            .expect_err("non-read-only tool nested in Parallel must fail closed");
+        assert!(err.to_string().contains("bash"), "got: {err}");
     }
 
     #[test]
