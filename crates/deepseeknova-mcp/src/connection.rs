@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot, RwLock};
 use tracing::{debug, error, info, warn};
@@ -25,6 +25,40 @@ use tracing::{debug, error, info, warn};
 /// in-flight frames is far beyond any realistic request burst while still
 /// bounding memory.
 const WRITE_CHANNEL_CAPACITY: usize = 1024;
+
+/// 单条 MCP stdout 行的最大字节数（16MB，含行尾换行符）。
+///
+/// MCP 的 stdio 传输把每条 JSON-RPC 消息编码为单行 JSON，合法消息远小于该
+/// 上限。reader 用此常量封顶单行累积（T-H3）：一旦超限即丢弃该行剩余字节并
+/// 告警（见 [`skip_to_newline`]），绝不无限累积——防止恶意或损坏的服务器输出
+/// 无限长单行耗尽内存。与 `http_client.rs::discover_post_url` 的 1MB 读取
+/// 上限同一口径。
+const MAX_MCP_LINE_BYTES: usize = 16 * 1024 * 1024;
+
+/// 丢弃 MCP stdout 上超长行的剩余内容（直到换行或 EOF）。
+///
+/// 返回 `true` 表示已消费到换行符（该行正常结束）；`false` 表示遇到 EOF 或
+/// 读取错误（读取错误已记录 error 日志）。读取按 4096 字节分块进行，只保留
+/// 当前块、即时清空，绝不把整行累积进内存。
+async fn skip_to_newline<R>(reader: &mut BufReader<R>) -> bool
+where
+    R: AsyncRead + Unpin,
+{
+    let mut drain = Vec::with_capacity(4096);
+    loop {
+        drain.clear();
+        let mut limited = (&mut *reader).take(4096);
+        match limited.read_until(b'\n', &mut drain).await {
+            Ok(0) => return false, // EOF：行未以换行结束
+            Ok(_) if drain.last() == Some(&b'\n') => return true,
+            Ok(_) => continue, // 本块未到换行，继续读下一块
+            Err(e) => {
+                error!("MCP read error while skipping oversized line: {e}");
+                return false;
+            }
+        }
+    }
+}
 
 /// Tracks a pending JSON-RPC request waiting for a response.
 struct PendingRequest {
@@ -182,18 +216,53 @@ impl McpConnection {
         // writing the response through the same channel the writer task drains.
         let reader_write_tx = write_tx.clone();
         let reader_handle = tokio::spawn(async move {
-            let buf = BufReader::new(stdout);
-            let mut lines = buf.lines();
+            let mut reader = BufReader::new(stdout);
+            // 每行复用的行缓冲，避免每条消息重新分配。
+            let mut line_buf: Vec<u8> = Vec::with_capacity(256);
 
             loop {
-                let line = tokio::select! {
-                    l = lines.next_line() => l,
-                    else => break,
+                line_buf.clear();
+                // 限长读取（T-H3）：MCP stdio 每条 JSON-RPC 消息是单行 JSON，
+                // 原 BufReader::lines() 对单行长度无上限，恶意/损坏的服务器可
+                // 用无限长单行耗尽内存。这里用 take() 把单行累积封顶在
+                // MAX_MCP_LINE_BYTES + 1 字节；若未在限内读到换行即判定超长，
+                // 丢弃剩余部分并告警，绝不无限累积。换行符由 read_until 消费，
+                // 后续消息保持按行对齐。
+                let n = {
+                    let mut limited = (&mut reader).take((MAX_MCP_LINE_BYTES + 1) as u64);
+                    tokio::select! {
+                        l = limited.read_until(b'\n', &mut line_buf) => l,
+                        else => break,
+                    }
                 };
 
-                match line {
-                    Ok(Some(line)) => {
-                        let line = line.trim().to_string();
+                match n {
+                    Ok(0) => {
+                        info!("MCP stdout closed");
+                        break;
+                    }
+                    Ok(_) if line_buf.len() > MAX_MCP_LINE_BYTES => {
+                        // 单行超限：丢弃本行剩余字节直到换行/EOF（分块读取、
+                        // 不累积），保证后续消息仍能被正确解析。
+                        warn!(
+                            "MCP: oversized stdout line ({} bytes > {}); skipping remainder",
+                            line_buf.len(),
+                            MAX_MCP_LINE_BYTES
+                        );
+                        skip_to_newline(&mut reader).await;
+                        continue;
+                    }
+                    Ok(_) => {
+                        // 原 BufReader::lines() 会把非法 UTF-8 当作读错误终止
+                        // reader；这里仅跳过该行，保持"垃圾行可跳过、不致命"
+                        // 的既有语义（见 invalid_json_lines_are_skipped_not_fatal）。
+                        let line = match std::str::from_utf8(&line_buf) {
+                            Ok(s) => s.trim().to_string(),
+                            Err(e) => {
+                                warn!("MCP: stdout line is not valid UTF-8 ({e}); skipping");
+                                continue;
+                            }
+                        };
                         if line.is_empty() {
                             continue;
                         }
@@ -274,10 +343,6 @@ impl McpConnection {
                         } else {
                             warn!("MCP: unrecognized server message without id or method");
                         }
-                    }
-                    Ok(None) => {
-                        info!("MCP stdout closed");
-                        break;
                     }
                     Err(e) => {
                         error!("MCP read error: {e}");
@@ -655,6 +720,75 @@ mod tests {
             .request("ping", None, Duration::from_secs(5))
             .await
             .expect("request should survive surrounding garbage");
+        assert_eq!(result, json!({"pong": true}));
+        server.abort();
+    }
+
+    // ── Oversized single-line output (T-H3) ────────────────────────────
+
+    #[tokio::test]
+    async fn oversized_stdout_line_is_skipped_and_following_message_still_parsed() {
+        // 服务器先输出一条远超 MAX_MCP_LINE_BYTES、且不含换行的单行内容，
+        // 随后才输出正常的 JSON-RPC 响应。reader 必须在达到上限后停止累积、
+        // 丢弃该行剩余字节并告警，同时仍能把后续响应按行对齐解析——绝不无限
+        // 累积内存（旧实现 BufReader::lines() 会一直读到换行才返回）。
+        let (conn_stdin, mut srv_rx) = duplex(crate::test_util::DUPLEX_BUF);
+        let (mut srv_tx, conn_stdout) = duplex(crate::test_util::DUPLEX_BUF);
+
+        let server = tokio::spawn(async move {
+            let buf = BufReader::new(&mut srv_rx);
+            let mut lines = buf.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let val: Value = match serde_json::from_str(&line) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let Some(id) = val.get("id").and_then(|i| i.as_u64()) else {
+                    continue; // notification — no id
+                };
+                if val["method"] == "initialize" {
+                    let _ = srv_tx
+                        .write_all(init_reply(id).to_string().as_bytes())
+                        .await;
+                    let _ = srv_tx.write_all(b"\n").await;
+                } else {
+                    // 超长单行：不换行地写入两倍于上限的内容，随后才换行。
+                    let garbage = vec![b'x'; MAX_MCP_LINE_BYTES * 2];
+                    let _ = srv_tx.write_all(&garbage).await;
+                    let _ = srv_tx.write_all(b"\n").await;
+                    // 紧跟着的正常响应：证明跳过超长行后消息仍按行对齐。
+                    let resp = json!({"jsonrpc":"2.0","id": id, "result":{"pong":true}});
+                    let _ = srv_tx.write_all(resp.to_string().as_bytes()).await;
+                    let _ = srv_tx.write_all(b"\n").await;
+                }
+                let _ = srv_tx.flush().await;
+            }
+        });
+
+        let conn = McpConnection::from_streams(
+            conn_stdin,
+            conn_stdout,
+            None,
+            Duration::from_secs(10),
+            WRITE_CHANNEL_CAPACITY,
+        )
+        .await
+        .expect("from_streams");
+        conn.handshake(Duration::from_secs(10))
+            .await
+            .expect("handshake should survive");
+
+        let result = conn
+            .request("ping", None, Duration::from_secs(10))
+            .await
+            .expect("request after oversized line should succeed");
+        assert_eq!(result, json!({"pong": true}));
+
+        // 再发一次请求，确认 reader 跳过超长行后仍持续正常工作。
+        let result = conn
+            .request("ping", None, Duration::from_secs(10))
+            .await
+            .expect("second request after oversized line should succeed");
         assert_eq!(result, json!({"pong": true}));
         server.abort();
     }

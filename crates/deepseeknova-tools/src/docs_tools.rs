@@ -157,9 +157,10 @@ fn render_not_found(library: &str) -> String {
     format!("no Context7 library found for '{library}'; check the library name and try again")
 }
 
-/// 拉取文本并做大小/超时/状态码校验；失败返回可直接展示的提示。
+/// 拉取文本并做大小/超时/状态码校验；失败返回可直接展示的提示。响应体按
+/// chunk 流式累积并边收边检查上限（T-H2），超限立即中止，不先全量缓冲。
 async fn fetch_text(client: &reqwest::Client, url: url::Url, what: &str) -> Result<String, String> {
-    let response = tokio::time::timeout(DEFAULT_TIMEOUT, client.get(url).send())
+    let mut response = tokio::time::timeout(DEFAULT_TIMEOUT, client.get(url).send())
         .await
         .map_err(|_| format!("Context7 {what} request timed out"))?
         .map_err(|e| format!("Context7 {what} request failed: {e}"))?;
@@ -167,17 +168,25 @@ async fn fetch_text(client: &reqwest::Client, url: url::Url, what: &str) -> Resu
     if !status.is_success() {
         return Err(format!("Context7 {what} failed with HTTP {status}"));
     }
-    let bytes = tokio::time::timeout(DEFAULT_TIMEOUT, response.bytes())
-        .await
-        .map_err(|_| format!("Context7 {what} body read timed out"))?
-        .map_err(|e| format!("Context7 {what} body read failed: {e}"))?;
-    if bytes.len() > MAX_RESPONSE_BYTES {
-        return Err(format!(
-            "Context7 {what} response exceeds {MAX_RESPONSE_BYTES} bytes"
-        ));
+    let mut body = Vec::new();
+    loop {
+        let chunk = tokio::time::timeout(DEFAULT_TIMEOUT, response.chunk())
+            .await
+            .map_err(|_| format!("Context7 {what} body read timed out"))?
+            .map_err(|e| format!("Context7 {what} body read failed: {e}"))?;
+        match chunk {
+            Some(bytes) => {
+                body.extend_from_slice(&bytes);
+                if body.len() > MAX_RESPONSE_BYTES {
+                    return Err(format!(
+                        "Context7 {what} response exceeds {MAX_RESPONSE_BYTES} bytes"
+                    ));
+                }
+            }
+            None => break,
+        }
     }
-    String::from_utf8(bytes.to_vec())
-        .map_err(|_| format!("Context7 {what} response is not valid UTF-8"))
+    String::from_utf8(body).map_err(|_| format!("Context7 {what} response is not valid UTF-8"))
 }
 
 #[async_trait]
@@ -524,5 +533,56 @@ mod tests {
         server.await.unwrap();
 
         assert!(out.contains("HTTP 500"), "非 200 应转友好提示：{out}");
+    }
+
+    /// 起一个本地 HTTP mock：响应头 `Content-Length` 声明 `declared` 字节，实际
+    /// 只写 `sent` 字节后关闭连接。用于验证 `fetch_text` 流式边收边检查上限：
+    /// 先全量缓冲的实现会因长度未满足而报截断错误而非"超限"错误。
+    async fn spawn_truncated_body_server(sent: usize, declared: usize) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let mut got = 0usize;
+                while got < buf.len() {
+                    let n = sock.read(&mut buf[got..]).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    got += n;
+                    if String::from_utf8_lossy(&buf[..got]).contains("\r\n\r\n") {
+                        break;
+                    }
+                }
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {declared}\r\nConnection: close\r\n\r\n"
+                );
+                let _ = sock.write_all(header.as_bytes()).await;
+                let _ = sock.write_all(&vec![b'a'; sent]).await;
+                let _ = sock.flush().await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        format!("http://{addr}/")
+    }
+
+    #[tokio::test]
+    async fn oversized_response_is_aborted_while_streaming() {
+        let _guard = ENV_LOCK.lock().await;
+        clear_proxy_env();
+        // 服务器声明 4×limit 的 Content-Length、实际只发 limit+1 字节后断开：
+        // fetch_text 必须流式边收边报"超限"；全量缓冲会因长度未满足而报
+        // 截断/超时错误而非超限错误。
+        let url = spawn_truncated_body_server(MAX_RESPONSE_BYTES + 1, MAX_RESPONSE_BYTES * 4).await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let err = fetch_text(&client, url::Url::parse(&url).unwrap(), "docs")
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("exceeds"),
+            "expected size error while streaming, got: {err}"
+        );
     }
 }

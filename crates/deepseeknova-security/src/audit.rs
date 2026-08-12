@@ -96,11 +96,17 @@ impl JsonlAuditLogger {
             }
         }
         use std::io::Write;
-        match std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
+        // S-H2：审计日志含敏感参数，Unix 下创建即收敛为 0600（默认 0644
+        // 会让同机其他用户可读）。对齐 failure_pattern.rs 的 save() 先例；
+        // Windows 分支保持现状（无 POSIX mode 语义）。
+        let mut opts = std::fs::OpenOptions::new();
+        opts.create(true).append(true);
+        #[cfg(unix)]
         {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        match opts.open(&self.path) {
             Ok(mut f) => {
                 if let Err(e) = writeln!(f, "{rendered}") {
                     tracing::warn!("audit log write failed ({}): {e}", self.path.display());
@@ -180,5 +186,29 @@ mod tests {
             reason: "r".to_string(),
         };
         logger.record(&event); // 不 panic 即通过
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn audit_log_file_is_0600_on_unix() {
+        // S-H2：审计日志含敏感参数，落盘文件权限必须收敛为 0600（Unix），
+        // 防止同机其他用户读取。对齐 failure_pattern.rs 的权限测试写法。
+        let dir = tempfile::tempdir().unwrap();
+        let logger = JsonlAuditLogger::at_workspace(dir.path());
+        let event = SecurityEvent {
+            event_type: "gate_deny".to_string(),
+            call_id: "call-1".to_string(),
+            tool_name: "bash".to_string(),
+            capability: Some(Capability::CommandExecute),
+            path: None,
+            allowed: false,
+            reason: "blocked".to_string(),
+        };
+        logger.record(&event);
+
+        let log = dir.path().join(".deepseeknova/security/audit.jsonl");
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&log).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "audit log must be 0600 on unix");
     }
 }

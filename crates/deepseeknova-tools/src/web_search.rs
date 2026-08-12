@@ -299,15 +299,19 @@ fn enforce_max_response_bytes(len: usize) -> Result<(), DeepseeknovaError> {
     Ok(())
 }
 
-/// 读取响应体并施加字节上限（对齐 web_fetch 的 5MB）：超限或非 UTF-8
-/// 返回明确错误，不静默截断。
-async fn read_response_body(resp: reqwest::Response) -> Result<String, DeepseeknovaError> {
-    let bytes = resp
-        .bytes()
+/// 读取响应体并施加字节上限（对齐 web_fetch 的 5MB）：流式边收边检查上限，
+/// 超限立即中止，不先全量缓冲（T-H2）；超限或非 UTF-8 返回明确错误，不静默截断。
+async fn read_response_body(mut resp: reqwest::Response) -> Result<String, DeepseeknovaError> {
+    let mut body_bytes = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
         .await
-        .map_err(|e| DeepseeknovaError::tool(format!("failed to read response body: {e}")))?;
-    enforce_max_response_bytes(bytes.len())?;
-    String::from_utf8(bytes.to_vec())
+        .map_err(|e| DeepseeknovaError::tool(format!("failed to read response body: {e}")))?
+    {
+        body_bytes.extend_from_slice(&chunk);
+        enforce_max_response_bytes(body_bytes.len())?;
+    }
+    String::from_utf8(body_bytes)
         .map_err(|e| DeepseeknovaError::tool(format!("response body is not valid UTF-8: {e}")))
 }
 
@@ -466,6 +470,25 @@ fn parse_searxng(text: &str) -> Result<Vec<SearchHit>, DeepseeknovaError> {
 mod tests {
     use super::*;
 
+    /// env 串行化锁：std::env 修改非线程安全，所有修改 env 或构建 reqwest::Client
+    /// 的测试须用此锁串行化。异步测试用 `.lock().await`。
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// 清除代理环境变量：reqwest 默认尊重 HTTP_PROXY/HTTPS_PROXY，会把请求转发
+    /// 到代理，代理无法连本地 mock 端口导致 Connect 失败或 hang。
+    fn clear_proxy_env() {
+        for v in &[
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+        ] {
+            std::env::remove_var(v);
+        }
+    }
+
     #[test]
     fn ddg_parses_abstract_and_related_topics() {
         let text = r#"{
@@ -574,13 +597,15 @@ mod tests {
         assert!(check_host_ssrf("http://8.8.8.8/").await.is_ok());
     }
 
-    /// 起一个本地 HTTP mock，返回固定长度 body（回环直连）。
+    /// 起一个本地 HTTP mock，返回固定长度 body（回环直连）。`declared` 是响应头
+    /// `Content-Length` 的声明值；传 `body.len()` 即正常长度，传更大值可构造
+    /// "声明大、实际提前截断"的流式超限场景。
     ///
     /// 服务器先读完客户端请求头再响应，写完后显式 shutdown 写端（FIN 而非
     /// drop 触发的 RST），并保持连接直到客户端关闭——避免并行测试下
     /// "connection closed before message completed / error decoding response
     /// body" 的 flaky 竞态。
-    async fn spawn_body_server(body: Vec<u8>) -> String {
+    async fn spawn_body_server(body: Vec<u8>, declared: usize) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -590,8 +615,7 @@ mod tests {
                 let mut req_buf = [0u8; 4096];
                 let _ = sock.read(&mut req_buf).await;
                 let header = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    body.len()
+                    "HTTP/1.1 200 OK\r\nContent-Length: {declared}\r\nConnection: close\r\n\r\n"
                 );
                 let _ = sock.write_all(header.as_bytes()).await;
                 let _ = sock.write_all(&body).await;
@@ -628,11 +652,31 @@ mod tests {
 
     #[tokio::test]
     async fn under_limit_response_is_read() {
+        let _guard = ENV_LOCK.lock().await;
+        clear_proxy_env();
         let body = br#"{"ok":true}"#.to_vec();
-        let url = spawn_body_server(body).await;
+        let url = spawn_body_server(body.clone(), body.len()).await;
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
         let resp = client.get(&url).send().await.unwrap();
         let text = read_response_body(resp).await.unwrap();
         assert_eq!(text, r#"{"ok":true}"#);
+    }
+
+    #[tokio::test]
+    async fn oversized_body_is_aborted_while_streaming() {
+        let _guard = ENV_LOCK.lock().await;
+        clear_proxy_env();
+        // 服务器声明 4×limit 的 Content-Length、实际只发 limit+1 字节后断开：
+        // 流式读取必须边收边报"超限"（不先全量缓冲）；全量缓冲会因长度未
+        // 满足而报截断错误而非超限错误。
+        let url =
+            spawn_body_server(vec![b'a'; MAX_RESPONSE_BYTES + 1], MAX_RESPONSE_BYTES * 4).await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let resp = client.get(&url).send().await.unwrap();
+        let err = read_response_body(resp).await.unwrap_err().to_string();
+        assert!(
+            err.contains("exceeds maximum size"),
+            "expected size error while streaming, got: {err}"
+        );
     }
 }

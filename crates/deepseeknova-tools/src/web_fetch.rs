@@ -332,20 +332,32 @@ fn fetch_with_redirects<'a>(
             )));
         }
 
-        // Read body with size cap
-        let body_bytes = tokio::time::timeout(DEFAULT_FETCH_TIMEOUT, response.bytes())
-            .await
-            .map_err(|_| DeepseeknovaError::tool("body read timed out".to_string()))?
-            .map_err(|e| DeepseeknovaError::tool(format!("failed to read response body: {e}")))?;
-
-        if body_bytes.len() > MAX_RESPONSE_BYTES {
-            return Err(DeepseeknovaError::tool(format!(
-                "response body exceeds maximum size of {MAX_RESPONSE_BYTES} bytes (got {} bytes)",
-                body_bytes.len()
-            )));
+        // Read body with size cap (streaming: enforce the limit while reading so
+        // a hostile server cannot push gigabytes into memory before the check).
+        let mut response = response;
+        let mut body_bytes = Vec::new();
+        loop {
+            let chunk = tokio::time::timeout(DEFAULT_FETCH_TIMEOUT, response.chunk())
+                .await
+                .map_err(|_| DeepseeknovaError::tool("body read timed out".to_string()))?
+                .map_err(|e| {
+                    DeepseeknovaError::tool(format!("failed to read response body: {e}"))
+                })?;
+            match chunk {
+                Some(bytes) => {
+                    body_bytes.extend_from_slice(&bytes);
+                    if body_bytes.len() > MAX_RESPONSE_BYTES {
+                        return Err(DeepseeknovaError::tool(format!(
+                            "response body exceeds maximum size of {MAX_RESPONSE_BYTES} bytes (got {} bytes)",
+                            body_bytes.len()
+                        )));
+                    }
+                }
+                None => break,
+            }
         }
 
-        let body = String::from_utf8(body_bytes.to_vec())
+        let body = String::from_utf8(body_bytes)
             .map_err(|e| DeepseeknovaError::tool(format!("response is not valid UTF-8: {e}")))?;
 
         Ok(body)
@@ -401,6 +413,25 @@ async fn validate_redirect_target(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// env 串行化锁：std::env 修改非线程安全，所有修改 env 或构建 reqwest::Client
+    /// 的测试须用此锁串行化。异步测试用 `.lock().await`。
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// 清除代理环境变量：reqwest 默认尊重 HTTP_PROXY/HTTPS_PROXY，会把请求转发
+    /// 到代理，代理无法连本地 mock 端口导致 Connect 失败或 hang。
+    fn clear_proxy_env() {
+        for v in &[
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+        ] {
+            std::env::remove_var(v);
+        }
+    }
 
     // -----------------------------------------------------------------------
     // ensure_safe_ip
@@ -551,5 +582,78 @@ mod tests {
                 .await
                 .is_ok()
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // streaming response body cap (T-H2)
+    // -----------------------------------------------------------------------
+
+    /// 起一个本地 HTTP mock（回环直连）：响应头 `Content-Length` 声明 `declared`
+    /// 字节，实际只写 `sent` 字节后关闭连接。用于验证流式边收边检查上限：
+    /// 若客户端先全量缓冲再判上限，会因长度未满足而得到截断/超时错误而非
+    /// "超限"错误。
+    async fn spawn_body_server(sent: Vec<u8>, declared: usize) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            if let Ok((mut sock, _)) = listener.accept().await {
+                // 先读客户端请求头（HTTP 交互对称，消除"服务器先响应"边缘）。
+                let mut req_buf = [0u8; 4096];
+                let mut got = 0usize;
+                while got < req_buf.len() {
+                    let n = sock.read(&mut req_buf[got..]).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    got += n;
+                    if String::from_utf8_lossy(&req_buf[..got]).contains("\r\n\r\n") {
+                        break;
+                    }
+                }
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {declared}\r\nConnection: close\r\n\r\n"
+                );
+                let _ = sock.write_all(header.as_bytes()).await;
+                let _ = sock.write_all(&sent).await;
+                let _ = sock.flush().await;
+                // 优雅关闭写端（FIN），避免 drop 时内核缓冲未发送完触发 RST。
+                let _ = sock.shutdown().await;
+            }
+        });
+        format!("http://{addr}/")
+    }
+
+    #[tokio::test]
+    async fn oversized_body_is_aborted_while_streaming() {
+        let _guard = ENV_LOCK.lock().await;
+        clear_proxy_env();
+        // 服务器声明 4×limit 的 Content-Length、实际只发 limit+1 字节后断开：
+        // 流式实现会在收满 limit+1 时立即报"超限"；先全量缓冲的实现会因
+        // 长度未满足而报截断/超时错误。
+        let url =
+            spawn_body_server(vec![b'a'; MAX_RESPONSE_BYTES + 1], MAX_RESPONSE_BYTES * 4).await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let err = fetch_with_redirects(&client, url::Url::parse(&url).unwrap(), 0, None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("exceeds maximum size"),
+            "expected size error while streaming, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn under_limit_body_is_fetched() {
+        let _guard = ENV_LOCK.lock().await;
+        clear_proxy_env();
+        let body = b"hello web_fetch".to_vec();
+        let url = spawn_body_server(body.clone(), body.len()).await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let text = fetch_with_redirects(&client, url::Url::parse(&url).unwrap(), 0, None)
+            .await
+            .unwrap();
+        assert_eq!(text, "hello web_fetch");
     }
 }

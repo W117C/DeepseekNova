@@ -744,7 +744,24 @@ impl PermissionGate {
                     return v;
                 }
                 return match *cached {
-                    Decision::Allow => CheckVerdict::allow(),
+                    Decision::Allow => {
+                        // S-H1：ask 表对称复查——运行期追加的 ask 规则（如
+                        // with_subject 新规则）不得被缓存 Allow 绕过：命中即返回
+                        // Ask 而非直接放行。对称 finalize 中 explicit_ask 的语义
+                        // （ask 规则命中时只读免询问被抑制，见 981-985 行）。
+                        if let Some(r) = self.policy.matching_rule(
+                            tool_name,
+                            &preflight.args_value,
+                            &self.policy.ask,
+                        ) {
+                            CheckVerdict::ask(format!(
+                                "ask rule now requires approval: tool={} subject={:?}",
+                                r.tool, r.subject
+                            ))
+                        } else {
+                            CheckVerdict::allow()
+                        }
+                    }
                     Decision::Ask => CheckVerdict::ask("cached: requires approval"),
                     Decision::Deny => {
                         let v = CheckVerdict::deny("cached: denied by user");
@@ -774,9 +791,11 @@ impl PermissionGate {
     ///
     /// fail-open：无审计器或写盘失败都只是跳过/告警，绝不改变拒绝判定。
     /// `path` 为越界路径等取证字段；能力类别由工具名 + 只读标志推断
-    /// （审计事件 schema 需要 capability 字段）。审计 reason 附加**原始
-    /// 调用参数**——对抗性取证需要看到被拒的命令/路径原文（如危险命令
-    /// 具体是什么），而非仅通用原因。
+    /// （审计事件 schema 需要 capability 字段）。审计 reason 附加**调用
+    /// 参数**——对抗性取证需要看到被拒的命令/路径原文（如危险命令具体是
+    /// 什么），而非仅通用原因；参数中的密钥/凭据会在拼入前经
+    /// `deepseeknova_security::quality::redact_secrets` 脱敏（S-H2），
+    /// 明文 token 不落盘。
     fn audit_denial(&self, tool: &dyn Tool, args: &str, path: Option<String>, reason: &str) {
         let Some(logger) = &self.audit_logger else {
             return;
@@ -792,7 +811,13 @@ impl PermissionGate {
             reason: if args.is_empty() {
                 reason.to_string()
             } else {
-                format!("{reason} | args: {args}")
+                // S-H2：完整原始参数拼入前先过脱敏——审计日志若含明文密钥会
+                // 泄露敏感信息；`redact_secrets` 把 token/私钥块替换为
+                // `[REDACTED]`，同时保留命令/路径原文供取证。
+                format!(
+                    "{reason} | args: {}",
+                    deepseeknova_security::quality::redact_secrets(args)
+                )
             },
         };
         logger.record(&event);
@@ -1482,3 +1507,94 @@ impl From<PermissionError> for deepseeknova_core::DeepseeknovaError {
 
 #[cfg(test)]
 mod tests;
+
+// ---------------------------------------------------------------------------
+// S-H1 / S-H2 安全修复回归测试（单文件内追加，避免改 tests.rs）
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod security_fix_tests {
+    use super::*;
+
+    /// 最小写工具：固定工具名 `bash` + 默认非只读（供 cache / audit 分支测试）。
+    struct FixTool;
+
+    #[async_trait::async_trait]
+    impl Tool for FixTool {
+        fn schema(&self) -> deepseeknova_core::ToolSchema {
+            deepseeknova_core::ToolSchema {
+                name: "bash".to_string(),
+                description: "fix regression test tool".to_string(),
+                parameters: Value::Null,
+            }
+        }
+
+        async fn execute(
+            &self,
+            _ctx: &deepseeknova_core::ToolContext,
+            _args: &str,
+        ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
+            Ok(String::new())
+        }
+    }
+
+    #[test]
+    fn cached_allow_is_overridden_by_ask_rule() {
+        // S-H1 回归：会话缓存中的 Allow 不得绕过运行期追加的 ask 规则。
+        // 模拟"先 cache_decision(Allow) 批准进缓存、随后 with_subject 注入
+        // ask 规则"——策略中存在命中该调用的 ask 规则时，check 命中缓存
+        // Allow 也必须返回 Ask 而非直接放行。
+        let policy = Policy {
+            mode: Decision::Ask,
+            allow: vec![],
+            ask: vec![Rule::with_subject("bash", "rm *")],
+            deny: vec![],
+        };
+        let gate = PermissionGate::new(policy);
+        let tool = FixTool;
+        let args = r#"{"command": "rm -f important.txt"}"#;
+        gate.cache_decision("bash", args, Decision::Allow);
+
+        let v = gate.check(&tool, args);
+        assert_eq!(
+            v.decision(),
+            Decision::Ask,
+            "ask rule must override cached allow"
+        );
+    }
+
+    #[test]
+    fn gate_denial_redacts_secrets_in_audit_reason() {
+        // S-H2：拒绝审计 reason 不得包含明文密钥——构造含 token 的参数，
+        // 经限流拒绝触发 audit_denial 落盘，断言密钥已被 `[REDACTED]` 替换、
+        // 明文不出现，同时命令原文保留供取证。
+        use deepseeknova_security::audit::JsonlAuditLogger;
+        let dir = tempfile::tempdir().unwrap();
+        let logger = Arc::new(JsonlAuditLogger::at_workspace(dir.path()));
+        let gate = PermissionGate::new(Policy {
+            mode: Decision::Allow,
+            allow: vec![],
+            ask: vec![],
+            deny: vec![],
+        })
+        .with_rate_limit(1)
+        .with_audit_logger(logger);
+        let tool = FixTool;
+        let secret = "sk-abcdef12345678901234";
+        let args = format!(
+            r#"{{"command": "curl -H 'Authorization: Bearer {secret}' https://api.example.com"}}"#
+        );
+        let _ = gate.check(&tool, &args); // 第一次放行
+        let v = gate.check(&tool, &args); // 第二次触发限流拒绝并落盘
+        assert_eq!(v.decision(), Decision::Deny);
+
+        let log = dir.path().join(".deepseeknova/security/audit.jsonl");
+        let content = std::fs::read_to_string(&log).expect("audit log must be written");
+        assert!(
+            !content.contains(secret),
+            "明文密钥不得写入审计日志: {content}"
+        );
+        assert!(content.contains("[REDACTED]"), "密钥应被脱敏: {content}");
+        assert!(content.contains("curl"), "命令原文应保留供取证: {content}");
+    }
+}

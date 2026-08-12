@@ -29,6 +29,19 @@ use tokio::time::timeout;
 
 const EMPTY_GRACE: Duration = Duration::from_millis(1500);
 
+/// 单条 LSP 消息 body 的大小上限（字节）。
+///
+/// 从不可信语言服务器 stdout 解析出的 `Content-Length` 若超过此值直接报错、
+/// 不做分配，防止恶意服务器声明超大长度触发一次性 `vec![0u8; len]` 分配导致
+/// OOM。
+const MAX_LSP_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+
+/// 单行 LSP 响应头的长度上限（字节）。
+///
+/// 服务器若一直不发送换行符，`read_line` 会无界累积该行；这里在分块读取时
+/// 逐块校验，超限即报错，杜绝 header 累积型内存放大。
+const MAX_LSP_HEADER_BYTES: usize = 64 * 1024;
+
 /// 收到空诊断后是否已过宽限期（等迟到的非空更新）。
 fn empty_grace_elapsed(empty_since: Option<Instant>, now: Instant) -> bool {
     empty_since.is_some_and(|s| now.duration_since(s) >= EMPTY_GRACE)
@@ -232,6 +245,40 @@ fn server_for(language: &str, overrides: &HashMap<String, String>) -> (String, V
 // Minimal LSP client
 // ---------------------------------------------------------------------------
 
+/// 读取一行 LSP 响应头，限制单行长度上限（字节）。
+///
+/// 用 `fill_buf`/`consume` 分块累积：服务器若不发送换行，逐块累积超过
+/// `max_bytes` 即返回错误，避免 `read_line` 式的无界内存增长。流结束且未
+/// 读到任何字节时返回 `Ok(None)`。
+async fn read_bounded_line<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    max_bytes: usize,
+) -> Result<Option<String>, DeepseeknovaError> {
+    let mut line: Vec<u8> = Vec::new();
+    loop {
+        let buf = reader.fill_buf().await?;
+        if buf.is_empty() {
+            if line.is_empty() {
+                return Ok(None);
+            }
+            return Ok(Some(String::from_utf8_lossy(&line).into_owned()));
+        }
+        if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+            line.extend_from_slice(&buf[..pos]);
+            reader.consume(pos + 1);
+            return Ok(Some(String::from_utf8_lossy(&line).into_owned()));
+        }
+        if line.len() + buf.len() > max_bytes {
+            return Err(DeepseeknovaError::tool(format!(
+                "LSP header line exceeds {max_bytes} byte limit"
+            )));
+        }
+        line.extend_from_slice(buf);
+        let consumed = buf.len();
+        reader.consume(consumed);
+    }
+}
+
 struct LspSession {
     child: Option<Child>,
     stdin: Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
@@ -272,11 +319,10 @@ impl LspSession {
     async fn next_message(&mut self) -> Result<Option<Value>, DeepseeknovaError> {
         let mut content_length: Option<usize> = None;
         loop {
-            let mut line = String::new();
-            let n = self.stdout.read_line(&mut line).await?;
-            if n == 0 {
+            let Some(line) = read_bounded_line(&mut self.stdout, MAX_LSP_HEADER_BYTES).await?
+            else {
                 return Ok(None);
-            }
+            };
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 break;
@@ -288,6 +334,11 @@ impl LspSession {
         let len = content_length.ok_or_else(|| {
             DeepseeknovaError::tool("LSP message missing Content-Length header".to_string())
         })?;
+        if len > MAX_LSP_MESSAGE_BYTES {
+            return Err(DeepseeknovaError::tool(format!(
+                "LSP Content-Length {len} exceeds {MAX_LSP_MESSAGE_BYTES} byte limit"
+            )));
+        }
         let mut body = vec![0u8; len];
         self.stdout.read_exact(&mut body).await?;
         let value = serde_json::from_slice(&body)?;
@@ -599,6 +650,49 @@ mod tests {
         let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
         assert!(frame.starts_with("Content-Length: "));
         assert!(frame.ends_with(body));
+    }
+
+    #[tokio::test]
+    async fn next_message_rejects_oversized_content_length() {
+        // 恶意服务器声明 4GiB body：若照旧 `vec![0u8; len]` 会直接触发超大
+        // 分配，测试根本走不到断言；能走到 `Err` 即证明未按声明的长度分配。
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("oversized_lsp_frame");
+        tokio::fs::write(&path, b"Content-Length: 4294967295\r\n\r\n")
+            .await
+            .unwrap();
+        let file = tokio::fs::File::open(&path).await.unwrap();
+        let mut session = LspSession {
+            child: None,
+            stdin: Box::new(tokio::io::sink()),
+            stdout: BufReader::new(Box::new(file)),
+        };
+        let err = session.next_message().await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("4294967295"), "错误应提及超限长度: {msg}");
+        assert!(
+            msg.contains(MAX_LSP_MESSAGE_BYTES.to_string().as_str()),
+            "错误应提及字节上限: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn next_message_parses_normal_length_frame() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("normal_lsp_frame");
+        let body = br#"{"jsonrpc":"2.0","id":1,"result":null}"#;
+        let mut frame = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();
+        frame.extend_from_slice(body);
+        tokio::fs::write(&path, frame).await.unwrap();
+        let file = tokio::fs::File::open(&path).await.unwrap();
+        let mut session = LspSession {
+            child: None,
+            stdin: Box::new(tokio::io::sink()),
+            stdout: BufReader::new(Box::new(file)),
+        };
+        let msg = session.next_message().await.unwrap().unwrap();
+        assert_eq!(msg["id"], 1);
+        assert!(msg["result"].is_null());
     }
 
     #[test]

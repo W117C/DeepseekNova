@@ -371,38 +371,52 @@ impl GraphExecutor {
                     let result = self.tool.call_tool(tool, args).await?;
                     Ok(NodeOutput::ToolResult(result))
                 }
-                Action::Observe { tool_call_id: _ } => {
-                    // Find the tool result from a preceding node. In a
-                    // Parallel scope (`shared`), sibling results written back
-                    // by already-completed children take priority (they are
-                    // fresher than the pre-Parallel snapshot); otherwise fall
-                    // back to the top-level outputs map.
-                    let shared_result: Option<String> = shared.as_ref().and_then(|lock| {
-                        let guard = lock.read().unwrap_or_else(|e| e.into_inner());
-                        // 兄弟 ToolResult 优先；无 ToolResult 时退而看 Error
-                        // （失败子节点也写回共享容器，Observe 可见失败产出）。
-                        guard
+                Action::Observe { tool_call_id } => {
+                    // C-H1：Observe 必须按 tool_call_id 精确选取对应工具结果，
+                    // 不得再静默取任意第一个兄弟 ToolResult。结构上
+                    // NodeOutput::ToolResult 不内嵌 id（outputs/shared 以
+                    // NodeId 为键，执行层无法把 tool_call_id 关联到具体生产
+                    // 节点），故沿用与 EdgeCondition::ToolCall 相同的匹配约定
+                    // ——结果文本包含该 id 即视为命中。空 id 或无匹配时返回
+                    // Err；多个结果同时命中时同样返回 Err（id 无法唯一区分，
+                    // 拒绝武断选择）。
+                    if tool_call_id.is_empty() {
+                        return Err(crate::DeepseeknovaError::runner(
+                            "Observe: tool_call_id 为空，无法定位对应的工具结果".to_string(),
+                        ));
+                    }
+                    let find_result = |guard: &HashMap<NodeId, NodeOutput>| {
+                        let matches: Vec<&String> = guard
                             .values()
-                            .find_map(|o| match o {
-                                NodeOutput::ToolResult(r) => Some(r.clone()),
+                            .filter_map(|o| match o {
+                                NodeOutput::ToolResult(r) => Some(r),
                                 _ => None,
                             })
-                            .or_else(|| {
-                                guard.values().find_map(|o| match o {
-                                    NodeOutput::Error(e) => Some(format!("error: {e}")),
-                                    _ => None,
-                                })
-                            })
-                    });
-                    let result = shared_result
-                        .or_else(|| {
-                            let guard = outputs.read().unwrap_or_else(|e| e.into_inner());
-                            guard.values().find_map(|o| match o {
-                                NodeOutput::ToolResult(r) => Some(r.clone()),
-                                _ => None,
-                            })
-                        })
-                        .unwrap_or_default();
+                            .filter(|r| r.contains(tool_call_id.as_str()))
+                            .collect();
+                        match matches.len() {
+                            0 => Ok(None),
+                            1 => Ok(matches.into_iter().next().cloned()),
+                            _ => Err(crate::DeepseeknovaError::runner(format!(
+                                "Observe: 多个 ToolResult 均包含 tool_call_id \
+                                 '{tool_call_id}'，无法唯一确定目标"
+                            ))),
+                        }
+                    };
+                    // 兄弟（Parallel 作用域）结果优先，其次回退到顶层 outputs。
+                    let mut matched: Option<String> = if let Some(lock) = shared {
+                        find_result(&lock.read().unwrap_or_else(|e| e.into_inner()))?
+                    } else {
+                        None
+                    };
+                    if matched.is_none() {
+                        matched = find_result(&outputs.read().unwrap_or_else(|e| e.into_inner()))?;
+                    }
+                    let result = matched.ok_or_else(|| {
+                        crate::DeepseeknovaError::runner(format!(
+                            "Observe: 未找到 tool_call_id '{tool_call_id}' 对应的 ToolResult"
+                        ))
+                    })?;
                     Ok(NodeOutput::ToolResult(result))
                 }
                 Action::Reflect { criteria } => {
@@ -504,10 +518,24 @@ impl GraphExecutor {
                     Ok(NodeOutput::Text(combined))
                 }
                 Action::Conditional {
-                    condition: _,
+                    condition,
                     then,
                     r#else: _,
-                } => self.execute_action(&then.action, outputs, shared).await,
+                } => {
+                    // C-H2：条件求值机制尚未实现（planner/解析层当前不会产出
+                    // 带非空 condition 的 Conditional——见
+                    // coordinator::parse_plan_node_action 与 graph.rs 中该变体
+                    // 的文档）。修复前此处无条件执行 then、else 分支被静默丢弃。
+                    // 最小正确修复：condition 非空时返回明确错误，拒绝静默执行
+                    // then；空串 condition 视为恒真继续执行 then（保持向后兼容）。
+                    if !condition.is_empty() {
+                        return Err(crate::DeepseeknovaError::runner(format!(
+                            "Conditional 求值未实现（condition='{condition}'），\
+                             拒绝静默执行 then 分支"
+                        )));
+                    }
+                    self.execute_action(&then.action, outputs, shared).await
+                }
             }
         })
     }
@@ -1256,8 +1284,10 @@ mod tests {
                 ),
                 ExecutionNode::new(
                     "observer",
+                    // 修复后 tool_call_id 必须非空且能匹配目标 ToolResult：
+                    // MockTool 对 read_file 返回 "tool read_file done"，含 id。
                     Action::Observe {
-                        tool_call_id: String::new(),
+                        tool_call_id: "read_file".into(),
                     },
                 ),
             ]),
@@ -1302,8 +1332,10 @@ mod tests {
         ));
         g.add_node(ExecutionNode::new(
             "obs",
+            // 修复后 tool_call_id 必须非空且能匹配目标 ToolResult：
+            // MockTool 对 read_file 返回 "tool read_file done"，含 id。
             Action::Observe {
-                tool_call_id: String::new(),
+                tool_call_id: "read_file".into(),
             },
         ));
         // 注意：add_edge 对未知节点 fail-soft（丢弃边），必须先 add_node。
@@ -1316,6 +1348,161 @@ mod tests {
                 assert!(r.contains("tool read_file done"), "got: {r}")
             }
             other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn observe_matches_tool_call_id_among_parallel_siblings() {
+        // C-H1 回归：多工具并行时，Observe 必须按 tool_call_id 精确取回目标
+        // 兄弟结果，而非（旧实现那样）静默取 HashMap 迭代序中的任意第一个。
+        // 两个兄弟 ToolResult 分别为 "tool cat done" 与 "tool grep done"，
+        // 目标 id 是 "grep"（非首个、且文本可区分）。
+        let exec = Arc::new(GraphExecutor::new(
+            Arc::new(MockThink),
+            Arc::new(MockTool),
+            Arc::new(MockReflect),
+        ));
+
+        let mut g = ExecutionGraph::new("p".into());
+        let mut node = ExecutionNode::new(
+            "p",
+            Action::Parallel(vec![
+                ExecutionNode::new(
+                    "producer_cat",
+                    Action::CallTool {
+                        tool: "cat".into(),
+                        args: serde_json::json!({"path": "a"}),
+                    },
+                ),
+                ExecutionNode::new(
+                    "producer_grep",
+                    Action::CallTool {
+                        tool: "grep".into(),
+                        args: serde_json::json!({"pattern": "x"}),
+                    },
+                ),
+                ExecutionNode::new(
+                    "observer",
+                    Action::Observe {
+                        tool_call_id: "grep".into(),
+                    },
+                ),
+            ]),
+        );
+        node.retry = RetryPolicy {
+            max_attempts: 1,
+            backoff: Duration::ZERO,
+            jitter: false,
+        };
+        g.add_node(node);
+
+        let result = exec.execute(&g).await.unwrap();
+        assert!(result.completed);
+        match result.node_outputs.get("p") {
+            Some(NodeOutput::Text(t)) => {
+                assert!(
+                    t.contains("[observer]: ToolResult(\"tool grep done\")"),
+                    "observer 应返回目标 id 的结果，got: {t}"
+                );
+                assert!(
+                    !t.contains("[observer]: ToolResult(\"tool cat done\")"),
+                    "observer 不得静默取任意第一个兄弟结果，got: {t}"
+                );
+            }
+            other => panic!("expected Parallel Text output, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn observe_without_matching_tool_call_id_errors() {
+        // C-H1：找不到与 tool_call_id 匹配的结果时必须返回 Err，不得回退为
+        // 空串或任意兄弟结果。
+        let exec = Arc::new(GraphExecutor::new(
+            Arc::new(MockThink),
+            Arc::new(MockTool),
+            Arc::new(MockReflect),
+        ));
+
+        let mut g = ExecutionGraph::new("g".into());
+        g.add_node(ExecutionNode::new(
+            "prod",
+            Action::CallTool {
+                tool: "read_file".into(),
+                args: serde_json::json!({"path": "x"}),
+            },
+        ));
+        let mut obs = ExecutionNode::new(
+            "obs",
+            Action::Observe {
+                tool_call_id: "nonexistent_id".into(),
+            },
+        );
+        obs.retry = RetryPolicy {
+            max_attempts: 1,
+            backoff: Duration::ZERO,
+            jitter: false,
+        };
+        g.add_node(obs);
+        g.add_edge("prod".into(), "obs".into(), Some(EdgeCondition::Success));
+
+        let result = exec.execute(&g).await.unwrap();
+        assert!(!result.completed, "Observe 无匹配结果应使节点失败");
+        match result.node_outputs.get("obs") {
+            Some(NodeOutput::Error(e)) => {
+                assert!(
+                    e.contains("未找到 tool_call_id 'nonexistent_id'"),
+                    "错误信息应指明缺失的 id，got: {e}"
+                )
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn conditional_with_nonempty_condition_errors_instead_of_silent_then() {
+        // C-H2：condition 非空时（条件求值未实现）必须返回明确错误，拒绝
+        // 静默执行 then 分支。
+        let exec = make_executor();
+        let mut g = ExecutionGraph::new("c".into());
+        g.add_node(ExecutionNode::new(
+            "c",
+            Action::Conditional {
+                condition: "x > 0".into(),
+                then: Box::new(make_think_node("then", "should-not-run")),
+                r#else: None,
+            },
+        ));
+
+        let result = exec.execute(&g).await.unwrap();
+        assert!(!result.completed);
+        match result.node_outputs.get("c") {
+            Some(NodeOutput::Error(e)) => assert!(
+                e.contains("Conditional 求值未实现"),
+                "应返回求值未实现的明确错误，got: {e}"
+            ),
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn conditional_with_empty_condition_runs_then() {
+        // C-H2：空串 condition 视为恒真，继续执行 then（保持向后兼容）。
+        let exec = make_executor();
+        let mut g = ExecutionGraph::new("c".into());
+        g.add_node(ExecutionNode::new(
+            "c",
+            Action::Conditional {
+                condition: String::new(),
+                then: Box::new(make_think_node("then", "hello")),
+                r#else: None,
+            },
+        ));
+
+        let result = exec.execute(&g).await.unwrap();
+        assert!(result.completed);
+        match result.node_outputs.get("c") {
+            Some(NodeOutput::Text(t)) => assert!(t.contains("thought: hello"), "got: {t}"),
+            other => panic!("expected Text, got {other:?}"),
         }
     }
 
