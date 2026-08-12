@@ -708,6 +708,15 @@ async fn handle_slash_command(
                     if let Some(total) = report.total_usd {
                         println!("total estimated: ${total:.4}");
                     }
+                    if let Some(rate) = report.cache_hit_rate {
+                        println!("prefix cache hit rate: {:.1}%", rate * 100.0);
+                        if rate < 0.60 {
+                            println!(
+                                "note: cache hit rate below 60% — stable prefix \
+                                 (tools/repo map/system) may be changing between calls"
+                            );
+                        }
+                    }
                     if report.unmetered_calls > 0 {
                         println!(
                             "note: {} call(s) had no usage info (not estimated)",

@@ -635,6 +635,7 @@ mod tests {
                 }],
                 total_usd: Some(0.001),
                 unmetered_calls: 0,
+                cache_hit_rate: None,
             },
         };
         let json = serde_json::to_string(&report).unwrap();

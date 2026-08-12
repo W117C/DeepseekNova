@@ -987,6 +987,7 @@ mod tests {
                 }],
                 total_usd: None,
                 unmetered_calls: 0,
+                cache_hit_rate: None,
             },
         }
     }
@@ -1037,6 +1038,7 @@ mod tests {
                 ],
                 total_usd: None,
                 unmetered_calls: 0,
+                cache_hit_rate: None,
             },
         }
     }
@@ -1072,6 +1074,7 @@ mod tests {
                 }],
                 total_usd: None,
                 unmetered_calls: 5,
+                cache_hit_rate: None,
             },
         };
         assert!(evaluate_cache_hit(&report).is_none());
@@ -1098,6 +1101,7 @@ mod tests {
                 }],
                 total_usd: None,
                 unmetered_calls: 0,
+                cache_hit_rate: None,
             },
         };
         assert!(evaluate_cache_hit(&report).is_none());

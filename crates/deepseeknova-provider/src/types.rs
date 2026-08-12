@@ -5,34 +5,6 @@ use serde::{Deserialize, Serialize};
 // Request types (owned — no borrows across await)
 // ---------------------------------------------------------------------------
 
-/// OpenAI-compatible chat-completions request body (owned, no borrows across
-/// `await`). Serialised and sent to `/v1/chat/completions`.
-#[derive(Debug, Serialize)]
-pub struct ChatCompletionRequest {
-    /// Model name to call.
-    pub model: String,
-    /// Conversation history in provider order.
-    pub messages: Vec<Message>,
-    /// Tools offered to the model; omitted from the body when `None`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tools: Option<Vec<OpenAIRequestTool>>,
-    /// Sampling temperature; omitted when `None` (provider default).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub temperature: Option<f32>,
-    /// Upper bound on generated tokens.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_tokens: Option<u32>,
-    /// Whether the response is streamed token-by-token.
-    pub stream: bool,
-    /// DeepSeek reasoning effort: "low" | "medium" | "high"
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reasoning_effort: Option<String>,
-    /// Extra body fields passed through to the API.
-    /// DeepSeek thinking mode requires: {"thinking": {"type": "enabled"}}
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub extra_body: Option<serde_json::Value>,
-}
-
 /// A single tool exposed to the model in the request `tools` array.
 #[derive(Debug, Serialize)]
 pub struct OpenAIRequestTool {

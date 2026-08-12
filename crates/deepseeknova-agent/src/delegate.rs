@@ -524,6 +524,9 @@ impl DelegationSink for DelegateEngine {
 /// 返回前做**输出净化**：中和子代理产出中的权限修改指令形状
 /// （`permissions.allow` / `bypassPermissions` / `<settings-json` 等），
 /// 防止被父模型当作可执行指令——这是子代理 → 父上下文的唯一收口点。
+///
+/// D3：若子代理以 `## Handoff` 段声明结构化交接信息（供父代理/下一子代理
+/// 承接），提取为 `[handoff]` 块追加在结果尾部，与普通总结区分。
 async fn collect_final_text(
     mut stream: deepseeknova_core::runner::RunEventStream,
 ) -> Result<String, DeepseeknovaError> {
@@ -545,7 +548,31 @@ async fn collect_final_text(
     if sanitized != final_text {
         tracing::warn!("delegate output sanitized: permission-override shape(s) neutralized");
     }
-    Ok(sanitized)
+    // D3：结构化交接段提取——父上下文以 `[handoff]` 标记承接。
+    let mut result = sanitized;
+    if let Some(handoff) = extract_handoff(&result) {
+        result.push_str(&format!("\n\n[handoff]\n{handoff}"));
+    }
+    Ok(result)
+}
+
+/// D3：从子代理最终文本提取 `## Handoff` 交接段（不含标题行本身）。
+///
+/// 子代理可在输出末尾以 markdown 二级标题 `## Handoff` 声明需要父代理
+/// 继续处理的事项/交接信息（如"后续步骤"、"待父代理决策的问题"）；该段
+/// 与普通总结分离，父上下文以 `[handoff]` 结构化承接。段内容截到下一个
+/// `## ` 标题或文末；空段返回 `None`。
+fn extract_handoff(text: &str) -> Option<String> {
+    const MARKER: &str = "## Handoff";
+    let idx = text.find(MARKER)?;
+    let rest = &text[idx + MARKER.len()..];
+    let end = rest.find("\n## ").unwrap_or(rest.len());
+    let section = rest[..end].trim();
+    if section.is_empty() {
+        None
+    } else {
+        Some(section.to_string())
+    }
 }
 
 /// 头尾截断到 token 预算（chars ≈ tokens×4），中部省略。
@@ -603,9 +630,10 @@ mod tests {
     }
 
     #[test]
-    fn engine_default_max_depth_is_three() {
+    fn engine_default_max_depth_is_five() {
+        // D2：默认深度 3→5（对齐 Claude Code 嵌套 5 层）。
         let engine = DelegateEngine::new(HashMap::new(), 2, 2000);
-        assert_eq!(engine.max_depth, 3);
+        assert_eq!(engine.max_depth, 5);
         let clamped = DelegateEngine::new(HashMap::new(), 2, 2000).with_max_depth(0);
         assert_eq!(clamped.max_depth, 1);
     }
@@ -817,6 +845,65 @@ mod tests {
         assert!(out.chars().count() < 10_000);
         assert!(out.contains("truncated"));
         assert_eq!(cap_output("hello", 100), "hello");
+    }
+
+    /// D3：`## Handoff` 段被提取（不含标题行），父上下文以 `[handoff]` 承接。
+    #[test]
+    fn handoff_section_is_extracted() {
+        let text = "found the bug\n\n## Handoff\nnext step: fix auth.rs\nrun cargo check";
+        let handoff = extract_handoff(text).expect("handoff must be extracted");
+        assert!(handoff.contains("next step: fix auth.rs"), "got: {handoff}");
+        assert!(
+            !handoff.contains("## Handoff"),
+            "title line must be stripped"
+        );
+    }
+
+    /// D3：无 `## Handoff` 段 → None（普通总结不受影响）。
+    #[test]
+    fn no_handoff_returns_none() {
+        assert!(extract_handoff("plain summary").is_none());
+        assert!(extract_handoff("").is_none());
+    }
+
+    /// D3：空 `## Handoff` 段 → None；段在 `## Handoff` 后遇下一标题截断。
+    #[test]
+    fn empty_or_bounded_handoff() {
+        assert!(extract_handoff("## Handoff\n  ").is_none());
+        let text = "## Handoff\nhandoff content\n## Next Section\nmore";
+        let handoff = extract_handoff(text).expect("handoff before next heading");
+        assert_eq!(handoff, "handoff content");
+    }
+
+    /// D3：collect_final_text 收口把 handoff 段以 `[handoff]` 块追加。
+    #[tokio::test]
+    async fn collect_final_text_appends_handoff_block() {
+        use deepseeknova_core::runner::{RunEvent, RunEventStream, RunOutput};
+        use tokio::sync::mpsc;
+        use tokio_stream::wrappers::ReceiverStream;
+        let (tx, rx) = mpsc::channel(8);
+        tx.send(Ok(RunEvent::TextDelta("summary part".into())))
+            .await
+            .unwrap();
+        tx.send(Ok(RunEvent::TextDelta("\n## Handoff\nhandoff part".into())))
+            .await
+            .unwrap();
+        tx.send(Ok(RunEvent::Done(RunOutput {
+            text: "".into(),
+            tool_calls: vec![],
+            usage: None,
+        })))
+        .await
+        .unwrap();
+        drop(tx);
+        let stream: RunEventStream = Box::pin(ReceiverStream::new(rx));
+        let out = collect_final_text(stream).await.unwrap();
+        assert!(out.contains("summary part"), "got: {out}");
+        assert!(
+            out.contains("[handoff]"),
+            "handoff block must be appended: {out}"
+        );
+        assert!(out.contains("handoff part"));
     }
 
     #[tokio::test]

@@ -71,6 +71,9 @@ pub struct CaseValues {
     pub card: Option<Scorecard>,
     /// 本用例已执行轮次的累计成本（USD）；无单价/未计量时为 None。
     pub cost_usd: Option<f64>,
+    /// F1：本用例累计的前缀缓存命中率（0..1，跨全部行的 hit/miss 汇总）；
+    /// 无缓存记账（hit+miss 均为 0）时为 None（门禁仅对缓存端点生效）。
+    pub cache_hit_rate: Option<f64>,
 }
 
 impl CaseValues {
@@ -184,6 +187,8 @@ pub struct EvalResult {
     pub card: Option<Scorecard>,
     /// 本用例全部执行轮次累计成本（USD）。
     pub cost_usd: Option<f64>,
+    /// F1：本用例累计前缀缓存命中率（0..1）；无缓存记账为 None。
+    pub cache_hit_rate: Option<f64>,
     /// 实际执行轮次（>=1）。
     pub rounds: u32,
     pub output: String,
@@ -426,6 +431,9 @@ pub fn render_markdown(results: &[EvalResult], summary: &EvalSummary) -> String 
         if let Some(c) = r.cost_usd {
             out.push_str(&format!("   cost {c:.4} USD\n"));
         }
+        if let Some(rate) = r.cache_hit_rate {
+            out.push_str(&format!("   prefix cache hit rate: {:.1}%\n", rate * 100.0));
+        }
         out.push_str(&format!("   rounds: {}\n", r.rounds));
         if let Some(err) = &r.error {
             out.push_str(&format!("   error: {err}\n"));
@@ -469,6 +477,7 @@ pub fn render_json(results: &[EvalResult], summary: &EvalSummary) -> serde_json:
             "score_0_5": r.card.as_ref().map(|c| c.dimensions.composite * 5.0),
             "dimensions": r.card.as_ref().map(|c| &c.dimensions),
             "cost_usd": r.cost_usd,
+            "cache_hit_rate": r.cache_hit_rate,
             "checks": r.checks,
             "error": r.error,
             "output": r.output,
@@ -502,6 +511,7 @@ mod tests {
             output: output.into(),
             card,
             cost_usd: cost,
+            cache_hit_rate: None,
         }
     }
 
@@ -725,6 +735,7 @@ mod tests {
                 checks: vec![],
                 card: Some(card(0.8, 0.9)),
                 cost_usd: Some(0.01),
+                cache_hit_rate: Some(0.95),
                 rounds: 1,
                 output: "x".into(),
                 error: None,
@@ -736,6 +747,7 @@ mod tests {
                 checks: vec![],
                 card: Some(card(0.6, 0.5)),
                 cost_usd: None,
+                cache_hit_rate: None,
                 rounds: 2,
                 output: "y".into(),
                 error: None,
@@ -748,6 +760,7 @@ mod tests {
                 checks: vec![],
                 card: None,
                 cost_usd: None,
+                cache_hit_rate: None,
                 rounds: 1,
                 output: "".into(),
                 error: Some("boom".into()),
@@ -821,6 +834,7 @@ mod tests {
             }],
             card: Some(card(0.85, 1.0)),
             cost_usd: Some(0.02),
+            cache_hit_rate: Some(0.9),
             rounds: 2,
             output: "x".into(),
             error: None,
@@ -836,5 +850,6 @@ mod tests {
         assert_eq!(v["results"][0]["checks"][0]["passed"], true);
         assert!(v["results"][0]["dimensions"]["governance"].is_number());
         assert_eq!(v["results"][0]["cost_usd"], 0.02);
+        assert_eq!(v["results"][0]["cache_hit_rate"], 0.9);
     }
 }

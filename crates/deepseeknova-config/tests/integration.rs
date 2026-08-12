@@ -88,6 +88,7 @@ fn merge_preserves_provider_overrides() {
         thinking_enabled: false,
         reasoning_effort: None,
         extra_body: None,
+        cache_control: None,
         context_window: None,
     });
 
@@ -126,6 +127,7 @@ fn merge_overrides_non_default_providers() {
         thinking_enabled: false,
         reasoning_effort: None,
         extra_body: None,
+        cache_control: None,
         context_window: None,
     });
 
@@ -143,6 +145,7 @@ fn merge_overrides_non_default_providers() {
             thinking_enabled: false,
             reasoning_effort: None,
             extra_body: None,
+            cache_control: None,
             context_window: None,
         }],
         ..Default::default()
@@ -196,6 +199,7 @@ fn resolve_provider_for_model() {
             thinking_enabled: false,
             reasoning_effort: None,
             extra_body: None,
+            cache_control: None,
             context_window: None,
         }],
         models: vec![ModelConfig {

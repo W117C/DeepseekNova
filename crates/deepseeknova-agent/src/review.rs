@@ -20,6 +20,71 @@ pub(crate) enum Verdict {
     Issues(Vec<String>),
 }
 
+/// A7：完成声明中"无工具证据的结论性断言"检测（grounding 审查）。
+///
+/// 目标：让"不要编造事实"从提示词职责迁移为确定性机制——完成声明若含
+/// 结论性断言（如 "all tests pass" / "compiles" / "fixed"），但会话工具
+/// 结果中没有任何支撑证据，则标记为无证据断言，交由 review 层处理。
+///
+/// 保守策略：只识别**明确**的成功断言短语；证据关键词命中任一工具结果
+/// 即视为有支撑（避免误报——测试输出/编译输出通常含 "ok"/"pass"/"0 errors"
+/// 等痕迹）。这是启发式审查，不作为阻断门。
+pub(crate) fn find_ungrounded_assertions(completion: &str, evidence: &[String]) -> Vec<String> {
+    if completion.trim().is_empty() {
+        return Vec::new();
+    }
+    // 结论性断言短语（小写匹配）。
+    const ASSERTION_PHRASES: &[&str] = &[
+        "all tests pass",
+        "tests pass",
+        "test pass",
+        "compiles",
+        "compiled successfully",
+        "build succeeded",
+        "it works",
+        "works correctly",
+        "fixed",
+        "done",
+        "complete",
+    ];
+    // 支撑证据关键词（任一工具结果命中即视为有证据）。
+    const EVIDENCE_KEYWORDS: &[&str] = &[
+        "ok",
+        "pass",
+        "passed",
+        "success",
+        "0 errors",
+        "no errors",
+        "compiled",
+        "built",
+        "exit code 0",
+        "done",
+    ];
+    let lowered = completion.to_lowercase();
+    let mut ungrounded = Vec::new();
+    for phrase in ASSERTION_PHRASES {
+        if !lowered.contains(phrase) {
+            continue;
+        }
+        let has_evidence = evidence.iter().any(|e| {
+            let el = e.to_lowercase();
+            EVIDENCE_KEYWORDS.iter().any(|k| el.contains(k))
+        });
+        if !has_evidence {
+            ungrounded.push((*phrase).to_string());
+        }
+    }
+    ungrounded
+}
+
+/// A7：把无证据断言渲染为 review 的额外 issue 文本（供调用方并入 issues）。
+pub(crate) fn render_ungrounded_issue(phrase: &str) -> String {
+    format!(
+        "completion claims `{phrase}` but no tool result in this session provides \
+         supporting evidence — verify before claiming"
+    )
+}
+
 /// 采集 git diff（--stat + 正文，正文按 cap 截断）。非 git 仓库或命令失败
 /// 返回 None（调用方跳过审查）。
 pub(crate) async fn collect_diff(workspace_root: &Path, cap_chars: usize) -> Option<String> {
@@ -79,7 +144,9 @@ pub(crate) fn render_review_prompt(task: &str, completion: &str, diff: &str) -> 
 pub(crate) fn parse_verdict(raw: &str) -> Option<Verdict> {
     let json_str = extract_json(raw)?;
     let v: serde_json::Value = serde_json::from_str(&json_str).ok()?;
-    match v.get("verdict")?.as_str()? {
+    // 结构化契约校验：verdict 必须是字符串字段（缺失/类型不符 → 降级）。
+    let verdict = crate::contract::require_string(&v, "verdict").ok()?;
+    match verdict {
         "approve" => Some(Verdict::Approve),
         "issues" => {
             let issues = v
@@ -101,64 +168,71 @@ pub(crate) fn parse_verdict(raw: &str) -> Option<Verdict> {
     }
 }
 
-pub(crate) fn extract_json(raw: &str) -> Option<String> {
-    if let Some(start) = raw.find("```json") {
-        let rest = &raw[start + 7..];
-        if let Some(end) = rest.find("```") {
-            return Some(rest[..end].trim().to_string());
-        }
-    }
-    // 首个平衡的 {...}；跟踪字符串与转义，避免 issue 文本里的字面花括号误截。
-    let bytes = raw.as_bytes();
-    let start = raw.find('{')?;
-    let mut depth = 0usize;
-    let mut in_string = false;
-    let mut escape = false;
-    for (i, &b) in bytes.iter().enumerate().skip(start) {
-        if escape {
-            escape = false;
-            continue;
-        }
-        match b {
-            b'\\' if in_string => escape = true,
-            b'"' => in_string = !in_string,
-            b'{' if !in_string => depth += 1,
-            b'}' if !in_string => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    return Some(raw[start..=i].to_string());
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
+// A2：宽松 JSON 提取统一到 `crate::contract`（单一实现），此处仅 re-export
+// 保持既有调用点（memory_distill / reflection / coordinator / verify）不变。
+pub(crate) use crate::contract::extract_json;
 
 /// 单次审查 LLM 调用（复用 compaction::summarize 同款 ValidatedRequest 通路）。
+///
+/// A2：接入 `contract::retry_parsed` —— 判定输出经结构化契约流水线
+/// （提取 → 校验 → 非法回显重试 ≤1 次 → 回退 None），弱模型输出不合规时
+/// 自动携带上次输出与错误原因重试，不直接降级跳过。
 pub(crate) async fn ask_reviewer(provider: &dyn Provider, prompt: &str) -> Option<Verdict> {
-    let msgs = vec![Message {
-        role: Role::User,
-        content: prompt.to_string(),
-        name: None,
-        tool_calls: None,
-        tool_call_id: None,
-        reasoning_content: None,
-        reasoning_signature: None,
-    }];
-    let validated = match ValidatedRequest::new(&msgs, &[]) {
-        Ok(v) => v,
-        Err(violations) => {
-            warn!(
-                "invalid review request ({}); skipping review",
-                violations.join("; ")
-            );
-            return None;
+    use crate::contract::{default_echo, retry_parsed, ContractOutcome};
+
+    const MAX_RETRIES: u32 = 1; // review 判定重试 1 次（成本受控）
+    let initial = prompt.to_string();
+
+    let outcome = retry_parsed(
+        MAX_RETRIES,
+        |p| {
+            let msgs = vec![Message {
+                role: Role::User,
+                content: p.to_string(),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                reasoning_signature: None,
+            }];
+            async move {
+                let validated = match ValidatedRequest::new(&msgs, &[]) {
+                    Ok(v) => v,
+                    Err(violations) => {
+                        warn!(
+                            "invalid review request ({}); skipping review",
+                            violations.join("; ")
+                        );
+                        return None;
+                    }
+                };
+                match provider.generate(validated).await {
+                    Ok(out) => Some(out.content),
+                    Err(e) => {
+                        warn!("review model call failed ({e}); skipping review");
+                        None
+                    }
+                }
+            }
+        },
+        |raw| {
+            parse_verdict(raw)
+                .ok_or_else(|| "missing/invalid `verdict` field in review JSON".to_string())
+        },
+        |last, reason| match (last, reason) {
+            (Some(raw), Some(hint)) => default_echo(&initial, raw, hint),
+            _ => initial.clone(),
+        },
+    )
+    .await;
+
+    match outcome {
+        ContractOutcome::Ok(verdict) => Some(verdict),
+        ContractOutcome::Fallback => {
+            warn!("review verdict unparseable after retries; skipping review");
+            None
         }
-    };
-    match provider.generate(validated).await {
-        Ok(out) => parse_verdict(&out.content),
-        Err(e) => {
+        ContractOutcome::CallError(e) => {
             warn!("review model call failed ({e}); skipping review");
             None
         }
@@ -297,5 +371,43 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         assert!(collect_diff(&dir, 4000).await.is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A7：无证据断言被标记；有工具证据支撑的断言不被标记。
+    #[test]
+    fn ungrounded_assertions_flagged_without_evidence() {
+        // 无任何工具结果 → "all tests pass" 无证据。
+        let flagged = find_ungrounded_assertions("All tests pass and the build is complete.", &[]);
+        assert!(
+            flagged.iter().any(|p| p == "all tests pass"),
+            "expected 'all tests pass' flagged, got {flagged:?}"
+        );
+        assert!(flagged.iter().any(|p| p == "complete"));
+    }
+
+    /// A7：测试输出含 ok/pass 等痕迹 → 断言有支撑，不标记。
+    #[test]
+    fn ungrounded_assertions_cleared_by_evidence() {
+        let evidence = vec!["test result: ok. 42 passed; 0 failed".to_string()];
+        let flagged =
+            find_ungrounded_assertions("All tests pass and the build is complete.", &evidence);
+        assert!(
+            flagged.is_empty(),
+            "evidence must clear assertions, got {flagged:?}"
+        );
+    }
+
+    /// A7：空完成声明不产生断言。
+    #[test]
+    fn ungrounded_assertions_empty_completion() {
+        assert!(find_ungrounded_assertions("  ", &[]).is_empty());
+    }
+
+    /// A7：渲染 issue 文本包含断言短语。
+    #[test]
+    fn ungrounded_issue_text_mentions_phrase() {
+        let text = render_ungrounded_issue("fixed");
+        assert!(text.contains("fixed"));
+        assert!(text.contains("no tool result"));
     }
 }

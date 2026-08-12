@@ -872,14 +872,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&ws);
     }
 
-    /// M5 默认值守门：默认 max_depth=3（无显式配置）时 depth=3 放行、
-    /// depth=4 拒绝——配置上限在生产路径生效（非仅显式配置场景）。
+    /// M5 默认值守门：默认 max_depth=5（无显式配置）时 depth=5 放行、
+    /// depth=6 拒绝——配置上限在生产路径生效（非仅显式配置场景）。
     #[tokio::test]
     async fn delegate_engine_default_max_depth_guards_excess() {
         use deepseeknova_agent::task_spec::InputValues;
         let root = std::env::temp_dir().join(format!("dnv-depth-default-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        let config = Config::default(); // max_depth 默认 3
+        let config = Config::default(); // max_depth 默认 5（D2：3→5）
         let security = SecurityContext::with_safe_defaults();
         let engine = build_delegate_engine(
             &config,
@@ -892,11 +892,11 @@ mod tests {
             None,
         );
         let ok = engine
-            .run_at_depth("explorer", "investigate", InputValues::new(), 3)
+            .run_at_depth("explorer", "investigate", InputValues::new(), 5)
             .await;
         assert!(ok.is_ok(), "depth=默认上限 应放行: {ok:?}");
         let err = engine
-            .run_at_depth("explorer", "investigate", InputValues::new(), 4)
+            .run_at_depth("explorer", "investigate", InputValues::new(), 6)
             .await
             .unwrap_err();
         assert!(

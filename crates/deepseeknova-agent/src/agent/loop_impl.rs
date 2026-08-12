@@ -76,6 +76,22 @@ async fn reflect_retry(
 /// Paused reason 中 fix_plan 摘要的截断上限（字符）。
 const PAUSE_FIX_PLAN_CAP: usize = 200;
 
+/// A4：写后 diff 规模审计的变更行阈值。超过则告警注入 ToolResult
+/// （确定性提示"最小改动"，替代提示词层职责）。git 仓库内生效。
+const DIFF_AUDIT_MAX_CHANGED_LINES: usize = 300;
+
+/// A4：统计 diff 文本的变更行数（`+`/`-` 打头的行，排除 `+++`/`---`
+/// 文件头）。纯函数，便于单测。
+fn changed_line_count(diff: &str) -> usize {
+    diff.lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            (t.starts_with('+') && !t.starts_with("+++"))
+                || (t.starts_with('-') && !t.starts_with("---"))
+        })
+        .count()
+}
+
 /// verify/review 达 max_cycles 的 Paused 前归因：预算内调用 LLM，产出
 /// `fix_plan` 摘要拼进 reason（恢复时可续用）；预算超限/归因失败 → 原
 /// reason（不阻塞、不猜）。verdict 本身不改变 Paused 语义（达上限即暂停）。
@@ -190,6 +206,7 @@ pub(crate) async fn run_agent_loop(
     diagnose_hook: Option<DiagnoseHook>,
     protocol_gates: Vec<Arc<dyn PhaseGate>>,
     adversarial_review_enabled: bool,
+    diff_audit: bool,
 ) -> Result<(), DeepseeknovaError> {
     // serve 等共享 Agent 场景未配置会话标注：每次 run 生成唯一 id，避免
     // 多会话共用同一 Paused session_id / 诊断报告文件名互相覆盖。
@@ -277,6 +294,13 @@ pub(crate) async fn run_agent_loop(
             .map(|s| s.max_attributions)
             .unwrap_or(0),
     );
+
+    // P0.6：工具索引（name → Arc<Tool>）在 run 内不变（tools 是函数参数，
+    // 循环内不增删）——提前构建一次，消除每步重建的 schema().name 开销。
+    let tool_map: HashMap<String, Arc<dyn Tool>> = tools
+        .iter()
+        .map(|t| (t.schema().name.clone(), Arc::clone(t)))
+        .collect();
 
     for step in 0..max_steps {
         metrics.observe_step();
@@ -420,6 +444,10 @@ pub(crate) async fn run_agent_loop(
         }
 
         // Atomic Turn-end compaction
+        // B2（写前阻塞）：压缩在 turn 末同步执行（L1/L2/L3 全链路 await 完成
+        // 后才进入下一轮），而写工具执行在 turn 内 `stream_and_process_turn`
+        // ——压缩与工具执行天然串行，压缩期间不存在并发写窗口（对齐 Codex
+        // "压缩前阻塞写工具"的语义由本架构顺序保证，无需额外锁）。
         if compaction_threshold.is_some() || budget_wants_compress {
             let threshold = compaction_threshold.unwrap_or(0);
             // A1：判定基于步内快照（与 budget 判定同源，零额外克隆）。
@@ -437,6 +465,8 @@ pub(crate) async fn run_agent_loop(
                 if after_shrink < before {
                     compacted = true;
                 }
+                // F4：压缩事件观测（L1 截断）。
+                diagnose.record_compaction("L1", threshold.max(1), 0);
 
                 info!("shrunk tool results: {} -> {} tokens", before, after_shrink);
 
@@ -446,6 +476,8 @@ pub(crate) async fn run_agent_loop(
                     compacted = true;
                     let after_slide = memory.read().await.estimate_tokens();
                     info!("slid window: {} -> {} tokens", after_shrink, after_slide);
+                    // F4：压缩事件观测（L2 滑动窗口）。
+                    diagnose.record_compaction("L2", threshold, 0);
 
                     // B2 L3：L1+L2 仍不够（或 budget 要求压缩）时，结构化摘要。
                     // 已熔断（连败 3 次）则直接跳过，省去渲染开销。
@@ -460,6 +492,16 @@ pub(crate) async fn run_agent_loop(
                             let after_l3 = memory.read().await.estimate_tokens();
                             info!("L3 compacted: {} -> {} tokens", after_slide, after_l3);
                             compacted = true;
+                            // F4：压缩事件观测（L3 LLM 摘要；digest 长度取压缩后
+                            // 首条消息字符数）。
+                            let digest_chars = memory
+                                .read()
+                                .await
+                                .iter_all()
+                                .next()
+                                .map(|m| m.content.len())
+                                .unwrap_or(0);
+                            diagnose.record_compaction("L3", threshold, digest_chars);
                         }
                     }
                 }
@@ -477,7 +519,13 @@ pub(crate) async fn run_agent_loop(
                     if let Some(rp) = rp {
                         let last_user = crate::compaction::last_user_message(&snapshot);
                         if let Some(q) = last_user {
-                            inject_recall(rp, &mut *memory.write().await, &q.content);
+                            // B4：压缩后召回注入按预算裁剪（防记忆块反噬上下文）。
+                            inject_recall(
+                                rp,
+                                &mut *memory.write().await,
+                                &q.content,
+                                crate::tools::DEFAULT_RECALL_MAX_CHARS,
+                            );
                             // 召回注入修改了历史 → 再次快照。
                             snapshot = memory.read().await.get_all();
                         }
@@ -486,11 +534,7 @@ pub(crate) async fn run_agent_loop(
             }
         }
 
-        // Build the tool index for execution
-        let tool_map: HashMap<String, Arc<dyn Tool>> = tools
-            .iter()
-            .map(|t| (t.schema().name.clone(), Arc::clone(t)))
-            .collect();
+        // P0.6：tool_map 已在循环前构建一次（run 内工具集不变），此处复用。
 
         // P2.1 每步 provider 选择：auto 路由（整轮固定）优先；否则机械续步
         // （上一步是正常工具结果）走 quick，首步 / 出错 / 回炉反馈走 high。
@@ -589,6 +633,7 @@ pub(crate) async fn run_agent_loop(
             // A1：复用步内快照作为本步 provider 请求的消息序列
             // （压缩路径已在修改后重新快照）。
             &snapshot,
+            diff_audit,
         )
         .await?;
 
@@ -601,136 +646,164 @@ pub(crate) async fn run_agent_loop(
                     // 产出空 verify 相位（此前无条件 phase_enter 会在报告中
                     // 留一个空相位）。review 相位已在 `wrote_files` 分支内，
                     // 无同类问题。
-                    if wrote_files && !vs.commands.is_empty() {
-                        // 任务质量闭环 B：verify 相位起点（报告阶段时间戳）。
-                        diagnose.phase_enter("verify");
-                        match crate::verify::run_verify_pass(
-                            &tool_map,
-                            vs,
-                            &workspace_root,
-                            &security,
-                            &extensions,
-                            cancel,
-                            tx,
-                        )
-                        .await
-                        {
-                            crate::verify::VerifyOutcome::Pass => {
-                                metrics.observe_verify(true);
-                                // 协议门控（阶段3）：verify pass → Verify 阶段
-                                // 边界（verify-evidence 门在此快照评估，此时
-                                // 计数含本轮 passed → 通过）。
-                                if protocol_active {
-                                    phase_runner.observe_verify(true);
-                                    // Bugbot #12：findings 接 run 局部质量快照。
-                                    let findings = run_findings.lock().await.clone();
-                                    let ctx = phase_runner.build_ctx(Phase::Verify, true, findings);
-                                    let violations = phase_runner.transition(
-                                        Phase::Verify,
-                                        &protocol_gates,
-                                        &ctx,
-                                    );
-                                    tx.send(Ok(RunEvent::PhaseTransition {
-                                        transition: PhaseTransition {
-                                            phase: Phase::Verify,
-                                            outcome: if violations.is_empty() {
-                                                PhaseOutcome::Pass
-                                            } else {
-                                                PhaseOutcome::Violated
+                    if wrote_files {
+                        // A8：验证命令发现——配置 `[verify] commands` 为空时，
+                        // 从会话工具结果推断验证命令（cargo check/test 等）；
+                        // 显式配置仍优先（commands 非空直接用配置）。
+                        let effective: std::borrow::Cow<crate::verify::VerifySettings> =
+                            if vs.commands.is_empty() {
+                                let tool_results: Vec<String> = memory
+                                    .read()
+                                    .await
+                                    .iter_all()
+                                    .filter(|m| m.role == Role::Tool)
+                                    .map(|m| m.content.clone())
+                                    .collect();
+                                let inferred = crate::verify::infer_verify_commands(&tool_results);
+                                if inferred.is_empty() {
+                                    std::borrow::Cow::Borrowed(vs)
+                                } else {
+                                    let mut s = vs.clone();
+                                    s.commands = inferred;
+                                    std::borrow::Cow::Owned(s)
+                                }
+                            } else {
+                                std::borrow::Cow::Borrowed(vs)
+                            };
+                        if !effective.commands.is_empty() {
+                            // 任务质量闭环 B：verify 相位起点（报告阶段时间戳）。
+                            diagnose.phase_enter("verify");
+                            match crate::verify::run_verify_pass(
+                                &tool_map,
+                                &effective,
+                                &workspace_root,
+                                &security,
+                                &extensions,
+                                cancel,
+                                tx,
+                            )
+                            .await
+                            {
+                                crate::verify::VerifyOutcome::Pass => {
+                                    metrics.observe_verify(true);
+                                    // 协议门控（阶段3）：verify pass → Verify 阶段
+                                    // 边界（verify-evidence 门在此快照评估，此时
+                                    // 计数含本轮 passed → 通过）。
+                                    if protocol_active {
+                                        phase_runner.observe_verify(true);
+                                        // Bugbot #12：findings 接 run 局部质量快照。
+                                        let findings = run_findings.lock().await.clone();
+                                        let ctx =
+                                            phase_runner.build_ctx(Phase::Verify, true, findings);
+                                        let violations = phase_runner.transition(
+                                            Phase::Verify,
+                                            &protocol_gates,
+                                            &ctx,
+                                        );
+                                        tx.send(Ok(RunEvent::PhaseTransition {
+                                            transition: PhaseTransition {
+                                                phase: Phase::Verify,
+                                                outcome: if violations.is_empty() {
+                                                    PhaseOutcome::Pass
+                                                } else {
+                                                    PhaseOutcome::Violated
+                                                },
                                             },
-                                        },
+                                        }))
+                                        .await
+                                        .ok();
+                                        for v in &violations {
+                                            tx.send(Ok(RunEvent::GateViolation(v.clone())))
+                                                .await
+                                                .ok();
+                                        }
+                                        let (pv, pt) = phase_runner.stats();
+                                        metrics.sync_protocol_stats(pv, pt);
+                                    }
+                                }
+                                crate::verify::VerifyOutcome::Fail(reason)
+                                    if verify_cycles < vs.max_cycles =>
+                                {
+                                    verify_cycles += 1;
+                                    metrics.observe_verify(false);
+                                    if protocol_active {
+                                        phase_runner.observe_verify(false);
+                                    }
+                                    metrics.observe_retry();
+                                    let original = verify_failure_message(&reason);
+                                    // 任务质量闭环 B：reflect 相位起点（报告阶段时间戳）。
+                                    diagnose.phase_enter("reflect");
+                                    let (content, reflection) = reflect_retry(
+                                        &reflect_settings,
+                                        &lesson_hook,
+                                        &input.prompt,
+                                        &reason,
+                                        &output.text,
+                                        original.clone(),
+                                    )
+                                    .await;
+                                    // 任务质量闭环 B：反思产物进诊断（root_cause/fix_plan）。
+                                    if let Some(r) = reflection {
+                                        diagnose.record_reflection(r);
+                                    }
+                                    // 任务质量闭环 C：retry 文案发生反思改写才计为
+                                    // 失败路径上有 reflection 记录（compose_retry_message
+                                    // 恒前置 [Reflection] 前缀，可直接比较）。
+                                    if content != original {
+                                        metrics.observe_reflection();
+                                    }
+                                    memory.write().await.add_message(Message {
+                                        role: Role::User,
+                                        content,
+                                        name: None,
+                                        tool_calls: None,
+                                        tool_call_id: None,
+                                        reasoning_content: None,
+                                        reasoning_signature: None,
+                                    });
+                                    continue; // 回炉修复，下一次 Complete 再验证
+                                }
+                                crate::verify::VerifyOutcome::Fail(reason) => {
+                                    metrics.observe_verify(false);
+                                    if protocol_active {
+                                        phase_runner.observe_verify(false);
+                                    }
+                                    metrics.emit(None);
+                                    let reason = attribute_pause_reason(
+                                        attribution_settings.as_ref(),
+                                        &attribution_budget,
+                                        &input.prompt,
+                                        &reason,
+                                        format!("verify_failed: {reason}"),
+                                    )
+                                    .await;
+                                    // 任务质量闭环 B：verify 达上限的 Paused 显式产出
+                                    // 报告（outcome=paused，失败详情带最终 pause reason）。
+                                    diagnose.record_failure("verify", None, None, reason.clone());
+                                    // Bugbot #2：Paused 终端分支同样接对抗审查。
+                                    wire_session_adversarial_review(
+                                        &mut diagnose,
+                                        provider.clone(),
+                                        adversarial_review_enabled,
+                                        &input.prompt,
+                                        &*memory.read().await,
+                                        &run_findings,
+                                        0,
+                                    )
+                                    .await;
+                                    diagnose
+                                        .emit("paused", &memory.read().await.get_all())
+                                        .await;
+                                    tx.send(Ok(RunEvent::Paused {
+                                        reason,
+                                        session_id: session_label.clone(),
                                     }))
                                     .await
                                     .ok();
-                                    for v in &violations {
-                                        tx.send(Ok(RunEvent::GateViolation(v.clone()))).await.ok();
-                                    }
-                                    let (pv, pt) = phase_runner.stats();
-                                    metrics.sync_protocol_stats(pv, pt);
+                                    return Ok(());
                                 }
+                                crate::verify::VerifyOutcome::Skipped => {}
                             }
-                            crate::verify::VerifyOutcome::Fail(reason)
-                                if verify_cycles < vs.max_cycles =>
-                            {
-                                verify_cycles += 1;
-                                metrics.observe_verify(false);
-                                if protocol_active {
-                                    phase_runner.observe_verify(false);
-                                }
-                                metrics.observe_retry();
-                                let original = verify_failure_message(&reason);
-                                // 任务质量闭环 B：reflect 相位起点（报告阶段时间戳）。
-                                diagnose.phase_enter("reflect");
-                                let (content, reflection) = reflect_retry(
-                                    &reflect_settings,
-                                    &lesson_hook,
-                                    &input.prompt,
-                                    &reason,
-                                    &output.text,
-                                    original.clone(),
-                                )
-                                .await;
-                                // 任务质量闭环 B：反思产物进诊断（root_cause/fix_plan）。
-                                if let Some(r) = reflection {
-                                    diagnose.record_reflection(r);
-                                }
-                                // 任务质量闭环 C：retry 文案发生反思改写才计为
-                                // 失败路径上有 reflection 记录（compose_retry_message
-                                // 恒前置 [Reflection] 前缀，可直接比较）。
-                                if content != original {
-                                    metrics.observe_reflection();
-                                }
-                                memory.write().await.add_message(Message {
-                                    role: Role::User,
-                                    content,
-                                    name: None,
-                                    tool_calls: None,
-                                    tool_call_id: None,
-                                    reasoning_content: None,
-                                    reasoning_signature: None,
-                                });
-                                continue; // 回炉修复，下一次 Complete 再验证
-                            }
-                            crate::verify::VerifyOutcome::Fail(reason) => {
-                                metrics.observe_verify(false);
-                                if protocol_active {
-                                    phase_runner.observe_verify(false);
-                                }
-                                metrics.emit(None);
-                                let reason = attribute_pause_reason(
-                                    attribution_settings.as_ref(),
-                                    &attribution_budget,
-                                    &input.prompt,
-                                    &reason,
-                                    format!("verify_failed: {reason}"),
-                                )
-                                .await;
-                                // 任务质量闭环 B：verify 达上限的 Paused 显式产出
-                                // 报告（outcome=paused，失败详情带最终 pause reason）。
-                                diagnose.record_failure("verify", None, None, reason.clone());
-                                // Bugbot #2：Paused 终端分支同样接对抗审查。
-                                wire_session_adversarial_review(
-                                    &mut diagnose,
-                                    provider.clone(),
-                                    adversarial_review_enabled,
-                                    &input.prompt,
-                                    &*memory.read().await,
-                                    &run_findings,
-                                    0,
-                                )
-                                .await;
-                                diagnose
-                                    .emit("paused", &memory.read().await.get_all())
-                                    .await;
-                                tx.send(Ok(RunEvent::Paused {
-                                    reason,
-                                    session_id: session_label.clone(),
-                                }))
-                                .await
-                                .ok();
-                                return Ok(());
-                            }
-                            crate::verify::VerifyOutcome::Skipped => {}
                         }
                     }
                     // ── P1b 完成前 LLM 验证：确定性命令通过后（或未配置命令时）
@@ -831,12 +904,18 @@ pub(crate) async fn run_agent_loop(
                             }
                             info!("review counter: {name}");
                         };
+                        // A7：grounding 证据 = 会话工具结果文本。先绑定局部
+                        // 变量，使 memory 读锁 guard 在进入 await 前释放——
+                        // 否则临时 guard 存活到 match 结束，Issues 分支的
+                        // memory.write() 会与读锁死锁（tokio RwLock 不可重入）。
+                        let grounding_evidence = evidence_for_grounding(&*memory.read().await);
                         match run_review_pass(
                             rp.as_ref(),
                             rs,
                             &workspace_root,
                             &input.prompt,
                             &output.text,
+                            &grounding_evidence,
                             &bump,
                             review_cycles == 0,
                         )
@@ -1084,14 +1163,30 @@ enum ReviewOutcome {
     Skipped,
 }
 
+/// A7：收集会话工具结果文本作为 grounding 审查证据（Role::Tool 消息的
+/// content）。审查时若完成声明含无工具证据的成功断言（如 "all tests pass"
+/// 但无对应测试输出），降级为 Issues。
+fn evidence_for_grounding(memory: &crate::memory::Memory) -> Vec<String> {
+    memory
+        .iter_all()
+        .filter(|m| m.role == Role::Tool)
+        .map(|m| m.content.clone())
+        .collect()
+}
+
 /// 执行一次审查：采集 diff → 问审查模型 → 判定。任何失败 → Skipped。
 /// `first_pass` 仅用于 review_triggered 只计首轮。
+/// A7：`evidence` 为本会话工具结果文本（memory 中 Role::Tool 消息），用于
+/// grounding 审查——审查模型判定 Approve 时，若完成声明含无证据的成功断言
+/// （如 "all tests pass" 但无对应工具结果），降级为 Issues（确定性审查，
+/// 替代提示词层"不要编造事实"职责）。
 async fn run_review_pass(
     provider: &dyn Provider,
     settings: &crate::review::ReviewSettings,
     workspace_root: &std::path::Path,
     task: &str,
     completion: &str,
+    evidence: &[String],
     bump: &(dyn Fn(&str) + Send + Sync),
     first_pass: bool,
 ) -> ReviewOutcome {
@@ -1105,7 +1200,26 @@ async fn run_review_pass(
     }
     let prompt = crate::review::render_review_prompt(task, completion, &diff);
     match crate::review::ask_reviewer(provider, &prompt).await {
-        Some(crate::review::Verdict::Approve) => ReviewOutcome::Approve,
+        Some(crate::review::Verdict::Approve) => {
+            // A7：grounding 审查——完成声明含无证据的成功断言时**告警但不降级**
+            // （启发式标记，非阻断门；降级会改变 review 判定语义，破坏
+            // "issues 后修复 → Done" 的既有闭环）。命中以 warn + counter 记录，
+            // 供诊断/观测；后续可演进为配置化阻断。
+            let ungrounded = crate::review::find_ungrounded_assertions(completion, evidence);
+            if !ungrounded.is_empty() {
+                bump("grounding_issues");
+                let detail: Vec<String> = ungrounded
+                    .iter()
+                    .map(|p| crate::review::render_ungrounded_issue(p))
+                    .collect();
+                tracing::warn!(
+                    "grounding review: {} ungrounded assertion(s) in completion — \
+                     flagged but not blocking",
+                    detail.len()
+                );
+            }
+            ReviewOutcome::Approve
+        }
         Some(crate::review::Verdict::Issues(list)) => {
             bump("issues_found");
             ReviewOutcome::Issues(list)
@@ -1161,6 +1275,7 @@ async fn stream_and_process_turn(
     // A1：本步消息快照（由调用方在步开始时取，压缩后重新快照）。
     // provider 请求复用此快照，不再在步内重复全量克隆。
     messages: &[Message],
+    diff_audit: bool,
 ) -> Result<StepOutcome, DeepseeknovaError> {
     // Build tool refs for provider
     let tool_refs: Vec<&dyn Tool> = tools.iter().map(|t| t.as_ref()).collect();
@@ -1813,6 +1928,24 @@ async fn stream_and_process_turn(
                         }
                     }
                 }
+                // A4：写后 diff 规模审计（git 仓库内，可配置默认关）。变更行数
+                // 超阈值 → 告警注入 ToolResult（确定性提示"最小改动"，替代提示词
+                // 层 Make Focused Progress 职责）。非 git 仓库 collect_diff 返回
+                // None，静默跳过。ToolHook::after 为同步方法无法 await git，故
+                // 审计落在主循环回填段（与 lsp 诊断同点位）。
+                if diff_audit {
+                    if let Some(diff) = crate::review::collect_diff(workspace_root, 64 * 1024).await
+                    {
+                        let changed = changed_line_count(&diff);
+                        if changed > DIFF_AUDIT_MAX_CHANGED_LINES {
+                            result.push_str(&format!(
+                                "\n\n---\n[diff audit] warning: {changed} changed lines exceeds \
+                                 the {DIFF_AUDIT_MAX_CHANGED_LINES}-line budget — consider smaller, \
+                                 verifiable changes"
+                            ));
+                        }
+                    }
+                }
             }
             // P2.2 观察压缩：事件透出原始结果；历史存压缩摘要（压缩失败回退原始截断）。
             let stored = if let Some(obs) = observe {
@@ -2112,6 +2245,21 @@ mod tests {
     use super::*;
     use crate::test_utils::MockProvider;
     use deepseeknova_core::types::ToolSchema;
+
+    /// A4：changed_line_count 统计 +/- 变更行、排除 +++/--- 文件头。
+    #[test]
+    fn changed_line_count_counts_additions_and_removals() {
+        let diff = "--- a/x.rs\n+++ b/x.rs\n@@ -1 +1 @@\n-old line\n+new line\n context\n";
+        assert_eq!(
+            changed_line_count(diff),
+            2,
+            "2 changed lines, 1 file header pair"
+        );
+        assert_eq!(changed_line_count(""), 0);
+        assert_eq!(changed_line_count("@@ -1 +1 @@\n context\n"), 0);
+        // 文件头 +++/--- 不得计入。
+        assert_eq!(changed_line_count("--- a\n+++ b\n"), 0);
+    }
     use std::sync::Arc;
 
     /// 固定返回给定文本的写类工具桩（驱动工具钩子产 findings）。
@@ -2271,6 +2419,7 @@ mod tests {
             None,
             Vec::new(),
             false,
+            false, // diff_audit：测试默认关
         )
         .await;
     }

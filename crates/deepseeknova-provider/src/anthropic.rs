@@ -11,7 +11,7 @@ use sha2::Digest;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
-use tracing::info;
+use tracing::{info, warn};
 
 // ---------------------------------------------------------------------------
 // AnthropicProvider — Anthropic Messages API
@@ -42,6 +42,9 @@ pub struct AnthropicProvider {
     tool_cache: ToolSchemaCache<Vec<AnthropicTool>>,
     /// Sampling temperature written into the request body when set.
     temperature: Option<f32>,
+    /// Whether to inject `cache_control: {"type":"ephemeral"}` breakpoints
+    /// (system block + last tool) so the stable prefix is explicitly cached.
+    cache_control: bool,
 }
 
 impl AnthropicProvider {
@@ -80,6 +83,7 @@ impl AnthropicProvider {
             max_tokens: 4096,
             tool_cache: ToolSchemaCache::with_capacity(16),
             temperature: None,
+            cache_control: true,
         })
     }
 
@@ -107,6 +111,15 @@ impl AnthropicProvider {
         self
     }
 
+    /// Toggle Anthropic prompt-caching breakpoint injection
+    /// (`cache_control: {"type":"ephemeral"}` on the system block and the
+    /// last tool). Enabled by default; disable to keep the request body
+    /// byte-identical to pre-wiring versions.
+    pub fn with_cache_control(mut self, enabled: bool) -> Self {
+        self.cache_control = enabled;
+        self
+    }
+
     /// Build the Anthropic request body shared by both `generate` and
     /// `stream`, injecting DeepSeek thinking mode and reasoning effort.
     fn build_request(
@@ -115,7 +128,19 @@ impl AnthropicProvider {
         tools: &[&dyn Tool],
         stream: bool,
     ) -> AnthropicRequest {
-        let system = Self::extract_system(messages);
+        let system = Self::extract_system(messages).map(|s| {
+            if self.cache_control {
+                // Anthropic prompt-caching 断点：system 以 blocks 数组形式携带
+                // cache_control，使稳定前缀（system + tools）显式缓存。
+                serde_json::json!([{
+                    "type": "text",
+                    "text": s,
+                    "cache_control": {"type": "ephemeral"}
+                }])
+            } else {
+                serde_json::Value::String(s)
+            }
+        });
         let conversation: Vec<&Message> =
             messages.iter().filter(|m| m.role != Role::System).collect();
 
@@ -168,16 +193,26 @@ impl AnthropicProvider {
     /// Build Anthropic-formatted tools, cached by tool identity so an
     /// unchanged registry skips the per-request collect + clone.
     fn build_tools(&self, tools: &[&dyn Tool]) -> Option<Vec<AnthropicTool>> {
-        self.tool_cache.get_or_build(tools, |ts| {
+        let cache_control = self.cache_control;
+        self.tool_cache.get_or_build(tools, move |ts| {
             let schemas: Vec<_> = ts.iter().map(|t| t.schema()).collect();
-            schemas
+            let mut built: Vec<AnthropicTool> = schemas
                 .iter()
                 .map(|s| AnthropicTool {
                     name: s.name.clone(),
                     description: s.description.clone(),
                     input_schema: s.parameters.clone(),
+                    cache_control: None,
                 })
-                .collect()
+                .collect();
+            // Anthropic 惯例：最后一个 tool 携带 cache_control 断点，标记
+            // 可缓存前缀（system + tools 段）的结尾。
+            if cache_control {
+                if let Some(last) = built.last_mut() {
+                    last.cache_control = Some(serde_json::json!({"type": "ephemeral"}));
+                }
+            }
+            built
         })
     }
 
@@ -363,18 +398,49 @@ impl Provider for AnthropicProvider {
         let messages = validated.messages;
         let tools = validated.tools;
         let body = self.build_request(messages, tools, true);
-        let response = self.send_request(&body, true).await?;
 
-        // True streaming via bytes_stream — same pattern as OpenAI provider
-        let (tx, rx) = mpsc::channel::<Result<Chunk, DeepseeknovaError>>(64);
+        // P0.4：body-read 阶段重试（与 `send_request` 内的 header 阶段重试
+        // 分离）。网关常在 SSE body 中途断流；仅当**未发出任何内容**时
+        // 重试安全——一旦有 text/tool/usage chunk 到达调用方，重试会重复
+        // 输出，错误直接上抛（与 OpenAI provider 行为对齐）。
+        let mut attempt = 0u32;
+        loop {
+            let response = self.send_request(&body, true).await?;
 
-        tokio::spawn(async move {
-            if let Err(e) = stream_anthropic_sse(response, &tx).await {
-                let _ = tx.send(Err(e)).await;
+            let (tx, mut rx) = mpsc::channel::<Result<Chunk, DeepseeknovaError>>(64);
+
+            tokio::spawn(async move {
+                if let Err(e) = stream_anthropic_sse(response, &tx).await {
+                    let _ = tx.send(Err(e)).await;
+                }
+            });
+
+            // Peek at the first item to decide retry vs. hand-off.
+            match rx.recv().await {
+                Some(Err(e)) if attempt < self.max_retries => {
+                    let delay = crate::retry::backoff_duration(attempt + 1);
+                    warn!(
+                        "anthropic stream disconnected before any content, retry {}/{}: {e:?}",
+                        attempt + 1,
+                        self.max_retries
+                    );
+                    drop(rx);
+                    tokio::time::sleep(delay).await;
+                    attempt += 1;
+                }
+                Some(first) => {
+                    // First item arrived — forward it, then the live rest.
+                    let rest = tokio_stream::wrappers::ReceiverStream::new(rx);
+                    let chained = tokio_stream::iter(std::iter::once(first)).chain(rest);
+                    return Ok(Box::pin(chained));
+                }
+                None => {
+                    return Err(DeepseeknovaError::provider(
+                        "anthropic stream ended before producing any event",
+                    ));
+                }
             }
-        });
-
-        Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+        }
     }
 }
 
@@ -471,7 +537,7 @@ struct AnthropicRequest {
     model: String,
     max_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<String>,
+    system: Option<serde_json::Value>,
     messages: Vec<AnthropicMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<AnthropicTool>>,
@@ -511,6 +577,10 @@ struct AnthropicTool {
     name: String,
     description: String,
     input_schema: serde_json::Value,
+    /// Anthropic prompt-caching breakpoint; set on the last tool when
+    /// cache_control is enabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -557,6 +627,17 @@ struct AnthropicUsage {
     /// Context-cache write/creation tokens (billed as cache misses).
     #[serde(rename = "cache_creation_input_tokens", default)]
     cache_creation_input_tokens: u32,
+    /// Billed reasoning tokens (thinking mode), nested under
+    /// `output_tokens_details` — DeepSeek's Anthropic-compatible endpoint
+    /// reports them here (mirrors OpenAI's `completion_tokens_details`).
+    #[serde(rename = "output_tokens_details", default)]
+    output_tokens_details: Option<AnthropicOutputTokensDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicOutputTokensDetails {
+    #[serde(rename = "reasoning_tokens", default)]
+    reasoning_tokens: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -637,6 +718,7 @@ struct AnthropicUsageAcc {
     output_tokens: u32,
     cache_read: u32,
     cache_creation: u32,
+    reasoning_tokens: u32,
 }
 
 impl AnthropicUsageAcc {
@@ -656,6 +738,11 @@ impl AnthropicUsageAcc {
         if u.cache_creation_input_tokens > 0 {
             self.cache_creation = u.cache_creation_input_tokens;
         }
+        if let Some(ref details) = u.output_tokens_details {
+            if details.reasoning_tokens > 0 {
+                self.reasoning_tokens = details.reasoning_tokens;
+            }
+        }
     }
 
     fn to_usage(&self) -> Usage {
@@ -666,7 +753,7 @@ impl AnthropicUsageAcc {
             total_tokens: prompt_tokens + self.output_tokens,
             cache_hit_tokens: self.cache_read,
             cache_miss_tokens: self.cache_creation,
-            reasoning_tokens: 0,
+            reasoning_tokens: self.reasoning_tokens,
         }
     }
 }
@@ -852,10 +939,15 @@ async fn process_anthropic_event(
             if let Some(usage) = event.usage {
                 usage_acc.absorb(&usage);
             }
-            // Emit the merged accounting (input + context-cache + output).
+            // P0.2：不再在此发射 Usage——message_delta 一轮可能多次，改为
+            // message_stop 时发射一次最终合并值（前端无需幂等去重）。
+        }
+        "message_stop" => {
+            // Emit the merged accounting exactly once per turn (input +
+            // context-cache + output + reasoning).
             let _ = tx.send(Ok(Chunk::Usage(usage_acc.to_usage()))).await;
         }
-        "message_stop" | "ping" => {}
+        "ping" => {}
         _ => {}
     }
 
@@ -889,6 +981,27 @@ async fn flush_anthropic_tool_calls(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::{clear_proxy_env, ENV_LOCK};
+
+    /// Minimal tool for request-body assertions (cache_control breakpoints).
+    struct TestTool;
+    #[async_trait::async_trait]
+    impl Tool for TestTool {
+        fn schema(&self) -> deepseeknova_core::types::ToolSchema {
+            deepseeknova_core::types::ToolSchema {
+                name: "test_tool".into(),
+                description: "does nothing".into(),
+                parameters: serde_json::json!({"type": "object"}),
+            }
+        }
+        async fn execute(
+            &self,
+            _ctx: &deepseeknova_core::tool::ToolContext,
+            _args: &str,
+        ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
+            Ok("ok".into())
+        }
+    }
 
     /// The DeepSeek-anthropic request must carry the thinking toggle and the
     /// reasoning effort (via output_config) when configured.
@@ -948,6 +1061,82 @@ mod tests {
         let v = serde_json::to_value(&body).unwrap();
         assert!(v.get("thinking").is_none());
         assert!(v.get("output_config").is_none());
+    }
+
+    /// P0.1：cache_control 断点注入开启时，system 以 blocks 数组携带
+    /// ephemeral 标记、tools 末项携带标记（前缀显式缓存）。
+    #[test]
+    fn build_request_injects_cache_control_breakpoints() {
+        std::env::set_var("TEST_ANTHRO_KEY_CACHE", "dummy");
+        let provider = AnthropicProvider::new(
+            "https://api.deepseek.com/anthropic",
+            "deepseek-v4-flash",
+            "TEST_ANTHRO_KEY_CACHE",
+            30,
+            0,
+        )
+        .unwrap();
+
+        let msgs = vec![
+            Message {
+                role: Role::System,
+                content: "You are a helpful agent.".into(),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                reasoning_signature: None,
+            },
+            Message {
+                role: Role::User,
+                content: "hi".into(),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                reasoning_signature: None,
+            },
+        ];
+
+        let tool = TestTool;
+        let tools: [&dyn Tool; 1] = [&tool];
+        let body = provider.build_request(&msgs, &tools, false);
+        let v = serde_json::to_value(&body).unwrap();
+        let sys = v["system"].as_array().expect("system must be blocks array");
+        assert_eq!(sys[0]["type"], "text");
+        assert_eq!(sys[0]["cache_control"]["type"], "ephemeral");
+        let ts = v["tools"].as_array().expect("tools array present");
+        assert_eq!(ts[0]["cache_control"]["type"], "ephemeral");
+    }
+
+    /// P0.1：cache_control 关闭时请求体与旧版本逐字节一致——system 为纯
+    /// 字符串、tools 无断点字段（向后兼容开关）。
+    #[test]
+    fn build_request_omits_cache_control_when_disabled() {
+        std::env::set_var("TEST_ANTHRO_KEY_CACHE_OFF", "dummy");
+        let provider = AnthropicProvider::new(
+            "https://api.deepseek.com/anthropic",
+            "deepseek-v4-flash",
+            "TEST_ANTHRO_KEY_CACHE_OFF",
+            30,
+            0,
+        )
+        .unwrap()
+        .with_cache_control(false);
+
+        let msgs = vec![Message {
+            role: Role::System,
+            content: "You are a helpful agent.".into(),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            reasoning_signature: None,
+        }];
+        let body = provider.build_request(&msgs, &[], false);
+        let v = serde_json::to_value(&body).unwrap();
+        assert!(v["system"].is_string(), "system must stay a plain string");
+        assert!(v.get("tools").is_none(), "no tools → no breakpoint");
     }
 
     /// A configured temperature must reach the serialised Anthropic request.
@@ -1426,10 +1615,22 @@ mod tests {
         .await
         .unwrap();
 
-        let delta = r#"{"type":"message_delta","usage":{"output_tokens":42}}"#;
+        let delta = r#"{"type":"message_delta","usage":{"output_tokens":42,"output_tokens_details":{"reasoning_tokens":25}}}"#;
         process_anthropic_event(
             Some("message_delta"),
             delta,
+            &tx,
+            &mut tool_acc,
+            &mut usage_acc,
+        )
+        .await
+        .unwrap();
+
+        // P0.2：message_delta 不发射 Usage，message_stop 才发射最终合并值。
+        let stop = r#"{"type":"message_stop"}"#;
+        process_anthropic_event(
+            Some("message_stop"),
+            stop,
             &tx,
             &mut tool_acc,
             &mut usage_acc,
@@ -1444,11 +1645,178 @@ mod tests {
                 usage = Some(u);
             }
         }
-        let u = usage.expect("a Usage chunk should be emitted on message_delta");
+        let u = usage.expect("a Usage chunk should be emitted on message_stop");
         assert_eq!(u.cache_hit_tokens, 80, "cache_read maps to cache_hit");
         assert_eq!(u.cache_miss_tokens, 10, "cache_creation maps to cache_miss");
         assert_eq!(u.completion_tokens, 42, "output tokens from message_delta");
         assert_eq!(u.prompt_tokens, 110, "input + cache read + cache creation");
         assert_eq!(u.total_tokens, 152);
+        assert_eq!(
+            u.reasoning_tokens, 25,
+            "billed reasoning tokens from output_tokens_details must survive"
+        );
+    }
+
+    // env 串行化锁与代理清除函数见 crate::test_util（跨 openai/embeddings
+    // 共享，避免 std::env 并发修改 UB）。
+
+    /// Mock Anthropic SSE 服务器：第 1 次请求返回 200 但 body 中途断开
+    /// （模拟网关断流），第 2 次返回完整 SSE。返回 base_url 与请求记录。
+    fn serve_anthropic_stream_retry() -> (String, std::sync::mpsc::Receiver<String>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for i in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                loop {
+                    let n = stream.read(&mut tmp).unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&tmp[..n]);
+                    if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                tx.send(String::from_utf8_lossy(&buf).to_string()).unwrap();
+                if i == 0 {
+                    // 声明 1024 字节但 body 一个字节都不写就断开 →
+                    // 读 body 第一块即报错（零输出断流）。
+                    let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 1024\r\n\r\n";
+                    let _ = stream.write_all(head.as_bytes());
+                    drop(stream);
+                } else {
+                    let body = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"id\":\"cb1\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":5}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                    drop(stream);
+                }
+            }
+        });
+        (format!("http://{addr}"), rx)
+    }
+
+    /// P0.4：Anthropic 流式在发出任何内容前断流时必须重试；重试后拿到
+    /// 完整输出（对齐 OpenAI provider 行为）。
+    #[tokio::test]
+    async fn stream_retries_zero_output_disconnect() {
+        let _guard = ENV_LOCK.lock().await;
+        clear_proxy_env();
+        std::env::set_var("TEST_ANTHRO_RETRY_KEY", "dummy");
+
+        let (base, rx) = serve_anthropic_stream_retry();
+        let provider =
+            AnthropicProvider::new(&base, "deepseek-v4-flash", "TEST_ANTHRO_RETRY_KEY", 30, 2)
+                .unwrap();
+
+        let msgs = vec![Message {
+            role: Role::User,
+            content: "hi".into(),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            reasoning_signature: None,
+        }];
+        let tool_refs: Vec<&dyn Tool> = Vec::new();
+        let validated = ValidatedRequest::new(&msgs, &tool_refs).unwrap();
+
+        let mut stream = provider.stream(validated).await.unwrap();
+        let mut text = String::new();
+        while let Some(item) = stream.next().await {
+            if let Ok(Chunk::TextDelta(t)) = item {
+                text.push_str(&t);
+            }
+        }
+
+        assert_eq!(text, "hello", "重试后应拿到完整输出");
+        assert_eq!(
+            rx.try_iter().count(),
+            2,
+            "应发生 2 次 HTTP 请求（首次断流 + 重试）"
+        );
+        std::env::remove_var("TEST_ANTHRO_RETRY_KEY");
+    }
+
+    /// P0.4：已发出过内容后断流不得重试（重试会重复输出）——错误直接上抛。
+    #[tokio::test]
+    async fn stream_does_not_retry_after_partial_output() {
+        use std::io::{Read, Write};
+        let _guard = ENV_LOCK.lock().await;
+        clear_proxy_env();
+        std::env::set_var("TEST_ANTHRO_PARTIAL_KEY", "dummy");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 4096];
+            loop {
+                let n = stream.read(&mut tmp).unwrap();
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&tmp[..n]);
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            // 先发一个 content_block_delta（有内容），随后断流。
+            let partial = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n";
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                partial.len(),
+                partial
+            );
+            let _ = stream.write_all(resp.as_bytes());
+            drop(stream);
+        });
+
+        let provider = AnthropicProvider::new(
+            &format!("http://{addr}"),
+            "deepseek-v4-flash",
+            "TEST_ANTHRO_PARTIAL_KEY",
+            30,
+            2,
+        )
+        .unwrap();
+
+        let msgs = vec![Message {
+            role: Role::User,
+            content: "hi".into(),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            reasoning_signature: None,
+        }];
+        let tool_refs: Vec<&dyn Tool> = Vec::new();
+        let validated = ValidatedRequest::new(&msgs, &tool_refs).unwrap();
+
+        let mut stream = provider.stream(validated).await.unwrap();
+        let mut text = String::new();
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(Chunk::TextDelta(t)) => text.push_str(&t),
+                Ok(Chunk::Done) => break,
+                Err(e) => {
+                    // 已发出部分内容后的断流错误直接上抛，不得重试。
+                    assert!(e.to_string().contains("stream"), "got: {e}");
+                    break;
+                }
+                Ok(_) => {}
+            }
+        }
+        assert_eq!(text, "partial", "部分输出必须先到达调用方");
+        std::env::remove_var("TEST_ANTHRO_PARTIAL_KEY");
     }
 }

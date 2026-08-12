@@ -619,6 +619,9 @@ async fn run_cli() -> Result<i32, DeepseeknovaError> {
                                 output,
                                 card,
                                 cost_usd: total_cost,
+                                // F1：本轮后从 ledger 快照取累计缓存命中率
+                                // （跨全部行汇总；无缓存记账为 None）。
+                                cache_hit_rate: ledger.report(&prices).cache_hit_rate,
                             };
                             let passed =
                                 eval::evaluate_case(case, &values).iter().all(|c| c.passed);
@@ -648,6 +651,7 @@ async fn run_cli() -> Result<i32, DeepseeknovaError> {
                     checks,
                     card: values.card,
                     cost_usd: values.cost_usd,
+                    cache_hit_rate: values.cache_hit_rate,
                     rounds: rounds_used as u32,
                     output: values.output,
                     error: case_error,

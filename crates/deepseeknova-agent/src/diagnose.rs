@@ -87,8 +87,24 @@ pub struct DiagnoseReport {
     /// 跳过时为 `None`）。向后兼容：旧报告反序列化时缺省为 `None`。
     #[serde(default)]
     pub adversarial_review: Option<String>,
+    /// F4：压缩事件观测（L1 截断 / L2 滑动窗口 / L3 LLM 摘要各一次记录，
+    /// 含触发阈值与摘要长度）——压缩精度与成本可观测（对齐 Codex 自述
+    /// "压缩精度随次数下降"的度量需求）。
+    #[serde(default)]
+    pub compactions: Vec<CompactionEvent>,
     /// 报告生成时间（unix 毫秒）。
     pub generated_at_ms: u64,
+}
+
+/// F4：一次上下文压缩事件。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompactionEvent {
+    /// 压缩层：`L1`（大结果截断）/ `L2`（滑动窗口）/ `L3`（LLM 摘要）。
+    pub level: String,
+    /// 触发时的 token 阈值（压缩前估算）。
+    pub threshold_tokens: u32,
+    /// 压缩后摘要/结果文本的字符长度（L3 为 digest 长度；L1/L2 为 0）。
+    pub digest_chars: usize,
 }
 
 impl DiagnoseReport {
@@ -102,6 +118,7 @@ impl DiagnoseReport {
             sub_agents: Vec::new(),
             quality: Vec::new(),
             adversarial_review: None,
+            compactions: Vec::new(),
             generated_at_ms: now_millis(),
         }
     }
@@ -174,6 +191,8 @@ pub struct DiagnoseCollector {
     last_reflection: Option<Reflection>,
     /// 子代理跨度（emit 时从历史近似提取）。
     sub_agents: Vec<SubAgentSpan>,
+    /// F4：压缩事件（L1/L2/L3 各一次记录）。
+    compactions: Vec<CompactionEvent>,
 }
 
 impl Default for DiagnoseCollector {
@@ -192,6 +211,7 @@ impl DiagnoseCollector {
             failures: Vec::new(),
             last_reflection: None,
             sub_agents: Vec::new(),
+            compactions: Vec::new(),
         }
     }
 
@@ -252,6 +272,15 @@ impl DiagnoseCollector {
         self.last_reflection = Some(r);
     }
 
+    /// F4：记录一次上下文压缩事件（L1/L2/L3）。
+    pub fn record_compaction(&mut self, level: &str, threshold_tokens: u32, digest_chars: usize) {
+        self.compactions.push(CompactionEvent {
+            level: level.to_string(),
+            threshold_tokens,
+            digest_chars,
+        });
+    }
+
     /// 当前相位名（失败详情归属用；无打开相位时回落 `plan`）。
     pub fn failure_phase(&self) -> String {
         self.current
@@ -295,6 +324,7 @@ impl DiagnoseCollector {
             sub_agents: std::mem::take(&mut self.sub_agents),
             quality,
             adversarial_review,
+            compactions: std::mem::take(&mut self.compactions),
             generated_at_ms: now_millis(),
         }
     }
@@ -361,6 +391,12 @@ impl DiagnoseGuard {
     /// 记录最近反思产物（透传收集器）。
     pub fn record_reflection(&mut self, r: Reflection) {
         self.collector.record_reflection(r);
+    }
+
+    /// F4：记录一次上下文压缩事件（透传收集器）。
+    pub fn record_compaction(&mut self, level: &str, threshold_tokens: u32, digest_chars: usize) {
+        self.collector
+            .record_compaction(level, threshold_tokens, digest_chars);
     }
 
     /// 当前相位名（透传收集器）。
@@ -642,12 +678,19 @@ mod tests {
                 evidence: "-----BEGIN".into(),
             }],
             adversarial_review: None,
+            compactions: vec![CompactionEvent {
+                level: "L3".into(),
+                threshold_tokens: 32000,
+                digest_chars: 512,
+            }],
             generated_at_ms: 1234,
         };
         let json = serde_json::to_string(&report).unwrap();
         let back: DiagnoseReport = serde_json::from_str(&json).unwrap();
         assert_eq!(back, report);
         assert!(json.contains("\"session_id\":\"s-1\""));
+        assert_eq!(back.compactions.len(), 1);
+        assert_eq!(back.compactions[0].level, "L3");
 
         // 旧报告（无 adversarial_review 字段）反序列化兼容 → None
         let legacy = r#"{"session_id":"s-1","outcome":"paused","phases":[],"failures":[],"sub_agents":[],"quality":[],"generated_at_ms":1}"#;
@@ -801,6 +844,7 @@ mod tests {
                 evidence: "-----BEGIN RSA PRIVATE KEY----- AKIAIOSFODNN7EXAMPLE".into(),
             }],
             adversarial_review: Some("AKIAIOSFODNN7EXAMPLE in bash output".into()),
+            compactions: Vec::new(),
             generated_at_ms: 1,
         }
     }

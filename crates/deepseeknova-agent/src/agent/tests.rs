@@ -3092,6 +3092,7 @@ async fn cancel_path_suppresses_diagnose_report() {
         Some(hook),
         Vec::new(), // 协议门控（阶段3）：空 = 关闭
         false,      // 对抗审查（阶段3）：关闭
+        false,      // diff_audit（A4）：测试默认关
     )
     .await;
     assert!(result.is_ok(), "cancel path must return Ok");

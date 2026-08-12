@@ -35,7 +35,8 @@ fn recover_poisoned<T>(e: std::sync::PoisonError<T>) -> T {
 }
 
 /// 子代理递归深度上限默认值（根派发 depth 1；可再派 depth 2…直至上限）。
-pub const DEFAULT_MAX_DEPTH: usize = 3;
+/// D2：3→5（对齐 Claude Code 嵌套 5 层；`DelegateDepth` 有界递归防死循环）。
+pub const DEFAULT_MAX_DEPTH: usize = 5;
 
 /// per-agent 模型解析：把声明模型名解析为 provider 实例。由上层
 /// （runtime / CLI）基于 provider 工厂实现；未装配时声明模型回退默认 provider。

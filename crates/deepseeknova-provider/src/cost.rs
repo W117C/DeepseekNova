@@ -108,6 +108,10 @@ pub struct CostReport {
     pub total_usd: Option<f64>,
     /// Total unmetered calls across all rows.
     pub unmetered_calls: u64,
+    /// 前缀缓存命中率：`cache_hit / (cache_hit + cache_miss)`，跨全部行汇总
+    /// （0..=1）。没有任何缓存记账（hit+miss 均为 0，如全部 unmetered）时为
+    /// `None`。命中率是 token 成本的核心杠杆指标（Claude Code 实践 ≥90%）。
+    pub cache_hit_rate: Option<f64>,
 }
 
 /// Thread-safe per-(role, model) token ledger shared across the run.
@@ -163,10 +167,16 @@ impl CostLedger {
             Some(estimates.iter().sum())
         };
         let unmetered_calls = rows.iter().map(|r| r.bucket.unmetered_calls).sum();
+        // 前缀缓存命中率：跨全部行的 hit/miss 汇总（hit 只来自 metered 行）。
+        let cache_hit: u64 = rows.iter().map(|r| r.bucket.cache_hit_tokens).sum();
+        let cache_miss: u64 = rows.iter().map(|r| r.bucket.cache_miss_tokens).sum();
+        let cache_hit_rate = (cache_hit + cache_miss > 0)
+            .then(|| cache_hit as f64 / (cache_hit + cache_miss) as f64);
         CostReport {
             rows,
             total_usd,
             unmetered_calls,
+            cache_hit_rate,
         }
     }
 

@@ -44,15 +44,55 @@ fn normalize_path<'a>(path: &'a Path, workspace_root: &'a Path) -> &'a Path {
     }
 }
 
+/// A3：已读路径集合的键——解析为绝对路径后词法归一（剥掉 `..`/`.`），
+/// 使 `read_file` 与 `write_file`/`edit_file`/`move_file` 的同一文件命中
+/// 同一键（相对/绝对、带 `./` 与否均可匹配）。
+fn normalize_read_key(path: &Path, workspace_root: &Path) -> PathBuf {
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        workspace_root.join(path)
+    };
+    let mut out = PathBuf::new();
+    for comp in joined.components() {
+        match comp {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 /// 质量策略钩子：`before` 拦截禁写路径，`after` 跑写后策略评估。
 pub struct QualityHook {
     policy: QualityPolicy,
+    /// A3：会话内已读取的文件路径集合（供"写前读取证据强制"使用）。
+    /// `read_file` 工具执行成功后由 `after` 记录；写工具 `before` 检查。
+    read_tracker: std::sync::Mutex<std::collections::HashSet<PathBuf>>,
+    /// A3 开关（默认关，零配置行为不变）：开启后写工具（write/edit/move）
+    /// 对**已存在**目标文件要求会话内先有读取记录，否则 Deny（提示先读）；
+    /// 新建文件（目标不存在）豁免。
+    require_read_before_write: bool,
 }
 
 impl QualityHook {
     /// 构造钩子并持有给定策略。
     pub fn new(policy: QualityPolicy) -> Self {
-        Self { policy }
+        Self {
+            policy,
+            read_tracker: std::sync::Mutex::new(std::collections::HashSet::new()),
+            require_read_before_write: false,
+        }
+    }
+
+    /// A3：开启"写前读取证据强制"（默认关）。开启后写已存在文件必须
+    /// 先读取过该文件（确定性前置，替代提示词"Read before writing"）。
+    pub fn with_require_read_before_write(mut self, enabled: bool) -> Self {
+        self.require_read_before_write = enabled;
+        self
     }
 }
 
@@ -61,21 +101,45 @@ impl ToolHook for QualityHook {
         "quality"
     }
 
-    /// 只对写类工具感兴趣（名单判定；这四个工具 `read_only() == false`，
-    /// 与 agent 主循环的判写名单一致）。MCP 工具（`mcp__*`）因 `read_only()`
-    /// 硬编码为 `false`，也纳入覆盖 —— `after` 阶段的结果文本质量评估生效
-    /// （私钥泄露等正则规则），避免 MCP 写类工具绕过质量闭环。
+    /// 对写类工具（名单判定；这四个工具 `read_only() == false`，与 agent
+    /// 主循环的判写名单一致）与 MCP 工具（`mcp__*`）感兴趣；A3 开启"写前
+    /// 读取证据强制"时额外跟踪 `read_file`（用于记录已读路径）。
     fn interested(&self, call: &ToolCall) -> bool {
         WRITE_TOOL_NAMES.contains(&call.function.name.as_str())
             || call.function.name.starts_with("mcp__")
+            || (self.require_read_before_write && call.function.name == "read_file")
     }
 
-    /// 预检：解析目标路径，命中 PathGlob deny 规则时拒绝执行。
+    /// 预检：命中 PathGlob deny 规则时拒绝；A3 开启时对已存在目标文件
+    /// 要求会话内先有读取记录（确定性前置，替代提示词"Read before writing"）。
     fn before(&self, ctx: &ToolHookCtx, call: &ToolCall) -> HookVerdict {
         if let Some(path) = parse_target_path(&call.function.name, &call.function.arguments) {
             let norm = normalize_path(&path, ctx.workspace_root);
             if let Some(rule_id) = self.policy.denied_path(norm) {
                 return HookVerdict::Deny(format!("blocked by quality policy: {rule_id}"));
+            }
+            // A3：写已存在文件必须先读取过（新建文件豁免）。
+            if self.require_read_before_write
+                && matches!(
+                    call.function.name.as_str(),
+                    "write_file" | "edit_file" | "move_file"
+                )
+                && ctx.workspace_root.join(norm).exists()
+            {
+                let key = normalize_read_key(&path, ctx.workspace_root);
+                let read = self
+                    .read_tracker
+                    .lock()
+                    .map(|t| t.contains(&key))
+                    .unwrap_or(false);
+                if !read {
+                    return HookVerdict::Deny(format!(
+                        "read-before-write: target `{}` was not read in this session; \
+                         read it first (deterministic guard, replaces prompt-level \
+                         'read before writing')",
+                        norm.display()
+                    ));
+                }
             }
         }
         // F1：bash 无结构化目标路径（parse_target_path 恒 None），改用轻量命令
@@ -99,6 +163,21 @@ impl ToolHook for QualityHook {
 
     /// 写后评估：对结果文本跑策略（正则/体积），变更路径从参数解析。
     fn after(&self, ctx: &ToolHookCtx, call: &ToolCall, result: &str) -> Vec<QualityFinding> {
+        // A3：`read_file` 执行成功后记录已读路径（供写前读取证据检查）。
+        // 读取成功与否以结果文本非空为近似判据；读失败（空结果）不记录。
+        if call.function.name == "read_file" {
+            if self.require_read_before_write && !result.trim().is_empty() {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&call.function.arguments) {
+                    if let Some(p) = v.get("path").and_then(|x| x.as_str()) {
+                        let key = normalize_read_key(Path::new(p), ctx.workspace_root);
+                        if let Ok(mut tracker) = self.read_tracker.lock() {
+                            tracker.insert(key);
+                        }
+                    }
+                }
+            }
+            return Vec::new(); // 读操作不做写后策略评估
+        }
         let changed: Vec<PathBuf> =
             parse_target_path(&call.function.name, &call.function.arguments)
                 .into_iter()
@@ -692,6 +771,109 @@ mod tests {
             }
             other => panic!("expected Deny, got {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // A3：写前读取证据强制（read-before-write）
+    // -----------------------------------------------------------------------
+
+    /// A3 测试工具：构造 write_file / read_file 的 ToolCall。
+    fn a3_call(name: &str, path: &str) -> ToolCall {
+        ToolCall {
+            id: "c".into(),
+            ty: "function".into(),
+            function: deepseeknova_core::types::FunctionCall {
+                name: name.into(),
+                arguments: format!(r#"{{"path":"{path}"}}"#),
+            },
+        }
+    }
+
+    /// A3：默认关闭时写已存在文件不被拦截（零配置行为不变）。
+    #[test]
+    fn a3_default_off_does_not_block_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("existing.txt");
+        std::fs::write(&target, "orig").unwrap();
+        let hook = QualityHook::new(QualityPolicy::builtin());
+        let ctx = ToolHookCtx {
+            workspace_root: dir.path(),
+        };
+        let call = a3_call("write_file", "existing.txt");
+        match hook.before(&ctx, &call) {
+            HookVerdict::Allow => {}
+            other => panic!("default-off must allow writes, got {other:?}"),
+        }
+    }
+
+    /// A3：开启后未读取直接写已存在文件 → Deny（read-before-write）。
+    #[test]
+    fn a3_blocks_write_without_prior_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("existing.txt");
+        std::fs::write(&target, "orig").unwrap();
+        let hook = QualityHook::new(QualityPolicy::builtin()).with_require_read_before_write(true);
+        let ctx = ToolHookCtx {
+            workspace_root: dir.path(),
+        };
+        let call = a3_call("write_file", "existing.txt");
+        match hook.before(&ctx, &call) {
+            HookVerdict::Deny(reason) => {
+                assert!(reason.contains("read-before-write"), "reason: {reason}")
+            }
+            other => panic!("expected Deny, got {other:?}"),
+        }
+    }
+
+    /// A3：先 read_file 后写同文件 → Allow（读取证据已记录，且路径键归一
+    /// 支持相对/绝对两种写法）。
+    #[test]
+    fn a3_allows_write_after_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("existing.txt");
+        std::fs::write(&target, "orig").unwrap();
+        let hook = QualityHook::new(QualityPolicy::builtin()).with_require_read_before_write(true);
+        let ctx = ToolHookCtx {
+            workspace_root: dir.path(),
+        };
+        // 1. read_file 用绝对路径读取，after 记录已读。
+        let read_call = a3_call("read_file", &target.to_string_lossy());
+        let findings = hook.after(&ctx, &read_call, "file content");
+        assert!(findings.is_empty(), "read must not produce findings");
+        // 2. write_file 用相对路径写同一文件 → 命中同一归一键 → Allow。
+        let write_call = a3_call("write_file", "existing.txt");
+        match hook.before(&ctx, &write_call) {
+            HookVerdict::Allow => {}
+            other => panic!("expected Allow after read, got {other:?}"),
+        }
+    }
+
+    /// A3：新建文件（目标不存在）豁免读取要求。
+    #[test]
+    fn a3_new_file_is_exempt() {
+        let dir = tempfile::tempdir().unwrap();
+        let hook = QualityHook::new(QualityPolicy::builtin()).with_require_read_before_write(true);
+        let ctx = ToolHookCtx {
+            workspace_root: dir.path(),
+        };
+        let call = a3_call("write_file", "brand_new.txt");
+        match hook.before(&ctx, &call) {
+            HookVerdict::Allow => {}
+            other => panic!("new file must be exempt, got {other:?}"),
+        }
+    }
+
+    /// A3：开启后 read_file 进入 interested（供 after 记录）；关闭时不感兴趣。
+    #[test]
+    fn a3_interested_tracks_read_file_only_when_enabled() {
+        let on = QualityHook::new(QualityPolicy::builtin()).with_require_read_before_write(true);
+        let off = QualityHook::new(QualityPolicy::builtin());
+        let call = a3_call("read_file", "x.txt");
+        assert!(on.interested(&call), "enabled hook must track read_file");
+        assert!(
+            !off.interested(&call),
+            "disabled hook must not track read_file"
+        );
     }
 
     // -----------------------------------------------------------------------

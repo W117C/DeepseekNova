@@ -367,18 +367,26 @@ impl HistoryCompactor for AtomicUnitCompactor {
 
             match exchange_idx {
                 Some(idx) => {
-                    if let HistoryUnit::ToolExchange { assistant, results } = &result[idx] {
+                    if let HistoryUnit::ToolExchange { results, .. } = &result[idx] {
                         let summary = format!(
                             "[Compacted turn] Called tool(s), {} result(s) returned. Details omitted.",
                             results.len()
                         );
+                        // B1（P0.9 修订）：摘要改 User 角色、不克隆 reasoning。
+                        // 原实现用 Role::Tool + 克隆 assistant 的 reasoning_content
+                        // 但丢弃 signature——Tool 角色带 reasoning 语义混乱，且
+                        // 若该 reasoning 需回放（DeepSeek 要求 reasoning 与
+                        // tool_calls 同现时原样回放）会因缺 signature 触发 HTTP
+                        // 400。整个 ToolExchange（assistant+results）已被摘要
+                        // 替代，其 tool_calls/reasoning 均不再回放，故摘要作为
+                        // 纯 User 上下文最稳妥，不克隆 reasoning。
                         let replacement = HistoryUnit::Standalone(Message {
-                            role: Role::Tool,
+                            role: Role::User,
                             content: summary,
                             name: None,
                             tool_calls: None,
                             tool_call_id: None,
-                            reasoning_content: assistant.reasoning_content.clone(),
+                            reasoning_content: None,
                             reasoning_signature: None,
                         });
                         tokens = tokens.saturating_sub(result[idx].estimated_tokens());

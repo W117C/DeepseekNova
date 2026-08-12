@@ -33,9 +33,6 @@ pub mod embeddings;
 pub mod openai;
 pub mod retry;
 pub mod router;
-/// Streaming JSON scavenger that reassembles complete JSON objects from a
-/// partial token stream (used to parse model replies mid-stream).
-pub mod scavenge;
 pub mod tool_cache;
 /// Owned wire request/response types shared by the provider backends.
 pub mod types;
@@ -431,6 +428,7 @@ pub mod factory {
         if let Some(temp) = temperature {
             p = p.with_temperature(temp);
         }
+        p = p.with_cache_control(cfg.cache_control.unwrap_or(true));
         Ok(p)
     }
 
@@ -457,6 +455,7 @@ pub mod factory {
         if let Some(temp) = temperature {
             p = p.with_temperature(temp);
         }
+        p = p.with_cache_control(cfg.cache_control.unwrap_or(true));
         Ok(p)
     }
 
@@ -579,6 +578,7 @@ pub mod factory {
                 thinking_enabled: false,
                 reasoning_effort: Some(effort.to_string()),
                 extra_body: None,
+                cache_control: None,
             }
         }
 
@@ -652,6 +652,7 @@ pub mod factory {
                 thinking_enabled: false,
                 reasoning_effort: None,
                 extra_body: None,
+                cache_control: None,
             };
             let result = create_provider(&cfg);
             let err = match result {
@@ -689,6 +690,7 @@ pub mod factory {
                 thinking_enabled: false,
                 reasoning_effort: reasoning_effort.map(str::to_string),
                 extra_body: None,
+                cache_control: None,
             }
         }
 

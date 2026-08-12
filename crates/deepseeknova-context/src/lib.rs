@@ -221,26 +221,29 @@ impl PromptBuilder {
         let mut system_content = String::with_capacity(system_prompt.len() + 2048);
         system_content.push_str(system_prompt);
 
+        // Inject tool descriptions (P0.7：段序与 CacheAwarePromptBuilder 对齐
+        // —— 静态 system → 工具 → 项目记忆 → repo map，保证前缀缓存稳定性
+        // 语义在两条构建路径上一致；此前 tools 段被放在 repo map 之后，
+        // 与缓存感知路径漂移)。
+        if !tools.is_empty() {
+            system_content.push_str("\n\n## Available Tools\n\n");
+            for tool in tools {
+                system_content.push_str(&format!("- **{}**: {}\n", tool.name, tool.description));
+            }
+        }
+
         // Inject project memory
         if let Some(ref deepseeknova_md) = project_memory.deepseeknova_md {
             system_content.push_str("\n\n---\n## Project Context\n\n");
             system_content.push_str(deepseeknova_md);
         }
 
-        // Inject repo map (stable prefix region: after project context, before tools).
+        // Inject repo map (stable prefix region: after project context).
         if let Some(map) = repo_map {
             if !map.is_empty() {
                 system_content.push_str("\n\n---\n## Repo Map\n\n```\n");
                 system_content.push_str(map);
                 system_content.push_str("\n```\n");
-            }
-        }
-
-        // Inject tool descriptions
-        if !tools.is_empty() {
-            system_content.push_str("\n\n## Available Tools\n\n");
-            for tool in tools {
-                system_content.push_str(&format!("- **{}**: {}\n", tool.name, tool.description));
             }
         }
 
@@ -353,14 +356,25 @@ impl CacheAwarePromptBuilder {
             prefix_parts.push(format!("## Available Tools\n\n{tools_text}"));
         }
 
-        // 3. Project memory (DEEPSEEKNOVA.md — stable between config changes)
+        // 3. Global rules (AGENTS.md — 行业标准项目规则，most stable)。
+        //    B6 三层缓存分层：global → project。AGENTS.md 变化只 invalidate
+        //    本段（置于 project 之前，静态优先动态最后）。
+        if let Some(pm) = project_memory {
+            if let Some(ref agents) = pm.agents_md {
+                if !agents.is_empty() {
+                    prefix_parts.push(format!("## Project Rules\n\n{agents}"));
+                }
+            }
+        }
+
+        // 4. Project memory (DEEPSEEKNOVA.md — stable between config changes)
         if let Some(pm) = project_memory {
             if let Some(ref deepseeknova_md) = pm.deepseeknova_md {
                 prefix_parts.push(format!("## Project Context\n\n{deepseeknova_md}"));
             }
         }
 
-        // 4. Repo map (global code graph — stable within an index generation).
+        // 5. Repo map (global code graph — stable within an index generation).
         //    Part of the cache prefix so it does not invalidate the volatile suffix.
         if let Some(map) = repo_map {
             if !map.is_empty() {
@@ -842,6 +856,11 @@ pub struct ProjectMemory {
     pub auto_memory: HashMap<String, MemoryEntry>,
     /// Content of DEEPSEEKNOVA.md at the workspace root, if present.
     pub deepseeknova_md: Option<String>,
+    /// B6：Content of AGENTS.md at the workspace root, if present — treated as
+    /// the **global/stable** rule layer (industry-standard file read by
+    /// Claude Code / Codex / opencode), injected before project memory so a
+    /// rule change invalidates only the global segment of the prefix cache.
+    pub agents_md: Option<String>,
     /// Custom slash commands loaded from `.deepseeknova/commands`.
     pub custom_commands: Vec<Command>,
 }
@@ -852,6 +871,7 @@ impl ProjectMemory {
         Self {
             auto_memory: HashMap::new(),
             deepseeknova_md: None,
+            agents_md: None,
             custom_commands: Vec::new(),
         }
     }
@@ -862,6 +882,18 @@ impl ProjectMemory {
         if path.exists() {
             if let Ok(content) = std::fs::read_to_string(&path) {
                 self.deepseeknova_md = Some(content);
+            }
+        }
+    }
+
+    /// B6：Load AGENTS.md from the workspace root if present (global rule layer).
+    /// AGENTS.md 是行业标准文件名（Claude Code / Codex / opencode / DeepseekNova
+    /// 均自动识别），作为稳定前缀的 global 段注入，先于 project 段。
+    pub fn load_agents_md(&mut self, root: &Path) {
+        let path = root.join("AGENTS.md");
+        if path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                self.agents_md = Some(content);
             }
         }
     }
@@ -1243,6 +1275,28 @@ mod tests {
             PromptBuilder::build("You are helpful.", &[], &WorkingMemory::new(), &pm, None);
         assert!(messages[0].content.contains("## Project Context"));
         assert!(messages[0].content.contains("Rust project"));
+    }
+
+    /// B6：缓存感知前缀按 global（AGENTS.md）→ project（DEEPSEEKNOVA.md）
+    /// 分层注入，段序 static-first（global 先于 project），保证 AGENTS.md
+    /// 变化只 invalidate 前缀的 global 段。
+    #[test]
+    fn cache_aware_prefix_layers_agents_then_project() {
+        let mut pm = ProjectMemory::new();
+        pm.agents_md = Some("AGENTS_RULES".into());
+        pm.deepseeknova_md = Some("PROJECT_CTX".into());
+
+        let mut builder = CacheAwarePromptBuilder::new(false);
+        let (prefix, _hash) = builder.build_prefix("SYS", &[], Some(&pm), None);
+        let sys_pos = prefix.find("SYS").unwrap();
+        let agents_pos = prefix.find("## Project Rules").unwrap();
+        let ctx_pos = prefix.find("## Project Context").unwrap();
+        assert!(
+            sys_pos < agents_pos && agents_pos < ctx_pos,
+            "segment order must be system → AGENTS.md → DEEPSEEKNOVA.md:\n{prefix}"
+        );
+        assert!(prefix.contains("AGENTS_RULES"));
+        assert!(prefix.contains("PROJECT_CTX"));
     }
 
     #[test]

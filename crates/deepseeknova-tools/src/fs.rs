@@ -43,10 +43,12 @@ impl Tool for ReadFileTool {
                     },
                     "start_line": {
                         "type": "integer",
+                        "minimum": 1,
                         "description": "First line (1-based)."
                     },
                     "end_line": {
                         "type": "integer",
+                        "minimum": 1,
                         "description": "Last line (1-based)."
                     }
                 },

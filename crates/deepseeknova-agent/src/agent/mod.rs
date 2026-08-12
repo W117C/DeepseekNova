@@ -193,6 +193,10 @@ pub struct Agent {
     /// 对抗审查开关（阶段3）：会话收尾按触发条件委派 adversarial-review
     /// 子代理，产出写入诊断报告 `adversarial_review` 字段；默认关闭。
     adversarial_review: bool,
+
+    /// A4：写后 diff 规模审计开关（git 仓库内，变更行数超阈值告警注入
+    /// ToolResult）；默认关闭（零配置行为不变）。
+    diff_audit: bool,
 }
 
 /// Type-erased provider that yields the current repo-map text (or `None`)
@@ -491,6 +495,7 @@ impl Agent {
             diagnose_hook: None,
             protocol_gates: Vec::new(),
             adversarial_review: false,
+            diff_audit: false,
         }
     }
 
@@ -760,6 +765,13 @@ impl Agent {
         self
     }
 
+    /// A4：开启写后 diff 规模审计（git 仓库内，变更行数超阈值告警注入
+    /// ToolResult）。默认关闭。
+    pub fn with_diff_audit(mut self, enabled: bool) -> Self {
+        self.diff_audit = enabled;
+        self
+    }
+
     /// 注册失败诊断回调（任务质量闭环 B 阶段）。每次 `run_stream` 以非
     /// success 结束（Paused/failed）时调用一次，传入结构化
     /// [`crate::diagnose::DiagnoseReport`]（阶段分解 + 时序 + 失败详情 +
@@ -1013,6 +1025,8 @@ impl Agent {
         // 协议门控（阶段3）：门集合与对抗审查开关 clone 带进 spawned task。
         let protocol_gates = self.protocol_gates.clone();
         let adversarial_review_enabled = self.adversarial_review;
+        // A4：写后 diff 审计开关复制为局部值（spawn 内借用 self 会逃逸）。
+        let diff_audit = self.diff_audit;
 
         tokio::spawn(async move {
             // 共享内存：fetch_full_result 工具按需取回被截断的完整结果。
@@ -1076,7 +1090,13 @@ impl Agent {
             // reasoning，故通过 replay 不变量校验。
             if !seeded {
                 if let Some(ref rp) = recall_provider {
-                    inject_recall(rp, &mut *memory.write().await, &input.prompt);
+                    // B4：新会话召回注入按预算裁剪。
+                    inject_recall(
+                        rp,
+                        &mut *memory.write().await,
+                        &input.prompt,
+                        crate::tools::DEFAULT_RECALL_MAX_CHARS,
+                    );
                 }
             }
 
@@ -1087,7 +1107,13 @@ impl Agent {
                     let active = !mid.require_tool_turn
                         || history_last_turn_used_tools(&memory.read().await.get_all());
                     if active {
-                        inject_recall(&mid.provider, &mut *memory.write().await, &input.prompt);
+                        // B4：续聊中途检索召回注入按预算裁剪。
+                        inject_recall(
+                            &mid.provider,
+                            &mut *memory.write().await,
+                            &input.prompt,
+                            crate::tools::DEFAULT_RECALL_MAX_CHARS,
+                        );
                     }
                 }
             }
@@ -1164,6 +1190,7 @@ impl Agent {
                 diagnose_hook,
                 protocol_gates,
                 adversarial_review_enabled,
+                diff_audit,
             )
             .await;
 

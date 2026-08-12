@@ -98,11 +98,17 @@ impl Tool for McpToolAdapter {
 }
 
 /// Build McpToolAdapter instances for all tools exposed by an MCP server.
+///
+/// C1：工具按名字排序返回——MCP server 的 `tools/list` 顺序可能随版本/
+/// 会话变化，若直接透传会破坏 DeepSeek 前缀缓存（工具段顺序是缓存前缀
+/// 的一部分，任何顺序变化都整段 miss）。排序后前缀在会话间逐字节稳定。
 pub async fn discover_mcp_tools(
     server_name: &str,
     client: Arc<McpClient>,
 ) -> Result<Vec<Arc<dyn Tool>>, DeepseeknovaError> {
-    let tools = client.list_tools().await?;
+    let mut tools = client.list_tools().await?;
+    // 按原始工具名排序（namespace 前缀 mcp__<server>__ 相同，比较原名即可）。
+    tools.sort_by(|a, b| a.name.cmp(&b.name));
     let adapters: Vec<Arc<dyn Tool>> = tools
         .iter()
         .map(|t| {

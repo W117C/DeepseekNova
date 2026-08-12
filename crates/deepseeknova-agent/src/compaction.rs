@@ -68,7 +68,12 @@ impl L3Compactor {
         let touched = extract_touched_files(&all_msgs);
         let prompt = render_l3_prompt(&all_msgs);
 
-        match summarize(provider, &prompt).await {
+        // B5：fork 摘要调用携带主线 system 前缀（首条 System 消息），
+        // 使摘要请求与主线共享前缀缓存——压缩在独立 Provider 调用中完成
+        // （不污染主线上下文），且 system 段命中缓存省 token。
+        let system_prefix: Option<&Message> = all_msgs.iter().find(|m| m.role == Role::System);
+
+        match summarize_with_prefix(provider, system_prefix, &prompt).await {
             Ok(digest) => {
                 memory.compact(digest, None);
                 // 状态重建①：最近改动文件路径清单（仅路径，非内容）。
@@ -83,9 +88,33 @@ impl L3Compactor {
                         reasoning_signature: None,
                     });
                 }
-                // 状态重建②：重放最后一条用户消息，让任务从原意图继续。
+                // 状态重建②（B3）：保留最近 N 个完整 turn（原子单元），而非
+                // 仅重放最后一条用户消息——Codex 模式"最近消息 + 摘要"：
+                // 最近 turn 对继续任务价值最高，按 `group_into_units` 原子保留
+                // （assistant(tool_calls)→Tool 结果配对不破坏 replay 不变量）。
+                for unit in recent_units(&all_msgs, KEEP_RECENT_UNITS) {
+                    match unit {
+                        deepseeknova_context::history::HistoryUnit::Standalone(msg) => {
+                            memory.add_message(msg.clone());
+                        }
+                        deepseeknova_context::history::HistoryUnit::ToolExchange {
+                            assistant,
+                            results,
+                        } => {
+                            memory.add_message(assistant.clone());
+                            for r in results {
+                                memory.add_message(r.clone());
+                            }
+                        }
+                    }
+                }
+                // 状态重建③：若最近 turn 未覆盖最后用户消息（如最后一条是
+                // 纯文本 assistant），补重放用户意图，让任务从原意图继续。
+                let rebuilt = memory.get_all();
                 if let Some(u) = last_user {
-                    memory.add_message(u);
+                    if !rebuilt.iter().any(|m| m.content == u.content) {
+                        memory.add_message(u);
+                    }
                 }
                 self.record_success();
                 true
@@ -97,6 +126,22 @@ impl L3Compactor {
             }
         }
     }
+}
+
+/// B3：压缩后保留的最近完整 turn 数（原子单元计数）。
+const KEEP_RECENT_UNITS: usize = 3;
+
+/// 取历史末尾最近 `n` 个压缩安全单元（按原顺序返回）。
+fn recent_units(messages: &[Message], n: usize) -> Vec<deepseeknova_context::history::HistoryUnit> {
+    let units = group_into_units(messages);
+    units
+        .into_iter()
+        .rev()
+        .take(n)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect()
 }
 
 /// 渲染 7 段结构化摘要 prompt（要求直引原文关键短语防漂移）。
@@ -180,8 +225,19 @@ pub(crate) fn last_user_message(messages: &[Message]) -> Option<Message> {
 }
 
 /// 单次 LLM 摘要调用：走 Provider 非流式生成，取文本。
-async fn summarize(provider: &dyn Provider, prompt: &str) -> Result<String, DeepseeknovaError> {
-    let msgs = vec![Message {
+///
+/// B5：`system_prefix` 为主线首条 System 消息（若有）——作为请求首条消息
+/// 携带，使摘要调用与主线共享前缀缓存（fork 调用不污染主线上下文）。
+async fn summarize_with_prefix(
+    provider: &dyn Provider,
+    system_prefix: Option<&Message>,
+    prompt: &str,
+) -> Result<String, DeepseeknovaError> {
+    let mut msgs: Vec<Message> = Vec::new();
+    if let Some(sys) = system_prefix {
+        msgs.push(sys.clone());
+    }
+    msgs.push(Message {
         role: Role::User,
         content: prompt.to_string(),
         name: None,
@@ -189,7 +245,7 @@ async fn summarize(provider: &dyn Provider, prompt: &str) -> Result<String, Deep
         tool_call_id: None,
         reasoning_content: None,
         reasoning_signature: None,
-    }];
+    });
     let validated = ValidatedRequest::new(&msgs, &[]).map_err(|violations| {
         DeepseeknovaError::runner(format!(
             "invalid compact request: {}",

@@ -1,0 +1,5 @@
+{"name":"single-file-bugfix","prompt":"修复 src/main.rs 中的 off-by-one 错误（循环边界），并运行验证命令确认通过。","must_contain":["fixed","verify"],"min_score":0.8,"cost_max":0.1,"rounds":2}
+{"name":"add-unit-test","prompt":"为 tools/src/fs.rs 的 normalize_path 添加单元测试（含相对路径与 .. 归一），并运行 cargo test 确认。","must_contain":["test","pass"],"dimension_min":{"verification":0.7},"cost_max":0.1,"rounds":2}
+{"name":"refactor-rename","prompt":"把 workspace 中 grep 工具的参数名 pattern 重命名为 regex（保留兼容别名），更新所有调用点。","must_contain":["renamed"],"min_score":0.7,"cost_max":0.15,"rounds":2}
+{"name":"debug-flaky-test","prompt":"定位 tests/integration.rs 中偶发失败的临时目录撞名问题并修复（使用 tempfile::tempdir）。","must_contain":["tempdir"],"dimension_min":{"governance":0.7},"cost_max":0.12,"rounds":2}
+{"name":"cross-file-change","prompt":"把 provider 的 usage 记账从 anthropic.rs 移到公共 cost.rs，保持行为一致并补测试。","must_contain":["cost"],"min_score":0.75,"cost_max":0.15,"rounds":2}

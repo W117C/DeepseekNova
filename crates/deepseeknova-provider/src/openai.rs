@@ -33,6 +33,9 @@ pub struct OpenAIProvider {
     tool_cache: ToolSchemaCache<serde_json::Value>,
     /// Sampling temperature written into the request body when set.
     temperature: Option<f32>,
+    /// Upper bound on generated tokens; written into the request body when set
+    /// (otherwise the endpoint default applies).
+    max_tokens: Option<u32>,
 }
 
 impl OpenAIProvider {
@@ -70,6 +73,7 @@ impl OpenAIProvider {
             extra_body: None,
             tool_cache: ToolSchemaCache::with_capacity(16),
             temperature: None,
+            max_tokens: None,
         })
     }
 
@@ -94,6 +98,14 @@ impl OpenAIProvider {
     /// Set the sampling temperature written into every request body.
     pub fn with_temperature(mut self, temperature: f32) -> Self {
         self.temperature = Some(temperature);
+        self
+    }
+
+    /// Set an explicit upper bound on generated tokens. Written into the
+    /// request body as `max_tokens`; without it the endpoint default applies
+    /// (which may silently cap long outputs).
+    pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
+        self.max_tokens = Some(max_tokens);
         self
     }
 
@@ -160,6 +172,10 @@ impl OpenAIProvider {
         }
         if let Some(ref effort) = self.reasoning_effort {
             req["reasoning_effort"] = serde_json::json!(effort);
+        }
+        if let Some(mt) = self.max_tokens {
+            // P0.5：显式输出上限（否则端点默认可能静默截断长输出）。
+            req["max_tokens"] = serde_json::json!(mt);
         }
         if let Some(temp) = self.temperature {
             req["temperature"] = serde_json::json!(temp);
@@ -539,22 +555,44 @@ async fn process_sse_line(
 }
 
 /// Emit ToolCallEnd for any pending (accumulated but not flushed) tool calls.
+///
+/// P0.3：残缺项不再静默丢弃——
+/// - `id` + `arguments` 齐备即 flush（`name` 缺失时以空串补齐并告警，避免
+///   已发出的 `ToolCallDelta` 变成孤儿残留，agent 端可据此反馈失败）；
+/// - 缺 `id`（无法定位调用）丢弃并告警；
+/// - 完全空的槽位（index 空洞）静默跳过。
 async fn flush_pending_tool_calls(
     tx: &mpsc::Sender<Result<Chunk, DeepseeknovaError>>,
     tool_acc: &mut Vec<AccToolCall>,
     sent_any: &mut bool,
 ) -> Result<(), DeepseeknovaError> {
     for acc in tool_acc.drain(..) {
-        if let (Some(id), Some(name)) = (acc.id, acc.name) {
-            *sent_any = true;
-            let _ = tx
-                .send(Ok(Chunk::ToolCallEnd {
-                    id,
-                    name,
-                    arguments: acc.arguments,
-                }))
-                .await;
+        let Some(id) = acc.id else {
+            tracing::warn!(
+                args_len = acc.arguments.len(),
+                "dropping incomplete streaming tool call without id"
+            );
+            continue;
+        };
+        let name = acc.name.unwrap_or_default();
+        if name.is_empty() && acc.arguments.is_empty() {
+            // index 空洞（从未收到任何 delta 的占位槽）——无需告警。
+            continue;
         }
+        if name.is_empty() {
+            tracing::warn!(
+                tool_call_id = %id,
+                "flushing streaming tool call with missing name (protocol anomaly)"
+            );
+        }
+        *sent_any = true;
+        let _ = tx
+            .send(Ok(Chunk::ToolCallEnd {
+                id,
+                name,
+                arguments: acc.arguments,
+            }))
+            .await;
     }
     Ok(())
 }
@@ -626,6 +664,53 @@ mod tests {
             "temperature must reach the request body, got {temp}"
         );
         std::env::remove_var("DPNOVA_TEMP_KEY");
+    }
+
+    /// P0.5：显式 max_tokens 必须写入请求体（否则端点默认可能静默截断长
+    /// 输出）；未配置时保持缺省（向后兼容）。
+    #[test]
+    fn build_request_injects_max_tokens_when_set() {
+        std::env::set_var("DPNOVA_MAXTOK_KEY", "sk-test");
+        let provider = OpenAIProvider::new(
+            "https://api.deepseek.com",
+            "deepseek-v4-flash",
+            "DPNOVA_MAXTOK_KEY",
+            30,
+            0,
+        )
+        .unwrap()
+        .with_max_tokens(8192);
+        let msgs = [user_msg("hi")];
+        let tools: Vec<&dyn Tool> = Vec::new();
+        let body = provider.build_request(&msgs, &tools, false);
+        assert_eq!(
+            body["max_tokens"].as_u64(),
+            Some(8192),
+            "max_tokens must reach the request body"
+        );
+        std::env::remove_var("DPNOVA_MAXTOK_KEY");
+    }
+
+    /// P0.5：未配置 max_tokens 时请求体不得出现该字段（保持旧行为）。
+    #[test]
+    fn build_request_omits_max_tokens_when_unset() {
+        std::env::set_var("DPNOVA_MAXTOK_KEY2", "sk-test");
+        let provider = OpenAIProvider::new(
+            "https://api.deepseek.com",
+            "deepseek-v4-flash",
+            "DPNOVA_MAXTOK_KEY2",
+            30,
+            0,
+        )
+        .unwrap();
+        let msgs = [user_msg("hi")];
+        let tools: Vec<&dyn Tool> = Vec::new();
+        let body = provider.build_request(&msgs, &tools, false);
+        assert!(
+            body.get("max_tokens").is_none(),
+            "unset max_tokens must stay omitted"
+        );
+        std::env::remove_var("DPNOVA_MAXTOK_KEY2");
     }
 
     /// Unset temperature must not be serialised at all.
@@ -790,6 +875,57 @@ data: [DONE]
                 break;
             }
         }
+    }
+
+    /// P0.3：残缺 tool call（有 id+args 但缺 name）不再被静默丢弃——
+    /// flush 时以空 name 补齐并发出 ToolCallEnd；完全缺 id 的项丢弃并告警。
+    #[tokio::test]
+    async fn flush_pending_tool_calls_handles_incomplete_calls() {
+        let (tx, mut rx) = mpsc::channel(64);
+
+        // index 0：id + args 齐备、缺 name（协议乱序）→ 必须 flush。
+        // index 1：完全缺 id → 丢弃（仅告警，不产生事件）。
+        let mut tool_acc = vec![
+            AccToolCall {
+                id: Some("call_1".into()),
+                name: None,
+                arguments: r#"{"path":"src/main.rs"}"#.into(),
+                started: true,
+            },
+            AccToolCall {
+                id: None,
+                name: Some("read_file".into()),
+                arguments: r#"{"path":"x"}"#.into(),
+                started: true,
+            },
+        ];
+        let mut sent_any = false;
+
+        flush_pending_tool_calls(&tx, &mut tool_acc, &mut sent_any)
+            .await
+            .unwrap();
+        drop(tx);
+
+        let mut chunks = Vec::new();
+        while let Some(chunk) = rx.recv().await {
+            chunks.push(chunk.unwrap());
+        }
+
+        // 只有 index 0 被 flush；缺 id 的 index 1 被丢弃。
+        assert_eq!(chunks.len(), 1, "only the id-bearing call must flush");
+        match &chunks[0] {
+            Chunk::ToolCallEnd {
+                id,
+                name,
+                arguments,
+            } => {
+                assert_eq!(id, "call_1");
+                assert!(name.is_empty(), "missing name must not block flush");
+                assert!(arguments.contains("src/main.rs"));
+            }
+            other => panic!("expected ToolCallEnd, got {other:?}"),
+        }
+        assert!(sent_any);
     }
 
     /// Verify reasoning_content is parsed.

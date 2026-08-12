@@ -45,6 +45,8 @@ pub mod attribution;
 pub mod budget;
 mod classify;
 mod compaction;
+/// 结构化输出契约：统一 extract/validate/retry 流水线（提示词无关能力核心）。
+mod contract;
 /// 双模型协调器：planner 产出执行图，executor 逐节点执行。
 pub mod coordinator;
 pub mod delegate;

@@ -211,6 +211,13 @@ pub struct ProviderConfig {
     /// Merged into the request body at the top level.
     #[serde(default)]
     pub extra_body: Option<serde_json::Value>,
+
+    /// 是否在 Anthropic 兼容请求中注入 `cache_control: {"type":"ephemeral"}`
+    /// 断点（prompt caching 前缀缓存标记，system 块与 tools 末项）。
+    /// `None` 使用 factory 默认（Anthropic 路径默认开启）；显式 `false`
+    /// 关闭断点注入（请求体与旧版本逐字节一致）。
+    #[serde(default)]
+    pub cache_control: Option<bool>,
 }
 
 fn default_timeout() -> u64 {
@@ -774,7 +781,7 @@ fn default_delegate_output_cap() -> usize {
     2000
 }
 fn default_delegate_max_depth() -> usize {
-    3
+    5
 }
 
 impl Default for DelegateConfig {
@@ -785,7 +792,7 @@ impl Default for DelegateConfig {
             output_cap_tokens: 2000,
             agents: Vec::new(),
             allow_recursion: false,
-            max_depth: 3,
+            max_depth: default_delegate_max_depth(), // D2：3→5
             agents_dir: None,
         }
     }
@@ -2674,6 +2681,7 @@ mod tests {
                 thinking_enabled: false,
                 reasoning_effort: None,
                 extra_body: None,
+                cache_control: None,
                 context_window: None,
             }],
             ..Config::default()
@@ -3324,7 +3332,8 @@ mod tests {
         assert_eq!(c.delegate.max_concurrent, 2);
         assert_eq!(c.delegate.output_cap_tokens, 2000);
         assert!(c.delegate.agents.is_empty());
-        assert_eq!(c.delegate.max_depth, 3);
+        // D2：默认递归深度 3→5（对齐 Claude Code 嵌套 5 层）。
+        assert_eq!(c.delegate.max_depth, 5);
         assert!(!c.delegate.allow_recursion);
         assert_eq!(c.delegate.agents_dir, None);
     }

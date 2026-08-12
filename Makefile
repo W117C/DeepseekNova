@@ -1,7 +1,7 @@
 .PHONY: all build check test clean run release \
         release-patch release-minor release-major \
         check-all test-all test-count test-count-check clippy-fix example \
-        install dist audit
+        install dist audit eval-ci
 
 # ── Default ─────────────────────────────────────────────────────
 all: build
@@ -85,3 +85,11 @@ dist: release
 audit:
 	@command -v cargo-deny >/dev/null 2>&1 || { echo "cargo-deny 未安装，请先安装: cargo install cargo-deny --locked"; exit 1; }
 	cargo deny --all-features check
+
+# ── Eval 基准（F3：成本优先 CI 门禁）─────────────────────────────
+# 跑核心基准任务集并施加 CI 门槛（综合分均值 + 关键维度 + 成本上限）。
+# 需要已配置 LLM provider（API key）；无 key 时跳过（not failure）。
+eval-ci:
+	@test -n "$$DEEPSEEKNOVA_API_KEY" -o -n "$$DEEPSEEK_API_KEY" || { echo "跳过 eval-ci：未配置 LLM API key"; exit 0; }
+	cargo run --bin deepseeknova-cli -- eval --path evals/core.jsonl --format json \
+		--require-min-score 3.5 --require-dimension governance>=0.7
