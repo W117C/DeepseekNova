@@ -70,17 +70,31 @@ impl SecurityPolicy {
             .any(|cmd| command_allowed(command, cmd))
     }
 
-    /// 域名是否允许：精确匹配或子域匹配（`example.com` 覆盖 `sub.example.com`）。    ///
+    /// 域名是否允许：精确匹配或子域匹配（`example.com` 覆盖 `sub.example.com`）。
     /// 与 Claude Code 的 `WebFetch(domain:)` 前缀语义对齐。条目 `example.com`
     /// 可放行任意子域；条目本身是子域（`api.example.com`）时只精确匹配自己。
+    /// 匹配大小写不敏感：`domain` 先 `to_ascii_lowercase()` 归一化一次，比较
+    /// 均用 `eq_ignore_ascii_case`，无中间分配；子域匹配要求后缀前一位是 `.`
+    /// （`notexample.com` 不命中 `example.com`）。
     /// 空列表 = 未配置 = 全放（见 [`SecurityPolicy::is_configured`]）。
     pub fn is_domain_allowed(&self, domain: &str) -> bool {
         if self.allowed_domains.is_empty() {
             return true;
         }
-        self.allowed_domains
-            .iter()
-            .any(|d| d == domain || domain.ends_with(&format!(".{d}")))
+        let domain_lower = domain.to_ascii_lowercase();
+        let domain_bytes = domain_lower.as_bytes();
+        self.allowed_domains.iter().any(|allowed| {
+            let allowed_bytes = allowed.as_bytes();
+            let d_len = allowed_bytes.len();
+            if domain_bytes.len() == d_len {
+                return domain_lower.eq_ignore_ascii_case(allowed);
+            }
+            // 子域匹配：`domain` 必须比 `allowed` 长，且后缀前一位是 `.`
+            //（`.` 边界防止 `notexample.com` / `evil-example.com` 误命中）。
+            domain_bytes.len() > d_len
+                && domain_bytes.get(domain_bytes.len() - d_len - 1) == Some(&b'.')
+                && domain_bytes[domain_bytes.len() - d_len..].eq_ignore_ascii_case(allowed_bytes)
+        })
     }
 }
 
@@ -270,6 +284,20 @@ mod tests {
         assert!(policy.is_domain_allowed("v1.api.example.com"));
         assert!(!policy.is_domain_allowed("example.com"));
         assert!(!policy.is_domain_allowed("evil-api.example.com"));
+    }
+
+    #[test]
+    fn test_domain_allowed_is_case_insensitive() {
+        let policy = SecurityPolicy {
+            allowed_domains: vec!["example.com".into()],
+            ..SecurityPolicy::default()
+        };
+        assert!(policy.is_domain_allowed("EXAMPLE.COM"));
+        assert!(policy.is_domain_allowed("Example.Com"));
+        assert!(policy.is_domain_allowed("API.Example.Com"));
+        assert!(policy.is_domain_allowed("v1.API.Example.COM"));
+        assert!(!policy.is_domain_allowed("NOTexample.com"));
+        assert!(!policy.is_domain_allowed("example.com.evil.net"));
     }
 
     // ── is_configured ─────────────────────────────────────────────
