@@ -501,11 +501,25 @@ impl McpConnection {
     /// Shut down the connection. Kills the child process and waits for
     /// background tasks to complete.
     pub async fn shutdown(&self) {
-        // Kill the process
+        // 1. Kill the process. Killing the child closes its stdout, which the
+        //    reader observes as EOF — this is what lets the reader complete
+        //    instead of blocking forever on a live pipe.
         if let Some(mut child) = self.child.write().await.take() {
             info!("MCP: shutting down server process");
             let _ = child.start_kill();
             let _ = child.wait().await;
+        }
+        // 2. Await the reader so it drains pending requests (failing each with
+        //    "MCP connection closed") rather than leaking the oneshot senders
+        //    and leaving in-flight callers suspended indefinitely.
+        if let Some(reader) = self._reader_handle.write().await.take() {
+            let _ = reader.await;
+        }
+        // 3. Abort the writer. It is blocked on write_rx.recv() and never
+        //    observes channel close because write_tx is still held by the
+        //    connection, so it must be cancelled explicitly.
+        if let Some(writer) = self._writer_handle.write().await.take() {
+            writer.abort();
         }
     }
 
@@ -844,6 +858,79 @@ mod tests {
             .expect_err("silent server must time out");
         assert!(
             err.to_string().contains("timed out"),
+            "unexpected error: {err}"
+        );
+    }
+
+    // ── Shutdown ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn shutdown_joins_background_tasks_without_hanging() {
+        // A fake server that answers initialize and then goes silent. With an
+        // in-flight request pending, shutdown must still complete promptly —
+        // it joins the reader (which drains pending on EOF) and aborts the
+        // writer instead of abandoning them.
+        let (conn_stdin, mut srv_rx) = duplex(crate::test_util::DUPLEX_BUF);
+        let (mut srv_tx, conn_stdout) = duplex(crate::test_util::DUPLEX_BUF);
+        let server = tokio::spawn(async move {
+            let buf = BufReader::new(&mut srv_rx);
+            let mut lines = buf.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let val: Value = match serde_json::from_str(&line) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let Some(id) = val.get("id").and_then(|i| i.as_u64()) else {
+                    continue; // notification — ignore
+                };
+                if val["method"] == "initialize" {
+                    let _ = srv_tx
+                        .write_all(init_reply(id).to_string().as_bytes())
+                        .await;
+                    let _ = srv_tx.write_all(b"\n").await;
+                    let _ = srv_tx.flush().await;
+                }
+                // Everything else stays unanswered.
+            }
+        });
+
+        let conn = McpConnection::from_streams(
+            conn_stdin,
+            conn_stdout,
+            None,
+            Duration::from_secs(5),
+            WRITE_CHANNEL_CAPACITY,
+        )
+        .await
+        .expect("from_streams");
+        conn.handshake(Duration::from_secs(5))
+            .await
+            .expect("handshake");
+
+        // Issue a request the fake server never answers.
+        let req = {
+            let conn = conn.clone();
+            tokio::spawn(async move { conn.request("hang", None, Duration::from_secs(60)).await })
+        };
+        // Give the request time to register as pending and be written out.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Close the server's stdout (EOF) so the reader drains pending, then
+        // shut down: must complete without hanging on either background task.
+        server.abort();
+
+        tokio::time::timeout(Duration::from_secs(5), conn.shutdown())
+            .await
+            .expect("shutdown must not hang on background tasks");
+
+        // The reader drains pending on EOF, so the in-flight request must fail
+        // cleanly rather than staying suspended.
+        let err = req
+            .await
+            .expect("request task should finish")
+            .expect_err("in-flight request must fail after shutdown");
+        assert!(
+            err.to_string().contains("MCP connection closed"),
             "unexpected error: {err}"
         );
     }
