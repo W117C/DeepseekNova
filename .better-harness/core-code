@@ -24,7 +24,6 @@ crates/deepseeknova-config/src/
 crates/deepseeknova-core/src/
 crates/deepseeknova-context/src/
 crates/deepseeknova-checkpoint/src/
-crates/deepseeknova-event/src/
 crates/deepseeknova-graph/src/
 crates/deepseeknova-mcp/src/
 crates/deepseeknova-provider/src/
