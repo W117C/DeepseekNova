@@ -943,6 +943,29 @@ async fn run_cli() -> Result<i32, DeepseeknovaError> {
             // Resume applies only to the first `/new` cycle.
             let mut resume_next = *resume;
 
+            // REPL 扩展能力：/undo（checkpoint 快照库）与 /mcp status（实时探测）。
+            // 与 TUI 路径同一数据源与控制器实现（tui_undo::TuiUndoController /
+            // mcp_probe::CliMcpProbe），保证 REPL/TUI 行为一致。
+            let mcp_server_infos: Vec<deepseeknova_tui::McpServerInfo> = config
+                .mcp_servers
+                .iter()
+                .filter(|s| s.enabled)
+                .map(|s| deepseeknova_tui::McpServerInfo {
+                    name: s.name.clone(),
+                    command: s.command.clone(),
+                    args: s.args.clone(),
+                })
+                .collect();
+            let repl_caps = chat::ReplCaps {
+                undo: Some(std::sync::Arc::new(tui_undo::TuiUndoController {
+                    path: std::env::current_dir()
+                        .unwrap_or_default()
+                        .join(&config.checkpoint.path),
+                })),
+                mcp_servers: mcp_server_infos,
+                mcp_probe: Some(std::sync::Arc::new(mcp_probe::CliMcpProbe::default())),
+            };
+
             loop {
                 // Persistent session memory — shared across model/effort
                 // rebuilds within the same `/new` session.
@@ -1044,6 +1067,7 @@ async fn run_cli() -> Result<i32, DeepseeknovaError> {
                     model.clone(),
                     persist,
                     Some(Arc::clone(&model_router)),
+                    repl_caps.clone(),
                 )
                 .await?;
                 if !restart {
@@ -1577,6 +1601,29 @@ async fn run_cli() -> Result<i32, DeepseeknovaError> {
             let mcp_tools = deepseeknova_runtime::discover_mcp_tools(&config).await;
             let sessions_root = sessions_root(&config);
 
+            // REPL 扩展能力：/undo（checkpoint 快照库）与 /mcp status（实时探测）。
+            // 与 TUI 路径同一数据源与控制器实现（tui_undo::TuiUndoController /
+            // mcp_probe::CliMcpProbe），保证 REPL/TUI 行为一致。
+            let mcp_server_infos: Vec<deepseeknova_tui::McpServerInfo> = config
+                .mcp_servers
+                .iter()
+                .filter(|s| s.enabled)
+                .map(|s| deepseeknova_tui::McpServerInfo {
+                    name: s.name.clone(),
+                    command: s.command.clone(),
+                    args: s.args.clone(),
+                })
+                .collect();
+            let repl_caps = chat::ReplCaps {
+                undo: Some(std::sync::Arc::new(tui_undo::TuiUndoController {
+                    path: std::env::current_dir()
+                        .unwrap_or_default()
+                        .join(&config.checkpoint.path),
+                })),
+                mcp_servers: mcp_server_infos,
+                mcp_probe: Some(std::sync::Arc::new(mcp_probe::CliMcpProbe::default())),
+            };
+
             loop {
                 let history: Arc<tokio::sync::Mutex<Vec<deepseeknova_core::Message>>> =
                     Arc::new(tokio::sync::Mutex::new(Vec::new()));
@@ -1636,6 +1683,7 @@ async fn run_cli() -> Result<i32, DeepseeknovaError> {
                     None,
                     persist,
                     Some(Arc::clone(&model_router)),
+                    repl_caps.clone(),
                 )
                 .await?;
                 if !restart {

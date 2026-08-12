@@ -3,6 +3,7 @@ use deepseeknova_core::runner::{RunEvent, RunInput, Runner};
 use deepseeknova_core::{DeepseeknovaError, Message, Role};
 use deepseeknova_provider::factory::ReasoningEffort;
 use deepseeknova_store::{SessionStore, StoredOutput};
+use deepseeknova_tui::{McpProbe, McpServerInfo, McpStatus, UndoController};
 use std::collections::HashMap;
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::PathBuf;
@@ -133,6 +134,22 @@ enum SlashAction {
     },
 }
 
+/// REPL 斜杠命令扩展能力：`/undo` 撤销控制器与 `/mcp status` 连接探测。
+///
+/// 由 CLI 在启动时按配置构建（与 TUI 路径同一数据源），注入
+/// [`run_chat_repl`]。字段为 `Option` 以兼容「未启用」场景（无 checkpoint
+/// 配置 / 无 MCP 服务器 / 无探测器）。`undo` 与 `mcp_probe` 用 `Arc` 包装
+/// 以便跨 `/new` 循环共享（trait 对象不可 `Clone`，但 `Arc` 可）。
+#[derive(Clone, Default)]
+pub struct ReplCaps {
+    /// `/undo` 撤销控制器（与 `checkpoint` 子命令共用同一快照库）。
+    pub undo: Option<std::sync::Arc<dyn UndoController>>,
+    /// `/mcp status` 展示的已启用 MCP server。
+    pub mcp_servers: Vec<McpServerInfo>,
+    /// `/mcp status` 实时连接探测器。
+    pub mcp_probe: Option<std::sync::Arc<dyn McpProbe>>,
+}
+
 /// Run an interactive chat REPL session with rich slash commands.
 ///
 /// `agent_factory` is called to (re-)create the agent when the session
@@ -145,12 +162,16 @@ enum SlashAction {
 ///
 /// When `router` is `Some`, the `/model use` (role-pointer hot switch) and
 /// `/cost` (token/price report) commands become available.
+///
+/// `caps` 提供 `/undo`（checkpoint 撤销）与 `/mcp status`（MCP 连接探测）
+/// 所需能力；为 `None`/空的字段表示对应功能不可用，命令会降级提示。
 pub async fn run_chat_repl<F>(
     agent_factory: F,
     baseline_effort: ReasoningEffort,
     initial_model: Option<String>,
     mut persist: Option<ChatPersistence>,
     router: Option<std::sync::Arc<deepseeknova_provider::router::ModelRouter>>,
+    caps: ReplCaps,
 ) -> Result<bool, deepseeknova_core::DeepseeknovaError>
 where
     F: Fn(
@@ -252,6 +273,7 @@ where
                 &mut current_model,
                 persist.as_mut(),
                 router.as_ref(),
+                &caps,
             )
             .await?;
             match action {
@@ -516,6 +538,7 @@ async fn handle_slash_command(
     current_model: &mut Option<String>,
     persist: Option<&mut ChatPersistence>,
     router: Option<&std::sync::Arc<deepseeknova_provider::router::ModelRouter>>,
+    caps: &ReplCaps,
 ) -> Result<SlashAction, deepseeknova_core::DeepseeknovaError> {
     // Split command and optional arguments
     let (name, args) = cmd.split_once(' ').unwrap_or((cmd, ""));
@@ -765,13 +788,36 @@ async fn handle_slash_command(
 
         // ── MCP status ────────────────────────────────────────
         "mcp" => {
-            println!("MCP servers are configured in deepseeknova.toml:");
-            println!("  [[mcp_servers]]");
-            println!("  name = \"my-server\"");
-            println!("  command = \"npx\"");
-            println!("  args = [\"-y\", \"@modelcontextprotocol/server-filesystem\"]");
-            println!();
-            println!("Use /mcp status to check connected servers (coming soon).");
+            let sub = args.trim();
+            if sub.is_empty() {
+                println!("MCP servers are configured in deepseeknova.toml:");
+                println!("  [[mcp_servers]]");
+                println!("  name = \"my-server\"");
+                println!("  command = \"npx\"");
+                println!("  args = [\"-y\", \"@modelcontextprotocol/server-filesystem\"]");
+                println!();
+                println!("Use /mcp status to check connected servers.");
+            } else if sub == "status" {
+                if caps.mcp_servers.is_empty() {
+                    println!("No MCP servers configured");
+                    println!(
+                        "Configure them in the mcp_servers array at the top of \
+                         deepseeknova.toml and restart"
+                    );
+                } else {
+                    let statuses = match &caps.mcp_probe {
+                        Some(probe) => probe.probe(&caps.mcp_servers).await,
+                        None => Vec::new(),
+                    };
+                    println!("Configured MCP servers (live status):");
+                    for line in format_mcp_status_lines(&caps.mcp_servers, &statuses) {
+                        println!("{line}");
+                    }
+                }
+            } else {
+                eprintln!("unknown /mcp sub-command: {sub}");
+                eprintln!("try /mcp status");
+            }
         }
 
         // ── Sessions (list / resume / rename) ─────────────────────────
@@ -863,10 +909,43 @@ async fn handle_slash_command(
         },
 
         // ── Undo ──────────────────────────────────────────────
-        "undo" => {
-            println!("Undo is not yet implemented in the CLI.");
-            println!("Use the checkpoint system: crates/deepseeknova-checkpoint");
-        }
+        "undo" => match &caps.undo {
+            None => println!("Undo unavailable (no UndoController)"),
+            Some(ctrl) => match parse_undo_args(args) {
+                UndoSubcommand::RollbackOne => match ctrl.rollback_one().await {
+                    Ok(Some(msg)) => println!("✓ {msg}"),
+                    Ok(None) => println!("No snapshot to roll back"),
+                    Err(e) => println!("Undo failed: {e}"),
+                },
+                UndoSubcommand::RollbackAll => match ctrl.rollback_all().await {
+                    Ok(n) => println!("Rolled back {n} snapshots"),
+                    Err(e) => println!("Undo failed: {e}"),
+                },
+                UndoSubcommand::List => match ctrl.list().await {
+                    Ok(lines) if !lines.is_empty() => {
+                        println!("Snapshot list:");
+                        for line in lines {
+                            println!("  {line}");
+                        }
+                    }
+                    Ok(_) => println!("(no snapshots)"),
+                    Err(e) => println!("Failed to list snapshots: {e}"),
+                },
+                UndoSubcommand::Diff => match ctrl.diffs().await {
+                    Ok(lines) if !lines.is_empty() => {
+                        for line in lines {
+                            println!("{line}");
+                        }
+                    }
+                    Ok(_) => println!("(no content-level changes)"),
+                    Err(e) => println!("Failed to show diff: {e}"),
+                },
+                UndoSubcommand::Unknown(arg) => println!(
+                    "Unknown argument: {arg} \
+                     (usage: /undo | /undo all | /undo list | /undo diff)"
+                ),
+            },
+        },
 
         // ── Help ──────────────────────────────────────────────
         "help" => {
@@ -878,11 +957,11 @@ async fn handle_slash_command(
             println!("  /model            — show / change model & reasoning settings");
             println!("  /cost             — show per-model token usage & estimated cost");
             println!("  /skills           — list available agent skills");
-            println!("  /mcp              — MCP server status");
+            println!("  /mcp              — MCP server status (/mcp status)");
             println!("  /sessions         — list saved sessions");
             println!("  /resume <id>      — restore a saved session's history");
             println!("  /rename <title>   — name the current session");
-            println!("  /undo             — revert changes (coming soon)");
+            println!("  /undo             — revert changes (/undo all | /undo list | /undo diff)");
             println!("  /help             — show this help");
             println!();
             println!("Display modes:");
@@ -916,6 +995,52 @@ fn parse_effort_command(args: &str) -> Result<ReasoningEffort, String> {
     }
     ReasoningEffort::from_config_str(trimmed)
         .ok_or_else(|| format!("unknown effort level: '{trimmed}'"))
+}
+
+/// `/undo` 的子命令：空参数 → 回退一条；`all`/`list`/`diff` → 对应操作；
+/// 其他 → 未知参数（携带原字符串供提示）。
+#[derive(Debug)]
+enum UndoSubcommand {
+    /// 回退最近一个快照。
+    RollbackOne,
+    /// 回退全部快照。
+    RollbackAll,
+    /// 列出可回退快照。
+    List,
+    /// 展示内容级 diff。
+    Diff,
+    /// 未知参数（携带原字符串）。
+    Unknown(String),
+}
+
+/// 解析 `/undo` 的参数为 [`UndoSubcommand`]，与 TUI `/undo` 同语义
+/// （空 / `all` / `list` / `diff`，其余报未知参数）。
+fn parse_undo_args(args: &str) -> UndoSubcommand {
+    match args.trim() {
+        "" => UndoSubcommand::RollbackOne,
+        "all" => UndoSubcommand::RollbackAll,
+        "list" => UndoSubcommand::List,
+        "diff" => UndoSubcommand::Diff,
+        other => UndoSubcommand::Unknown(other.to_string()),
+    }
+}
+
+/// 把 `/mcp status` 的探测结果格式化成展示行（与 TUI 词表同文案口径）。
+///
+/// `statuses` 与 `servers` 按下标一一对应；`statuses` 缺失下标（探测器
+/// 未提供该 server 状态）时仅列名。
+fn format_mcp_status_lines(servers: &[McpServerInfo], statuses: &[McpStatus]) -> Vec<String> {
+    servers
+        .iter()
+        .enumerate()
+        .map(|(i, server)| match statuses.get(i) {
+            Some(McpStatus::Connected) => format!("  • {} — ✓ connected", server.name),
+            Some(McpStatus::Disconnected(reason)) => {
+                format!("  • {} — ✗ disconnected ({reason})", server.name)
+            }
+            None => format!("  • {}", server.name),
+        })
+        .collect()
 }
 
 /// 校验用户输入可安全作为会话 id 使用（防 `/resume` 路径越界读写）。
@@ -1363,5 +1488,54 @@ mod tests {
             .find(|(id, _, _, _)| id == "chat-b")
             .expect("chat-b 在列表中");
         assert_eq!(b.2, None, "未命名会话 title 为 None");
+    }
+
+    // ── parse_undo_args（/undo 参数分发）──────────────────────────────
+
+    #[test]
+    fn parse_undo_args_dispatch() {
+        assert!(matches!(parse_undo_args(""), UndoSubcommand::RollbackOne));
+        assert!(matches!(parse_undo_args("  "), UndoSubcommand::RollbackOne));
+        assert!(matches!(
+            parse_undo_args("all"),
+            UndoSubcommand::RollbackAll
+        ));
+        assert!(matches!(parse_undo_args("list"), UndoSubcommand::List));
+        assert!(matches!(parse_undo_args("diff"), UndoSubcommand::Diff));
+        match parse_undo_args("bogus") {
+            UndoSubcommand::Unknown(arg) => assert_eq!(arg, "bogus"),
+            other => panic!("expected Unknown, got {other:?}"),
+        }
+    }
+
+    // ── format_mcp_status_lines（/mcp status 展示行）─────────────────
+
+    #[test]
+    fn format_mcp_status_lines_maps_statuses() {
+        let servers = vec![
+            McpServerInfo {
+                name: "a".into(),
+                command: "x".into(),
+                args: vec![],
+            },
+            McpServerInfo {
+                name: "b".into(),
+                command: "y".into(),
+                args: vec![],
+            },
+            McpServerInfo {
+                name: "c".into(),
+                command: "z".into(),
+                args: vec![],
+            },
+        ];
+        let statuses = vec![
+            McpStatus::Connected,
+            McpStatus::Disconnected("exit 1".into()),
+        ];
+        let lines = format_mcp_status_lines(&servers, &statuses);
+        assert_eq!(lines[0], "  • a — ✓ connected");
+        assert_eq!(lines[1], "  • b — ✗ disconnected (exit 1)");
+        assert_eq!(lines[2], "  • c", "statuses 缺失下标 → 仅列名");
     }
 }
