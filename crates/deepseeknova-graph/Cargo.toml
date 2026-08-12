@@ -26,6 +26,11 @@ tree-sitter-go = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "retrieval"
+harness = false
 
 [lints]
 workspace = true

@@ -756,6 +756,7 @@ dependencies = [
 name = "deepseeknova-graph"
 version = "0.5.0"
 dependencies = [
+ "criterion",
  "deepseeknova-core",
  "hex",
  "rusqlite",
