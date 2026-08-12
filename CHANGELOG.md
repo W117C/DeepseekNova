@@ -19,6 +19,12 @@ All notable changes to DeepseekNova will be documented in this file.
   `deepseeknova_core::DeepseeknovaError`；`Provider` 变体改为结构化
   `{ message, retryable }`，`is_retryable()` 不再依赖消息文本匹配，IO 仅
   瞬时错误种类（TimedOut/ConnectionRefused 等）可重试。
+- **移除死代码 crate 与公开 API**（P1 死代码清理）：删除
+  `deepseeknova-event` 整 crate（其事件职责已被 `deepseeknova_core::runner::RunEvent`
+  流覆盖，缓存观测已被 `Message.usage`/`cache_hit_tokens` 覆盖）、
+  `deepseeknova_runtime::Runtime` 结构体、`deepseeknova_context::ContextEngine`
+  与 `ContextProvider` trait。workspace 由 22 个 crate 减为 21 个；已引用这些
+  符号的嵌入方需改用 `RunEventStream` 或自有装配。
 
 ### Fixed（2026-08-10 全面体检轮）
 
