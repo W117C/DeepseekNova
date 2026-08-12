@@ -409,8 +409,9 @@ async fn run_coordinator(
         graph.edges.len()
     );
 
-    // Safety check: no node may use a non-read-only tool via call_read_tool.
-    validate_plan_tool_boundary(&graph, &read_only_tools);
+    // Safety check: fail closed if any node references a non-read-only tool
+    // (the planner may never schedule a mutating tool).
+    validate_plan_tool_boundary(&graph, &read_only_tools)?;
 
     // ---- Phase 2: Execution ----
     info!("coordinator: execution phase");
@@ -491,26 +492,61 @@ async fn run_coordinator(
 // Plan boundary validation — core two-model safety guarantee
 // ---------------------------------------------------------------------------
 
-/// Scan every `call_read_tool`-action node in the plan and assert the named
-/// tool is registered as read-only. This is the runtime enforcement of the
-/// planner / executor split.
-fn validate_plan_tool_boundary(graph: &ExecutionGraph, read_only: &[Arc<dyn Tool>]) {
+/// Scan every `CallTool` node in the plan and fail closed if any node names a
+/// tool that is not registered read-only. This is the runtime enforcement of
+/// the planner / executor split: the planner may never schedule a mutating
+/// tool, so a plan that references one is rejected outright rather than
+/// merely warned about.
+fn validate_plan_tool_boundary(
+    graph: &ExecutionGraph,
+    read_only: &[Arc<dyn Tool>],
+) -> Result<(), DeepseeknovaError> {
     let allowed: Vec<String> = read_only.iter().map(|t| t.schema().name.clone()).collect();
     for (id, node) in &graph.nodes {
-        let maybe_tool = match &node.action {
-            Action::CallTool { tool, .. } => Some(tool.as_str()),
-            _ => None,
-        };
-        if let Some(tool_name) = maybe_tool {
-            if !allowed.iter().any(|n| n == tool_name) {
-                warn!(
-                    "coordinator safety: plan node '{}' attempted to call \
-                     non-read-only tool '{}' during planning — executor-only",
-                    id, tool_name
-                );
+        check_node_action(id, &node.action, &allowed)?;
+    }
+    Ok(())
+}
+
+/// Recursively check one node action against the read-only allowlist:
+/// a `CallTool` must name a registered read-only tool, and nested nodes
+/// (both `Action::Parallel` children and `Action::Conditional` then/else
+/// branches) are checked the same way — the executor runs those nested
+/// nodes, so they are in scope of the boundary. A mutating tool smuggled
+/// inside a parallel or conditional node must be rejected just like a
+/// top-level one.
+fn check_node_action(
+    id: &str,
+    action: &Action,
+    allowed: &[String],
+) -> Result<(), DeepseeknovaError> {
+    match action {
+        Action::CallTool { tool, .. } => {
+            if !allowed.iter().any(|n| n == tool) {
+                return Err(DeepseeknovaError::runner(format!(
+                    "coordinator safety: plan node '{id}' attempted to call \
+                     non-read-only tool '{tool}' during planning — executor-only"
+                )));
             }
         }
+        Action::Parallel(children) => {
+            for child in children {
+                check_node_action(&child.id, &child.action, allowed)?;
+            }
+        }
+        Action::Conditional { then, r#else, .. } => {
+            check_node_action(&then.id, &then.action, allowed)?;
+            if let Some(else_node) = r#else {
+                check_node_action(&else_node.id, &else_node.action, allowed)?;
+            }
+        }
+        // Leaf actions that cannot contain tool calls or nested nodes: no-op.
+        Action::Think { .. }
+        | Action::Observe { .. }
+        | Action::Reflect { .. }
+        | Action::Delegate { .. } => {}
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -901,6 +937,122 @@ impl DelegateCallback for CoordinatorCallbacks {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use deepseeknova_core::types::ToolSchema;
+
+    // Minimal tool stub for the boundary check: carries a name, never executed.
+    struct NamedTool {
+        name: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for NamedTool {
+        fn schema(&self) -> ToolSchema {
+            ToolSchema {
+                name: self.name.to_string(),
+                description: "stub".to_string(),
+                parameters: serde_json::json!({"type":"object","properties":{}}),
+            }
+        }
+        async fn execute(
+            &self,
+            _ctx: &ToolContext,
+            _args: &str,
+        ) -> Result<String, DeepseeknovaError> {
+            Ok(String::new())
+        }
+    }
+
+    #[test]
+    fn validate_plan_tool_boundary_blocks_non_read_only_tool() {
+        let mut graph = ExecutionGraph::new("a".to_string());
+        graph.add_node(ExecutionNode::new(
+            "a",
+            Action::CallTool {
+                tool: "bash".to_string(),
+                args: serde_json::Value::Null,
+            },
+        ));
+        let read_only: Vec<Arc<dyn Tool>> = vec![Arc::new(NamedTool { name: "grep" })];
+
+        let err = validate_plan_tool_boundary(&graph, &read_only)
+            .expect_err("non-read-only tool in plan must fail closed");
+        assert!(err.to_string().contains("bash"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_plan_tool_boundary_allows_read_only_tool() {
+        let mut graph = ExecutionGraph::new("a".to_string());
+        graph.add_node(ExecutionNode::new(
+            "a",
+            Action::CallTool {
+                tool: "grep".to_string(),
+                args: serde_json::Value::Null,
+            },
+        ));
+        let read_only: Vec<Arc<dyn Tool>> = vec![Arc::new(NamedTool { name: "grep" })];
+
+        validate_plan_tool_boundary(&graph, &read_only)
+            .expect("read-only tool must pass the boundary check");
+    }
+
+    #[test]
+    fn validate_plan_tool_boundary_ignores_non_tool_nodes() {
+        let mut graph = ExecutionGraph::new("a".to_string());
+        graph.add_node(ExecutionNode::new(
+            "a",
+            Action::Think {
+                prompt: "x".to_string(),
+            },
+        ));
+        let read_only: Vec<Arc<dyn Tool>> = vec![];
+
+        validate_plan_tool_boundary(&graph, &read_only)
+            .expect("Think nodes must not be subject to the tool boundary check");
+    }
+
+    #[test]
+    fn validate_plan_tool_boundary_blocks_non_read_only_tool_in_parallel() {
+        let mut graph = ExecutionGraph::new("a".to_string());
+        graph.add_node(ExecutionNode::new(
+            "a",
+            Action::Parallel(vec![ExecutionNode::new(
+                "child",
+                Action::CallTool {
+                    tool: "bash".to_string(),
+                    args: serde_json::Value::Null,
+                },
+            )]),
+        ));
+        let read_only: Vec<Arc<dyn Tool>> = vec![Arc::new(NamedTool { name: "grep" })];
+
+        let err = validate_plan_tool_boundary(&graph, &read_only)
+            .expect_err("non-read-only tool nested in Parallel must fail closed");
+        assert!(err.to_string().contains("bash"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_plan_tool_boundary_blocks_non_read_only_tool_in_conditional() {
+        let mut graph = ExecutionGraph::new("a".to_string());
+        graph.add_node(ExecutionNode::new(
+            "a",
+            Action::Conditional {
+                condition: "x".to_string(),
+                then: Box::new(ExecutionNode::new(
+                    "t",
+                    Action::CallTool {
+                        tool: "bash".to_string(),
+                        args: serde_json::Value::Null,
+                    },
+                )),
+                r#else: None,
+            },
+        ));
+        let read_only: Vec<Arc<dyn Tool>> = vec![Arc::new(NamedTool { name: "grep" })];
+
+        let err = validate_plan_tool_boundary(&graph, &read_only)
+            .expect_err("non-read-only tool nested in Conditional must fail closed");
+        assert!(err.to_string().contains("bash"), "got: {err}");
+    }
 
     #[test]
     fn parse_plan_falls_back_when_invalid() {
