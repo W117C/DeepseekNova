@@ -167,7 +167,8 @@ impl GraphExecutor {
         graph: &ExecutionGraph,
     ) -> Result<ExecutionResult, crate::DeepseeknovaError> {
         let sorted = topological_sort(graph)?;
-        let mut outputs: HashMap<NodeId, NodeOutput> = HashMap::new();
+        let outputs: Arc<RwLock<HashMap<NodeId, NodeOutput>>> =
+            Arc::new(RwLock::new(HashMap::new()));
         let mut completed = true;
 
         // Group nodes by "wave" — nodes at the same topological depth
@@ -186,17 +187,26 @@ impl GraphExecutor {
 
                 if should_skip_node(node, graph, &outputs) {
                     debug!("node {node_id} skipped: no incoming edge condition satisfied");
-                    outputs.insert(node_id.clone(), NodeOutput::Skipped);
+                    outputs
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(node_id.clone(), NodeOutput::Skipped);
                     continue;
                 }
 
                 match self.clone().execute_node(node, &outputs, &None).await {
                     Ok(output) => {
-                        outputs.insert(node.id.clone(), output);
+                        outputs
+                            .write()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(node.id.clone(), output);
                     }
                     Err(e) => {
                         warn!("node {node_id} failed: {e}");
-                        outputs.insert(node_id.clone(), NodeOutput::Error(format!("{e}")));
+                        outputs
+                            .write()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(node_id.clone(), NodeOutput::Error(format!("{e}")));
                         completed = false;
                     }
                 }
@@ -211,19 +221,22 @@ impl GraphExecutor {
                             crate::DeepseeknovaError::runner("node must exist".to_string())
                         })?
                         .clone();
-                    let outputs_snapshot = outputs.clone();
+                    let outputs_shared = Arc::clone(&outputs);
                     let this = Arc::clone(&self);
 
-                    if should_skip_node(&node, graph, &outputs_snapshot) {
+                    if should_skip_node(&node, graph, &outputs_shared) {
                         debug!("node {node_id} skipped: no incoming edge condition satisfied");
-                        outputs.insert(node.id.clone(), NodeOutput::Skipped);
+                        outputs
+                            .write()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(node.id.clone(), NodeOutput::Skipped);
                         continue;
                     }
 
                     set.spawn(async move {
                         (
                             node.id.clone(),
-                            this.execute_node(&node, &outputs_snapshot, &None).await,
+                            this.execute_node(&node, &outputs_shared, &None).await,
                         )
                     });
                 }
@@ -231,11 +244,17 @@ impl GraphExecutor {
                 while let Some(result) = set.join_next().await {
                     match result {
                         Ok((id, Ok(output))) => {
-                            outputs.insert(id, output);
+                            outputs
+                                .write()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .insert(id, output);
                         }
                         Ok((id, Err(e))) => {
                             warn!("node {id} failed: {e}");
-                            outputs.insert(id, NodeOutput::Error(format!("{e}")));
+                            outputs
+                                .write()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .insert(id, NodeOutput::Error(format!("{e}")));
                             completed = false;
                         }
                         Err(e) => {
@@ -247,8 +266,13 @@ impl GraphExecutor {
             }
         }
 
+        let mut node_outputs = HashMap::new();
+        std::mem::swap(
+            &mut *outputs.write().unwrap_or_else(|e| e.into_inner()),
+            &mut node_outputs,
+        );
         Ok(ExecutionResult {
-            node_outputs: outputs,
+            node_outputs,
             total_usage: Usage::default(),
             completed,
         })
@@ -262,7 +286,7 @@ impl GraphExecutor {
     async fn execute_node(
         self: Arc<Self>,
         node: &ExecutionNode,
-        outputs: &HashMap<NodeId, NodeOutput>,
+        outputs: &Arc<RwLock<HashMap<NodeId, NodeOutput>>>,
         shared: &SharedOutputs,
     ) -> Result<NodeOutput, crate::DeepseeknovaError> {
         let mut attempt = 0u32;
@@ -328,7 +352,7 @@ impl GraphExecutor {
     fn execute_action<'a>(
         self: Arc<Self>,
         action: &'a Action,
-        outputs: &'a HashMap<NodeId, NodeOutput>,
+        outputs: &'a Arc<RwLock<HashMap<NodeId, NodeOutput>>>,
         shared: &'a SharedOutputs,
     ) -> std::pin::Pin<
         Box<
@@ -372,7 +396,8 @@ impl GraphExecutor {
                     });
                     let result = shared_result
                         .or_else(|| {
-                            outputs.values().find_map(|o| match o {
+                            let guard = outputs.read().unwrap_or_else(|e| e.into_inner());
+                            guard.values().find_map(|o| match o {
                                 NodeOutput::ToolResult(r) => Some(r.clone()),
                                 _ => None,
                             })
@@ -605,7 +630,7 @@ fn group_into_waves(sorted: &[NodeId], graph: &ExecutionGraph) -> Vec<Vec<NodeId
 fn should_skip_node(
     node: &ExecutionNode,
     graph: &ExecutionGraph,
-    outputs: &HashMap<NodeId, NodeOutput>,
+    outputs: &Arc<RwLock<HashMap<NodeId, NodeOutput>>>,
 ) -> bool {
     let incoming: Vec<&Edge> = graph.edges.iter().filter(|e| e.to == node.id).collect();
     if incoming.is_empty() {
@@ -617,8 +642,12 @@ fn should_skip_node(
 }
 
 /// Whether an edge's condition is satisfied by the source node's output.
-fn edge_condition_satisfied(edge: &Edge, outputs: &HashMap<NodeId, NodeOutput>) -> bool {
-    let Some(source_output) = outputs.get(&edge.from) else {
+fn edge_condition_satisfied(
+    edge: &Edge,
+    outputs: &Arc<RwLock<HashMap<NodeId, NodeOutput>>>,
+) -> bool {
+    let guard = outputs.read().unwrap_or_else(|e| e.into_inner());
+    let Some(source_output) = guard.get(&edge.from) else {
         return false;
     };
     match &edge.condition {
@@ -637,9 +666,10 @@ fn edge_condition_satisfied(edge: &Edge, outputs: &HashMap<NodeId, NodeOutput>) 
     }
 }
 
-fn build_context(outputs: &HashMap<NodeId, NodeOutput>) -> String {
+fn build_context(outputs: &Arc<RwLock<HashMap<NodeId, NodeOutput>>>) -> String {
+    let guard = outputs.read().unwrap_or_else(|e| e.into_inner());
     let mut ctx = String::new();
-    for (id, output) in outputs {
+    for (id, output) in guard.iter() {
         match output {
             NodeOutput::Text(t) => ctx.push_str(&format!("[{id}]: {t}\n")),
             NodeOutput::ToolResult(r) => ctx.push_str(&format!("[{id}]: {r}\n")),
@@ -1404,5 +1434,109 @@ mod tests {
         assert_eq!(recorded.len(), 1);
         assert_eq!(recorded[0].0, "a");
         assert!(recorded[0].1.contains("DelegateCallback"));
+    }
+
+    /// 拓扑排序 / 波次分组的性质测试（proptest）：对任意 DAG（u<v 边天然
+    /// 无环）验证排序保持边方向、波次 partition 且不跨波回退。
+    mod property_tests {
+        use super::super::*;
+        use super::make_think_node;
+        use proptest::prelude::*;
+
+        /// 生成去重后的 DAG 边（u<v 保证无环；去重避免 add_edge 重复边使
+        /// in_degree 虚高，导致拓扑排序把合法 DAG 误判为环）。
+        fn dag_edges() -> impl Strategy<Value = Vec<(u32, u32)>> {
+            prop::collection::vec((0u32..8u32, 0u32..8u32), 0..16).prop_map(|edges| {
+                let mut seen = std::collections::HashSet::new();
+                edges
+                    .into_iter()
+                    .filter(|(a, b)| a < b && seen.insert((*a, *b)))
+                    .collect()
+            })
+        }
+
+        fn graph_from_edges(edges: &[(u32, u32)]) -> ExecutionGraph {
+            let mut g = ExecutionGraph::new("0".into());
+            for &(a, b) in edges {
+                g.add_node(make_think_node(&a.to_string(), "x"));
+                g.add_node(make_think_node(&b.to_string(), "x"));
+            }
+            for &(a, b) in edges {
+                g.add_edge(a.to_string(), b.to_string(), None);
+            }
+            g
+        }
+
+        proptest! {
+            /// 拓扑排序不变量：结果含全部节点各一次，且每条边 from 在 to 前。
+            #[test]
+            fn topological_sort_preserves_edges(edges in dag_edges()) {
+                let g = graph_from_edges(&edges);
+                let sorted = match topological_sort(&g) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        prop_assert!(false, "DAG rejected: {e}");
+                        unreachable!();
+                    }
+                };
+                prop_assert_eq!(sorted.len(), g.nodes.len());
+                let pos: HashMap<&String, usize> = sorted
+                    .iter()
+                    .enumerate()
+                    .map(|(i, id)| (id, i))
+                    .collect();
+                for id in g.nodes.keys() {
+                    prop_assert!(
+                        pos.contains_key(id),
+                        "missing node {id} in topological order"
+                    );
+                }
+                for e in &g.edges {
+                    prop_assert!(
+                        pos[&e.from] < pos[&e.to],
+                        "edge {}→{} reversed",
+                        e.from,
+                        e.to
+                    );
+                }
+            }
+
+            /// 波次不变量：partition（每节点恰入一波）+ 边方向不跨波回退。
+            #[test]
+            fn waves_partition_and_preserve_edges(edges in dag_edges()) {
+                let g = graph_from_edges(&edges);
+                let sorted = topological_sort(&g).expect("DAG");
+                let waves = group_into_waves(&sorted, &g);
+                let mut seen: HashSet<String> = HashSet::new();
+                let mut wave_of: HashMap<String, usize> = HashMap::new();
+                for (wi, wave) in waves.iter().enumerate() {
+                    prop_assert!(!wave.is_empty(), "empty wave {wi}");
+                    for id in wave {
+                        prop_assert!(
+                            seen.insert(id.clone()),
+                            "node {id} appears in multiple waves"
+                        );
+                        prop_assert!(
+                            g.nodes.contains_key(id),
+                            "wave contains unknown node {id}"
+                        );
+                        wave_of.insert(id.clone(), wi);
+                    }
+                }
+                prop_assert_eq!(
+                    seen.len(),
+                    g.nodes.len(),
+                    "waves must cover every node exactly once"
+                );
+                for e in &g.edges {
+                    prop_assert!(
+                        wave_of[&e.from] <= wave_of[&e.to],
+                        "edge {}→{} crosses waves backward",
+                        e.from,
+                        e.to
+                    );
+                }
+            }
+        }
     }
 }
