@@ -190,6 +190,26 @@ pub struct ListToolsResult {
     pub tools: Vec<ToolDef>,
 }
 
+/// Optional annotations on a tool describing its runtime behaviour
+/// (MCP `Tool.annotations`), e.g. whether the tool is read-only.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ToolAnnotations {
+    /// Whether the tool is read-only: it never modifies state.
+    #[serde(rename = "readOnlyHint", default)]
+    pub read_only_hint: bool,
+    /// Whether the tool is destructive: it may modify or delete state.
+    #[serde(rename = "destructiveHint", default)]
+    pub destructive_hint: bool,
+    /// Whether the tool is idempotent: repeated calls with the same arguments
+    /// produce the same result without side effects.
+    #[serde(rename = "idempotentHint", default)]
+    pub idempotent_hint: bool,
+    /// Whether the tool operates on an open world whose results may change
+    /// between calls.
+    #[serde(rename = "openWorldHint", default)]
+    pub open_world_hint: bool,
+}
+
 /// Description of a tool exposed by the MCP server.
 #[derive(Debug, Deserialize)]
 pub struct ToolDef {
@@ -201,6 +221,9 @@ pub struct ToolDef {
     /// JSON Schema describing the tool's arguments, sent as `inputSchema`.
     #[serde(rename = "inputSchema")]
     pub input_schema: Value,
+    /// Optional tool annotations, sent as `annotations` (MCP `ToolAnnotations`).
+    #[serde(default)]
+    pub annotations: Option<ToolAnnotations>,
 }
 
 /// A request to invoke a tool on the MCP server.
