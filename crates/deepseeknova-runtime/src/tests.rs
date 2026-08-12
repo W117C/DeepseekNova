@@ -237,6 +237,41 @@ fn build_agent_skips_graph_when_disabled() {
     assert!(!agent.tool_names().iter().any(|n| n == "explore_code"));
 }
 
+/// deprecated 过滤端到端激活：workspace 下 fitness.json 标记的已弃用技能
+/// 不再注册为 `skill__<name>` 工具（runtime 装配点与 metrics 侧写盘同路径
+/// `<workspace_root>/.deepseeknova/skills/fitness.json`）；未弃用内置技能
+/// 照常注册。这就是「接线激活」的生产语义——deprecated 技能在 session 中
+/// 不可被激活为工具。
+#[test]
+fn build_agent_excludes_deprecated_skills() {
+    use deepseeknova_skills::fitness::FitnessStore;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    // 预置 fitness：标记一个内置技能为已弃用（路径与 metrics 侧写盘一致）。
+    let fitness_path = root
+        .join(".deepseeknova")
+        .join("skills")
+        .join("fitness.json");
+    let mut store = FitnessStore::load(&fitness_path).unwrap();
+    store.mark_deprecated("coding-copilot");
+    store.save().unwrap();
+
+    let mut config = Config::default();
+    config.graph.enabled = false;
+    config.memory.enabled = false;
+    let provider = std::sync::Arc::new(stub_provider());
+    let agent = build_agent(&config, root, provider, 5, None, vec![]).unwrap();
+    let names = agent.tool_names();
+    assert!(
+        !names.iter().any(|n| n == "skill__coding-copilot"),
+        "deprecated skill must not be registered, got {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n == "skill__frontend-developer"),
+        "non-deprecated builtin must still be registered, got {names:?}"
+    );
+}
+
 #[tokio::test]
 async fn build_agent_registers_memory_tools_when_enabled() {
     let mut config = Config::default();

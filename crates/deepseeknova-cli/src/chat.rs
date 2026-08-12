@@ -738,7 +738,14 @@ async fn handle_slash_command(
             let user_skills = dirs::home_dir()
                 .map(|h| h.join(".deepseeknova/skills"))
                 .unwrap_or_default();
+            // 激活 deprecated 过滤：从会话工作区（persist.workspace 与 agent
+            // 构建同源，均来自 current_dir）的 fitness.json 读取已弃用技能名，
+            // 与 runtime 装配点同语义；文件缺失/损坏 = 空集 = 不过滤。
+            let deprecated = deprecated_skills_for_workspace(
+                persist.as_ref().and_then(|p| p.workspace.as_deref()),
+            );
             let resolver = SkillResolver::new()
+                .with_deprecated(deprecated)
                 .add_preloaded(
                     SkillScope::Builtin,
                     deepseeknova_skills::load_builtin_skills(),
@@ -918,6 +925,25 @@ fn parse_effort_command(args: &str) -> Result<ReasoningEffort, String> {
     }
     ReasoningEffort::from_config_str(trimmed)
         .ok_or_else(|| format!("unknown effort level: '{trimmed}'"))
+}
+
+/// 读取会话工作区的已弃用技能名集合（`/skills` 展示过滤用）。
+///
+/// 路径与 runtime/metrics 侧同源：`<workspace>/.deepseeknova/skills/fitness.json`。
+/// 工作区未知或文件缺失/损坏时返回空集（不过滤），降级语义与
+/// [`load_deprecated_set`](deepseeknova_skills::fitness::load_deprecated_set)
+/// 一致。
+fn deprecated_skills_for_workspace(workspace: Option<&str>) -> std::collections::HashSet<String> {
+    workspace
+        .map(|ws| {
+            deepseeknova_skills::fitness::load_deprecated_set(
+                &std::path::Path::new(ws)
+                    .join(".deepseeknova")
+                    .join("skills")
+                    .join("fitness.json"),
+            )
+        })
+        .unwrap_or_default()
 }
 
 /// 校验用户输入可安全作为会话 id 使用（防 `/resume` 路径越界读写）。
@@ -1365,5 +1391,31 @@ mod tests {
             .find(|(id, _, _, _)| id == "chat-b")
             .expect("chat-b 在列表中");
         assert_eq!(b.2, None, "未命名会话 title 为 None");
+    }
+
+    // ── deprecated_skills_for_workspace（/skills 过滤的 deprecated 集合）───
+
+    #[test]
+    fn deprecated_skills_for_workspace_reads_fitness_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("ws");
+        std::fs::create_dir_all(ws.join(".deepseeknova/skills")).unwrap();
+        let fitness_path = ws.join(".deepseeknova/skills/fitness.json");
+        let mut store = deepseeknova_skills::fitness::FitnessStore::load(&fitness_path).unwrap();
+        store.mark_deprecated("legacy-skill");
+        store.save().unwrap();
+
+        let set = deprecated_skills_for_workspace(Some(ws.to_str().unwrap()));
+        assert!(set.contains("legacy-skill"));
+        assert!(!set.contains("other"));
+    }
+
+    #[test]
+    fn deprecated_skills_for_workspace_empty_without_workspace_or_file() {
+        // 无工作区（非会话场景）→ 空集不过滤。
+        assert!(deprecated_skills_for_workspace(None).is_empty());
+        // 工作区存在但无 fitness.json → 空集不过滤。
+        let dir = tempfile::tempdir().unwrap();
+        assert!(deprecated_skills_for_workspace(Some(dir.path().to_str().unwrap())).is_empty());
     }
 }

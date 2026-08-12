@@ -258,6 +258,11 @@ impl FitnessStore {
         self.deprecated.insert(name.to_string());
     }
 
+    /// 当前已弃用技能名集合的拷贝。
+    pub fn deprecated(&self) -> HashSet<String> {
+        self.deprecated.iter().cloned().collect()
+    }
+
     fn empty(path: &Path) -> Self {
         Self {
             records: HashMap::new(),
@@ -287,6 +292,18 @@ impl FitnessStore {
 // ---------------------------------------------------------------------------
 // Evolution suggestions
 // ---------------------------------------------------------------------------
+
+/// 从 fitness 文件加载已弃用技能名集合。
+///
+/// 文件缺失、损坏或读失败时返回空集（与 [`FitnessStore::load`] 的降级
+/// 语义一致，缺失/损坏均 warn 后视为空 store）——调用方可直接把结果传给
+/// [`SkillResolver::with_deprecated`](crate::SkillResolver::with_deprecated)
+/// 实现 deprecated 技能过滤，无需自行处理错误。
+pub fn load_deprecated_set(path: &Path) -> HashSet<String> {
+    FitnessStore::load(path)
+        .map(|store| store.deprecated())
+        .unwrap_or_default()
+}
 
 /// A non-destructive evolution suggestion produced by [`evaluate`].
 ///
@@ -691,5 +708,21 @@ mod tests {
         let loaded = FitnessStore::load(&path).unwrap();
         assert!(loaded.is_deprecated("legacy-skill"));
         assert!(!loaded.is_deprecated("other"));
+    }
+
+    #[test]
+    fn load_deprecated_set_returns_markers_and_defaults_empty() {
+        // 缺失文件 → 空集（装配点无 fitness 数据时的默认行为）。
+        let dir = tempfile::tempdir().unwrap();
+        assert!(load_deprecated_set(&dir.path().join("missing.json")).is_empty());
+
+        // 已标记 + 落盘 → 读回集合；未标记技能不在集合中。
+        let path = dir.path().join("fitness.json");
+        let mut store = FitnessStore::load(&path).unwrap();
+        store.mark_deprecated("legacy-skill");
+        store.save().unwrap();
+        let set = load_deprecated_set(&path);
+        assert!(set.contains("legacy-skill"));
+        assert!(!set.contains("other"));
     }
 }

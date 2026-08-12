@@ -276,13 +276,25 @@ pub fn build_agent_with_role_providers(
     // `skill__<name>` 工具。可经 tools.overrides 按名禁用（精确匹配 skill__<name>）。
     // 用户级目录 `~/.deepseeknova/skills`，项目级 `.deepseeknova/skills`（后加者
     // 覆盖 `.agents/skills`）。
+    // 激活 deprecated 过滤：从 `<workspace_root>/.deepseeknova/skills/fitness.json`
+    // 读取已弃用技能名集合（fitness 记录/标记由 metrics 侧会话结束写盘，文件
+    // 缺失即空集 = 不过滤），这些技能不再注册为工具——会话内不可激活、`/skills`
+    // 不展示，且已在 [`SkillResolver::resolve`] 层对 builtin/user/project 全部
+    // 来源生效。
     {
         use deepseeknova_core::registry::SkillScope;
         use deepseeknova_skills::{SkillResolver, SkillTool};
         let user_skills = dirs::home_dir()
             .map(|h| h.join(".deepseeknova/skills"))
             .unwrap_or_default();
+        let deprecated = deepseeknova_skills::fitness::load_deprecated_set(
+            &workspace_root
+                .join(".deepseeknova")
+                .join("skills")
+                .join("fitness.json"),
+        );
         let resolver = SkillResolver::new()
+            .with_deprecated(deprecated)
             .add_preloaded(
                 SkillScope::Builtin,
                 deepseeknova_skills::load_builtin_skills(),
