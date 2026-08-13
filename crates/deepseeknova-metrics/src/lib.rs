@@ -63,6 +63,14 @@ pub struct SessionStats {
     pub verifications: u64,
     /// 验证通过次数。
     pub verifications_passed: u64,
+    /// 会话内只读工具结果缓存命中次数（`[cached]` 短路，未调内层工具）。
+    /// serde default 0（旧报告缺字段按 0 兼容）。
+    #[serde(default)]
+    pub tool_cache_hits: u64,
+    /// 会话内只读工具结果缓存未命中次数（实际执行并写入缓存）。
+    /// serde default 0。
+    #[serde(default)]
+    pub tool_cache_misses: u64,
     /// run 结束前为 None。
     pub outcome: Option<RunOutcome>,
 }
@@ -95,6 +103,8 @@ pub struct SessionTracker {
     retries: u64,
     verifications: u64,
     verifications_passed: u64,
+    tool_cache_hits: u64,
+    tool_cache_misses: u64,
     outcome: Option<RunOutcome>,
 }
 
@@ -139,6 +149,16 @@ impl SessionTracker {
         }
     }
 
+    /// 记录一次会话内只读工具结果缓存命中（`[cached]` 短路，未调内层工具）。
+    pub fn observe_tool_cache_hit(&mut self) {
+        self.tool_cache_hits += 1;
+    }
+
+    /// 记录一次会话内只读工具结果缓存未命中（实际执行并写入缓存）。
+    pub fn observe_tool_cache_miss(&mut self) {
+        self.tool_cache_misses += 1;
+    }
+
     /// 标记本次 run 的结束态。run 结束前 `outcome` 为 `None`。
     pub fn mark_outcome(&mut self, outcome: RunOutcome) {
         self.outcome = Some(outcome);
@@ -160,6 +180,8 @@ impl SessionTracker {
             retries: self.retries,
             verifications: self.verifications,
             verifications_passed: self.verifications_passed,
+            tool_cache_hits: self.tool_cache_hits,
+            tool_cache_misses: self.tool_cache_misses,
             outcome: self.outcome,
         }
     }
@@ -396,6 +418,11 @@ pub struct Scorecard {
     /// 每条失败详情记一轮重试）。serde default 0。
     #[serde(default)]
     pub retry_rounds: u32,
+    /// L1 前缀缓存命中率（`CostLedger::report().cache_hit_rate`，0..=1）。
+    /// runtime 在写盘前回填；`None` = 无缓存记账（全部 unmetered）或
+    /// 旧评分卡文件缺字段。serde default 保证旧文件兼容、序列化恒含键。
+    #[serde(default)]
+    pub cache_hit_rate: Option<f64>,
 }
 
 impl Scorecard {
@@ -466,6 +493,9 @@ impl Scorecard {
             // 经 fill_task_rate 覆写（设计 §7.1 末条）。
             first_pass: false,
             retry_rounds: 0,
+            // L1 命中率：compute 无成本输入，由 runtime 写盘前经
+            // CostLedger::report() 回填（A.4）。
+            cache_hit_rate: None,
         }
     }
 }
@@ -865,6 +895,7 @@ mod tests {
             },
             first_pass: true,
             retry_rounds: 0,
+            cache_hit_rate: None,
         };
         write_scorecard(&mk("a", 0.5), dir.path()).unwrap();
         write_scorecard(&mk("b", 1.0), dir.path()).unwrap();
@@ -887,6 +918,7 @@ mod tests {
             dimensions: dims,
             first_pass: true,
             retry_rounds: 0,
+            cache_hit_rate: None,
         };
         let cards = vec![
             mk(
@@ -945,6 +977,7 @@ mod tests {
             },
             first_pass: true,
             retry_rounds: 0,
+            cache_hit_rate: None,
         };
         let cards = vec![mk("a", 0.2, 0.9), mk("b", 0.4, 0.8)];
         let agg = aggregate_scorecards(&cards);
@@ -970,6 +1003,38 @@ mod tests {
         // clamp 下限：违规数超过迁移数 → 0.0（而非负值）
         assert_eq!(protocol_dim(9, 3), 0.0);
         assert_eq!(protocol_dim(10, 0), 1.0); // 无迁移仍按 1.0，违规数不参与
+    }
+
+    /// A.4：Scorecard 序列化必须含 `cache_hit_rate` 键（serve 端点与落盘
+    /// 评分卡文件据此可观测 L1 命中率趋势）。值为 `null` 表示无成本记账，
+    /// 但键必须存在；serde default 保证旧评分卡文件反序列化兼容。
+    #[test]
+    fn scorecard_serializes_cache_hit_rate_key() {
+        let card = Scorecard {
+            session_id: "s".into(),
+            started_at_ms: 1,
+            dimensions: ScoreDimensions {
+                governance: 1.0,
+                verification: 1.0,
+                reflection: 1.0,
+                review: 1.0,
+                protocol: 1.0,
+                composite: 1.0,
+            },
+            first_pass: true,
+            retry_rounds: 0,
+            cache_hit_rate: None,
+        };
+        let v = serde_json::to_value(&card).unwrap();
+        assert!(
+            v.get("cache_hit_rate").is_some(),
+            "cache_hit_rate must be serialized (may be null)"
+        );
+        // 显式设置后必须透出数值。
+        let mut card = card;
+        card.cache_hit_rate = Some(0.9);
+        let v = serde_json::to_value(&card).unwrap();
+        assert_eq!(v["cache_hit_rate"], serde_json::json!(0.9));
     }
 
     #[test]

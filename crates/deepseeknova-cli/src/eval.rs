@@ -503,6 +503,7 @@ mod tests {
             },
             first_pass: false,
             retry_rounds: 0,
+            cache_hit_rate: None,
         }
     }
 

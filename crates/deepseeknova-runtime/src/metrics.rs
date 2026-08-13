@@ -266,6 +266,9 @@ pub fn attach_metrics_hook_with_fitness(
             stats: stats.clone(),
             cost: sink.ledger.report(&sink.prices),
         };
+        // A.4：评分卡回填 L1 前缀缓存命中率（CostLedger 汇总口径，与 report
+        // 同源），serve 端点/落盘文件据此可趋势化命中率并门禁。
+        card.cache_hit_rate = report.cost.cache_hit_rate;
         // P2-2 指标反馈闭环：落盘前评估 prefix cache 命中率，低命中时 warn
         // 提示前缀稳定性问题（system prompt 抖动 / tools 顺序变化 / slide_window
         // 误弹 System 消息等）。报告已含完整 cost.rows，无需额外获取。
