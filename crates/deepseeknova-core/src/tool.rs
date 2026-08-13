@@ -141,6 +141,16 @@ pub trait Tool: Send + Sync {
         false
     }
 
+    /// 是否可与同批其他调用并发 spawn（B.1 并行 fan-out）。
+    ///
+    /// 与 [`read_only`](Self::read_only) 的区别：可并发的 spawn 类工具
+    /// （如 `delegate` 子代理）会写文件、但由引擎的信号量（`max_concurrent`）
+    /// 与既有写锁/文件级协调兜底冲突；调度器把 `read_only() || parallelizable()`
+    /// 的工具并入可并发组，其余仍串行。默认 `false`（保守：未知工具串行）。
+    fn parallelizable(&self) -> bool {
+        false
+    }
+
     /// Execute the tool with the given JSON arguments string.
     ///
     /// 返回 [`crate::DeepseeknovaError`] 而非 `anyhow::Error`，让调用方可按

@@ -75,6 +75,13 @@ impl Tool for DelegateTool {
         }
     }
 
+    // B.1：子代理委派可并发 spawn（并行 fan-out）。read_only 保持 false
+    // （子代理会写文件），并行性由 DelegateEngine 的 max_concurrent 信号量
+    // 封顶，写冲突由既有写锁/文件级协调兜底。
+    fn parallelizable(&self) -> bool {
+        true
+    }
+
     async fn execute(
         &self,
         ctx: &ToolContext,

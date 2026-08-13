@@ -129,6 +129,12 @@ impl Tool for RecursiveDelegateTool {
         }
     }
 
+    // B.1：子代理委派可并发 spawn（并行 fan-out），并发上限由
+    // DelegateEngine 信号量封顶；写冲突由既有协调兜底。
+    fn parallelizable(&self) -> bool {
+        true
+    }
+
     async fn execute(
         &self,
         ctx: &ToolContext,

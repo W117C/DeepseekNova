@@ -1796,8 +1796,14 @@ async fn stream_and_process_turn(
         let allowed: Vec<usize> = (0..pending_calls.len())
             .filter(|&i| decisions[i].is_none())
             .collect();
+        // B.1：分组条件 = read_only（只读并发）|| parallelizable（可并发
+        // spawn 类工具，如 delegate 子代理）。后者仍保持 read_only=false
+        // 语义（会写文件），并行性由引擎信号量/写锁兜底。
         let segments = group_call_indices(&pending_calls, &allowed, |name| {
-            tool_map.get(name).map(|t| t.read_only()).unwrap_or(false)
+            tool_map
+                .get(name)
+                .map(|t| t.read_only() || t.parallelizable())
+                .unwrap_or(false)
         });
 
         for segment in segments {

@@ -2689,6 +2689,91 @@ async fn tool_cache_hits_and_misses_reach_session_stats() {
     assert_eq!(snapshots[0].tool_cache_hits, 1, "x(2) cached");
 }
 
+/// B.1 探针：parallelizable 但 read_only=false 的工具（模拟 delegate 语义），
+/// 记录最大并发执行数，观察批量 fan-out 是否并发下发。
+struct ParallelSpy {
+    active: Arc<std::sync::atomic::AtomicUsize>,
+    max_active: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl Tool for ParallelSpy {
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "delegate".to_string(),
+            description: "parallel fan-out spy".to_string(),
+            parameters: serde_json::json!({"type":"object","properties":{}}),
+        }
+    }
+    fn read_only(&self) -> bool {
+        false
+    }
+    fn parallelizable(&self) -> bool {
+        true
+    }
+    async fn execute(
+        &self,
+        _ctx: &ToolContext,
+        _args: &str,
+    ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
+        use std::sync::atomic::Ordering;
+        let cur = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_active.fetch_max(cur, Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        Ok("ok".into())
+    }
+}
+
+/// B.1：一次 batch 含 2 个 delegate 调用时，二者必须并发下发
+/// （parallelizable=true 分到可并发组，而非 read_only=false 判写串行）。
+#[tokio::test]
+async fn delegate_calls_fan_out_concurrently_in_batch() {
+    use std::sync::atomic::Ordering;
+    let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let max_active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let provider = Arc::new(MockProvider::sequential(vec![
+        vec![
+            Chunk::ToolCallStart {
+                id: "p1".into(),
+                name: "delegate".into(),
+            },
+            Chunk::ToolCallEnd {
+                id: "p1".into(),
+                name: "delegate".into(),
+                arguments: r#"{"agent":"explorer","goal":"a"}"#.into(),
+            },
+            Chunk::ToolCallStart {
+                id: "p2".into(),
+                name: "delegate".into(),
+            },
+            Chunk::ToolCallEnd {
+                id: "p2".into(),
+                name: "delegate".into(),
+                arguments: r#"{"agent":"coder","goal":"b"}"#.into(),
+            },
+            Chunk::Done,
+        ],
+        vec![
+            Chunk::TextDelta("done".into()),
+            Chunk::Usage(Usage::default()),
+            Chunk::Done,
+        ],
+    ]));
+    let mut agent = Agent::new(provider, 8);
+    agent.register_tool(Arc::new(ParallelSpy {
+        active: active.clone(),
+        max_active: max_active.clone(),
+    }));
+    let events = drain(agent, "delegate two subtasks").await;
+    assert!(events.iter().any(|e| matches!(e, RunEvent::Done(_))));
+    assert!(
+        max_active.load(Ordering::SeqCst) >= 2,
+        "delegate 调用必须并发 fan-out，实测 max_active={}",
+        max_active.load(Ordering::SeqCst)
+    );
+}
+
 #[tokio::test]
 async fn mid_run_retrieval_injects_on_seeded_tool_turn() {
     // 续聊历史包含一次工具交换 → 新轮次开头触发中途召回注入。
