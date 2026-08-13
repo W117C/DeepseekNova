@@ -19,8 +19,11 @@
 )]
 
 pub mod docs_tools;
-/// File read/write/edit/move tools (`read_file`, `write_file`, `edit_file`, `move_file`).
+/// File read/write/edit/move/delete tools (`read_file`, `write_file`, `edit_file`, `move_file`, `delete_file`).
 pub mod fs;
+/// `ask_user` 工具（向用户提问取回输入；B.5 骨架，交互通道未接线时返回
+/// 文档化占位说明）。
+pub mod ask_user;
 /// Glob pattern file-finding tool (`glob`).
 pub mod glob;
 pub mod graph_tools;
@@ -41,6 +44,7 @@ pub mod web_search;
 
 pub use docs_tools::*;
 pub use fs::*;
+pub use ask_user::*;
 pub use glob::*;
 pub use graph_tools::*;
 pub use grep::*;
@@ -87,11 +91,16 @@ pub fn all_builtin_tools_with_sandbox_and_checkpoint(
         Some(ck) => MoveFileTool::with_checkpointer(Arc::clone(ck)),
         None => MoveFileTool::new(),
     };
+    let del = match &checkpointer {
+        Some(ck) => DeleteFileTool::with_checkpointer(Arc::clone(ck)),
+        None => DeleteFileTool::new(),
+    };
     vec![
         Arc::new(ReadFileTool),
         Arc::new(write),
         Arc::new(edit),
         Arc::new(mv),
+        Arc::new(del),
         Arc::new(LsTool),
         Arc::new(GlobTool),
         Arc::new(GrepTool),
@@ -104,6 +113,7 @@ pub fn all_builtin_tools_with_sandbox_and_checkpoint(
         Arc::new(SearchCodeTool),
         Arc::new(TraverseGraphTool),
         Arc::new(RetrieveEntityTool),
+        Arc::new(AskUserTool),
     ]
 }
 

@@ -533,6 +533,99 @@ impl Tool for MoveFileTool {
 }
 
 // ---------------------------------------------------------------------------
+// DeleteFileTool
+// ---------------------------------------------------------------------------
+
+/// Deletes a file within the workspace. Path safety mirrors `move_file`:
+/// sanitize + policy allowlist; outside-workspace paths are rejected.
+pub struct DeleteFileTool {
+    checkpointer: Option<Arc<Mutex<CheckpointManager>>>,
+}
+
+impl Default for DeleteFileTool {
+    fn default() -> Self {
+        Self { checkpointer: None }
+    }
+}
+
+impl DeleteFileTool {
+    /// Create a `DeleteFileTool` without checkpoint support.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Attach a checkpoint manager (snapshot before deletion).
+    pub fn with_checkpointer(checkpointer: Arc<Mutex<CheckpointManager>>) -> Self {
+        Self {
+            checkpointer: Some(checkpointer),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct DeleteFileArgs {
+    path: String,
+}
+
+#[async_trait]
+impl Tool for DeleteFileTool {
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "delete_file".to_string(),
+            description: "Deletes a file inside the workspace. Outside-workspace paths are rejected.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to delete."
+                    }
+                },
+                "required": ["path"]
+            }),
+        }
+    }
+
+    fn read_only(&self) -> bool {
+        false
+    }
+
+    fn writes_fs(&self) -> bool {
+        true
+    }
+
+    async fn execute(
+        &self,
+        ctx: &ToolContext,
+        args: &str,
+    ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
+        deepseeknova_security::context::enforce_capability(
+            ctx,
+            &self.schema().name,
+            deepseeknova_security::capability::Capability::FileWrite,
+        )?;
+        let parsed: DeleteFileArgs = serde_json::from_str(args)?;
+        let path = sanitize_path(&ctx.workspace_root, &parsed.path)?;
+        check_policy_path_allowed(ctx, &path)?;
+
+        if ctx.cancellation.is_cancelled() {
+            return Err(deepseeknova_core::DeepseeknovaError::Cancelled);
+        }
+
+        // Snapshot before deletion so the checkpoint can restore the file.
+        if let Some(ref ck) = self.checkpointer {
+            {
+                let mut guard = ck.lock().await;
+                guard.snapshot_file(&path).await?;
+            }
+        }
+
+        fs::remove_file(&path).await?;
+        Ok(format!("deleted {}", path.display()))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Path sanitization
 // ---------------------------------------------------------------------------
 
@@ -787,5 +880,32 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("escapes workspace root"));
+    }
+
+    /// B.5：delete_file 删除工作区内已存在文件，并拒绝越界路径。
+    #[tokio::test]
+    async fn delete_file_removes_inside_and_rejects_outside() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(dir.path().join("victim.txt"), "data").await.unwrap();
+        let ctx = test_ctx(dir.path());
+
+        // 工作区内已存在文件：删除成功。
+        let out = DeleteFileTool::new()
+            .execute(&ctx, r#"{"path":"victim.txt"}"#)
+            .await
+            .unwrap();
+        assert!(out.contains("deleted"), "got: {out}");
+        assert!(!dir.path().join("victim.txt").exists(), "file must be gone");
+
+        // 越界路径（含 .. 逃逸）：拒绝且不删除任何文件。
+        let err = DeleteFileTool::new()
+            .execute(&ctx, r#"{"path":"../outside_xyz.txt"}"#)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("escapes workspace root"),
+            "outside path must be blocked, got: {err}"
+        );
     }
 }
