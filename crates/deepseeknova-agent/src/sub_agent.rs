@@ -1235,6 +1235,15 @@ async fn run_sub_agent_loop(
                                                 evidence = %finding.evidence,
                                                 "blocking quality finding from sub-agent tool hook"
                                             );
+                                            // B.2：Blocking finding 上抛为事件
+                                            // （对照主循环 loop_impl 同段实现），
+                                            // 使质量闭环对子代理写同样可见；
+                                            // 发送失败仅 warn，不阻断子代理。
+                                            tx.send(Ok(RunEvent::QualityFinding(
+                                                finding.clone(),
+                                            )))
+                                            .await
+                                            .ok();
                                         }
                                     }
                                 }
@@ -2220,6 +2229,72 @@ mod tests {
         let none_runner = none_runner.with_default("f");
         let out_none = collect_text(&none_runner, "goal: read").await;
         assert!(out_none.contains("read ok"), "None 应绕过 gate: {out_none}");
+    }
+
+    /// B.2：子代理循环中 ToolHook::after 产出的 Blocking finding 必须上抛
+    /// 为事件（而非仅 warn 日志），使质量闭环对子代理写同样生效。
+    #[tokio::test]
+    async fn sub_agent_blocking_finding_is_emitted_as_event() {
+        use deepseeknova_core::tool_hook::{FindingSeverity, QualityFinding, ToolHookCtx};
+        struct BlockingHook;
+        impl ToolHook for BlockingHook {
+            fn name(&self) -> &str {
+                "blocking-hook"
+            }
+            fn after(
+                &self,
+                _ctx: &ToolHookCtx,
+                _call: &ToolCall,
+                _result: &str,
+            ) -> Vec<QualityFinding> {
+                vec![QualityFinding {
+                    rule: "sub-block".into(),
+                    severity: FindingSeverity::Blocking,
+                    passed: false,
+                    evidence: "sub".into(),
+                }]
+            }
+        }
+        let p = Arc::new(EchoToolProvider {
+            tool_name: "read_file".to_string(),
+            args: "{}".into(),
+        });
+        let (tx, mut rx) = mpsc::channel(64);
+        let mut memory = Memory::new();
+        let sec = deepseeknova_security::context::SecurityContext::with_safe_defaults();
+        run_sub_agent_loop(
+            p.clone(),
+            p,
+            vec![Arc::new(NoopReadTool)],
+            100,
+            None,
+            &mut memory,
+            "goal: sub".to_string(),
+            &tx,
+            None,
+            Some(sec),
+            std::env::temp_dir(),
+            1,
+            None,
+            false,
+            vec![Arc::new(BlockingHook)],
+            UserHooks::default(),
+            "sub-test".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        drop(tx);
+        let mut saw_finding = false;
+        while let Some(Ok(ev)) = rx.recv().await {
+            if matches!(ev, RunEvent::QualityFinding(_)) {
+                saw_finding = true;
+            }
+        }
+        assert!(
+            saw_finding,
+            "sub-agent blocking finding must be emitted as event"
+        );
     }
 
     // -----------------------------------------------------------------------

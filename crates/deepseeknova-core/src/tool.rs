@@ -151,6 +151,17 @@ pub trait Tool: Send + Sync {
         false
     }
 
+    /// 是否执行文件系统写（B.2 质量闭环覆盖）。
+    ///
+    /// 质量闭环（verify/review/adversarial review）只在发生文件写时触发；
+    /// 名称白名单（`write_file|edit_file|move_file|bash`）覆盖不到的工具
+    /// （如 MCP 写工具、`remember` 等未来写工具）通过本方法把「写」语义
+    /// 显式告知调度器，避免质量闭环被绕过。默认 `false`；MCP adapter 据
+    /// `readOnlyHint` 回填（无 hint 保守按写）。
+    fn writes_fs(&self) -> bool {
+        false
+    }
+
     /// Execute the tool with the given JSON arguments string.
     ///
     /// 返回 [`crate::DeepseeknovaError`] 而非 `anyhow::Error`，让调用方可按

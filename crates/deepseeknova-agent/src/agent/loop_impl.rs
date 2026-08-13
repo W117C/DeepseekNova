@@ -1937,12 +1937,19 @@ async fn stream_and_process_turn(
             });
             if executed[i] {
                 *tool_calls_made += 1;
-                // B3/verify：写类工具或 shell 执行过 → 本轮需验证/审查
-                // （名字以注册 schema 为准；shell 工具实际注册名为 "bash"）。
-                if matches!(
-                    call.name.as_str(),
-                    "write_file" | "edit_file" | "move_file" | "bash"
-                ) {
+                // B3/verify：写类工具或 shell 执行过 → 本轮需验证/审查。
+                // B.2：`writes_fs()` 语义优先（覆盖 MCP 写工具等白名单外
+                // 写工具），名称白名单兜底既有行为（shell 实际注册名为 "bash"）。
+                let tool_writes_fs = tool_map
+                    .get(&call.name)
+                    .map(|t| t.writes_fs())
+                    .unwrap_or(false);
+                if tool_writes_fs
+                    || matches!(
+                        call.name.as_str(),
+                        "write_file" | "edit_file" | "move_file" | "bash"
+                    )
+                {
                     *wrote_files = true;
                 }
             }

@@ -2170,6 +2170,38 @@ struct WritableSpy {
     result: String,
 }
 
+/// B.2 探针：模拟 MCP 写工具——名字不在内置白名单
+/// （`write_file|edit_file|move_file|bash`），但 `writes_fs()==true`
+/// （readOnlyHint 缺省时 MCP adapter 保守按写）。
+struct McpWriteSpy {
+    name: &'static str,
+    result: String,
+}
+
+#[async_trait::async_trait]
+impl Tool for McpWriteSpy {
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: self.name.to_string(),
+            description: "mcp write spy tool".to_string(),
+            parameters: serde_json::json!({"type":"object","properties":{}}),
+        }
+    }
+    fn read_only(&self) -> bool {
+        false
+    }
+    fn writes_fs(&self) -> bool {
+        true
+    }
+    async fn execute(
+        &self,
+        _ctx: &ToolContext,
+        _args: &str,
+    ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
+        Ok(self.result.clone())
+    }
+}
+
 #[async_trait::async_trait]
 impl Tool for WritableSpy {
     fn schema(&self) -> ToolSchema {
@@ -2382,6 +2414,45 @@ async fn verify_gate_passes_and_reaches_done() {
         "passing verify must reach Done, got {events:?}"
     );
     assert!(!events.iter().any(|e| matches!(e, RunEvent::Paused { .. })));
+}
+
+/// B.2：MCP 写工具（名字不在内置白名单，但 `writes_fs()==true`）执行后
+/// 必须触发 verify 相位——质量闭环不得被名字白名单绕过。
+#[tokio::test]
+async fn mcp_write_tool_triggers_verify_phase() {
+    let provider = Arc::new(MockProvider::sequential(vec![
+        vec![
+            Chunk::ToolCallStart {
+                id: "m1".into(),
+                name: "mcp__demo__write".into(),
+            },
+            Chunk::ToolCallEnd {
+                id: "m1".into(),
+                name: "mcp__demo__write".into(),
+                arguments: "{}".into(),
+            },
+            Chunk::Done,
+        ],
+        vec![
+            Chunk::TextDelta("done".into()),
+            Chunk::Usage(Usage::default()),
+            Chunk::Done,
+        ],
+    ]));
+    let mut agent = Agent::new(provider, 5).with_verify(vec!["cargo check --quiet".into()], 1);
+    agent.register_tool(Arc::new(McpWriteSpy {
+        name: "mcp__demo__write",
+        result: "written".into(),
+    }));
+    agent.register_tool(Arc::new(BashSpy { fail: false }));
+
+    let events = drain(agent, "write via mcp").await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, RunEvent::Verification { .. })),
+        "mcp write tool must trigger verify phase (quality loop bypassed?), got {events:?}"
+    );
 }
 
 /// 只读工具桩：统计执行次数。

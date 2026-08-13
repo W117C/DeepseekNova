@@ -104,6 +104,12 @@ impl Tool for McpToolAdapter {
     fn read_only(&self) -> bool {
         self.read_only
     }
+
+    // B.2：MCP 工具是否写文件系统。readOnlyHint=true → 只读（不写 fs）；
+    // false / 未提供 → 保守按写（质量闭环对 MCP 写同样触发 verify/review）。
+    fn writes_fs(&self) -> bool {
+        !self.read_only
+    }
 }
 
 /// Build McpToolAdapter instances for all tools exposed by an MCP server.
