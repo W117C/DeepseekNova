@@ -270,6 +270,19 @@ make eval-ci        # 跑 evals/core.jsonl 基准任务集并施加 CI 门槛（
   下载错误资产）
 - [如何避免]：bump 脚本同步改写 npm 包 manifest；CI 发布前用 tag 派生
   `npm version --no-git-tag-version`
+- [缓存断点误伤合成 Tool 摘要]：A.1 给「最后一条会话消息」打 cache_control
+  断点时，无 tool_call_id 的合成 Tool 摘要（压缩摘要回落纯文本）也被转成
+  blocks 数组并加断点，破坏「合成消息保持纯文本」契约（既有测试
+  `synthetic_tool_message_without_call_id_stays_plain_text` 失败）
+- [如何避免]：打断点前先排除合成摘要（`role==Tool && tool_call_id.is_none()`），
+  摘要每轮变化、打断点既浪费又破坏契约；补回归测试验证纯文本保持
+- [batch 并发测试误用独立轮次]：B.1 用两个 `single_read_call(...)` 构造
+  「一次 batch 含 2 个 delegate 调用」，但每个 single_read_call 是独立轮次
+  （各自含 `Chunk::Done`），batch 内实际只有 1 个调用，并发探针 max_active
+  恒为 1，无法验证 fan-out
+- [如何避免]：单轮多工具调用须在**同一个** `Vec<Chunk>` 内放多个
+  ToolCallStart/End（仿 `agent_parallel_tool_batch_preserves_result_order`），
+  不能用多个 single_read_call 拼「单轮」
 
 ---
 
