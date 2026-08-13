@@ -288,7 +288,6 @@ mod tests {
     use deepseeknova_core::types::ToolSchema;
     use deepseeknova_core::{Role, ToolContext};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use tokio_stream::StreamExt;
 
     fn msg(role: Role, content: &str) -> Message {
         Message {
@@ -322,6 +321,12 @@ mod tests {
         ) -> Result<String, DeepseeknovaError> {
             Ok("ok".into())
         }
+    }
+
+    #[allow(dead_code)]
+    fn _assert_dummy_tool_is_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<DummyTool>();
     }
 
     /// 计数 provider：记录 generate/stream 被真实调用次数。

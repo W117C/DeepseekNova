@@ -196,6 +196,14 @@ impl AnthropicProvider {
             max_tokens: self.max_tokens,
             system,
             messages: {
+                // 合成 Tool 摘要（无 tool_call_id 的压缩摘要）属不稳定中间段：
+                // 打断点既浪费（摘要每轮变化）又破坏「合成消息保持纯文本」
+                // 契约（anthropic_message_content 对无 call_id 的 Tool 消息
+                // 回落 Text），故最后一条为合成摘要时跳过会话前缀断点。
+                let last_is_synthetic_tool = conversation
+                    .last()
+                    .map(|m| m.role == Role::Tool && m.tool_call_id.is_none())
+                    .unwrap_or(false);
                 let mut conversation: Vec<AnthropicMessage> = conversation
                     .iter()
                     .map(|m| AnthropicMessage {
@@ -216,7 +224,7 @@ impl AnthropicProvider {
                 // KV）。不能给每条消息都打——Anthropic 对断点数量有上限，
                 // 且中间段随轮次变化不稳定；最后一条是 tool_use 而未完成
                 // 时该断点浪费属保守取舍。
-                if self.cache_control {
+                if self.cache_control && !last_is_synthetic_tool {
                     if let Some(last) = conversation.last_mut() {
                         let marker = self.cache_control_value();
                         last.content = match std::mem::replace(

@@ -31,6 +31,9 @@ fn config_display_redacts_inline_keys_and_auth_headers() {
         reasoning_effort: None,
         extra_body: None,
         cache_control: None,
+        cache_ttl: None,
+        cache_prompt_key: None,
+        cache_exact: None,
     });
 
     let shown = redact_config_for_display(&config);

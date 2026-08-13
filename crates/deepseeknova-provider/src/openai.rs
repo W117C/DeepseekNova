@@ -428,7 +428,7 @@ struct OpenAiSseState<'a> {
     tx: &'a mpsc::Sender<Result<Chunk, DeepseeknovaError>>,
     tool_acc: Vec<AccToolCall>,
     sent_any: bool,
-    /// [DONE] 标记是否已发出——防止流正常结束 + 显式 [DONE] 造成双重 Done。
+    /// `DONE` 标记是否已发出——防止流正常结束 + 显式 `DONE` 造成双重 Done。
     done_sent: bool,
 }
 

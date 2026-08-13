@@ -1,6 +1,6 @@
 //! `ask_user` 工具：agent 向用户提问并获取输入（B.5 骨架）。
 //!
-//! 首版为骨架 + 文档标注：用户输入经 [`ToolContext`] 扩展注入的
+//! 首版为骨架 + 文档标注：用户输入经 `ToolContext` 扩展注入的
 //! [`AskUserResponder`] 获取；正式 CLI/serve 交互通道未接线前，未注入
 //! responder 时工具返回文档化占位说明（不硬失败、不臆造输入）。
 
@@ -47,11 +47,7 @@ impl Tool for AskUserTool {
         true
     }
 
-    async fn execute(
-        &self,
-        ctx: &ToolContext,
-        args: &str,
-    ) -> Result<String, DeepseeknovaError> {
+    async fn execute(&self, ctx: &ToolContext, args: &str) -> Result<String, DeepseeknovaError> {
         let parsed: AskUserArgs = serde_json::from_str(args)?;
         // 用户输入经注入的 responder 获取；未注入（CLI/serve 交互通道
         // 尚未接线）时返回文档化占位说明，提示当前通道不可用。

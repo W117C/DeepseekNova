@@ -538,14 +538,9 @@ impl Tool for MoveFileTool {
 
 /// Deletes a file within the workspace. Path safety mirrors `move_file`:
 /// sanitize + policy allowlist; outside-workspace paths are rejected.
+#[derive(Default)]
 pub struct DeleteFileTool {
     checkpointer: Option<Arc<Mutex<CheckpointManager>>>,
-}
-
-impl Default for DeleteFileTool {
-    fn default() -> Self {
-        Self { checkpointer: None }
-    }
 }
 
 impl DeleteFileTool {
@@ -572,7 +567,9 @@ impl Tool for DeleteFileTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "delete_file".to_string(),
-            description: "Deletes a file inside the workspace. Outside-workspace paths are rejected.".to_string(),
+            description:
+                "Deletes a file inside the workspace. Outside-workspace paths are rejected."
+                    .to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -886,7 +883,9 @@ mod tests {
     #[tokio::test]
     async fn delete_file_removes_inside_and_rejects_outside() {
         let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(dir.path().join("victim.txt"), "data").await.unwrap();
+        tokio::fs::write(dir.path().join("victim.txt"), "data")
+            .await
+            .unwrap();
         let ctx = test_ctx(dir.path());
 
         // 工作区内已存在文件：删除成功。
