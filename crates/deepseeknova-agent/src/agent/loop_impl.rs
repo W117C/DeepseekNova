@@ -169,6 +169,8 @@ pub(crate) async fn run_agent_loop(
     tools: Vec<Arc<dyn Tool>>,
     max_steps: usize,
     compaction_threshold: Option<u32>,
+    turn_end_result_cap: Option<u32>,
+    preventive_shrink_ratio: Option<f32>,
     memory: Arc<tokio::sync::RwLock<Memory>>,
     input: RunInput,
     tx: &mpsc::Sender<Result<RunEvent, DeepseeknovaError>>,
@@ -369,6 +371,26 @@ pub(crate) async fn run_agent_loop(
                 .map(|m| crate::tokens::estimate_text_tokens(&m.content) as usize)
                 .sum();
             use crate::budget::controller::BudgetDecision;
+            // P2-B（Reasonix 借鉴）：预防性缩容——上下文占用达到预算的
+            // preventive_shrink_ratio 比例时提前对大工具结果缩容（渐进小
+            // 重置，避免 80% 紧急时一次性大改缓存前缀）。阈值复用轮末缩容
+            // 阈值（turn_end_result_cap 优先，否则 3000 对齐 Reasonix）。
+            if let Some(ratio) = preventive_shrink_ratio {
+                let cap = turn_end_result_cap.unwrap_or(3000);
+                if current >= (b.max_total_tokens as f32 * ratio) as usize {
+                    let before = memory.read().await.estimate_tokens();
+                    memory.write().await.shrink_large_results(cap);
+                    let after = memory.read().await.estimate_tokens();
+                    if after < before {
+                        info!(
+                            "preventive shrink @ {:.0}%: {} -> {} tokens",
+                            ratio * 100.0,
+                            before,
+                            after
+                        );
+                    }
+                }
+            }
             match b.evaluate_budget(current, EXPECTED_TURN_TOKENS, memory_tokens) {
                 BudgetDecision::Allow => {}
                 BudgetDecision::CompressHistory => budget_wants_compress = true,
@@ -442,6 +464,16 @@ pub(crate) async fn run_agent_loop(
                 .ok();
                 return Ok(());
             }
+        }
+
+        // P2-A（Reasonix 借鉴）：轮末大工具结果缩容——turn_end_result_cap
+        // 配置时每轮末对超过阈值的工具结果缩容（当轮看全文、后续看摘要、
+        // 可按 call_id 经 fetch_full_result 重读）。与压缩路径分离：压缩是
+        // "超预算才触发"的大重置；轮末缩容是"每轮执行"的渐进控制，降低
+        // 每轮新增占比以提升前缀缓存命中率。shrink_large_results 幂等
+        // （shrunk_messages 记录已缩容 call_id），重复调用安全。
+        if let Some(cap) = turn_end_result_cap {
+            memory.write().await.shrink_large_results(cap);
         }
 
         // Atomic Turn-end compaction
@@ -1788,6 +1820,7 @@ async fn stream_and_process_turn(
                     let key = tool_cache_key(&pending_calls[i].name, &pending_calls[i].arguments);
                     if let Some(cached) = tool_cache.get(&key) {
                         results[i] = Some(format!("[cached]\n{cached}"));
+                        metrics.observe_tool_cache_hit();
                         continue;
                     }
                     cache_keys.push((i, key));
@@ -1876,6 +1909,7 @@ async fn stream_and_process_turn(
                         if let Some(r) = &results[i] {
                             if !is_tool_error_result(r) && !r.starts_with("[cached]") {
                                 tool_cache.insert(*key, r.clone());
+                                metrics.observe_tool_cache_miss();
                             }
                         }
                     }
@@ -2385,6 +2419,8 @@ mod tests {
             provider,
             tools,
             5,
+            None,
+            None,
             None,
             memory,
             RunInput {

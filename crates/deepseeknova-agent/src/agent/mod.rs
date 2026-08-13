@@ -71,6 +71,10 @@ pub struct Agent {
     security: SecurityContext,
 
     compaction_threshold_tokens: Option<u32>,
+    /// P2-A：轮末大工具结果缩容阈值（tokens）；None = 不启用（Reasonix 借鉴）。
+    turn_end_result_cap_tokens: Option<u32>,
+    /// P2-B：上下文占用达到预算的该比例时提前预防性缩容；None = 关闭。
+    preventive_shrink_ratio: Option<f32>,
 
     /// Optional persistent conversation store. When set, each `run_stream`
     /// seeds its working memory from this store at the start and writes the
@@ -367,6 +371,16 @@ impl MetricsGuard {
         self.tracker.observe_verify(passed);
     }
 
+    /// 记录一次会话内只读工具结果缓存命中（`[cached]` 短路）。
+    fn observe_tool_cache_hit(&mut self) {
+        self.tracker.observe_tool_cache_hit();
+    }
+
+    /// 记录一次会话内只读工具结果缓存未命中（实际执行并写入缓存）。
+    fn observe_tool_cache_miss(&mut self) {
+        self.tracker.observe_tool_cache_miss();
+    }
+
     fn emit(&mut self, outcome: Option<RunOutcome>) {
         if self.emitted {
             return;
@@ -461,6 +475,8 @@ impl Agent {
             security: SecurityContext::with_safe_defaults(),
 
             compaction_threshold_tokens: None,
+            turn_end_result_cap_tokens: None,
+            preventive_shrink_ratio: None,
             history: None,
             permission: None,
             approval: None,
@@ -520,6 +536,23 @@ impl Agent {
     /// `None` disables the check.
     pub fn with_compaction_threshold(mut self, tokens: Option<u32>) -> Self {
         self.compaction_threshold_tokens = tokens;
+        self
+    }
+
+    /// P2-A（Reasonix 借鉴）：启用轮末大工具结果缩容——每轮末对超过
+    /// `cap`（tokens）的工具结果缩容，当轮看全文、后续看摘要、可按
+    /// call_id 经 `fetch_full_result` 重读；降低每轮新增占比以提升前缀
+    /// 缓存命中率。
+    pub fn with_turn_end_result_cap(mut self, cap: u32) -> Self {
+        self.turn_end_result_cap_tokens = Some(cap);
+        self
+    }
+
+    /// P2-B（Reasonix 借鉴）：启用预防性缩容——上下文占用达到预算的
+    /// `ratio`（0.0..=1.0，建议 0.4）比例时提前对大工具结果缩容，避免
+    /// 80% 紧急阈值一次性大改缓存前缀。
+    pub fn with_preventive_shrink_ratio(mut self, ratio: f32) -> Self {
+        self.preventive_shrink_ratio = Some(ratio);
         self
     }
 
@@ -936,6 +969,8 @@ impl Agent {
             .clone()
             .unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string());
         let compaction_threshold = self.compaction_threshold_tokens;
+        let turn_end_result_cap = self.turn_end_result_cap_tokens;
+        let preventive_shrink_ratio = self.preventive_shrink_ratio;
         let workspace_root = self.workspace_root.clone();
         let security = self.security.clone();
         let history = self.history.clone();
@@ -1154,6 +1189,8 @@ impl Agent {
                 tools,
                 max_steps,
                 compaction_threshold,
+                turn_end_result_cap,
+                preventive_shrink_ratio,
                 memory.clone(),
                 input,
                 &tx,

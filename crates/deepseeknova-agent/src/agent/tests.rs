@@ -2641,6 +2641,55 @@ async fn tool_cache_cleared_after_write() {
 }
 
 #[tokio::test]
+async fn tool_cache_hits_and_misses_reach_session_stats() {
+    // A.4：工具结果缓存命中率度量——同一只读请求两次调用（第二次命中
+    // `[cached]` 短路）与一次不同请求（未命中），计数分别进入 SessionStats。
+    use std::sync::Mutex as StdMutex;
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let provider = Arc::new(MockProvider::sequential(vec![
+        single_read_call("read_file", "s0", r#"{"q":"x"}"#),
+        single_read_call("read_file", "s1", r#"{"q":"x"}"#),
+        single_read_call("read_file", "s2", r#"{"q":"y"}"#),
+        vec![
+            Chunk::TextDelta("done".into()),
+            Chunk::Usage(Usage::default()),
+            Chunk::Done,
+        ],
+    ]));
+    let fired = Arc::new(StdMutex::new(Vec::new()));
+    let f2 = fired.clone();
+    let hook: MetricsHook = Arc::new(move |stats, _summary| {
+        f2.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(stats);
+    });
+    let mut agent = Agent::new(provider, 8)
+        .with_tool_cache(true)
+        .with_metrics_hook(hook);
+    agent.register_tool(Arc::new(CountingSpy {
+        name: "read_file",
+        result: "r".into(),
+        calls: calls.clone(),
+    }));
+
+    let events = drain(agent, "read same twice then different").await;
+    assert!(events.iter().any(|e| matches!(e, RunEvent::Done(_))));
+    // 工具真实执行：第一次 x、第二次 y；x 的第二次调用命中缓存。
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    // hook 由 spawned task 在流耗尽后触发，与 metrics_hook_fires 同款等待。
+    for _ in 0..50 {
+        if !fired.lock().unwrap_or_else(|e| e.into_inner()).is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let snapshots = fired.lock().unwrap_or_else(|e| e.into_inner());
+    assert_eq!(snapshots.len(), 1, "metrics hook must fire exactly once");
+    assert_eq!(snapshots[0].tool_cache_misses, 2, "x(1) and y exec");
+    assert_eq!(snapshots[0].tool_cache_hits, 1, "x(2) cached");
+}
+
+#[tokio::test]
 async fn mid_run_retrieval_injects_on_seeded_tool_turn() {
     // 续聊历史包含一次工具交换 → 新轮次开头触发中途召回注入。
     let history = Arc::new(tokio::sync::Mutex::new(vec![
@@ -3056,6 +3105,8 @@ async fn cancel_path_suppresses_diagnose_report() {
         provider,
         Vec::new(),
         5,
+        None,
+        None,
         None,
         memory.clone(),
         RunInput {
