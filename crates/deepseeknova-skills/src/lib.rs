@@ -273,6 +273,9 @@ impl Tool for SkillTool {
         output.push_str(&format!("# Skill Activated: {}\n\n", self.skill.name));
         output.push_str(&self.skill.system_prompt);
 
+        // `tools_allowed` 与 `model` 仅为文本建议（advisory only）：提示词层
+        // 引导模型优先使用允许的工具/模型，不 gate 工具执行、不切换 provider
+        // （B.6 登记：能力未接线，勿按"强制执行"语义理解）。
         if !self.skill.tools_allowed.is_empty() {
             output.push_str("\n\n## Allowed Tools\n\n");
             for tool in &self.skill.tools_allowed {

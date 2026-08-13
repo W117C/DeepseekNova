@@ -171,6 +171,8 @@ pub struct ProviderConfig {
 
     /// Provider 模型上下文窗口上限（tokens）。用于 TUI token 预算条等
     /// 资源可见性 UI；未配置时由 CLI 回落 `[[models]]` 同名条目。
+    /// **B.6 登记：compaction 阈值是硬编码启发式，本字段无消费者**，
+    /// 归 P1 deadcode 计划清理（本计划不删除，避免与 event 删除冲突）。
     #[serde(default)]
     pub context_window: Option<u32>,
 

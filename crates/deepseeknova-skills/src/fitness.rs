@@ -336,6 +336,10 @@ pub enum EvolutionSuggestion {
 
 /// Compute evolution suggestions from fitness records (pure function).
 ///
+/// **B.6 登记：本函数当前无生产消费者**（无自动应用闭环；调用方仅限
+/// 测试与未来 TUI `/skills` 人工查看入口）。建议仅作展示，勿引入自动
+/// 反馈循环——deprecate/promote 决策需人工确认。
+///
 /// Rules:
 /// - `Deprecate`: `now_ms - last_used_ms > 30 days`, or `uses >= 5` with a
 ///   success rate below 0.3.
