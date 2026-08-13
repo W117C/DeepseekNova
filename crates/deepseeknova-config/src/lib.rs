@@ -912,15 +912,21 @@ pub struct AgentConfig {
     /// 轮末大工具结果缩容阈值（tokens）：> 阈值的工具结果在轮末缩容，
     /// 当轮看全文、后续看摘要、可按 call_id 重读（Reasonix 借鉴：对齐
     /// 3000 token 的 turn-end auto-compaction，降低每轮新增占比以提升
-    /// 前缀缓存命中率）。`None` = 保持现状（仅压缩路径缩容）。
-    #[serde(default)]
+    /// 前缀缓存命中率）。**默认 `Some(3000)`**（A.5 落定：无害且直接保护
+    /// 缓存前缀稳定）；`None` = 关闭。
+    #[serde(default = "default_turn_end_result_cap")]
     pub turn_end_result_cap_tokens: Option<u32>,
 
     /// 上下文占用达到预算的该比例时提前预防性缩容（Reasonix 借鉴：
     /// 40% 预防性 shrink，避免 80% 紧急时一次性大改缓存前缀）。
-    /// `None` = 关闭（保持现状）。建议范围 0.0..=1.0。
+    /// `None` = 关闭（保持现状，阈值语义需实测调优，故保持 opt-in）。
+    /// 建议范围 0.0..=1.0。
     #[serde(default)]
     pub preventive_shrink_ratio: Option<f32>,
+}
+
+fn default_turn_end_result_cap() -> Option<u32> {
+    Some(3000)
 }
 
 fn default_max_steps() -> usize {
@@ -964,7 +970,7 @@ impl Default for AgentConfig {
             reflect_on_failure: true,
             reflect_model: None,
             reflect_max_chars: default_reflect_max_chars(),
-            turn_end_result_cap_tokens: None,
+            turn_end_result_cap_tokens: default_turn_end_result_cap(),
             preventive_shrink_ratio: None,
         }
     }
@@ -3579,17 +3585,20 @@ mod tests {
         assert_eq!(c.agent.auto_router_max_chars, 4_000);
     }
 
-    /// P2（Reasonix 借鉴）：轮末缩容阈值与预防性缩容比例的默认值与解析。
+    /// P2（Reasonix 借鉴）+ A.5：轮末缩容阈值与预防性缩容比例的默认值与解析。
+    /// A.5 落定：`turn_end_result_cap_tokens` 默认开启（`Some(3000)`，无害且
+    /// 直接保护缓存前缀稳定）；`preventive_shrink_ratio` 保持 opt-in。
     #[test]
     fn agent_cache_shrink_fields_defaults_and_parse() {
         let d = Config::default();
-        assert!(
-            d.agent.turn_end_result_cap_tokens.is_none(),
-            "默认不启用轮末缩容（保持现状）"
+        assert_eq!(
+            d.agent.turn_end_result_cap_tokens,
+            Some(3000),
+            "默认开启轮末缩容（A.5 保护前缀稳定）"
         );
         assert!(
             d.agent.preventive_shrink_ratio.is_none(),
-            "默认不启用预防性缩容（保持现状）"
+            "预防性缩容保持 opt-in（阈值语义需实测调优）"
         );
 
         let c: Config = toml::from_str(
@@ -3600,7 +3609,9 @@ mod tests {
         assert_eq!(c.agent.preventive_shrink_ratio, Some(0.4));
     }
 
-    /// P2：merge 语义——显式设置覆盖默认；未设置的一侧保持既有值。
+    /// P2：merge 语义——显式设置覆盖默认；未设置（None）的一侧保持既有值。
+    /// A.5 后 `AgentConfig::default()` 自带 `turn_end_result_cap_tokens =
+    /// Some(3000)`，故"未设置"必须以显式 `None` 表达，不可用 default。
     #[test]
     fn agent_cache_shrink_merge_semantics() {
         let mut base = AgentConfig::default();
@@ -3610,8 +3621,11 @@ mod tests {
         });
         assert_eq!(base.turn_end_result_cap_tokens, Some(5000));
 
-        // 未设置的一侧 merge 不覆盖既有值。
-        base.merge(AgentConfig::default());
+        // 未设置（None）的一侧 merge 不覆盖既有值。
+        base.merge(AgentConfig {
+            turn_end_result_cap_tokens: None,
+            ..Default::default()
+        });
         assert_eq!(base.turn_end_result_cap_tokens, Some(5000));
         assert!(base.preventive_shrink_ratio.is_none());
 

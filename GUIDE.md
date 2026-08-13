@@ -163,6 +163,11 @@ concurrent_tools = true            # 同批读类工具并发、写类保序串�
 # observe_compress_threshold_chars = 12000
 # observe_compress_max_chars = 4000
 # tool_cache = true                # 会话内只读工具结果缓存，写后失效（P2）
+# turn_end_result_cap_tokens = 3000  # 轮末大工具结果缩容阈值（tokens，默认 3000：
+#                                   #   默认开启，保护 system+tools+对话前缀稳定以提升
+#                                   #   缓存命中率；0/None 关闭）
+# preventive_shrink_ratio = 0.4    # 上下文占用达预算该比例时提前预防性缩容
+#                                   #   （默认关闭，opt-in：阈值语义需实测调优）
 
 [tools]                            # 按工具名覆盖（name/disabled/timeout_secs/max_file_size）
 [[tools.overrides]]

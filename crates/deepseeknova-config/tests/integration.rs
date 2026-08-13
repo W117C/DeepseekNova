@@ -22,6 +22,30 @@ fn default_config_roundtrip() {
     assert_eq!(parsed.agent.max_steps, 25);
 }
 
+/// A.5：未配置时轮末结果缩容默认开启（`turn_end_result_cap_tokens ==
+/// Some(3000)`，保护缓存前缀稳定），预防性缩容保持 opt-in（`None`）。
+#[test]
+fn agent_turn_end_result_cap_defaults_on() {
+    let cfg = Config::default();
+    assert_eq!(
+        cfg.agent.turn_end_result_cap_tokens,
+        Some(3000),
+        "turn-end result cap must default to Some(3000)"
+    );
+    assert!(
+        cfg.agent.preventive_shrink_ratio.is_none(),
+        "preventive shrink stays opt-in"
+    );
+    // TOML 未配置该字段时同样得到新默认值（serde default 路径）。
+    let parsed: Config = toml::from_str("[agent]\n").unwrap();
+    assert_eq!(parsed.agent.turn_end_result_cap_tokens, Some(3000));
+    assert!(parsed.agent.preventive_shrink_ratio.is_none());
+    // 显式配置仍可覆盖默认。
+    let overridden: Config =
+        toml::from_str("[agent]\nturn_end_result_cap_tokens = 5000\n").unwrap();
+    assert_eq!(overridden.agent.turn_end_result_cap_tokens, Some(5000));
+}
+
 #[test]
 fn load_from_valid_toml() {
     let dir = TempDir::new().unwrap();
@@ -89,6 +113,9 @@ fn merge_preserves_provider_overrides() {
         reasoning_effort: None,
         extra_body: None,
         cache_control: None,
+        cache_ttl: None,
+        cache_prompt_key: None,
+        cache_exact: None,
         context_window: None,
     });
 
@@ -128,6 +155,9 @@ fn merge_overrides_non_default_providers() {
         reasoning_effort: None,
         extra_body: None,
         cache_control: None,
+        cache_ttl: None,
+        cache_prompt_key: None,
+        cache_exact: None,
         context_window: None,
     });
 
@@ -146,6 +176,9 @@ fn merge_overrides_non_default_providers() {
             reasoning_effort: None,
             extra_body: None,
             cache_control: None,
+            cache_ttl: None,
+            cache_prompt_key: None,
+            cache_exact: None,
             context_window: None,
         }],
         ..Default::default()
@@ -200,6 +233,9 @@ fn resolve_provider_for_model() {
             reasoning_effort: None,
             extra_body: None,
             cache_control: None,
+            cache_ttl: None,
+            cache_prompt_key: None,
+            cache_exact: None,
             context_window: None,
         }],
         models: vec![ModelConfig {
