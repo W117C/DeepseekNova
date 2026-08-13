@@ -179,6 +179,9 @@ impl Tool for ShellTool {
             }
             Ok(Err(e)) => {
                 let _ = child.kill().await;
+                // 与 overflow/超时两条 kill 路径对称：kill 后 wait 回收子进程，
+                // 消除瞬时 zombie（collect 出错路径此前直接 return 跳过了 wait）。
+                let _ = child.wait().await;
                 return Err(DeepseeknovaError::tool(format!("command failed: {e}")));
             }
             Err(_elapsed) => {
@@ -498,7 +501,16 @@ mod tests {
             Err(e) => e.to_string(),
         };
         assert!(out.contains("[truncated"), "got: {out}");
-        assert!(out.len() < 500, "输出应被截断，got len {}", out.len());
+        // 封顶契约：overflow 路径内容部分 ≤ cap（32 字节）+ 注记长度；出错
+        // 消息还带固定前缀 "command exited with code -1\nSTDOUT:\n"（36 字节）。
+        // 该上界远小于 500 字节原始输出，证明截断真实生效（而非仅含标记）。
+        let cap: usize = 32;
+        let note = format!("... [truncated: output exceeded {cap}-byte limit]");
+        assert!(
+            out.len() <= cap + note.len() + 64,
+            "输出应封顶在 cap+注记+固定前缀，got len {}",
+            out.len()
+        );
     }
 
     #[cfg(unix)]

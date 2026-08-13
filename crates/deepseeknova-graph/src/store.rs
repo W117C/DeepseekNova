@@ -1374,6 +1374,11 @@ impl Store {
 
     /// 沿 Contains 边向上递归收集全部祖先节点名（单条递归 CTE，深度上限 32）。
     /// `resolve` 限定名匹配用；替代逐跳 `parents()` 查询消除 N+1。
+    ///
+    /// 语义拓宽：递归 CTE 的 UNION ALL 对每个父节点继续向上展开，收集**所有**
+    /// 父路径上的祖先——多父扇出（嵌套模块/多继承下同一节点经不同父链可达的
+    /// 全部祖先）都会计入，而非旧实现的单父链。多父场景下这是更正确的行为，
+    /// 不只是单纯的 N+1 查询优化；调用方（resolve）按此语义匹配限定名。
     pub(crate) fn ancestor_names(&self, id: &str) -> Result<Vec<String>, GraphError> {
         let mut stmt = self.conn.prepare(
             "WITH RECURSIVE ancestor_names(id, name, depth) AS (\n\
