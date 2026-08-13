@@ -104,7 +104,9 @@ mod tests {
     async fn for_each_sse_line_skips_cr_calls_back_empty_lines_and_flushes_tail() {
         // `\r\n` 行尾下逐字节切行：`\r` 被跳过、空行同样回调、无尾随 `\n`
         // 的最后一行冲刷给闭包——三条行为一次覆盖。
-        let stream = stream::iter(vec![Ok::<_, reqwest::Error>(b"data: a\r\n\ndata: b".to_vec())]);
+        let stream = stream::iter(vec![Ok::<_, reqwest::Error>(
+            b"data: a\r\n\ndata: b".to_vec(),
+        )]);
         let lines = for_each_sse_line(stream, "test", Vec::new(), |line, mut acc| async move {
             acc.push(line);
             Ok(acc)
@@ -118,8 +120,9 @@ mod tests {
     async fn for_each_sse_line_flushes_final_line_without_trailing_newline() {
         // 尾行冲刷的独立用例：最后一行不带 `\n` 结尾也必须回调（`data: a` 后
         // 的尾行数据在上一用例中已随流结束冲刷，此处用无 `\n` 尾行单独锁定）。
-        let stream =
-            stream::iter(vec![Ok::<_, reqwest::Error>(b"event: done\nlast: 1".to_vec())]);
+        let stream = stream::iter(vec![Ok::<_, reqwest::Error>(
+            b"event: done\nlast: 1".to_vec(),
+        )]);
         let lines = for_each_sse_line(stream, "test", Vec::new(), |line, mut acc| async move {
             acc.push(line);
             Ok(acc)
