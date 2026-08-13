@@ -137,8 +137,9 @@ enum SlashAction {
 /// REPL 斜杠命令扩展能力：`/undo` 撤销控制器与 `/mcp status` 连接探测。
 ///
 /// 由 CLI 在启动时按配置构建（与 TUI 路径同一数据源），注入
-/// [`run_chat_repl`]。字段为 `Option` 以兼容「未启用」场景（无 checkpoint
-/// 配置 / 无 MCP 服务器 / 无探测器）。`undo` 与 `mcp_probe` 用 `Arc` 包装
+/// [`run_chat_repl`]。字段为 `Option` 或空 `Vec` 以兼容「未启用」场景（无
+/// checkpoint 配置 / 无 MCP 服务器 / 无探测器）。`undo` 与 `mcp_probe` 用
+/// `Arc` 包装
 /// 以便跨 `/new` 循环共享（trait 对象不可 `Clone`，但 `Arc` 可）。
 #[derive(Clone, Default)]
 pub struct ReplCaps {
