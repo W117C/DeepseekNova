@@ -45,6 +45,9 @@ pub struct AnthropicProvider {
     /// Whether to inject `cache_control: {"type":"ephemeral"}` breakpoints
     /// (system block + last tool) so the stable prefix is explicitly cached.
     cache_control: bool,
+    /// Explicit TTL for cache_control breakpoints ("5m" | "1h"); `None`
+    /// leaves the endpoint default (5 minutes) applied.
+    cache_ttl: Option<String>,
 }
 
 impl AnthropicProvider {
@@ -63,7 +66,20 @@ impl AnthropicProvider {
         max_retries: u32,
     ) -> Result<Self, DeepseeknovaError> {
         let api_key = crate::resolve_api_key_env_value(api_key_env)?;
+        Self::new_with_key(base_url, model, api_key, timeout_secs, max_retries)
+    }
 
+    /// Build a provider with the API key passed directly (from config
+    /// `api_key` field) instead of an environment variable. Wiring fix
+    /// (mirrors `OpenAIProvider::new_with_key`): `ProviderConfig.api_key`
+    /// was previously ignored by the factory.
+    pub fn new_with_key(
+        base_url: &str,
+        model: &str,
+        api_key: String,
+        timeout_secs: u64,
+        max_retries: u32,
+    ) -> Result<Self, DeepseeknovaError> {
         let client = Client::builder()
             .timeout(Duration::from_secs(timeout_secs))
             .build()
@@ -84,6 +100,7 @@ impl AnthropicProvider {
             tool_cache: ToolSchemaCache::with_capacity(16),
             temperature: None,
             cache_control: true,
+            cache_ttl: None,
         })
     }
 
@@ -120,6 +137,26 @@ impl AnthropicProvider {
         self
     }
 
+    /// Set an explicit TTL for the cache_control breakpoints ("5m" | "1h").
+    /// `None` leaves the endpoint default (5 minutes). The same TTL is
+    /// applied to the system block and the last tool, which satisfies
+    /// Anthropic's "longer TTL blocks must precede shorter ones" constraint
+    /// (tools → system → messages are cached as one prefix with one TTL).
+    pub fn with_cache_ttl(mut self, ttl: impl Into<String>) -> Self {
+        self.cache_ttl = Some(ttl.into());
+        self
+    }
+
+    /// The cache_control value to attach to breakpoints, honouring the
+    /// configured TTL ("5m" | "1h"); without an explicit TTL the endpoint
+    /// default (5 minutes) applies.
+    fn cache_control_value(&self) -> serde_json::Value {
+        match self.cache_ttl.as_deref() {
+            Some(ttl) => serde_json::json!({"type": "ephemeral", "ttl": ttl}),
+            None => serde_json::json!({"type": "ephemeral"}),
+        }
+    }
+
     /// Build the Anthropic request body shared by both `generate` and
     /// `stream`, injecting DeepSeek thinking mode and reasoning effort.
     fn build_request(
@@ -135,7 +172,7 @@ impl AnthropicProvider {
                 serde_json::json!([{
                     "type": "text",
                     "text": s,
-                    "cache_control": {"type": "ephemeral"}
+                    "cache_control": self.cache_control_value()
                 }])
             } else {
                 serde_json::Value::String(s)
@@ -158,20 +195,52 @@ impl AnthropicProvider {
             model: self.model.clone(),
             max_tokens: self.max_tokens,
             system,
-            messages: conversation
-                .iter()
-                .map(|m| AnthropicMessage {
-                    role: match m.role {
-                        Role::User => "user",
-                        Role::Assistant => "assistant",
-                        // Tool results are sent as user-role `tool_result`
-                        // content blocks in the Anthropic Messages API.
-                        _ => "user",
+            messages: {
+                let mut conversation: Vec<AnthropicMessage> = conversation
+                    .iter()
+                    .map(|m| AnthropicMessage {
+                        role: match m.role {
+                            Role::User => "user",
+                            Role::Assistant => "assistant",
+                            // Tool results are sent as user-role `tool_result`
+                            // content blocks in the Anthropic Messages API.
+                            _ => "user",
+                        }
+                        .to_string(),
+                        content: anthropic_message_content(m, self.thinking_enabled),
+                    })
+                    .collect();
+                // 会话前缀断点：仅最后一条非 System 消息的最后内容块携带
+                // cache_control，使「system + tools + 已完成对话」成为显式
+                // 可缓存前缀（Claude Code 惯例：下一轮只重算新追加消息的
+                // KV）。不能给每条消息都打——Anthropic 对断点数量有上限，
+                // 且中间段随轮次变化不稳定；最后一条是 tool_use 而未完成
+                // 时该断点浪费属保守取舍。
+                if self.cache_control {
+                    if let Some(last) = conversation.last_mut() {
+                        let marker = self.cache_control_value();
+                        last.content = match std::mem::replace(
+                            &mut last.content,
+                            AnthropicMessageContent::Text(String::new()),
+                        ) {
+                            AnthropicMessageContent::Text(text) => {
+                                AnthropicMessageContent::Blocks(vec![serde_json::json!({
+                                    "type": "text",
+                                    "text": text,
+                                    "cache_control": marker,
+                                })])
+                            }
+                            AnthropicMessageContent::Blocks(mut blocks) => {
+                                if let Some(last_block) = blocks.last_mut() {
+                                    last_block["cache_control"] = marker;
+                                }
+                                AnthropicMessageContent::Blocks(blocks)
+                            }
+                        };
                     }
-                    .to_string(),
-                    content: anthropic_message_content(m, self.thinking_enabled),
-                })
-                .collect(),
+                }
+                conversation
+            },
             tools: self.build_tools(tools),
             stream,
             thinking,
@@ -194,6 +263,7 @@ impl AnthropicProvider {
     /// unchanged registry skips the per-request collect + clone.
     fn build_tools(&self, tools: &[&dyn Tool]) -> Option<Vec<AnthropicTool>> {
         let cache_control = self.cache_control;
+        let cache_ttl = self.cache_ttl.clone();
         self.tool_cache.get_or_build(tools, move |ts| {
             let schemas: Vec<_> = ts.iter().map(|t| t.schema()).collect();
             let mut built: Vec<AnthropicTool> = schemas
@@ -209,7 +279,10 @@ impl AnthropicProvider {
             // 可缓存前缀（system + tools 段）的结尾。
             if cache_control {
                 if let Some(last) = built.last_mut() {
-                    last.cache_control = Some(serde_json::json!({"type": "ephemeral"}));
+                    last.cache_control = Some(match cache_ttl.as_deref() {
+                        Some(ttl) => serde_json::json!({"type": "ephemeral", "ttl": ttl}),
+                        None => serde_json::json!({"type": "ephemeral"}),
+                    });
                 }
             }
             built
@@ -644,17 +717,24 @@ impl AnthropicUsage {
     /// 把 Anthropic 原生用量映射为核心 `Usage`，保留 context-cache 读/写与
     /// 计费推理 token（与流式路径 `AnthropicUsageAcc::to_usage` 口径一致）。
     fn to_usage(&self) -> Usage {
-        // 假设 DeepSeek 记账口径：input_tokens 不含缓存 token，故 prompt 需加上
-        // cache_read/cache_creation；若端点 input_tokens 已含缓存 token，
-        // 此公式会双重计数。
-        let prompt_tokens =
-            self.input_tokens + self.cache_read_input_tokens + self.cache_creation_input_tokens;
+        // Anthropic 官方口径：`input_tokens` 已包含缓存读/写 token
+        // （cache_read_input_tokens + cache_creation_input_tokens），若再加
+        // 一次会双重计数（对抗审查 F2 修正）。未命中部分 = 总输入 − 命中
+        // （含本次写入缓存的 creation 段），恒等式 hit + miss == prompt
+        // 成立，命中率 = hit / prompt 自洽。
+        //
+        // 待实测校验：若 DeepSeek Anthropic 端点实测 `input_tokens` 不含缓存
+        // token（与官方 Anthropic 协议相悖），需改回相加口径——由实验 1 的
+        // 双端点（OpenAI 格式 vs Anthropic 格式）同 prompt 对比定论。
+        let prompt_tokens = self.input_tokens;
+        let cache_hit_tokens = self.cache_read_input_tokens;
+        let cache_miss_tokens = prompt_tokens.saturating_sub(cache_hit_tokens);
         Usage {
             prompt_tokens,
             completion_tokens: self.output_tokens,
             total_tokens: prompt_tokens + self.output_tokens,
-            cache_hit_tokens: self.cache_read_input_tokens,
-            cache_miss_tokens: self.cache_creation_input_tokens,
+            cache_hit_tokens,
+            cache_miss_tokens,
             reasoning_tokens: self
                 .output_tokens_details
                 .as_ref()
@@ -769,15 +849,17 @@ impl AnthropicUsageAcc {
     }
 
     fn to_usage(&self) -> Usage {
-        // 与 `AnthropicUsage::to_usage` 同一记账口径：DeepSeek 的 input_tokens
-        // 不含缓存 token，需加 cache_read/cache_creation；若已含则双重计数。
-        let prompt_tokens = self.input_tokens + self.cache_read + self.cache_creation;
+        // 与 `AnthropicUsage::to_usage` 同一记账口径（F2 修正）：input_tokens
+        // 已含缓存读/写 token，未命中 = 总输入 − 命中，恒等式自洽。
+        let prompt_tokens = self.input_tokens;
+        let cache_hit_tokens = self.cache_read;
+        let cache_miss_tokens = prompt_tokens.saturating_sub(cache_hit_tokens);
         Usage {
             prompt_tokens,
             completion_tokens: self.output_tokens,
             total_tokens: prompt_tokens + self.output_tokens,
-            cache_hit_tokens: self.cache_read,
-            cache_miss_tokens: self.cache_creation,
+            cache_hit_tokens,
+            cache_miss_tokens,
             reasoning_tokens: self.reasoning_tokens,
         }
     }
@@ -1149,6 +1231,155 @@ mod tests {
         assert_eq!(sys[0]["cache_control"]["type"], "ephemeral");
         let ts = v["tools"].as_array().expect("tools array present");
         assert_eq!(ts[0]["cache_control"]["type"], "ephemeral");
+    }
+
+    /// 会话前缀断点：最后一条 user/tool_result 消息的最后内容块携带
+    /// cache_control，标记「system + tools + 已完成对话」为可缓存前缀。
+    #[test]
+    fn last_conversation_message_carries_cache_control_breakpoint() {
+        std::env::set_var("TEST_ANTHRO_KEY_LASTMSG", "dummy");
+        let provider = AnthropicProvider::new(
+            "https://api.deepseek.com/anthropic",
+            "deepseek-v4-flash",
+            "TEST_ANTHRO_KEY_LASTMSG",
+            30,
+            0,
+        )
+        .unwrap();
+
+        let msgs = vec![
+            Message {
+                role: Role::System,
+                content: "sys".into(),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                reasoning_signature: None,
+                usage: None,
+            },
+            Message {
+                role: Role::User,
+                content: "hello".into(),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                reasoning_signature: None,
+                usage: None,
+            },
+            Message {
+                role: Role::Assistant,
+                content: "hi".into(),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                reasoning_signature: None,
+                usage: None,
+            },
+            Message {
+                role: Role::User,
+                content: "tool-result-here".into(),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                reasoning_signature: None,
+                usage: None,
+            },
+        ];
+        let body = provider.build_request_json(&msgs, &[], false);
+        let messages = body["messages"].as_array().unwrap();
+        let last = messages.last().unwrap();
+        assert_eq!(
+            last["content"].as_array().unwrap().last().unwrap()["cache_control"],
+            serde_json::json!({"type": "ephemeral"})
+        );
+        // 非最后一条消息不得携带 cache_control（避免把不稳定中间段标为前缀）
+        for m in &messages[..messages.len() - 1] {
+            let content = &m["content"];
+            if let Some(blocks) = content.as_array() {
+                assert!(
+                    blocks.last().unwrap().get("cache_control").is_none(),
+                    "intermediate message must not carry cache_control"
+                );
+            }
+        }
+    }
+
+    /// L1：显式 TTL（"1h"）必须写入 system 块与 tools 末项的 cache_control
+    /// 值（Anthropic 付费档长缓存；system 与 tools 统一 TTL，满足"长 TTL
+    /// 块在前"约束）。
+    #[test]
+    fn build_request_injects_cache_ttl_when_set() {
+        std::env::set_var("TEST_ANTHRO_KEY_TTL", "dummy");
+        let provider = AnthropicProvider::new(
+            "https://api.deepseek.com/anthropic",
+            "deepseek-v4-flash",
+            "TEST_ANTHRO_KEY_TTL",
+            30,
+            0,
+        )
+        .unwrap()
+        .with_cache_ttl("1h");
+
+        let msgs = vec![Message {
+            role: Role::System,
+            content: "You are a helpful agent.".into(),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            reasoning_signature: None,
+            usage: None,
+        }];
+        let tool = TestTool;
+        let tools: [&dyn Tool; 1] = [&tool];
+        let v = serde_json::to_value(provider.build_request(&msgs, &tools, false)).unwrap();
+        let sys = v["system"].as_array().expect("system must be blocks array");
+        assert_eq!(sys[0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(sys[0]["cache_control"]["ttl"], "1h");
+        let ts = v["tools"].as_array().expect("tools array present");
+        assert_eq!(ts[0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(ts[0]["cache_control"]["ttl"], "1h");
+        std::env::remove_var("TEST_ANTHRO_KEY_TTL");
+    }
+
+    /// L1：未配置 TTL 时 cache_control 保持 `{"type":"ephemeral"}`（无 ttl
+    /// 字段，端点默认 5 分钟），与旧行为逐字节一致。
+    #[test]
+    fn build_request_omits_cache_ttl_when_unset() {
+        std::env::set_var("TEST_ANTHRO_KEY_TTL2", "dummy");
+        let provider = AnthropicProvider::new(
+            "https://api.deepseek.com/anthropic",
+            "deepseek-v4-flash",
+            "TEST_ANTHRO_KEY_TTL2",
+            30,
+            0,
+        )
+        .unwrap();
+
+        let msgs = vec![Message {
+            role: Role::System,
+            content: "You are a helpful agent.".into(),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            reasoning_signature: None,
+            usage: None,
+        }];
+        let tool = TestTool;
+        let tools: [&dyn Tool; 1] = [&tool];
+        let v = serde_json::to_value(provider.build_request(&msgs, &tools, false)).unwrap();
+        let sys = v["system"].as_array().expect("system must be blocks array");
+        assert_eq!(sys[0]["cache_control"]["type"], "ephemeral");
+        assert!(
+            sys[0]["cache_control"].get("ttl").is_none(),
+            "unset TTL must stay omitted"
+        );
+        std::env::remove_var("TEST_ANTHRO_KEY_TTL2");
     }
 
     /// P0.1：cache_control 关闭时请求体与旧版本逐字节一致——system 为纯
@@ -1656,7 +1887,9 @@ mod tests {
         let mut tool_acc = Vec::new();
         let mut usage_acc = AnthropicUsageAcc::default();
 
-        let start = r#"{"type":"message_start","message":{"usage":{"input_tokens":20,"cache_read_input_tokens":80,"cache_creation_input_tokens":10,"output_tokens":1}}}"#;
+        // F2 修正后的 mock 口径：Anthropic 官方语义 input_tokens 已含缓存
+        // 读/写 token（110 = 非缓存 20 + read 80 + creation 10）。
+        let start = r#"{"type":"message_start","message":{"usage":{"input_tokens":110,"cache_read_input_tokens":80,"cache_creation_input_tokens":10,"output_tokens":1}}}"#;
         process_anthropic_event(
             Some("message_start"),
             start,
@@ -1699,14 +1932,66 @@ mod tests {
         }
         let u = usage.expect("a Usage chunk should be emitted on message_stop");
         assert_eq!(u.cache_hit_tokens, 80, "cache_read maps to cache_hit");
-        assert_eq!(u.cache_miss_tokens, 10, "cache_creation maps to cache_miss");
+        assert_eq!(u.cache_miss_tokens, 30, "miss = input - read (110 - 80)");
         assert_eq!(u.completion_tokens, 42, "output tokens from message_delta");
-        assert_eq!(u.prompt_tokens, 110, "input + cache read + cache creation");
+        assert_eq!(u.prompt_tokens, 110, "input_tokens already includes cache");
         assert_eq!(u.total_tokens, 152);
         assert_eq!(
             u.reasoning_tokens, 25,
             "billed reasoning tokens from output_tokens_details must survive"
         );
+    }
+
+    /// F2 回归：命中率恒等式 hit + miss == prompt 必须成立（否则命中率
+    /// KPI 与折扣计价失真）。覆盖非流式与流式两条记账路径。
+    #[test]
+    fn usage_cache_identity_holds_on_both_paths() {
+        let non_stream = AnthropicUsage {
+            input_tokens: 110,
+            output_tokens: 42,
+            cache_read_input_tokens: 80,
+            cache_creation_input_tokens: 10,
+            output_tokens_details: Some(AnthropicOutputTokensDetails {
+                reasoning_tokens: 25,
+            }),
+        }
+        .to_usage();
+        assert_eq!(
+            non_stream.cache_hit_tokens + non_stream.cache_miss_tokens,
+            non_stream.prompt_tokens,
+            "hit + miss must equal prompt (non-streaming)"
+        );
+        assert_eq!(non_stream.cache_hit_tokens, 80);
+        assert_eq!(non_stream.cache_miss_tokens, 30);
+
+        let acc = AnthropicUsageAcc {
+            input_tokens: 110,
+            output_tokens: 42,
+            cache_read: 80,
+            cache_creation: 10,
+            reasoning_tokens: 25,
+        }
+        .to_usage();
+        assert_eq!(
+            acc.cache_hit_tokens + acc.cache_miss_tokens,
+            acc.prompt_tokens,
+            "hit + miss must equal prompt (streaming)"
+        );
+        assert_eq!(acc.cache_hit_tokens, 80);
+        assert_eq!(acc.cache_miss_tokens, 30);
+
+        // 纯未命中场景：无缓存读时 hit=0、miss=全部输入。
+        let cold = AnthropicUsage {
+            input_tokens: 50,
+            output_tokens: 0,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 50,
+            output_tokens_details: None,
+        }
+        .to_usage();
+        assert_eq!(cold.cache_hit_tokens, 0);
+        assert_eq!(cold.cache_miss_tokens, 50);
+        assert_eq!(cold.prompt_tokens, 50);
     }
 
     // env 串行化锁与代理清除函数见 crate::test_util（跨 openai/embeddings
