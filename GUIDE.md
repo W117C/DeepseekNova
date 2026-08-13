@@ -136,6 +136,10 @@ timeout_secs = 120
 max_retries = 3
 reasoning_effort = "high"         # disabled | high | max（low/medium 配置串折叠为 high，DeepSeek 系）
 context_window = 128000
+# cache_prompt_key = "session-abc" # 可选：OpenAI 兼容端点的前缀缓存路由提示
+#                                   # （同 key 会话路由到同后端提升前缀命中；仅 OpenAI 官方
+#                                   #   支持，DeepSeek 等其他端点对未知字段接受度不一，
+#                                   #   默认不注入该字段，需按官方文档确认后再启用）
 
 # 命名模型与成本分账（可选）：被 model_pointers 与 /model 引用
 [[models]]

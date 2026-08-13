@@ -218,6 +218,28 @@ pub struct ProviderConfig {
     /// 关闭断点注入（请求体与旧版本逐字节一致）。
     #[serde(default)]
     pub cache_control: Option<bool>,
+
+    /// Anthropic 兼容路径 cache_control 断点的 TTL 显式设置："5m"（端点
+    /// 默认）或 "1h"（Anthropic 付费档，长会话/批量场景回本更快）。
+    /// `None` = 不注入 ttl 字段。注意 Anthropic 约束"长 TTL 块必须位于
+    /// 短 TTL 块之前"：本实现 system 与 tools 统一使用同一 TTL，天然满足。
+    #[serde(default)]
+    pub cache_ttl: Option<String>,
+
+    /// OpenAI 兼容路径的 `prompt_cache_key` 路由提示：同一会话复用相同
+    /// key，引导服务端路由到同一后端，提升前缀缓存命中率（OpenAI 官方
+    /// 支持；DeepSeek 等其他端点对未知字段的接受度不一，故默认关闭，
+    /// 仅显式配置时才注入该字段）。
+    #[serde(default)]
+    pub cache_prompt_key: Option<String>,
+
+    /// 是否启用 L2 统一缓存层（`CachingProvider` 精确匹配缓存装饰器）：
+    /// 对完整请求做客户端精确匹配，覆盖跨会话重复 / 无原生缓存端点 /
+    /// 本地模型等 L1（provider 原生前缀缓存）覆盖不到的场景。
+    /// `None`/`false` = 关闭（默认）；`true` = build_provider 时包装
+    /// 一层有界 + TTL 的精确缓存。语义缓存不在本开关内（默认关闭）。
+    #[serde(default)]
+    pub cache_exact: Option<bool>,
 }
 
 fn default_timeout() -> u64 {
@@ -886,6 +908,19 @@ pub struct AgentConfig {
     /// 反思输入的最后完成文本上限（字符，默认 4000）。
     #[serde(default = "default_reflect_max_chars")]
     pub reflect_max_chars: usize,
+
+    /// 轮末大工具结果缩容阈值（tokens）：> 阈值的工具结果在轮末缩容，
+    /// 当轮看全文、后续看摘要、可按 call_id 重读（Reasonix 借鉴：对齐
+    /// 3000 token 的 turn-end auto-compaction，降低每轮新增占比以提升
+    /// 前缀缓存命中率）。`None` = 保持现状（仅压缩路径缩容）。
+    #[serde(default)]
+    pub turn_end_result_cap_tokens: Option<u32>,
+
+    /// 上下文占用达到预算的该比例时提前预防性缩容（Reasonix 借鉴：
+    /// 40% 预防性 shrink，避免 80% 紧急时一次性大改缓存前缀）。
+    /// `None` = 关闭（保持现状）。建议范围 0.0..=1.0。
+    #[serde(default)]
+    pub preventive_shrink_ratio: Option<f32>,
 }
 
 fn default_max_steps() -> usize {
@@ -929,6 +964,8 @@ impl Default for AgentConfig {
             reflect_on_failure: true,
             reflect_model: None,
             reflect_max_chars: default_reflect_max_chars(),
+            turn_end_result_cap_tokens: None,
+            preventive_shrink_ratio: None,
         }
     }
 }
@@ -2266,6 +2303,12 @@ impl AgentConfig {
             self.reflect_model = other.reflect_model;
         }
         self.reflect_max_chars = other.reflect_max_chars;
+        if other.turn_end_result_cap_tokens.is_some() {
+            self.turn_end_result_cap_tokens = other.turn_end_result_cap_tokens;
+        }
+        if other.preventive_shrink_ratio.is_some() {
+            self.preventive_shrink_ratio = other.preventive_shrink_ratio;
+        }
     }
 }
 
@@ -2682,6 +2725,9 @@ mod tests {
                 reasoning_effort: None,
                 extra_body: None,
                 cache_control: None,
+                cache_ttl: None,
+                cache_prompt_key: None,
+                cache_exact: None,
                 context_window: None,
             }],
             ..Config::default()
@@ -3531,6 +3577,49 @@ mod tests {
             Some("deepseek-v4-flash")
         );
         assert_eq!(c.agent.auto_router_max_chars, 4_000);
+    }
+
+    /// P2（Reasonix 借鉴）：轮末缩容阈值与预防性缩容比例的默认值与解析。
+    #[test]
+    fn agent_cache_shrink_fields_defaults_and_parse() {
+        let d = Config::default();
+        assert!(
+            d.agent.turn_end_result_cap_tokens.is_none(),
+            "默认不启用轮末缩容（保持现状）"
+        );
+        assert!(
+            d.agent.preventive_shrink_ratio.is_none(),
+            "默认不启用预防性缩容（保持现状）"
+        );
+
+        let c: Config = toml::from_str(
+            "[agent]\nturn_end_result_cap_tokens = 3000\npreventive_shrink_ratio = 0.4\n",
+        )
+        .unwrap();
+        assert_eq!(c.agent.turn_end_result_cap_tokens, Some(3000));
+        assert_eq!(c.agent.preventive_shrink_ratio, Some(0.4));
+    }
+
+    /// P2：merge 语义——显式设置覆盖默认；未设置的一侧保持既有值。
+    #[test]
+    fn agent_cache_shrink_merge_semantics() {
+        let mut base = AgentConfig::default();
+        base.merge(AgentConfig {
+            turn_end_result_cap_tokens: Some(5000),
+            ..Default::default()
+        });
+        assert_eq!(base.turn_end_result_cap_tokens, Some(5000));
+
+        // 未设置的一侧 merge 不覆盖既有值。
+        base.merge(AgentConfig::default());
+        assert_eq!(base.turn_end_result_cap_tokens, Some(5000));
+        assert!(base.preventive_shrink_ratio.is_none());
+
+        base.merge(AgentConfig {
+            preventive_shrink_ratio: Some(0.4),
+            ..Default::default()
+        });
+        assert_eq!(base.preventive_shrink_ratio, Some(0.4));
     }
 
     #[test]

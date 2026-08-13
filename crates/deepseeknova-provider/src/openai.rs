@@ -36,6 +36,11 @@ pub struct OpenAIProvider {
     /// Upper bound on generated tokens; written into the request body when set
     /// (otherwise the endpoint default applies).
     max_tokens: Option<u32>,
+    /// Optional `prompt_cache_key` routing hint (OpenAI-compatible endpoints
+    /// that support it): reusing the same key across a session routes requests
+    /// to the same backend, improving prefix-cache hit rate. Default off —
+    /// only injected when explicitly configured.
+    prompt_cache_key: Option<String>,
 }
 
 impl OpenAIProvider {
@@ -54,7 +59,21 @@ impl OpenAIProvider {
         max_retries: u32,
     ) -> Result<Self, DeepseeknovaError> {
         let api_key = crate::resolve_api_key_env_value(api_key_env)?;
+        Self::new_with_key(base_url, model, api_key, timeout_secs, max_retries)
+    }
 
+    /// Build a provider with the API key passed directly (from config
+    /// `api_key` field) instead of an environment variable. Wiring fix:
+    /// `ProviderConfig.api_key` was previously ignored by the factory, so a
+    /// configured direct key silently fell back to the env var (wrong-key
+    /// auth failures against alternate endpoints).
+    pub fn new_with_key(
+        base_url: &str,
+        model: &str,
+        api_key: String,
+        timeout_secs: u64,
+        max_retries: u32,
+    ) -> Result<Self, DeepseeknovaError> {
         let client = Client::builder()
             .timeout(Duration::from_secs(timeout_secs))
             .build()
@@ -74,6 +93,7 @@ impl OpenAIProvider {
             tool_cache: ToolSchemaCache::with_capacity(16),
             temperature: None,
             max_tokens: None,
+            prompt_cache_key: None,
         })
     }
 
@@ -106,6 +126,15 @@ impl OpenAIProvider {
     /// (which may silently cap long outputs).
     pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
         self.max_tokens = Some(max_tokens);
+        self
+    }
+
+    /// Set the optional `prompt_cache_key` routing hint for OpenAI-compatible
+    /// endpoints that support it. Requests sharing the same key are routed to
+    /// the same backend, improving prefix-cache hit rate for a session.
+    /// Leave unset (default) to keep the request body unchanged.
+    pub fn with_prompt_cache_key(mut self, key: impl Into<String>) -> Self {
+        self.prompt_cache_key = Some(key.into());
         self
     }
 
@@ -179,6 +208,11 @@ impl OpenAIProvider {
         }
         if let Some(temp) = self.temperature {
             req["temperature"] = serde_json::json!(temp);
+        }
+        if let Some(ref key) = self.prompt_cache_key {
+            // OpenAI prompt-cache routing hint：同 key 会话路由到同一后端，
+            // 提升前缀缓存命中率。仅显式配置时注入（其他端点接受度不一）。
+            req["prompt_cache_key"] = serde_json::json!(key);
         }
         if let Some(serde_json::Value::Object(ref eb_map)) = extra_body {
             for (k, v) in eb_map {
@@ -776,6 +810,53 @@ mod tests {
             "unset temperature must be omitted"
         );
         std::env::remove_var("DPNOVA_TEMP_KEY2");
+    }
+
+    /// L1：配置 prompt_cache_key 时必须写入请求体（OpenAI 前缀缓存路由提示）。
+    #[test]
+    fn build_request_injects_prompt_cache_key_when_set() {
+        std::env::set_var("DPNOVA_CACHEKEY_KEY", "sk-test");
+        let provider = OpenAIProvider::new(
+            "https://api.deepseek.com",
+            "deepseek-v4-flash",
+            "DPNOVA_CACHEKEY_KEY",
+            30,
+            0,
+        )
+        .unwrap()
+        .with_prompt_cache_key("session-abc");
+        let msgs = [user_msg("hi")];
+        let tools: Vec<&dyn Tool> = Vec::new();
+        let body = provider.build_request(&msgs, &tools, false);
+        assert_eq!(
+            body["prompt_cache_key"].as_str(),
+            Some("session-abc"),
+            "prompt_cache_key must reach the request body"
+        );
+        std::env::remove_var("DPNOVA_CACHEKEY_KEY");
+    }
+
+    /// L1：未配置 prompt_cache_key 时请求体不得出现该字段（默认关闭，
+    /// 避免向不支持的端点发送未知字段）。
+    #[test]
+    fn build_request_omits_prompt_cache_key_when_unset() {
+        std::env::set_var("DPNOVA_CACHEKEY_KEY2", "sk-test");
+        let provider = OpenAIProvider::new(
+            "https://api.deepseek.com",
+            "deepseek-v4-flash",
+            "DPNOVA_CACHEKEY_KEY2",
+            30,
+            0,
+        )
+        .unwrap();
+        let msgs = [user_msg("hi")];
+        let tools: Vec<&dyn Tool> = Vec::new();
+        let body = provider.build_request(&msgs, &tools, false);
+        assert!(
+            body.get("prompt_cache_key").is_none(),
+            "unset prompt_cache_key must stay omitted"
+        );
+        std::env::remove_var("DPNOVA_CACHEKEY_KEY2");
     }
 
     /// build_tools must produce one entry per tool (sorted), and return `None`
