@@ -23,4 +23,4 @@
 
 ## 结果归档
 
-`evals/results/` 存放每次运行报告（含 token/命中率/轮数），命名 `<date>-<tag>.json`。
+`evals/results/` 存放每次运行报告（含 token/命中率/轮数），命名 `<date>-<tag>.json`——**规划中，尚未落地**。

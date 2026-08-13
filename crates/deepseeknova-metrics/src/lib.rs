@@ -498,6 +498,10 @@ pub struct ScorecardAggregate {
     /// 各维度的平均值。
     pub avg: ScoreDimensions,
     /// 综合指数（composite）的平均值（加权口径，见 [`composite_index`]）。
+    /// 注意与 [`Scorecard::overall`] 语义不同：本字段是 aggregate 维度下
+    /// composite 的均值（= 综合指数），而单张评分卡的 `overall()` 是
+    /// governance/verification/reflection/review 四维均值（不含 composite），
+    /// 两者不可混用。
     pub avg_overall: f32,
     /// 平均分最低的维度名（governance/verification/reflection/review/
     /// protocol/composite 六维，固定顺序取首个最小值）；空输入为 `""`。

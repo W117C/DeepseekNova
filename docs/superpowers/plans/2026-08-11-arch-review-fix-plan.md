@@ -7,7 +7,16 @@
 > 约定：worker 只编辑自己分配的文件；改动前用 `read_file` 复核行号（审查报告行号为
 > 快照，可能 ± 数行）；新增 pub 项必须补 `///` 中文文档注释（missing_docs lint）；
 > 跨 crate 变更按 AGENTS.md §1.1 完整协议执行
-> 状态：部分完成（2026-08-13 复核）——T1/T2/T5 已落地，其余待逐项核实；本行非「未开始」。
+> 状态：已逐项核实（2026-08-13）——已落地：T1（tar -I deny 集，readonly.rs:1041）、
+> T2（is_path_allowed 接入 fs/grep/glob/ls，fs.rs:553）、T3（Sandbox 能力位+装配降级告警）、
+> T4（tool_use/tool_result/thinking 回放）、T5（lsp resolve_path 走 sanitize）、
+> T6（MCP server-request 应答，stdio+HTTP）、T7（tavily SSRF+5MB 上限）、
+> T8（五段深合并）、T9（Snapshot Vec<u8>+existed）、T10（缓存契约四修）、
+> T11（run 局部 findings 暂存区+并发隔离）、T14（serve Semaphore+审批 RAII）、
+> T15（流式退出改返回码）、T16（schema 三态保守）、T17（content_id 换 sha2）、
+> T18（锁外嵌入扫描）、T19（hook 异步化）；部分落地：T12（缺 RecursiveDelegateTool
+> enforce_capability 能力门）、T13（缺生产路径 ModelResolver 装配，仅测试装配）；
+> 无未落地项。详见 /tmp/arch-review-verification.md。
 
 ---
 

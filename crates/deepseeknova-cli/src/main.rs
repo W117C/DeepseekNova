@@ -745,16 +745,7 @@ async fn run_cli() -> Result<i32, DeepseeknovaError> {
                 use deepseeknova_provider::cost::ModelRole;
                 use deepseeknova_provider::factory::ReasoningEffort;
                 // /mcp：列出已启用 server 并做实时连接探测（短超时 spawn 检查存活）。
-                let mcp_server_infos: Vec<deepseeknova_tui::McpServerInfo> = config
-                    .mcp_servers
-                    .iter()
-                    .filter(|s| s.enabled)
-                    .map(|s| deepseeknova_tui::McpServerInfo {
-                        name: s.name.clone(),
-                        command: s.command.clone(),
-                        args: s.args.clone(),
-                    })
-                    .collect();
+                let mcp_server_infos = mcp_server_infos(&config);
                 // /undo：与 `checkpoint` 子命令同一快照库。
                 let undo_controller = Arc::new(tui_undo::TuiUndoController {
                     path: std::env::current_dir()
@@ -946,16 +937,7 @@ async fn run_cli() -> Result<i32, DeepseeknovaError> {
             // REPL 扩展能力：/undo（checkpoint 快照库）与 /mcp status（实时探测）。
             // 与 TUI 路径同一数据源与控制器实现（tui_undo::TuiUndoController /
             // mcp_probe::CliMcpProbe），保证 REPL/TUI 行为一致。
-            let mcp_server_infos: Vec<deepseeknova_tui::McpServerInfo> = config
-                .mcp_servers
-                .iter()
-                .filter(|s| s.enabled)
-                .map(|s| deepseeknova_tui::McpServerInfo {
-                    name: s.name.clone(),
-                    command: s.command.clone(),
-                    args: s.args.clone(),
-                })
-                .collect();
+            let mcp_server_infos = mcp_server_infos(&config);
             let repl_caps = chat::ReplCaps {
                 undo: Some(std::sync::Arc::new(tui_undo::TuiUndoController {
                     path: std::env::current_dir()
@@ -1604,16 +1586,7 @@ async fn run_cli() -> Result<i32, DeepseeknovaError> {
             // REPL 扩展能力：/undo（checkpoint 快照库）与 /mcp status（实时探测）。
             // 与 TUI 路径同一数据源与控制器实现（tui_undo::TuiUndoController /
             // mcp_probe::CliMcpProbe），保证 REPL/TUI 行为一致。
-            let mcp_server_infos: Vec<deepseeknova_tui::McpServerInfo> = config
-                .mcp_servers
-                .iter()
-                .filter(|s| s.enabled)
-                .map(|s| deepseeknova_tui::McpServerInfo {
-                    name: s.name.clone(),
-                    command: s.command.clone(),
-                    args: s.args.clone(),
-                })
-                .collect();
+            let mcp_server_infos = mcp_server_infos(&config);
             let repl_caps = chat::ReplCaps {
                 undo: Some(std::sync::Arc::new(tui_undo::TuiUndoController {
                     path: std::env::current_dir()
@@ -2092,6 +2065,21 @@ fn sessions_root(config: &deepseeknova_config::Config) -> Option<std::path::Path
     } else {
         Some(std::path::PathBuf::from(&config.session.root))
     }
+}
+
+/// 把配置中的已启用 MCP server 映射为 TUI 展示用的
+/// [`deepseeknova_tui::McpServerInfo`]（TUI 与 REPL `/mcp status` 共用）。
+fn mcp_server_infos(config: &deepseeknova_config::Config) -> Vec<deepseeknova_tui::McpServerInfo> {
+    config
+        .mcp_servers
+        .iter()
+        .filter(|s| s.enabled)
+        .map(|s| deepseeknova_tui::McpServerInfo {
+            name: s.name.clone(),
+            command: s.command.clone(),
+            args: s.args.clone(),
+        })
+        .collect()
 }
 
 /// Build the chat persistence context for one session.

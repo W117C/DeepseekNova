@@ -644,6 +644,9 @@ impl AnthropicUsage {
     /// 把 Anthropic 原生用量映射为核心 `Usage`，保留 context-cache 读/写与
     /// 计费推理 token（与流式路径 `AnthropicUsageAcc::to_usage` 口径一致）。
     fn to_usage(&self) -> Usage {
+        // 假设 DeepSeek 记账口径：input_tokens 不含缓存 token，故 prompt 需加上
+        // cache_read/cache_creation；若端点 input_tokens 已含缓存 token，
+        // 此公式会双重计数。
         let prompt_tokens =
             self.input_tokens + self.cache_read_input_tokens + self.cache_creation_input_tokens;
         Usage {
@@ -766,6 +769,8 @@ impl AnthropicUsageAcc {
     }
 
     fn to_usage(&self) -> Usage {
+        // 与 `AnthropicUsage::to_usage` 同一记账口径：DeepSeek 的 input_tokens
+        // 不含缓存 token，需加 cache_read/cache_creation；若已含则双重计数。
         let prompt_tokens = self.input_tokens + self.cache_read + self.cache_creation;
         Usage {
             prompt_tokens,
