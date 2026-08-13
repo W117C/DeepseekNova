@@ -762,12 +762,12 @@ async fn handle_slash_command(
             let user_skills = dirs::home_dir()
                 .map(|h| h.join(".deepseeknova/skills"))
                 .unwrap_or_default();
-            // 激活 deprecated 过滤：从会话工作区（persist.workspace 与 agent
-            // 构建同源，均来自 current_dir）的 fitness.json 读取已弃用技能名，
-            // 与 runtime 装配点同语义；文件缺失/损坏 = 空集 = 不过滤。
-            let deprecated = deprecated_skills_for_workspace(
-                persist.as_ref().and_then(|p| p.workspace.as_deref()),
-            );
+            // 激活 deprecated 过滤：工作区直接取 current_dir（与 agent 构建
+            // 同源），不依赖会话持久化开关（persist=None 时同样过滤）；
+            // fitness.json 缺失/损坏 = 空集 = 不过滤。
+            let workspace_dir = std::env::current_dir().ok();
+            let deprecated =
+                deprecated_skills_for_workspace(workspace_dir.as_deref().and_then(|p| p.to_str()));
             let resolver = SkillResolver::new()
                 .with_deprecated(deprecated)
                 .add_preloaded(
