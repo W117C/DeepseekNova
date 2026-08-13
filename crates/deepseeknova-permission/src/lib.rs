@@ -573,6 +573,10 @@ pub struct PermissionGate {
     audit_logger: Option<Arc<dyn AuditLogger>>,
     /// gate 拒绝事件的自增序号（生成 call_id）。
     audit_seq: std::sync::atomic::AtomicU64,
+    /// 会话决策缓存命中次数（A.4 命中率度量）。
+    cache_hits: std::sync::atomic::AtomicU64,
+    /// 会话决策缓存未命中次数（A.4 命中率度量）。
+    cache_misses: std::sync::atomic::AtomicU64,
 }
 
 impl PermissionGate {
@@ -591,6 +595,8 @@ impl PermissionGate {
             allow_project_scoped: false,
             audit_logger: None,
             audit_seq: std::sync::atomic::AtomicU64::new(0),
+            cache_hits: std::sync::atomic::AtomicU64::new(0),
+            cache_misses: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -727,50 +733,58 @@ impl PermissionGate {
 
         // Check session cache (user decisions take precedence over readonly auto-allow)
         let cache_key = compute_cache_key(tool_name, args);
-        if let Ok(cache) = self.session_cache.lock() {
-            if let Some(cached) = cache.get(&cache_key) {
-                // T10：缓存命中后仍先对 deny 表做一次匹配——deny 规则恒优先于
-                // 任何缓存决策（缓存 Allow/Ask 不得绕过 deny），"deny > ask >
-                // allow" 契约对缓存命中同样成立。
-                if let Some(r) =
-                    self.policy
-                        .matching_rule(tool_name, &preflight.args_value, &self.policy.deny)
-                {
-                    let v = CheckVerdict::deny(format!(
-                        "blocked by deny rule: tool={} subject={:?}",
-                        r.tool, r.subject
-                    ));
-                    self.audit_denial(tool, args, None, v.reason());
-                    return v;
-                }
-                return match *cached {
-                    Decision::Allow => {
-                        // S-H1：ask 表对称复查——运行期追加的 ask 规则（如
-                        // with_subject 新规则）不得被缓存 Allow 绕过：命中即返回
-                        // Ask 而非直接放行。对称 finalize 中 explicit_ask 的语义
-                        // （ask 规则命中时只读免询问被抑制，见 981-985 行）。
-                        if let Some(r) = self.policy.matching_rule(
-                            tool_name,
-                            &preflight.args_value,
-                            &self.policy.ask,
-                        ) {
-                            CheckVerdict::ask(format!(
-                                "ask rule now requires approval: tool={} subject={:?}",
-                                r.tool, r.subject
-                            ))
-                        } else {
-                            CheckVerdict::allow()
-                        }
-                    }
-                    Decision::Ask => CheckVerdict::ask("cached: requires approval"),
-                    Decision::Deny => {
-                        let v = CheckVerdict::deny("cached: denied by user");
+        match self.session_cache.lock() {
+            Ok(cache) => {
+                if let Some(cached) = cache.get(&cache_key) {
+                    // A.4：决策缓存命中计数（命中即用户已有裁决，免询问）。
+                    self.cache_hits.fetch_add(1, Ordering::Relaxed);
+                    // T10：缓存命中后仍先对 deny 表做一次匹配——deny 规则恒优先于
+                    // 任何缓存决策（缓存 Allow/Ask 不得绕过 deny），"deny > ask >
+                    // allow" 契约对缓存命中同样成立。
+                    if let Some(r) =
+                        self.policy
+                            .matching_rule(tool_name, &preflight.args_value, &self.policy.deny)
+                    {
+                        let v = CheckVerdict::deny(format!(
+                            "blocked by deny rule: tool={} subject={:?}",
+                            r.tool, r.subject
+                        ));
                         self.audit_denial(tool, args, None, v.reason());
-                        v
+                        return v;
                     }
-                };
+                    return match *cached {
+                        Decision::Allow => {
+                            // S-H1：ask 表对称复查——运行期追加的 ask 规则（如
+                            // with_subject 新规则）不得被缓存 Allow 绕过：命中即返回
+                            // Ask 而非直接放行。对称 finalize 中 explicit_ask 的语义
+                            // （ask 规则命中时只读免询问被抑制，见 981-985 行）。
+                            if let Some(r) = self.policy.matching_rule(
+                                tool_name,
+                                &preflight.args_value,
+                                &self.policy.ask,
+                            ) {
+                                CheckVerdict::ask(format!(
+                                    "ask rule now requires approval: tool={} subject={:?}",
+                                    r.tool, r.subject
+                                ))
+                            } else {
+                                CheckVerdict::allow()
+                            }
+                        }
+                        Decision::Ask => CheckVerdict::ask("cached: requires approval"),
+                        Decision::Deny => {
+                            let v = CheckVerdict::deny("cached: denied by user");
+                            self.audit_denial(tool, args, None, v.reason());
+                            v
+                        }
+                    };
+                }
             }
+            // 锁失败视为未命中（保守：走完整策略裁决，不因锁争用免询问）。
+            Err(_) => {}
         }
+        // A.4：决策缓存未命中计数（无缓存裁决，需走完整策略裁决）。
+        self.cache_misses.fetch_add(1, Ordering::Relaxed);
 
         // 策略裁决（与 preview 同源）。
         let outcome = self.finalize(tool_name, read_only, &preflight);
@@ -1120,6 +1134,16 @@ impl PermissionGate {
         if let Ok(mut cache) = self.session_cache.lock() {
             cache.clear();
         }
+    }
+
+    /// 会话决策缓存命中/未命中计数快照（A.4 命中率度量）。
+    /// 命中 = 用户已有裁决、免询问直接返回；未命中 = 需走完整策略裁决。
+    pub fn cache_stats(&self) -> (u64, u64) {
+        use std::sync::atomic::Ordering;
+        (
+            self.cache_hits.load(Ordering::Relaxed),
+            self.cache_misses.load(Ordering::Relaxed),
+        )
     }
 
     /// 当前策略中的 deny 规则（冻结用）。
@@ -1561,6 +1585,37 @@ mod security_fix_tests {
             Decision::Ask,
             "ask rule must override cached allow"
         );
+    }
+
+    #[test]
+    fn decision_cache_stats_count_hits_and_misses() {
+        // A.4：决策缓存命中率度量——未命中（首次 check）与命中（缓存裁决
+        // 免询问）的计数分别递增，供 serve/scorecard 观测缓存收益。
+        let gate = PermissionGate::new(Policy {
+            mode: Decision::Allow,
+            allow: vec![],
+            ask: vec![],
+            deny: vec![],
+        });
+        let tool = FixTool;
+        let args = r#"{"command": "ls"}"#;
+        assert_eq!(gate.cache_stats(), (0, 0), "fresh gate has no cache traffic");
+
+        // 首次 check：无缓存裁决 → 未命中计数 +1。
+        let v = gate.check(&tool, args);
+        assert_eq!(v.decision(), Decision::Allow);
+        assert_eq!(gate.cache_stats(), (0, 1), "first check must be a miss");
+
+        // 用户批准进缓存后再次 check：命中缓存 → 命中计数 +1。
+        gate.cache_decision("bash", args, Decision::Allow);
+        let v = gate.check(&tool, args);
+        assert_eq!(v.decision(), Decision::Allow);
+        assert_eq!(gate.cache_stats(), (1, 1), "cached check must be a hit");
+
+        // 不同参数：另一未命中。
+        let other = r#"{"command": "pwd"}"#;
+        let _ = gate.check(&tool, other);
+        assert_eq!(gate.cache_stats(), (1, 2), "new args must miss again");
     }
 
     #[test]
