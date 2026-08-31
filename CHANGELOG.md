@@ -6,6 +6,8 @@ All notable changes to DeepseekNova will be documented in this file.
 
 > 测试数口径：README badge / 技术栈表的测试数为当前权威值（Linux CI 维护）；下方历史条目中出现的测试数（如「1729」）为对应提交时点的快照，非当前值。
 
+## [0.6.0] — 2026-08-31
+
 ### ⚠ Breaking
 
 - **CLI 退出码重排**（消除与 eval 子命令退出码 2/3 的冲突）：

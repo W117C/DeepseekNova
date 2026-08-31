@@ -54,7 +54,7 @@ else
     sed -i "s/version = \"$CURRENT_VERSION\"/version = \"$NEW_VERSION\"/g" Cargo.toml
 fi
 
-echo "✅ Cargo.toml 已更新: $CURRENT_VERSION → $NEW_VERSION（workspace 版本 + 内部依赖钉）"
+echo "✅ Cargo.toml 已更新: $CURRENT_VERSION → ${NEW_VERSION}（workspace 版本 + 内部依赖钉）"
 echo ""
 
 # ── 同步 npm 包版本 ───────────────────────────────────────────────
