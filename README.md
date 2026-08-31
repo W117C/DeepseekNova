@@ -63,8 +63,10 @@ Rust 从头构建的 AI Agent 框架，不是套壳—— 是为 DeepSeek 模型
 - **API 级前缀缓存** — DeepSeek V4 磁盘级自动前缀缓存（字节级前缀命中
   即复用）；`cache_hit_tokens` / `cache_miss_tokens` 来自 provider 返回的
   usage，逐请求透传
-- **会话级命中率统计** — [规划中]：跨轮次 prompt prefix 命中率的实时统计
-  尚未落地（Usage 相关字段当前恒为 0）
+- **会话级命中率统计** — TUI 状态栏 `⌁87%` 实时显示跨轮次 prompt prefix
+  命中率（逐次 LLM 调用饱和累计，含子代理与 plan mode；<30% 黄 / ≥70%
+  绿，对齐 runtime 告警阈值；`/new` `/resume` 随会话清零），评分卡
+  `cache_hit_rate` 会话末落盘
 - **Token 追踪** — 单请求级输入/输出/推理/缓存 token 实时统计，精确成本计算
 - **预算控制** — 单会话 Token 上限，超额自动停止
 

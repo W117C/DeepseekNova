@@ -81,6 +81,9 @@ impl CommandHandler for NewCmd {
                     ctx.app.clear_display();
                     ctx.app.last_prompt = None;
                     ctx.app.sessions_loaded = false;
+                    // 会话切换：cache 命中率统计随新会话重置。
+                    ctx.app.session_cache_hit = 0;
+                    ctx.app.session_cache_miss = 0;
                     ctx.app.show_notice(tr.t(Key::NoticeNewSession));
                 }
                 Err(e) => ctx

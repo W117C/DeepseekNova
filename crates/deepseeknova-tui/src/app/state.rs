@@ -310,6 +310,12 @@ pub struct AppState {
     pub run_started_at: Option<std::time::Instant>,
     pub turn: usize,
     pub usage: Option<Usage>,
+    /// 会话级 prefix cache 累计命中 token（跨轮次饱和累加自每次 LLM 调用的
+    /// `RunEvent::Usage.cache_hit_tokens`，含子代理与 plan mode 调用）；
+    /// `/new`、`/resume` 切换会话时清零。
+    pub session_cache_hit: u64,
+    /// 会话级 prefix cache 累计未命中 token（口径同 [`AppState::session_cache_hit`]）。
+    pub session_cache_miss: u64,
     /// 会话累计成本（美元），由 router ledger 每帧刷新。
     pub total_cost_usd: Option<f64>,
     /// 已配置至少一个 provider（CLI 注入；欢迎块/状态行 setup 引导依据）。
@@ -711,6 +717,12 @@ impl AppState {
     /// 单一入口消费 RunEvent：委托消息树 + 单独消费 Usage。
     pub fn apply_run_event(&mut self, ev: RunEvent) {
         if let RunEvent::Usage(usage) = &ev {
+            self.session_cache_hit = self
+                .session_cache_hit
+                .saturating_add(u64::from(usage.cache_hit_tokens));
+            self.session_cache_miss = self
+                .session_cache_miss
+                .saturating_add(u64::from(usage.cache_miss_tokens));
             self.usage = Some(usage.clone());
         }
         self.conversation.apply(ev, self.tr);
@@ -1041,6 +1053,9 @@ impl AppState {
 
     pub fn restore_conversation(&mut self, lines: Vec<ResumedLine>) {
         self.clear_display();
+        // 会话切换：cache 命中率统计随会话重置（/clear 保留，仅 /resume 走此路径）。
+        self.session_cache_hit = 0;
+        self.session_cache_miss = 0;
         for line in lines {
             match line.role {
                 ResumedRole::User => {
@@ -1418,6 +1433,29 @@ mod tests {
         app.apply_run_event(RunEvent::Done(done_output("")));
         assert!(app.usage.is_some());
         assert_eq!(app.conversation.segment_count(), 1);
+    }
+
+    #[test]
+    fn session_cache_totals_accumulate_and_reset() {
+        let mut app = AppState::default();
+        let mk_usage = |hit: u32, miss: u32| Usage {
+            prompt_tokens: 10,
+            completion_tokens: 1,
+            total_tokens: 11,
+            reasoning_tokens: 0,
+            cache_hit_tokens: hit,
+            cache_miss_tokens: miss,
+        };
+        app.apply_run_event(RunEvent::Usage(mk_usage(100, 40)));
+        app.apply_run_event(RunEvent::Usage(mk_usage(30, 0)));
+        assert_eq!(app.session_cache_hit, 130);
+        assert_eq!(app.session_cache_miss, 40);
+        // /clear 仅清显示，统计跨轮保留（同会话）。
+        app.clear_display();
+        assert_eq!((app.session_cache_hit, app.session_cache_miss), (130, 40));
+        // /resume 走 restore_conversation：会话切换，统计清零。
+        app.restore_conversation(vec![]);
+        assert_eq!((app.session_cache_hit, app.session_cache_miss), (0, 0));
     }
 
     #[test]

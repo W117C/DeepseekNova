@@ -48,8 +48,8 @@ A Rust-from-scratch AI agent framework — not a wrapper. Built specifically for
   auto model+thinking routing (`[agent] auto_route = true`), and durable
   serve runs (`GET /v1/runs` / `POST /v1/runs/{id}/resume`)
 - **Prefix-cache support** — DeepSeek V4 API-level automatic prefix caching,
-  per-request cache-hit token tracking, and budget control (cross-turn
-  session-level hit-rate statistics are [planned])
+  per-request cache-hit token tracking, session-level cross-turn hit-rate
+  stats (live TUI status segment, threshold-colored), and budget control
 - **Sandboxed execution** — macOS Seatbelt / Linux bubblewrap isolation;
   allow/ask/deny rule gating (`deny > ask > allow > default mode`) with session
   caching and optional rate limiting; a four-layer read-only shell command

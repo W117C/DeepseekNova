@@ -28,6 +28,20 @@ All notable changes to DeepseekNova will be documented in this file.
   与 `ContextProvider` trait。workspace 由 22 个 crate 减为 21 个；已引用这些
   符号的嵌入方需改用 `RunEventStream` 或自有装配。
 
+### Added（2026-08-31 会话级命中率轮）
+
+- **会话级 prefix cache 命中率统计**：TUI 状态栏新增 `⌁87%` 实时段——
+  跨轮次对每次 LLM 调用（主循环 / 子代理 / plan mode）的
+  `cache_hit_tokens` / `cache_miss_tokens` 饱和累计，实时渲染命中率并
+  三档着色（<30% 黄，对齐 runtime `CACHE_HIT_WARN_THRESHOLD` 告警；
+  ≥70% 绿；其余 dim）；无可评估数据（provider 未上报缓存统计）不显示。
+  复位语义：`/new`、`/resume` 随会话切换清零，`/clear` 仅清显示保留
+  统计。补 4 条单测（缺省隐藏 / 三档边界 / fit 集成 / 累计与复位）。
+- **修复 clippy 1.98 新 lint 与测试编译破损**：`chunks_exact(4)` →
+  `as_chunks::<4>()`（core/memory、graph/store）；provider 测试
+  `ProviderConfig` 初始化补 `cache_ttl` / `cache_prompt_key` / `cache_exact`
+  三字段；全仓 `cargo fmt` 适配 rustfmt 1.98（CI `@stable` 不锁版本）。
+
 ### Fixed（2026-08-10 全面体检轮）
 
 - **`config` 命令凭据脱敏**：内联 `api_key` 与常见认证头（authorization /

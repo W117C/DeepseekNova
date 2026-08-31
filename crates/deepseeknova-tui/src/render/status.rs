@@ -11,6 +11,14 @@ use crate::theme::{SemanticTone, Theme};
 
 /// 状态行分段优先级（数字越大越先保留）。宽度不足时按此顺序丢弃：
 /// 先丢 ctx → 模型/运行态/权限模式 → 退出警示。
+///
+/// 会话 prefix cache 命中率段（资源健康信息：低于 ctx、高于 turn——
+/// 命中率异常是成本异常的前兆）。阈值与 runtime/metrics.rs 的 30% 告警对齐。
+const PRIO_CACHE: u8 = 7;
+/// 命中率“健康”下限（≥70% 绿色；DeepSeek 前缀缓存稳定前缀下应达 80%+）。
+const CACHE_OK_PCT: u64 = 70;
+/// 命中率告警阈值（<30% 黄色，对齐 runtime `CACHE_HIT_WARN_THRESHOLD`）。
+const CACHE_WARN_PCT: u64 = 30;
 /// Claude Code 风格精简：只保留运行态 + 模型 + ctx 占用 + 权限模式 +
 /// 退出警示；成本/turn/usage/lines 等明细挪到 `/cost` 等命令查看。
 const PRIO_QUIT: u8 = 10;
@@ -200,6 +208,9 @@ pub fn fit_status_line(app: &AppState, theme: &Theme, width: usize) -> Line<'sta
         Line::from(vec![Span::styled(model_text, badge_style(theme))]),
     ));
     if let Some(seg) = grok_ctx_segment(app, theme) {
+        left.push(seg);
+    }
+    if let Some(seg) = session_cache_segment(app, theme) {
         left.push(seg);
     }
     // 中栏：回合计数 + 视图标签（All 显示总数，Single 显示 `选中/总数`）。
@@ -456,6 +467,33 @@ fn ctx_usage_color(theme: &Theme, pct: u64) -> Color {
 /// [`ctx_usage_color`] 渐变。
 ///
 /// 旧格式 `ctx_segment` 保留给 status_segments 测试路径（i18n 模板）。
+/// 会话级 prefix cache 命中率段：`⌁71%`，三档着色（<30% 黄 / ≥70% 绿 /
+/// 其余默认前景）。数据源为 [`AppState::session_cache_hit`] /
+/// [`AppState::session_cache_miss`]（跨轮次饱和累计，`/new` `/resume` 清零）；
+/// 可评估 token（hit+miss）为 0 时返回 None（provider 未上报缓存统计或
+/// 会话尚无 LLM 调用，不显示）。
+fn session_cache_segment(app: &AppState, theme: &Theme) -> Option<(u8, Line<'static>)> {
+    let hit = app.session_cache_hit;
+    let miss = app.session_cache_miss;
+    let evaluable = hit.checked_add(miss)?;
+    if evaluable == 0 {
+        return None;
+    }
+    let pct = hit.saturating_mul(100) / evaluable;
+    // 三档着色：<30% 黄（告警，对齐 runtime 阈值）、≥70% 绿（健康）、其余 dim。
+    let style = if pct < CACHE_WARN_PCT {
+        Style::default().fg(theme.semantic(SemanticTone::Warning))
+    } else if pct >= CACHE_OK_PCT {
+        Style::default().fg(theme.semantic(SemanticTone::Success))
+    } else {
+        Style::default().add_modifier(Modifier::DIM)
+    };
+    Some((
+        PRIO_CACHE,
+        Line::from(vec![Span::styled(format!(" ⌁{pct}%"), style)]),
+    ))
+}
+
 fn grok_ctx_segment(app: &AppState, theme: &Theme) -> Option<(u8, Line<'static>)> {
     let (used, window) = app.context_usage?;
     let pct = used.saturating_mul(100).checked_div(window).unwrap_or(0);
@@ -852,6 +890,67 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert!(ctx.content.contains("46%"));
+    }
+
+    #[test]
+    fn cache_segment_absent_when_no_evaluable_tokens() {
+        let theme = Theme::default();
+        let app = AppState::default();
+        assert!(session_cache_segment(&app, &theme).is_none());
+    }
+
+    #[test]
+    fn cache_segment_shows_rate_with_threshold_tones() {
+        let theme = Theme::default();
+        // 健康档（≥70% 绿色）。
+        let mut app = AppState::default();
+        app.session_cache_hit = 8_700;
+        app.session_cache_miss = 1_300;
+        let (prio, line) = session_cache_segment(&app, &theme).expect("有可评估数据必有段");
+        assert_eq!(prio, PRIO_CACHE);
+        assert!(line.to_string().contains("87%"), "87%: {line:?}");
+        assert_eq!(
+            line.spans[0].style,
+            Style::default().fg(theme.semantic(SemanticTone::Success))
+        );
+        // 告警档（<30% 黄色）。
+        let mut low = AppState::default();
+        low.session_cache_hit = 100;
+        low.session_cache_miss = 900;
+        let (_, line) = session_cache_segment(&low, &theme).expect("10% 必有段");
+        assert_eq!(
+            line.spans[0].style,
+            Style::default().fg(theme.semantic(SemanticTone::Warning))
+        );
+        // 边界：恰 70% 归健康档（>= 语义）。
+        let mut edge = AppState::default();
+        edge.session_cache_hit = 700;
+        edge.session_cache_miss = 300;
+        let (_, line) = session_cache_segment(&edge, &theme).expect("70% 必有段");
+        assert_eq!(
+            line.spans[0].style,
+            Style::default().fg(theme.semantic(SemanticTone::Success))
+        );
+    }
+
+    #[test]
+    fn fit_status_line_includes_cache_segment_when_evaluable() {
+        let theme = Theme::default();
+        let app = AppState {
+            session_cache_hit: 8_700,
+            session_cache_miss: 1_300,
+            ..Default::default()
+        };
+        let wide = fit_status_line(&app, &theme, 400).to_string();
+        assert!(wide.contains("87%"), "宽行含 cache 段: {wide}");
+        // 无可评估数据（provider 未上报缓存统计）不显示段，避免"无数据"被误读为 0%。
+        let empty = AppState::default();
+        assert!(
+            !fit_status_line(&empty, &theme, 400)
+                .to_string()
+                .contains('⌁'),
+            "无数据不渲染 cache 段"
+        );
     }
 
     #[test]
