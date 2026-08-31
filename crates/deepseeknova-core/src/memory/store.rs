@@ -780,8 +780,8 @@ impl MemoryStore {
                 let dim: i64 = r.get(1)?;
                 let model: String = r.get(2)?;
                 let mut vec = Vec::with_capacity(dim as usize);
-                for chunk in blob.chunks_exact(4) {
-                    vec.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+                for chunk in blob.as_chunks::<4>().0 {
+                    vec.push(f32::from_le_bytes(*chunk));
                 }
                 Ok((vec, model))
             },
@@ -875,8 +875,8 @@ impl MemoryStore {
                 continue;
             }
             let mut vec = Vec::with_capacity(dim as usize);
-            for chunk in blob.chunks_exact(4) {
-                vec.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+            for chunk in blob.as_chunks::<4>().0 {
+                vec.push(f32::from_le_bytes(*chunk));
             }
             let c = crate::memory::embedding::cosine(&qv, &vec);
             if c > 0.0 {

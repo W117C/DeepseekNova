@@ -582,6 +582,9 @@ pub mod factory {
                 reasoning_effort: Some(effort.to_string()),
                 extra_body: None,
                 cache_control: None,
+                cache_ttl: None,
+                cache_prompt_key: None,
+                cache_exact: None,
             }
         }
 
@@ -656,6 +659,9 @@ pub mod factory {
                 reasoning_effort: None,
                 extra_body: None,
                 cache_control: None,
+                cache_ttl: None,
+                cache_prompt_key: None,
+                cache_exact: None,
             };
             let result = create_provider(&cfg);
             let err = match result {
@@ -695,6 +701,9 @@ pub mod factory {
                 reasoning_effort: reasoning_effort.map(str::to_string),
                 extra_body: None,
                 cache_control: None,
+                cache_ttl: None,
+                cache_prompt_key: None,
+                cache_exact: None,
             }
         }
 

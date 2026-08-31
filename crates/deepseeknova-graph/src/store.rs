@@ -815,8 +815,8 @@ impl Store {
                 let dim: i64 = r.get(2)?;
                 let kind: String = r.get(3)?;
                 let mut vec = Vec::with_capacity(dim as usize);
-                for chunk in blob.chunks_exact(4) {
-                    vec.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+                for chunk in blob.as_chunks::<4>().0 {
+                    vec.push(f32::from_le_bytes(*chunk));
                 }
                 Ok((id, kind, vec))
             })?;
