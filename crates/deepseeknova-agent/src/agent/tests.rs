@@ -2730,9 +2730,7 @@ async fn tool_cache_hits_and_misses_reach_session_stats() {
     let fired = Arc::new(StdMutex::new(Vec::new()));
     let f2 = fired.clone();
     let hook: MetricsHook = Arc::new(move |stats, _summary| {
-        f2.lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(stats);
+        f2.lock().unwrap_or_else(|e| e.into_inner()).push(stats);
     });
     let mut agent = Agent::new(provider, 8)
         .with_tool_cache(true)

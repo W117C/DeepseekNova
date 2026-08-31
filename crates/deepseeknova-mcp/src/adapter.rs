@@ -187,11 +187,7 @@ impl Tool for McpResourceTool {
         true
     }
 
-    async fn execute(
-        &self,
-        _ctx: &ToolContext,
-        args: &str,
-    ) -> Result<String, DeepseeknovaError> {
+    async fn execute(&self, _ctx: &ToolContext, args: &str) -> Result<String, DeepseeknovaError> {
         let parsed: serde_json::Value = if args.trim().is_empty() {
             serde_json::Value::Null
         } else {
@@ -246,7 +242,9 @@ impl Tool for McpPromptTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: format!("mcp__{}__get_prompt", self.server_name),
-            description: "Gets a prompt rendered by the MCP server; returns the rendered prompt text (JSON).".to_string(),
+            description:
+                "Gets a prompt rendered by the MCP server; returns the rendered prompt text (JSON)."
+                    .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -262,11 +260,7 @@ impl Tool for McpPromptTool {
         true
     }
 
-    async fn execute(
-        &self,
-        _ctx: &ToolContext,
-        args: &str,
-    ) -> Result<String, DeepseeknovaError> {
+    async fn execute(&self, _ctx: &ToolContext, args: &str) -> Result<String, DeepseeknovaError> {
         let parsed: serde_json::Value = if args.trim().is_empty() {
             serde_json::Value::Null
         } else {
@@ -308,19 +302,21 @@ mod tests {
     /// 而非仅 tools——resources/prompts 不得是死能力。
     #[tokio::test]
     async fn discover_exposes_resources_and_prompts_as_read_only_tools() {
-        let client = Arc::new(client_with(|req| match req["method"].as_str() {
-            Some("tools/list") => Some(serde_json::json!({"result": {"tools": [
-                {"name": "t1", "inputSchema": {"type": "object"}}
-            ]}})),
-            Some("resources/list") => Some(serde_json::json!({"result": {"resources": [
-                {"uri": "file:///tmp/a", "name": "a"}
-            ]}})),
-            Some("prompts/list") => Some(serde_json::json!({"result": {"prompts": [
-                {"name": "review", "description": "Code review"}
-            ]}})),
-            _ => Some(serde_json::json!({"result": {}})),
-        })
-        .await);
+        let client = Arc::new(
+            client_with(|req| match req["method"].as_str() {
+                Some("tools/list") => Some(serde_json::json!({"result": {"tools": [
+                    {"name": "t1", "inputSchema": {"type": "object"}}
+                ]}})),
+                Some("resources/list") => Some(serde_json::json!({"result": {"resources": [
+                    {"uri": "file:///tmp/a", "name": "a"}
+                ]}})),
+                Some("prompts/list") => Some(serde_json::json!({"result": {"prompts": [
+                    {"name": "review", "description": "Code review"}
+                ]}})),
+                _ => Some(serde_json::json!({"result": {}})),
+            })
+            .await,
+        );
 
         let tools = discover_mcp_tools("srv", client).await.expect("discover");
         let names: Vec<String> = tools.iter().map(|t| t.schema().name.clone()).collect();
@@ -345,36 +341,44 @@ mod tests {
     /// （保持既有 discover 行为，不臆造能力）。
     #[tokio::test]
     async fn discover_without_resources_prompts_stays_tools_only() {
-        let client = Arc::new(client_with(|req| match req["method"].as_str() {
-            Some("tools/list") => Some(serde_json::json!({"result": {"tools": [
-                {"name": "t1", "inputSchema": {"type": "object"}}
-            ]}})),
-            // resources/list 与 prompts/list 返回空列表（未声明能力）。
-            Some("resources/list") => Some(serde_json::json!({"result": {"resources": []}})),
-            Some("prompts/list") => Some(serde_json::json!({"result": {"prompts": []}})),
-            _ => Some(serde_json::json!({"result": {}})),
-        })
-        .await);
+        let client = Arc::new(
+            client_with(|req| match req["method"].as_str() {
+                Some("tools/list") => Some(serde_json::json!({"result": {"tools": [
+                    {"name": "t1", "inputSchema": {"type": "object"}}
+                ]}})),
+                // resources/list 与 prompts/list 返回空列表（未声明能力）。
+                Some("resources/list") => Some(serde_json::json!({"result": {"resources": []}})),
+                Some("prompts/list") => Some(serde_json::json!({"result": {"prompts": []}})),
+                _ => Some(serde_json::json!({"result": {}})),
+            })
+            .await,
+        );
 
         let tools = discover_mcp_tools("srv", client).await.expect("discover");
         let names: Vec<String> = tools.iter().map(|t| t.schema().name.clone()).collect();
-        assert_eq!(names, vec!["mcp__srv__t1"], "未声明能力时仅 tools, got {names:?}");
+        assert_eq!(
+            names,
+            vec!["mcp__srv__t1"],
+            "未声明能力时仅 tools, got {names:?}"
+        );
     }
 
     #[tokio::test]
     async fn read_resource_tool_forwards_uri_and_reads_text() {
-        let client = Arc::new(client_with(|req| match req["method"].as_str() {
-            Some("tools/list") => Some(serde_json::json!({"result": {"tools": []}})),
-            Some("resources/list") => Some(serde_json::json!({"result": {"resources": [
-                {"uri": "file:///tmp/a", "name": "a"}
-            ]}})),
-            Some("prompts/list") => Some(serde_json::json!({"result": {"prompts": []}})),
-            Some("resources/read") => Some(serde_json::json!({"result": {"contents": [
-                {"uri": "file:///tmp/a", "text": "file data"}
-            ]}})),
-            _ => Some(serde_json::json!({"result": {}})),
-        })
-        .await);
+        let client = Arc::new(
+            client_with(|req| match req["method"].as_str() {
+                Some("tools/list") => Some(serde_json::json!({"result": {"tools": []}})),
+                Some("resources/list") => Some(serde_json::json!({"result": {"resources": [
+                    {"uri": "file:///tmp/a", "name": "a"}
+                ]}})),
+                Some("prompts/list") => Some(serde_json::json!({"result": {"prompts": []}})),
+                Some("resources/read") => Some(serde_json::json!({"result": {"contents": [
+                    {"uri": "file:///tmp/a", "text": "file data"}
+                ]}})),
+                _ => Some(serde_json::json!({"result": {}})),
+            })
+            .await,
+        );
         let tools = discover_mcp_tools("srv", client).await.expect("discover");
         let read_tool = tools
             .iter()
@@ -387,7 +391,10 @@ mod tests {
             )
             .await
             .expect("read_resource executes");
-        assert!(out.contains("file data"), "read_resource 返回资源文本: {out}");
+        assert!(
+            out.contains("file data"),
+            "read_resource 返回资源文本: {out}"
+        );
     }
 
     async fn client_with<F>(handler: F) -> McpClient
