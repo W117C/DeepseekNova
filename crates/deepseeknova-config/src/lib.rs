@@ -1380,6 +1380,18 @@ pub struct McpServerConfig {
     /// Whether this server is enabled.
     #[serde(default = "default_true")]
     pub enabled: bool,
+
+    /// 会话级工具集裁剪（白名单）：只保留名字（原始名或 `mcp__<server>__`
+    /// 全名）前缀/全名匹配任一条目的工具。空 = 不过滤；与 `exclude_tools`
+    /// 同时配置时先白后黑。
+    #[serde(default)]
+    pub include_tools: Vec<String>,
+
+    /// 会话级工具集裁剪（黑名单）：剔除名字匹配条目的工具（匹配规则同
+    /// `include_tools`）。空 = 不过滤。用于关掉已知不用的重 schema 工具，
+    /// 缩短工具段、稳定缓存前缀。
+    #[serde(default)]
+    pub exclude_tools: Vec<String>,
 }
 
 /// 环境变量键值对。

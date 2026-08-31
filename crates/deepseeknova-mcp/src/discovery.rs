@@ -145,6 +145,8 @@ mod tests {
             command: "deepseeknova-nonexistent-mcp-binary".into(),
             args: vec![],
             env: vec![],
+            include_tools: vec![],
+            exclude_tools: vec![],
             enabled: true,
         }
     }

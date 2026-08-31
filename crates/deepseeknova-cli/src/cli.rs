@@ -123,6 +123,10 @@ pub enum Commands {
         /// 中文别名 (治理/验证/反思/审查/协议/综合)，N 为 0..1 阈值。
         #[arg(long = "require-dimension", value_parser = parse_require_dimension)]
         require_dimension: Vec<(String, f32)>,
+        /// CI 门槛：全部用例前缀缓存命中率均值（0..1）下限。均值仅基于
+        /// 有缓存记账的用例；全部无记账时门槛 n/a 跳过（兼容无缓存端点）。
+        #[arg(long)]
+        require_min_cache_hit_rate: Option<f32>,
     },
     /// Interactive chat session
     Chat {

@@ -112,6 +112,47 @@ impl Tool for McpToolAdapter {
     }
 }
 
+/// 会话级工具集裁剪（对应 config `McpServerConfig::include_tools` /
+/// `exclude_tools`）。
+///
+/// 匹配规则（防误伤，见 AGENTS.md §5 前缀匹配教训）：条目命中当且仅当
+/// ①等于原始名（`tools/list` 返回名）、②等于全名（`mcp__<server>__<raw>`）、
+/// 或 ③全名以 `{entry}__` 开头（家族前缀，`__` 边界守卫——`list` 不会误中
+/// `list_issues`）。裁剪发生在工具段进缓存前缀之前，schema 收敛即前缀
+/// 变小且跨会话稳定。
+#[derive(Debug, Clone, Default)]
+pub struct McpToolFilter {
+    /// 白名单（空 = 不限）。
+    pub include: Vec<String>,
+    /// 黑名单（空 = 不剔；与 include 同时配置时先白后黑）。
+    pub exclude: Vec<String>,
+}
+
+impl McpToolFilter {
+    fn hit(list: &[String], raw: &str, full: &str) -> bool {
+        list.iter().any(|e| {
+            // 家族前缀：条目自带 __ 尾则原样用，否则补 __ 边界——
+            // repo__ 命中 repo__list，但 list 永不误中 list_issues。
+            let prefix = if e.ends_with("__") {
+                e.clone()
+            } else {
+                format!("{e}__")
+            };
+            e == raw || e == full || raw.starts_with(&prefix) || full.starts_with(&prefix)
+        })
+    }
+
+    /// 该工具是否被保留。
+    pub fn keeps(&self, raw: &str, full: &str) -> bool {
+        if !self.include.is_empty() && !Self::hit(&self.include, raw, full) {
+            return false;
+        }
+        if Self::hit(&self.exclude, raw, full) {
+            return false;
+        }
+        true
+    }
+}
 /// Build McpToolAdapter instances for all tools exposed by an MCP server.
 ///
 /// C1：工具按名字排序返回——MCP server 的 `tools/list` 顺序可能随版本/
@@ -120,8 +161,13 @@ impl Tool for McpToolAdapter {
 pub async fn discover_mcp_tools(
     server_name: &str,
     client: Arc<McpClient>,
+    filter: &McpToolFilter,
 ) -> Result<Vec<Arc<dyn Tool>>, DeepseeknovaError> {
     let mut tools = client.list_tools().await?;
+    // 会话级裁剪（白名单后黑名单）：在排序与 adapter 构造之前剔除，
+    // 被裁工具不进前缀、不建连接副作用。
+    let prefix = format!("mcp__{server_name}__");
+    tools.retain(|t| filter.keeps(&t.name, &format!("{prefix}{}", t.name)));
     // 按原始工具名排序（namespace 前缀 mcp__<server>__ 相同，比较原名即可）。
     tools.sort_by(|a, b| a.name.cmp(&b.name));
     let mut adapters: Vec<Arc<dyn Tool>> = tools
@@ -318,7 +364,9 @@ mod tests {
             .await,
         );
 
-        let tools = discover_mcp_tools("srv", client).await.expect("discover");
+        let tools = discover_mcp_tools("srv", client, &McpToolFilter::default())
+            .await
+            .expect("discover");
         let names: Vec<String> = tools.iter().map(|t| t.schema().name.clone()).collect();
         assert!(
             names.iter().any(|n| n == "mcp__srv__read_resource"),
@@ -354,7 +402,9 @@ mod tests {
             .await,
         );
 
-        let tools = discover_mcp_tools("srv", client).await.expect("discover");
+        let tools = discover_mcp_tools("srv", client, &McpToolFilter::default())
+            .await
+            .expect("discover");
         let names: Vec<String> = tools.iter().map(|t| t.schema().name.clone()).collect();
         assert_eq!(
             names,
@@ -379,7 +429,9 @@ mod tests {
             })
             .await,
         );
-        let tools = discover_mcp_tools("srv", client).await.expect("discover");
+        let tools = discover_mcp_tools("srv", client, &McpToolFilter::default())
+            .await
+            .expect("discover");
         let read_tool = tools
             .iter()
             .find(|t| t.schema().name == "mcp__srv__read_resource")
@@ -467,5 +519,39 @@ mod tests {
         };
         let adapter = make_adapter("srv", &tool);
         assert!(!adapter.read_only(), "readOnlyHint=false 应保持可写");
+    }
+
+    /// 会话级裁剪：白名单/黑名单/家族前缀边界。
+    #[test]
+    fn tool_filter_include_exclude_and_boundary() {
+        use super::McpToolFilter;
+        let f = McpToolFilter {
+            include: vec!["search".into(), "mcp__srv__repo__".into()],
+            exclude: vec!["dangerous".into()],
+        };
+        // 精确原始名命中白名单。
+        assert!(f.keeps("search", "mcp__srv__search"));
+        // 家族前缀：`mcp__srv__repo__` 守 `__` 边界,命中家族成员。
+        assert!(f.keeps("repo__list", "mcp__srv__repo__list"));
+        // `search` 不得因前缀关系误中 `search_issues`（白名单条目无 `__` 尾）。
+        assert!(!f.keeps("search_issues", "mcp__srv__search_issues"));
+        // 全名精确命中（include 条目即全名）。
+        let f3 = McpToolFilter {
+            include: vec!["mcp__srv__issues".into()],
+            exclude: vec![],
+        };
+        assert!(f3.keeps("issues", "mcp__srv__issues"));
+        assert!(!f3.keeps("issues_list", "mcp__srv__issues_list"));
+        // 黑名单优先于白名单命中。
+        assert!(!f.keeps("dangerous", "mcp__srv__dangerous"));
+        // 家族前缀成员即便在黑名单家族内也被剔（先白后黑,黑优先）。
+        let f2 = McpToolFilter {
+            include: vec!["repo__".into()],
+            exclude: vec!["repo__dangerous".into()],
+        };
+        assert!(f2.keeps("repo__list", "mcp__srv__repo__list"));
+        assert!(!f2.keeps("repo__dangerous", "mcp__srv__repo__dangerous"));
+        // 空过滤 = 全保留。
+        assert!(McpToolFilter::default().keeps("anything", "mcp__srv__anything"));
     }
 }

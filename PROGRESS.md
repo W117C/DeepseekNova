@@ -725,3 +725,25 @@ embed-backfill: attempted=0 ok=0
 - **验证**：make check EXIT=0（fmt / clippy -D warnings / 全 workspace
   测试 / doctest / doc 零警告）+ make bench-ci EXIT=0（本地 macOS
   arm64，criterion 基线 target/criterion baseline=ci）。
+
+## 命中率闭环轮（2026-08-31，0.6.0 后第一轮）
+
+- **调研拆解**：内部 12 候选（规划中标记 / master plan 十大领域 / DESIGN
+  P0-P6）× 外部对标（Codex CLI 0.150 / Claude Code 2026Q2 / OpenCode
+  v1.3 / 市场综述）；用户拍板「命中率闭环套餐」：统计（上轮已上线）
+  → 优化前缀 → 验证收益。
+- **块1 serve SSE 会话级用量**：map_run_event 穿线 SessionUsageTotals，
+  usage/done 事件 stamp session_cache_hit/miss_tokens（running total）；
+  会话端点跨轮次累计落 LiveSession 原子字段，run 端点流内累计；
+  done 刻意不重复累加（loop_impl 中 done.usage 与末个 Chunk::Usage
+  同源）。提取 usage_event_json / done_usage_json 纯函数 + 新单测。
+- **块2 MCP 工具集裁剪**：McpToolFilter（include/exclude；精确名/全名/
+  带 __ 尾家族前缀，黑名单优先，__ 边界防 list 误中 list_issues），
+  config McpServerConfig 加 include_tools/exclude_tools（serde default，
+  零配置行为不变），runtime 按 server 名构造传入；被裁工具不进前缀。
+- **块3 eval CI 命中率门槛**：CiThresholds.min_cache_hit_rate +
+  check_ci 第 4 参 + --require-min-cache-hit-rate CLI flag（0..1 校验）；
+  均值仅基于有记账用例，全无记账 n/a 跳过；报告加 avg_cache_hit_rate。
+- **块4 文档纠偏**：三层缓存分层复核为「B6 已落地」（build_prefix 段序
+  + 专项测试），master plan 差距 #2 标注更新。
+- **验证**：make check EXIT=0（见 /tmp/dsnova-check8.log）。

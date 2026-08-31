@@ -1151,11 +1151,21 @@ pub async fn discover_mcp_tools(config: &Config) -> Vec<Arc<dyn deepseeknova_cor
 
     // List tools per server concurrently; a slow or broken `tools/list` on one
     // server must not stall the others.
+    // 会话级工具集裁剪：config 按 server 名携带 include/exclude（§4.5 路径 B）。
     let listings = discovered.into_iter().map(|server| async move {
         let client = Arc::new(deepseeknova_mcp::McpClient::from_connection(
             server.connection,
         ));
-        match deepseeknova_mcp::adapter::discover_mcp_tools(&server.name, client).await {
+        let filter = config
+            .mcp_servers
+            .iter()
+            .find(|s| s.name == server.name)
+            .map(|s| deepseeknova_mcp::adapter::McpToolFilter {
+                include: s.include_tools.clone(),
+                exclude: s.exclude_tools.clone(),
+            })
+            .unwrap_or_default();
+        match deepseeknova_mcp::adapter::discover_mcp_tools(&server.name, client, &filter).await {
             Ok(tools) => tools,
             Err(e) => {
                 tracing::warn!("MCP server '{}' tools/list failed: {e}", server.name);

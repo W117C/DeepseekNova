@@ -8,6 +8,13 @@ All notable changes to DeepseekNova will be documented in this file.
 
 ## [0.6.0] — 2026-08-31
 
+
+### Added（2026-08-31 命中率闭环轮）
+
+- **serve SSE 会话级缓存用量**：`/v1/chat` 与 `/v1/sessions/{id}/chat` 的 `usage`/`done` 事件新增 `session_cache_hit_tokens` / `session_cache_miss_tokens`（running total；会话端点跨轮次累计于 `LiveSession` 原子字段，run 端点流内累计）；done 不重复累加（usage 与末个 Usage 事件同源，防双计）
+- **MCP 工具集会话级裁剪**：`McpServerConfig` 新增 `include_tools` / `exclude_tools`（精确名 / 全名 / 带 `__` 尾的家族前缀，黑名单优先）；被裁工具不进缓存前缀、不建连接副作用
+- **eval CI 命中率门槛**：`eval` 命令新增 `--require-min-cache-hit-rate <0..1>`；均值仅基于有缓存记账的用例，全部无记账时 n/a 跳过（兼容无缓存端点）；报告新增 `avg_cache_hit_rate` 字段
+- 文档：master-execution-plan 三层缓存分层差距标注更新为「已由 B6 落地」（复核 `build_prefix` 段序 + 专项测试）
 ### ⚠ Breaking
 
 - **CLI 退出码重排**（消除与 eval 子命令退出码 2/3 的冲突）：

@@ -108,7 +108,7 @@ A（提示词无关 harness + 工作流/函数调用/自动化验证）
 
 **差距**：
 1. L3 摘要跑在主线上下文（无 fork 独立调用）；压缩前不阻塞写工具；摘要后不保留"最近消息 + 摘要"结构（Codex 模式）。
-2. 三层缓存分层（global/project/session）未实现——AGENTS.md 与项目记忆同段注入，全局规则变化会 invalidate 整个项目前缀。
+2. ~~三层缓存分层（global/project/session）未实现~~ **已由 B6 落地**（2026-08-31 复核：`CacheAwarePromptBuilder::build_prefix` 段序 system → AGENTS.md（global）→ DEEPSEEKNOVA.md（project）→ repo map，专项测试 `cache_aware_prefix_layers_agents_then_project` 覆盖；session 层=对话内动态注入本就后置，无需独立机制）——原差距描述过期。
 3. recall 注入无 token 预算；压缩后不重注入 invoked skills（CC 模式）。
 
 **目标**：压缩质量不依赖模型提示词（摘要提示词内聚为独立契约）；前缀三层稳定；注入全部预算化。

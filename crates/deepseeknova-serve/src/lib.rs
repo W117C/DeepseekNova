@@ -52,6 +52,7 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{oneshot, OwnedSemaphorePermit, Semaphore};
@@ -659,6 +660,9 @@ fn stream_input(
         let mut failed: Option<String> = None;
         let mut paused = false;
         let mut client_gone = false;
+        // 会话级缓存用量累计器：/v1/chat 与 /v1/runs/{id}/resume 以
+        // durable run id 为关联键，单个 SSE 流内累计。
+        let mut session_usage = SessionUsageTotals::default();
         match state.runner.run_stream(input.clone()).await {
             Ok(mut stream) => {
                 use tokio_stream::StreamExt;
@@ -668,6 +672,7 @@ fn stream_input(
                         &mut done_text,
                         &mut failed,
                         &mut paused,
+                        &mut session_usage,
                         run_id.as_deref(),
                     ) {
                         Some(e) => e,
@@ -700,6 +705,63 @@ fn stream_input(
     Sse::new(rx)
 }
 
+/// SSE 流内累计的会话级 prefix cache 用量（随每个 usage 事件以 running
+/// total 写进 `session_cache_*_tokens` wire 字段）。
+#[derive(Debug, Default)]
+struct SessionUsageTotals {
+    /// 累计命中 token。
+    hit: u64,
+    /// 累计未命中 token。
+    miss: u64,
+}
+
+impl SessionUsageTotals {
+    /// 把单请求级 hit/miss 饱和累加进会话级总量。
+    fn add_request(&mut self, hit: u32, miss: u32) {
+        self.hit = self.hit.saturating_add(u64::from(hit));
+        self.miss = self.miss.saturating_add(u64::from(miss));
+    }
+
+    /// 把 running total 写进 Usage/Done 的 wire JSON（增量字段，旧消费方
+    /// 不受影响）。
+    fn stamp(&self, value: &mut serde_json::Value) {
+        if let serde_json::Value::Object(map) = value {
+            map.insert(
+                "session_cache_hit_tokens".to_string(),
+                serde_json::json!(self.hit),
+            );
+            map.insert(
+                "session_cache_miss_tokens".to_string(),
+                serde_json::json!(self.miss),
+            );
+        }
+    }
+}
+
+/// 组装单个 usage 事件的 wire JSON(带会话级 running total)。
+/// 独立于 SSE `Event`,便于单元测试直接断言 JSON 形状。
+fn usage_event_json(
+    u: &deepseeknova_core::chunk::Usage,
+    totals: &mut SessionUsageTotals,
+) -> serde_json::Value {
+    totals.add_request(u.cache_hit_tokens, u.cache_miss_tokens);
+    let mut value = serde_json::to_value(u).unwrap_or(serde_json::Value::Null);
+    totals.stamp(&mut value);
+    value
+}
+
+/// 组装 done 事件 usage 字段的 wire JSON(带会话级终值)。
+fn done_usage_json(
+    usage: Option<&deepseeknova_core::chunk::Usage>,
+    totals: &mut SessionUsageTotals,
+) -> serde_json::Value {
+    let mut value = usage
+        .map(|u| serde_json::to_value(u).unwrap_or(serde_json::Value::Null))
+        .unwrap_or(serde_json::Value::Null);
+    totals.stamp(&mut value);
+    value
+}
+
 /// Map one runner event to its SSE wire form. `None` marks events that are
 /// accumulated into a later event (`TurnComplete`, `ToolCallDelta`) and
 /// should be skipped by the caller. State (`done_text` / `failed` / `paused`)
@@ -713,6 +775,7 @@ fn map_run_event(
     done_text: &mut String,
     failed: &mut Option<String>,
     paused: &mut bool,
+    session_usage: &mut SessionUsageTotals,
     session_id: Option<&str>,
 ) -> Option<Result<Event, Infallible>> {
     match event {
@@ -733,11 +796,14 @@ fn map_run_event(
         Ok(RunEvent::ToolResult { call_id, result }) => Some(Ok(Event::default()
             .event("tool_result")
             .data(serde_json::json!({ "call_id": call_id, "result": result }).to_string()))),
-        Ok(RunEvent::Usage(u)) => Some(Ok(Event::default()
-            .event("usage")
-            .data(serde_json::to_string(&u).unwrap_or_default()))),
+        Ok(RunEvent::Usage(u)) => {
+            let value = usage_event_json(&u, session_usage);
+            Some(Ok(Event::default().event("usage").data(value.to_string())))
+        }
         Ok(RunEvent::Done(output)) => {
             *done_text = output.text.clone();
+            // done 事件的 usage 也带会话级 running total（流末终值）。
+            let usage_value = done_usage_json(output.usage.as_ref(), session_usage);
             let json = serde_json::json!({
                 "text": output.text,
                 "tool_calls": output.tool_calls.iter().map(|tc| serde_json::json!({
@@ -745,7 +811,7 @@ fn map_run_event(
                     "name": tc.function.name,
                     "arguments": tc.function.arguments,
                 })).collect::<Vec<_>>(),
-                "usage": output.usage,
+                "usage": usage_value,
                 "session_id": session_id,
             });
             Some(Ok(Event::default().event("done").data(json.to_string())))
@@ -1128,6 +1194,12 @@ fn stream_session_input(
         let mut failed: Option<String> = None;
         let mut paused = false;
         let mut client_gone = false;
+        // 会话级缓存用量累计器：跨轮次存放在 LiveSession 原子字段中
+        //（record_session_usage 落账），本流从当前总量起算。
+        let mut session_usage = SessionUsageTotals {
+            hit: session.session_cache_hit.load(Ordering::Acquire),
+            miss: session.session_cache_miss.load(Ordering::Acquire),
+        };
         match session.runner.run_stream(input.clone()).await {
             Ok(mut stream) => {
                 use tokio_stream::StreamExt;
@@ -1137,6 +1209,7 @@ fn stream_session_input(
                         &mut done_text,
                         &mut failed,
                         &mut paused,
+                        &mut session_usage,
                         Some(&id),
                     ) {
                         Some(e) => e,
@@ -1153,6 +1226,13 @@ fn stream_session_input(
                 let _ = tx.unbounded_send(Ok(Event::default().event("error").data(text)));
             }
         }
+        // 本轮累计落账回 LiveSession（下一轮 SSE 流从新总量起算）。
+        session
+            .session_cache_hit
+            .store(session_usage.hit, Ordering::Release);
+        session
+            .session_cache_miss
+            .store(session_usage.miss, Ordering::Release);
         // 回合完成时落盘（口径与 TUI controller 一致：仅成功回合记录）。
         if failed.is_none() && !paused {
             if let Some(manager) = sessions {
@@ -1357,6 +1437,35 @@ mod tests {
         assert!(
             pending.lock().unwrap().is_empty(),
             "timed-out approval must be removed from the pending map"
+        );
+    }
+
+    /// 会话级缓存累计：usage 事件带 running total，done 终值一致。
+    #[test]
+    fn usage_events_carry_running_session_totals() {
+        let totals = std::cell::RefCell::new(SessionUsageTotals::default());
+        let usage = |hit: u32, miss: u32| deepseeknova_core::chunk::Usage {
+            prompt_tokens: hit + miss,
+            completion_tokens: 0,
+            total_tokens: hit + miss,
+            cache_hit_tokens: hit,
+            cache_miss_tokens: miss,
+            reasoning_tokens: 0,
+        };
+        let v1 = usage_event_json(&usage(100, 40), &mut totals.borrow_mut());
+        assert_eq!(v1["session_cache_hit_tokens"], 100);
+        assert_eq!(v1["session_cache_miss_tokens"], 40);
+        let v2 = usage_event_json(&usage(30, 0), &mut totals.borrow_mut());
+        assert_eq!(v2["session_cache_hit_tokens"], 130);
+        let v3 = done_usage_json(Some(&usage(50, 10)), &mut totals.borrow_mut());
+        // done.usage 与最后一个 Usage 事件同源（防双计设计）：session
+        // 字段保持 running total，不因 done 再加一次。
+        assert_eq!(v3["session_cache_hit_tokens"], 130);
+        assert_eq!(v3["session_cache_miss_tokens"], 40);
+        // 无用量（Option::None）→ Null 上 stamp 是 no-op。
+        assert_eq!(
+            done_usage_json(None, &mut totals.borrow_mut()),
+            serde_json::Value::Null
         );
     }
 }

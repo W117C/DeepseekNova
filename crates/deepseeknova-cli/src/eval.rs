@@ -217,6 +217,10 @@ pub struct CiThresholds {
     pub min_score: Option<f32>,
     /// 单维均值下限（维度名 → 0..1）。
     pub dimension_min: Vec<(String, f32)>,
+    /// 全部用例前缀缓存命中率均值（0..1）下限。均值基于有缓存记账的
+    /// 用例；**全部用例无记账时门槛跳过（n/a 通过）**——兼容无缓存端点
+    /// （命中率 0 与"无缓存数据"是两回事，前者照常参与均值并判失败）。
+    pub min_cache_hit_rate: Option<f32>,
 }
 
 /// 单条 CI 门槛检查结果。
@@ -250,6 +254,7 @@ pub fn check_ci(
     thresholds: &CiThresholds,
     avg_score_0_5: Option<f32>,
     avg_dims: Option<&ScoreDimensions>,
+    avg_cache_hit_rate: Option<f32>,
 ) -> CiSummary {
     let mut checks = Vec::new();
     if let Some(threshold) = thresholds.min_score {
@@ -264,6 +269,20 @@ pub fn check_ci(
             label: "score".to_string(),
             threshold: t,
             actual,
+            passed,
+        });
+    }
+    if let Some(threshold) = thresholds.min_cache_hit_rate {
+        let passed = match avg_cache_hit_rate {
+            // 有缓存记账 → 均值判门槛（容差同其他门槛）。
+            Some(actual) => actual + 1e-3 >= threshold,
+            // 全部用例无缓存记账 → n/a 跳过（见 CiThresholds 字段说明）。
+            None => true,
+        };
+        checks.push(CiCheck {
+            label: "cache_hit_rate".to_string(),
+            threshold,
+            actual: avg_cache_hit_rate,
             passed,
         });
     }
@@ -291,6 +310,8 @@ pub struct EvalSummary {
     pub avg_score_0_5: Option<f32>,
     /// 各维均值（0..1；同上）。
     pub avg_dimensions: Option<ScoreDimensions>,
+    /// 前缀缓存命中率均值（0..1；仅含有记账的用例；全无记账 → None）。
+    pub avg_cache_hit_rate: Option<f32>,
     pub ci: CiSummary,
 }
 
@@ -302,13 +323,28 @@ pub fn summarize(results: &[EvalResult], thresholds: CiThresholds) -> EvalSummar
     let cards: Vec<&Scorecard> = results.iter().filter_map(|r| r.card.as_ref()).collect();
     let avg_dims = average_dims(&cards);
     let avg_score_0_5 = avg_dims.as_ref().map(|d| d.composite * 5.0);
-    let ci = check_ci(&thresholds, avg_score_0_5, avg_dims.as_ref());
+    // 命中率均值仅基于有缓存记账的用例（None 不参与）；全空 → n/a。
+    let avg_cache_hit_rate: Option<f32> = {
+        let rates: Vec<f64> = results.iter().filter_map(|r| r.cache_hit_rate).collect();
+        if rates.is_empty() {
+            None
+        } else {
+            Some((rates.iter().sum::<f64>() / rates.len() as f64) as f32)
+        }
+    };
+    let ci = check_ci(
+        &thresholds,
+        avg_score_0_5,
+        avg_dims.as_ref(),
+        avg_cache_hit_rate,
+    );
     EvalSummary {
         total,
         passed,
         failed,
         avg_score_0_5,
         avg_dimensions: avg_dims,
+        avg_cache_hit_rate,
         ci,
     }
 }
@@ -689,27 +725,61 @@ mod tests {
         let thresholds = CiThresholds {
             min_score: Some(3.5), // 0..5
             dimension_min: vec![("governance".to_string(), 0.85)],
+            min_cache_hit_rate: None,
         };
         // 达标。
-        let pass = check_ci(&thresholds, Some(4.0), Some(&card(0.8, 0.9).dimensions));
+        let pass = check_ci(
+            &thresholds,
+            Some(4.0),
+            Some(&card(0.8, 0.9).dimensions),
+            None,
+        );
         assert!(pass.passed, "{:?}", pass.checks);
         // 综合分不足。
-        let fail_score = check_ci(&thresholds, Some(3.0), Some(&card(0.6, 0.9).dimensions));
+        let fail_score = check_ci(
+            &thresholds,
+            Some(3.0),
+            Some(&card(0.6, 0.9).dimensions),
+            None,
+        );
         assert!(!fail_score.passed);
         assert!(!fail_score.checks[0].passed);
         // 单维不足（中文别名）。
-        let fail_dim = check_ci(&thresholds, Some(4.0), Some(&card(0.8, 0.5).dimensions));
+        let fail_dim = check_ci(
+            &thresholds,
+            Some(4.0),
+            Some(&card(0.8, 0.5).dimensions),
+            None,
+        );
         assert!(!fail_dim.passed);
         assert!(!fail_dim.checks[1].passed);
         assert_eq!(fail_dim.checks[1].label, "dimension.governance");
         // 无评分卡数据 → 门槛 fail（n/a）。
-        let no_card = check_ci(&thresholds, None, None);
+        let no_card = check_ci(&thresholds, None, None, None);
         assert!(!no_card.passed);
         assert_eq!(no_card.checks[0].actual, None);
         // 未设置门槛 → 恒通过。
-        let empty = check_ci(&CiThresholds::default(), None, None);
+        let empty = check_ci(&CiThresholds::default(), None, None, None);
         assert!(empty.passed);
         assert!(empty.checks.is_empty());
+    }
+
+    /// cache_hit_rate 门槛：有记账判均值；全无记账 n/a 跳过；0 参与判失败。
+    #[test]
+    fn ci_cache_hit_rate_gate_semantics() {
+        let t = CiThresholds {
+            min_score: None,
+            dimension_min: vec![],
+            min_cache_hit_rate: Some(0.7),
+        };
+        let s = check_ci(&t, None, None, Some(0.85));
+        assert!(s.passed);
+        let s = check_ci(&t, None, None, Some(0.5));
+        assert!(!s.passed);
+        // 全部用例无缓存记账 → n/a 跳过（不误伤无缓存端点）。
+        let s = check_ci(&t, None, None, None);
+        assert!(s.passed);
+        assert_eq!(s.checks[0].label, "cache_hit_rate");
     }
 
     #[test]
@@ -718,11 +788,12 @@ mod tests {
         let t_01 = CiThresholds {
             min_score: Some(0.7),
             dimension_min: vec![],
+            min_cache_hit_rate: None,
         };
-        let pass = check_ci(&t_01, Some(3.6), Some(&card(0.72, 1.0).dimensions));
+        let pass = check_ci(&t_01, Some(3.6), Some(&card(0.72, 1.0).dimensions), None);
         assert!(pass.passed);
         assert!((pass.checks[0].threshold - 3.5).abs() < 1e-3);
-        let fail = check_ci(&t_01, Some(3.4), Some(&card(0.68, 1.0).dimensions));
+        let fail = check_ci(&t_01, Some(3.4), Some(&card(0.68, 1.0).dimensions), None);
         assert!(!fail.passed);
     }
 
@@ -786,6 +857,7 @@ mod tests {
             failed: 0,
             avg_score_0_5: Some(4.0),
             avg_dimensions: None,
+            avg_cache_hit_rate: None,
             ci: CiSummary {
                 checks: vec![],
                 passed: true,

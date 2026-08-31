@@ -586,14 +586,24 @@ async fn run_cli() -> Result<i32, DeepseeknovaError> {
             format,
             require_min_score,
             require_dimension,
+            require_min_cache_hit_rate,
         }) => {
             use deepseeknova_metrics::{Scorecard, SessionStats};
             use deepseeknova_provider::cost::ModelRole;
 
             let cases = eval::load_cases(path)?;
+            if let Some(rate) = *require_min_cache_hit_rate {
+                if !(0.0..=1.0).contains(&rate) {
+                    return Err(deepseeknova_core::DeepseeknovaError::Config {
+                        message: format!("require-min-cache-hit-rate 必须在 0..1 区间，got {rate}"),
+                        source: None,
+                    });
+                }
+            }
             let ci = eval::CiThresholds {
                 min_score: *require_min_score,
                 dimension_min: require_dimension.clone(),
+                min_cache_hit_rate: *require_min_cache_hit_rate,
             };
             let provider = model_router.provider_for(ModelRole::Main, None)?;
             let mcp_tools = deepseeknova_runtime::discover_mcp_tools(&config).await;

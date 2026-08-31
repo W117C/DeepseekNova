@@ -47,6 +47,12 @@ pub(crate) struct LiveSession {
     busy: AtomicBool,
     /// Next turn number (1-based), seeded from the stored turn count.
     turn: AtomicU64,
+    /// 会话级（跨轮次）prefix cache 累计命中 token。`/v1/sessions/{id}/chat`
+    /// 的 SSE `usage` 事件 session_* 字段数据源；仅内存态，会话存活期内
+    /// 累计（durable 存储不落这两项，重启会话后从 0 重新累计）。
+    pub(crate) session_cache_hit: AtomicU64,
+    /// 会话级（跨轮次）prefix cache 累计未命中 token（见上）。
+    pub(crate) session_cache_miss: AtomicU64,
 }
 
 /// RAII release for [`LiveSession::busy`] so a panicking run task cannot
@@ -173,6 +179,8 @@ impl SessionManager {
                     _history: history,
                     busy: AtomicBool::new(false),
                     turn: AtomicU64::new(turns.len() as u64),
+                    session_cache_hit: AtomicU64::new(0),
+                    session_cache_miss: AtomicU64::new(0),
                 });
                 live.insert(id.to_string(), Arc::clone(&session));
                 session
