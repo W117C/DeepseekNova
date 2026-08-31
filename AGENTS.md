@@ -283,6 +283,14 @@ make eval-ci        # 跑 evals/core.jsonl 基准任务集并施加 CI 门槛（
 - [如何避免]：单轮多工具调用须在**同一个** `Vec<Chunk>` 内放多个
   ToolCallStart/End（仿 `agent_parallel_tool_batch_preserves_result_order`），
   不能用多个 single_read_call 拼「单轮」
+- [测试辅助手工拼 JSON 未转义路径]：a3_call 用 `format!` 拼
+  `{"path":"..."}` 字面量，Windows 绝对路径的 `\\` 构成非法 JSON 转义
+  （`\\U`/`\\A` 等），serde_json `from_str` 静默失败 → 已读记录缺失 →
+  before 误 Deny；macOS/Linux 因正斜杠合法从未暴露，CI Windows job
+  首次完整运行才炸出（a3_allows_write_after_read 实案）
+- [如何避免]：构造 JSON 参数（测试与生产同罪）一律用
+  `serde_json::json!` 宏或 `to_string` 序列化，禁止 `format!` 手工拼接
+  含路径/用户输入的字面量；新平台跑测试前先审一遍 `format!` 拼 JSON
 
 ---
 

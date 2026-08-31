@@ -779,13 +779,18 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// A3 测试工具：构造 write_file / read_file 的 ToolCall。
+    ///
+    /// 参数必须经 serde_json 序列化：Windows 绝对路径含 `\`，手工
+    /// `format!` 拼接会产生非法 JSON 转义（`\U`/`\A` 等），`after` 的
+    /// `from_str` 静默失败导致读取记录缺失、`before` 误判 Deny
+    /// （CI cargo test (windows-latest) a3_allows_write_after_read 实案）。
     fn a3_call(name: &str, path: &str) -> ToolCall {
         ToolCall {
             id: "c".into(),
             ty: "function".into(),
             function: deepseeknova_core::types::FunctionCall {
                 name: name.into(),
-                arguments: format!(r#"{{"path":"{path}"}}"#),
+                arguments: serde_json::json!({ "path": path }).to_string(),
             },
         }
     }
