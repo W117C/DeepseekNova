@@ -903,9 +903,11 @@ mod tests {
     fn cache_segment_shows_rate_with_threshold_tones() {
         let theme = Theme::default();
         // 健康档（≥70% 绿色）。
-        let mut app = AppState::default();
-        app.session_cache_hit = 8_700;
-        app.session_cache_miss = 1_300;
+        let app = AppState {
+            session_cache_hit: 8_700,
+            session_cache_miss: 1_300,
+            ..Default::default()
+        };
         let (prio, line) = session_cache_segment(&app, &theme).expect("有可评估数据必有段");
         assert_eq!(prio, PRIO_CACHE);
         assert!(line.to_string().contains("87%"), "87%: {line:?}");
@@ -914,18 +916,22 @@ mod tests {
             Style::default().fg(theme.semantic(SemanticTone::Success))
         );
         // 告警档（<30% 黄色）。
-        let mut low = AppState::default();
-        low.session_cache_hit = 100;
-        low.session_cache_miss = 900;
+        let low = AppState {
+            session_cache_hit: 100,
+            session_cache_miss: 900,
+            ..Default::default()
+        };
         let (_, line) = session_cache_segment(&low, &theme).expect("10% 必有段");
         assert_eq!(
             line.spans[0].style,
             Style::default().fg(theme.semantic(SemanticTone::Warning))
         );
         // 边界：恰 70% 归健康档（>= 语义）。
-        let mut edge = AppState::default();
-        edge.session_cache_hit = 700;
-        edge.session_cache_miss = 300;
+        let edge = AppState {
+            session_cache_hit: 700,
+            session_cache_miss: 300,
+            ..Default::default()
+        };
         let (_, line) = session_cache_segment(&edge, &theme).expect("70% 必有段");
         assert_eq!(
             line.spans[0].style,

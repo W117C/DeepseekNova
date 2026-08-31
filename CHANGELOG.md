@@ -42,6 +42,19 @@ All notable changes to DeepseekNova will be documented in this file.
   `ProviderConfig` 初始化补 `cache_ttl` / `cache_prompt_key` / `cache_exact`
   三字段；全仓 `cargo fmt` 适配 rustfmt 1.98（CI `@stable` 不锁版本）。
 
+### Fixed（2026-08-31 CI 修复轮）
+
+- **h2 升级至 0.4.19**：修复 RUSTSEC-2026-0258（h2 unbounded empty DATA
+  frames，cargo audit / cargo deny 双双拦截，依赖为 reqwest 传递依赖）。
+- **`make bench-ci` 修复**：criterion 0.8 升级后 workspace 配置缺
+  `cargo_bench_support` feature，bench 二进制不再解析 `--save-baseline`；
+  且 `cargo bench --workspace -- <args>` 会把参数转发给 lib 单测的 libtest
+  harness（agent --lib 曾报 Unrecognized option）。现补齐 feature 并把参数
+  定向传给 4 个 `harness = false` bench 目标（core registry/events/
+  memory_search、graph retrieval）。
+- **README 测试数徽章同步**：1926 → 2112（Linux CI 权威口径 2108 + 本轮
+  新增 4 条 TUI 测试）。
+
 ### Fixed（2026-08-10 全面体检轮）
 
 - **`config` 命令凭据脱敏**：内联 `api_key` 与常见认证头（authorization /

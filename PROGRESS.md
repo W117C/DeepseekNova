@@ -693,3 +693,35 @@ embed-backfill: attempted=0 ok=0
 - [x] A8 OCR：`ocr delegate preview` + `ocr delegate rule` 输出与评论表已贴
       crates/REVIEW.md；R1 high 已修；修复后全量 `make check` EXIT=0
 - [x] A9 收尾：CLOSEOUT 六事实面 + BLOCKED 更新；无未确认删除
+
+## CI 修复轮 + 会话级命中率（2026-08-31，rustfmt/clippy 1.98 对齐）
+
+- **工具链对齐**：本机无 Rust → 装 rustup stable（cargo 1.98.0 + rustfmt +
+  clippy）；CI 用 dtolnay/rust-toolchain@stable 不锁版本，1.98 的 rustfmt
+  格式化行为变化 → 全仓 cargo fmt 独立 style 提交；clippy 1.98 新 lint
+  chunks_exact_to_as_chunks 命中 core/memory 与 graph/store 共 3 处 →
+  as_chunks::<4>().0 修复；provider 测试 ProviderConfig 初始化缺
+  cache_ttl/cache_prompt_key/cache_exact 三字段（HEAD 上已存在的测试
+  编译破损）→ 补 None。基线 make check EXIT=0。
+- **会话级 prefix cache 命中率**（README 唯一 [规划中] 项落地）：TUI
+  状态栏 ⌁N% 段——AppState 新增 session_cache_hit/miss（RunEvent::Usage
+  逐调用饱和累计，含子代理/plan mode），三档着色（<30% 黄对齐 runtime
+  30% 告警阈值 / ≥70% 绿 / 其余 dim），无可评估数据不显示；复位语义
+  /new /resume 清零、/clear 保留。4 条单测 + README/README_EN/CHANGELOG
+  同步。设计依据：TUI usage 原为单事件覆盖（仅显示最后一次调用），
+  评分卡 cache_hit_rate 只有会话末快照，无实时跨轮统计。
+- **CI 红项修复**（dependabot PR 与 main 共同暴露）：
+  - RUSTSEC-2026-0258（h2 0.4.15 unbounded empty DATA frames）→
+    cargo update -p h2 → 0.4.19（audit/deny 双拦截解除）
+  - make bench-ci 双重根因：criterion 0.8 升级后 workspace 配置缺
+    cargo_bench_support feature（4c6929d 引入 default-features=false）
+    + --workspace 转发参数给 libtest harness（agent --lib 报
+    Unrecognized option）→ 补 feature + 配方定向传参 4 个
+    harness=false 目标；本地 make bench-ci EXIT=0 实证
+  - README 测试数 1926 → 2112（CI 权威口径 2108 + 本轮 4 条新测试）
+- **dependabot**：#76 unicode-width / #77 tree-sitter-javascript 全绿
+  squash 合并；#74 tokio / #75 uuid / #78 serde_json / #83 install-action
+  rebase 后仅剩上述 main 级红项，修复推送后待 rebase 复跑。
+- **验证**：make check EXIT=0（fmt / clippy -D warnings / 全 workspace
+  测试 / doctest / doc 零警告）+ make bench-ci EXIT=0（本地 macOS
+  arm64，criterion 基线 target/criterion baseline=ci）。

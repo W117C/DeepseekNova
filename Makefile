@@ -93,9 +93,15 @@ audit:
 # 注意：criterion 0.8 已移除 --output-format json，基线保存是
 # 现版本可用的 JSON 记录手段；未设自动门禁阈值（机器噪声易 flaky），
 # 退化由人工比对历史 artifact 发现。
+# 参数只定向传给 harness=false 的 criterion bench 目标：`--` 之后的参数
+# 会转发给所有 bench 目标，lib 单测的 libtest harness 不认识
+# --save-baseline 会报 Unrecognized option（agent --lib 曾因此炸 CI bench）。
+# criterion 须启用 cargo_bench_support feature（workspace Cargo.toml），
+# 否则 bench 二进制同样不解析该参数。
 bench-ci:
 	mkdir -p target/bench-ci
-	cargo bench --workspace -- --save-baseline ci
+	cargo bench -p deepseeknova-core --bench registry --bench events --bench memory_search -- --save-baseline ci
+	cargo bench -p deepseeknova-graph --bench retrieval -- --save-baseline ci
 	tar czf target/bench-ci/bench.tar.gz -C target criterion
 	@echo "基准已保存到 target/criterion（baseline: ci）并打包 target/bench-ci/bench.tar.gz"
 
