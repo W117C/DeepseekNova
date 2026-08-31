@@ -165,6 +165,20 @@ pub enum Key {
     CmdRenameDesc,
     /// /checkpoint 命令描述。
     CmdCheckpointDesc,
+    /// /diff 命令描述。
+    CmdDiffDesc,
+    /// /diff 非 git 工作区提示。
+    DiffNoGit,
+    /// /diff 工作区干净提示。
+    DiffClean,
+    /// /diff 状态段头。
+    DiffStatusHeader,
+    /// /diff 统计段头。
+    DiffStatHeader,
+    /// /diff 补丁段头。
+    DiffPatchHeader,
+    /// /diff 补丁截断提示（{n} 截断行数）。
+    DiffPatchTruncated,
 
     // ── /help 浮层（commands::builtin）────────────────────
     /// 帮助：命令面板热键。
@@ -725,6 +739,13 @@ impl Key {
             WorkspaceCountRow => "  {ws} · {n}",
             CmdRenameDesc => "Rename the current session",
             CmdCheckpointDesc => "Save / list / roll back session checkpoints",
+            CmdDiffDesc => "Git-backed session review: what the agent changed",
+            DiffNoGit => "Not a git worktree — /diff unavailable",
+            DiffClean => "Working tree clean — nothing changed",
+            DiffStatusHeader => "Status (--short):",
+            DiffStatHeader => "Diff stat (vs HEAD):",
+            DiffPatchHeader => "Patch (vs HEAD):",
+            DiffPatchTruncated => "  … patch truncated, {n} more lines not shown",
 
             // /help 浮层
             HelpKeyCmdPalette => "  /              Command palette",
@@ -1057,6 +1078,13 @@ impl Key {
             WorkspaceCountRow => "  {ws} · {n}",
             CmdRenameDesc => "重命名当前会话",
             CmdCheckpointDesc => "会话检查点（保存/列表/回退）",
+            CmdDiffDesc => "会话改动审查（git 视角）",
+            DiffNoGit => "非 git 工作区，/diff 不可用",
+            DiffClean => "工作区干净，无改动",
+            DiffStatusHeader => "状态（--short）：",
+            DiffStatHeader => "差异统计（vs HEAD）：",
+            DiffPatchHeader => "完整补丁（vs HEAD）：",
+            DiffPatchTruncated => "  …补丁已截断，剩余 {n} 行未显示",
 
             // /help 浮层
             HelpKeyCmdPalette => "  /              命令面板",

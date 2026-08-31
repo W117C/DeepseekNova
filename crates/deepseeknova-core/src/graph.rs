@@ -128,6 +128,12 @@ pub enum Action {
     /// Execute nodes in parallel.
     Parallel(Vec<ExecutionNode>),
     /// Conditional branching.
+    ///
+    /// `condition` 为确定性文法（与边条件 `EdgeCondition` 词表对齐，由
+    /// executor `eval_conditional` 求值）：`""` 恒真（旧约定）；`success` /
+    /// `failure`（`on_failure`/`error` 同义）；`node:<id>:success|failure`；
+    /// `tool_call:<id>`；`contains:<text>`。未知表达式 → 明确错误
+    /// （fail-closed，拒绝静默执行 then）。
     Conditional {
         /// 分支条件表达式。
         condition: String,

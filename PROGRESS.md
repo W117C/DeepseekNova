@@ -747,3 +747,21 @@ embed-backfill: attempted=0 ok=0
 - **块4 文档纠偏**：三层缓存分层复核为「B6 已落地」（build_prefix 段序
   + 专项测试），master plan 差距 #2 标注更新。
 - **验证**：make check EXIT=0（见 /tmp/dsnova-check8.log）。
+
+## 拆解清单第二轮（2026-08-31，#2 + #7，#5 复核关闭）
+
+- **复核发现**：#5 contract.rs 已由 A1/A2 轮实现（307 行：extract_json /
+  require_string / require_bool / retry_parsed / default_echo；review.rs 与
+  verify.rs 判定点接入 retry ≤1），master plan §4.4 标注过期 → 清单关闭。
+  reflection 维持宽松提取（反思输出非门控判定，失败仅降级为无反思）。
+- **#2 Conditional 求值**（core/executor.rs）：eval_conditional 纯函数 +
+  Conditional 分支改写（真→then / 假→else 或 Skipped / 未知→明确错误）。
+  文法与 EdgeCondition 词表对齐：success、failure（on_failure/error 同义）、
+  node:<id>:success|failure、tool_call:<id>、contains:<text>、空串恒真。
+  测试：文法矩阵 14 断言 + true→then / false→else 集成；原 C-H2 错误测试
+  更新为 unknown-condition 语义。
+- **#7 TUI /diff**（tui/commands/builtin.rs）：git rev-parse 探测 → status
+  --short + diff HEAD --stat；/diff patch 输出完整补丁（truncate_patch
+  截断 200 行 + 溢出提示）；非 git 工作区 DiffNoGit 提示。i18n 中英 8 键。
+  测试：注册 / 截断纯函数 / Handled+输出存在性。
+- **验证**：make check EXIT=0（/tmp/dsnova-check9.log）。

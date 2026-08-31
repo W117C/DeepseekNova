@@ -592,22 +592,21 @@ impl GraphExecutor {
                 Action::Conditional {
                     condition,
                     then,
-                    r#else: _,
+                    r#else,
                 } => {
-                    // C-H2：条件求值机制尚未实现（planner/解析层当前不会产出
-                    // 带非空 condition 的 Conditional——见
-                    // coordinator::parse_plan_node_action 与 graph.rs 中该变体
-                    // 的文档）。修复前此处无条件执行 then、else 分支被静默丢弃。
-                    // 最小正确修复：condition 非空时返回明确错误，拒绝静默执行
-                    // then；空串 condition 视为恒真继续执行 then（保持向后兼容）。
-                    if !condition.is_empty() {
-                        return Err(crate::DeepseeknovaError::runner(format!(
-                            "Conditional 求值未实现（condition='{condition}'），\
-                             拒绝静默执行 then 分支"
-                        )));
+                    // C-H2：确定性条件求值（文法见 eval_conditional）。真 →
+                    // then；假 → else（无 else 则 Skipped，输出可观测）；未知
+                    // 表达式 → 明确错误（fail-closed，拒绝静默执行 then）。
+                    let truthy = eval_conditional(condition, outputs)?;
+                    if truthy {
+                        self.execute_action(&then.action, outputs, shared, usage)
+                            .await
+                    } else if let Some(else_node) = r#else {
+                        self.execute_action(&else_node.action, outputs, shared, usage)
+                            .await
+                    } else {
+                        Ok(NodeOutput::Skipped)
                     }
-                    self.execute_action(&then.action, outputs, shared, usage)
-                        .await
                 }
             }
         })
@@ -764,6 +763,62 @@ fn edge_condition_satisfied(
             NodeOutput::ToolResult(r) => r.contains(id),
             _ => false,
         },
+    }
+}
+
+/// C-H2：`Action::Conditional` 的条件求值——确定性文法，与边条件
+/// `EdgeCondition` 词表对齐（`success`/`failure`/`tool_call:<id>`），另加
+/// 节点级与文本包含两种形式。未知表达式返回 `Err`（fail-closed，拒绝
+/// 静默取真执行 then 分支；与 C-H2 最小正确修复同精神）。
+///
+/// 文法（`condition.trim()` 后匹配）：
+/// - `""` → 恒真（向后兼容：空串条件是文档化的旧约定）
+/// - `success` → 已有完成输出且无 `Error`
+/// - `failure` / `on_failure` / `error` → 存在 `Error` 输出
+/// - `node:<id>:success` / `node:<id>:failure` → 指定节点输出状态
+/// - `tool_call:<id>` → 任一 `ToolResult` 包含 `<id>`（同边条件语义）
+/// - `contains:<text>` → 任一输出文本包含 `<text>`
+fn eval_conditional(
+    condition: &str,
+    outputs: &RwLock<HashMap<NodeId, NodeOutput>>,
+) -> Result<bool, crate::DeepseeknovaError> {
+    let cond = condition.trim();
+    if cond.is_empty() {
+        return Ok(true);
+    }
+    let unknown = || {
+        crate::DeepseeknovaError::runner(format!(
+            "Conditional 条件表达式无法识别：'{cond}'（支持 success / failure / \
+             node:<id>:success|failure / tool_call:<id> / contains:<text>；\
+             空串恒真）"
+        ))
+    };
+    let guard = outputs.read().unwrap_or_else(|e| e.into_inner());
+    let any_output = !guard.is_empty();
+    let has_error = guard.values().any(|o| matches!(o, NodeOutput::Error(_)));
+    let (kind, arg) = match cond.split_once(':') {
+        Some((k, a)) => (k, Some(a)),
+        None => (cond, None),
+    };
+    match (kind, arg) {
+        ("success", None) => Ok(any_output && !has_error),
+        ("failure" | "on_failure" | "error", None) => Ok(has_error),
+        ("tool_call", Some(id)) => Ok(guard
+            .values()
+            .any(|o| matches!(o, NodeOutput::ToolResult(r) if r.contains(id)))),
+        ("node", Some(rest)) => match rest.split_once(':') {
+            Some((id, "success")) => Ok(matches!(
+                guard.get(id),
+                Some(NodeOutput::Text(_)) | Some(NodeOutput::ToolResult(_))
+            )),
+            Some((id, "failure")) => Ok(matches!(guard.get(id), Some(NodeOutput::Error(_)))),
+            _ => Err(unknown()),
+        },
+        ("contains", Some(text)) => Ok(guard.values().any(|o| match o {
+            NodeOutput::Text(t) | NodeOutput::ToolResult(t) => t.contains(text),
+            _ => false,
+        })),
+        _ => Err(unknown()),
     }
 }
 
@@ -1578,8 +1633,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn conditional_with_nonempty_condition_errors_instead_of_silent_then() {
-        // C-H2：condition 非空时（条件求值未实现）必须返回明确错误，拒绝
+    async fn conditional_unknown_condition_errors_instead_of_silent_then() {
+        // C-H2：未知条件表达式必须返回明确错误（fail-closed），拒绝
         // 静默执行 then 分支。
         let exec = make_executor();
         let mut g = ExecutionGraph::new("c".into());
@@ -1596,33 +1651,102 @@ mod tests {
         assert!(!result.completed);
         match result.node_outputs.get("c") {
             Some(NodeOutput::Error(e)) => assert!(
-                e.contains("Conditional 求值未实现"),
-                "应返回求值未实现的明确错误，got: {e}"
+                e.contains("条件表达式无法识别"),
+                "应返回表达式无法识别的明确错误，got: {e}"
             ),
             other => panic!("expected Error, got {other:?}"),
         }
     }
 
+    #[test]
+    fn eval_conditional_grammar_matrix() {
+        // 纯函数矩阵:空串恒真 / success / failure / tool_call / node:* /
+        // contains / 未知表达式 fail-closed。
+        let mut outputs: HashMap<NodeId, NodeOutput> = HashMap::new();
+        outputs.insert(
+            "a".into(),
+            NodeOutput::ToolResult("call tool_call:abc".into()),
+        );
+        outputs.insert("b".into(), NodeOutput::Text("has needle here".into()));
+        let guard = RwLock::new(outputs);
+        let g = |k: &str| eval_conditional(k, &guard).unwrap();
+        let e = |k: &str| eval_conditional(k, &guard).is_err();
+
+        assert!(g(""));
+        assert!(g("success"));
+        assert!(!g("failure"));
+        assert!(g("tool_call:abc"));
+        assert!(!g("tool_call:zzz"));
+        assert!(g("node:a:success"));
+        assert!(g("node:b:success"));
+        assert!(!g("node:missing:success"));
+        assert!(g("contains:needle"));
+        assert!(!g("contains:absent"));
+        assert!(e("x > 0"));
+        assert!(e("node:a"));
+        assert!(e("node:a:bogus"));
+        assert!(e("success:extra"));
+
+        // failure / on_failure / error 同义词。
+        let mut err: HashMap<NodeId, NodeOutput> = HashMap::new();
+        err.insert("p".into(), NodeOutput::Error("boom".into()));
+        let eg = RwLock::new(err);
+        assert!(eval_conditional("failure", &eg).unwrap());
+        assert!(eval_conditional("on_failure", &eg).unwrap());
+        assert!(eval_conditional("error", &eg).unwrap());
+        assert!(!eval_conditional("success", &eg).unwrap());
+    }
+
     #[tokio::test]
-    async fn conditional_with_empty_condition_runs_then() {
-        // C-H2：空串 condition 视为恒真，继续执行 then（保持向后兼容）。
+    async fn conditional_true_runs_then_false_runs_else() {
+        // 真值 → then 执行;假值 + else 存在 → else 执行;假值无 else → Skipped。
+        // 前置 ToolResult 使 tool_call:abc 条件为真。
         let exec = make_executor();
-        let mut g = ExecutionGraph::new("c".into());
+        let mut g = ExecutionGraph::new("probe".into());
+        let mut probe = ExecutionNode::new(
+            "probe",
+            Action::CallTool {
+                tool: "read_file".into(),
+                args: serde_json::Value::Null,
+            },
+        );
+        probe.retry = RetryPolicy {
+            max_attempts: 1,
+            backoff: Duration::ZERO,
+            jitter: false,
+        };
+        g.add_node(probe);
         g.add_node(ExecutionNode::new(
             "c",
             Action::Conditional {
-                condition: String::new(),
-                then: Box::new(make_think_node("then", "hello")),
-                r#else: None,
+                condition: "tool_call:read_file".into(),
+                then: Box::new(make_think_node("then", "took-then")),
+                r#else: Some(Box::new(make_think_node("els", "took-else"))),
             },
         ));
-
+        g.add_edge("probe".into(), "c".into(), None);
+        // 恒假条件（contains 不存在文本）→ else 分支执行。
+        g.add_node(ExecutionNode::new(
+            "c2",
+            Action::Conditional {
+                condition: "contains:absent-marker".into(),
+                then: Box::new(make_think_node("then2", "should-not-run")),
+                r#else: Some(Box::new(make_think_node("els2", "took-else"))),
+            },
+        ));
+        g.add_edge("c".into(), "c2".into(), None);
         let result = exec.execute(&g).await.unwrap();
-        assert!(result.completed);
-        match result.node_outputs.get("c") {
-            Some(NodeOutput::Text(t)) => assert!(t.contains("thought: hello"), "got: {t}"),
-            other => panic!("expected Text, got {other:?}"),
-        }
+        assert!(result.completed, "graph should complete");
+        let then_text = match result.node_outputs.get("c") {
+            Some(NodeOutput::Text(t)) => t.clone(),
+            other => panic!("expected Text from then branch, got {other:?}"),
+        };
+        assert!(then_text.contains("took-then"), "got: {then_text}");
+        let else_text = match result.node_outputs.get("c2") {
+            Some(NodeOutput::Text(t)) => t.clone(),
+            other => panic!("expected Text from else branch, got {other:?}"),
+        };
+        assert!(else_text.contains("took-else"), "got: {else_text}");
     }
 
     struct MockHeartbeatThink {

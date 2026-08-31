@@ -9,6 +9,20 @@ All notable changes to DeepseekNova will be documented in this file.
 ## [0.6.0] — 2026-08-31
 
 
+### Added（2026-08-31 拆解清单第二轮）
+
+- **Conditional 条件求值（C-H2 落地）**：executor 新增 `eval_conditional`
+  确定性文法（`""` 恒真 / `success` / `failure`（`on_failure`/`error` 同义）/
+  `node:<id>:success|failure` / `tool_call:<id>` / `contains:<text>`，与边条件
+  `EdgeCondition` 词表对齐）；假分支走 else（无 else → Skipped 可观测），
+  未知表达式明确报错（fail-closed，拒绝静默执行 then）；文法入 graph.rs 文档
+- **TUI /diff 会话改动审查**（OpenCode session review 对齐）：`git status
+  --short` 总览 + `diff HEAD --stat` 统计；`/diff patch` 输出完整补丁
+  （≤200 行，超出截断提示）；非 git 工作区降级提示
+- 复核记录：master plan §4.4 结构化输出契约（contract.rs / retry_parsed /
+  require_* 校验器）已由 A1/A2 轮实现，review 与 verify 判定点均已接入——
+  拆解清单 #5 关闭（reflection 仍为宽松提取，系反思输出非门控判定，维持现状）
+
 ### Added（2026-08-31 命中率闭环轮）
 
 - **serve SSE 会话级缓存用量**：`/v1/chat` 与 `/v1/sessions/{id}/chat` 的 `usage`/`done` 事件新增 `session_cache_hit_tokens` / `session_cache_miss_tokens`（running total；会话端点跨轮次累计于 `LiveSession` 原子字段，run 端点流内累计）；done 不重复累加（usage 与末个 Usage 事件同源，防双计）

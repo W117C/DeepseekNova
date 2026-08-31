@@ -291,6 +291,13 @@ make eval-ci        # 跑 evals/core.jsonl 基准任务集并施加 CI 门槛（
 - [如何避免]：构造 JSON 参数（测试与生产同罪）一律用
   `serde_json::json!` 宏或 `to_string` 序列化，禁止 `format!` 手工拼接
   含路径/用户输入的字面量；新平台跑测试前先审一遍 `format!` 拼 JSON
+- [doc 注释裸尖括号被 rustdoc 当 HTML 标签]：doc 注释写 `tool_call:<id>` 时
+  `<id>` 未包反引号，rustdoc 报 "unclosed HTML tag `id`"；make check 的 doc 阶段
+  （`RUSTDOCFLAGS="-D warnings"` 且 `--document-private-items`）直接 fail，而普通
+  `cargo doc`（默认不 deny、不 lint 私有项）通过，造成"本地过了"假象
+- [如何避免]：doc 注释中的泛型/占位符形参（`<id>`、`<text>` 等）一律包反引号
+  代码段；本地验收必须跑完整 `make check`（含 doc 阶段），不能只跑 `cargo doc`
+
 
 ---
 

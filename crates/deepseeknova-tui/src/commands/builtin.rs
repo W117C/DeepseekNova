@@ -67,6 +67,95 @@ impl CommandHandler for ClearCmd {
     }
 }
 
+// ── diff ────────────────────────────────────────────────────────
+
+struct DiffCmd;
+
+/// 截断补丁行：返回 (显示行, 超限未显示行数 Option)。
+fn truncate_patch(patch: &str, max: usize) -> (Vec<String>, Option<usize>) {
+    let all: Vec<&str> = patch.lines().collect();
+    if all.len() <= max {
+        (all.iter().map(|l| l.to_string()).collect(), None)
+    } else {
+        (
+            all[..max].iter().map(|l| l.to_string()).collect(),
+            Some(all.len() - max),
+        )
+    }
+}
+
+#[async_trait]
+impl CommandHandler for DiffCmd {
+    /// Git 视角会话审查（OpenCode session review 对齐）：status --short 总览 +
+    /// diff HEAD 统计；`patch` 参数追加完整补丁（≤200 行，超出截断提示）。
+    /// 非 git 工作区降级提示；git 调用 best-effort，与 /workspace 同模式。
+    async fn run(&self, ctx: &mut CommandCtx<'_>, args: &str) -> CommandOutcome {
+        let tr = ctx.app.tr;
+        let inside = std::process::Command::new("git")
+            .args(["rev-parse", "--is-inside-work-tree"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !inside {
+            ctx.app.show_notice(tr.t(Key::DiffNoGit));
+            return CommandOutcome::Handled;
+        }
+        let status = std::process::Command::new("git")
+            .args(["status", "--short"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default();
+        if status.trim().is_empty() {
+            ctx.app.show_notice(tr.t(Key::DiffClean));
+            return CommandOutcome::Handled;
+        }
+        ctx.app
+            .echo_line(LineKind::System, tr.t(Key::DiffStatusHeader));
+        for line in status.lines() {
+            ctx.app.echo_line(LineKind::System, &format!("  {line}"));
+        }
+        let want_patch = args.trim().eq_ignore_ascii_case("patch");
+        let git_args: &[&str] = if want_patch {
+            &["diff", "HEAD"]
+        } else {
+            &["diff", "HEAD", "--stat"]
+        };
+        if let Some(out) = std::process::Command::new("git")
+            .args(git_args)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+        {
+            let text = String::from_utf8_lossy(&out.stdout);
+            if want_patch {
+                ctx.app
+                    .echo_line(LineKind::System, tr.t(Key::DiffPatchHeader));
+                const MAX_PATCH_LINES: usize = 200;
+                let (lines, overflow) = truncate_patch(&text, MAX_PATCH_LINES);
+                for line in lines {
+                    ctx.app.echo_line(LineKind::System, &line);
+                }
+                if let Some(n) = overflow {
+                    let n = n.to_string();
+                    ctx.app.echo_line(
+                        LineKind::System,
+                        &tr.t_args(Key::DiffPatchTruncated, &[("n", &n)]),
+                    );
+                }
+            } else if !text.trim().is_empty() {
+                ctx.app
+                    .echo_line(LineKind::System, tr.t(Key::DiffStatHeader));
+                for line in text.lines() {
+                    ctx.app.echo_line(LineKind::System, &format!("  {line}"));
+                }
+            }
+        }
+        CommandOutcome::Handled
+    }
+}
+
 // ── new / sessions / resume（会话）─────────────────────────────
 
 struct NewCmd;
@@ -1057,6 +1146,7 @@ static SESSIONS: SessionsCmd = SessionsCmd;
 static RESUME: ResumeCmd = ResumeCmd;
 static RENAME: RenameCmd = RenameCmd;
 static CHECKPOINT: CheckpointCmd = CheckpointCmd;
+static DIFF: DiffCmd = DiffCmd;
 static MODEL: ModelCmd = ModelCmd;
 static COST: CostCmd = CostCmd;
 static SCORECARD: ScorecardCmd = ScorecardCmd;
@@ -1157,6 +1247,14 @@ pub const BUILTIN: &[Command] = &[
         args_spec: ArgsSpec::FreeText,
         args_hint: Some(&["save [label]", "list", "rollback [id]"]),
         handler: &CHECKPOINT,
+    },
+    Command {
+        name: "diff",
+        desc: &Key::CmdDiffDesc,
+        keywords: &["差异", "改动", "审查", "review", "git"],
+        args_spec: ArgsSpec::Enum(&["stat", "patch"]),
+        args_hint: Some(&["stat", "patch"]),
+        handler: &DIFF,
     },
     Command {
         name: "model",
@@ -1395,6 +1493,37 @@ mod tests {
         assert_eq!(app.display_mode, DisplayMode::Raw);
         run_cmd("raw", "", &mut app, &caps).await;
         assert_eq!(app.display_mode, DisplayMode::Normal);
+    }
+
+    #[test]
+    fn diff_command_is_registered() {
+        assert!(crate::commands::CommandRegistry::find("diff").is_some());
+    }
+
+    #[test]
+    fn truncate_patch_caps_and_reports_overflow() {
+        let short = "a\nb";
+        let (lines, overflow) = truncate_patch(short, 200);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(overflow, None);
+        let long: String = (0..250).map(|i| format!("line-{i}\n")).collect();
+        let (lines, overflow) = truncate_patch(&long, 200);
+        assert_eq!(lines.len(), 200);
+        assert_eq!(overflow, Some(50));
+    }
+
+    #[tokio::test]
+    async fn diff_runs_handled_in_git_or_nongit_cwd() {
+        // 仓库内（cargo test cwd）→ Handled 且不 panic；输出行或提示至少其一。
+        let caps = empty_caps();
+        let mut app = AppState {
+            tr: Tr::new(crate::i18n::Lang::Zh),
+            ..Default::default()
+        };
+        let out = run_cmd("diff", "", &mut app, &caps).await;
+        assert!(matches!(out, CommandOutcome::Handled));
+        let produced = app.notice.is_some() || !app.echo.is_empty();
+        assert!(produced, "/diff 应产生提示或回显行");
     }
 
     #[tokio::test]
