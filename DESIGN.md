@@ -304,7 +304,7 @@ Swarm 成员通过 `SwarmMessage` 进行异步通信：
 
 ### 概述
 
-> **状态**：[规划中/未实现]（见 §十 P5）。原先位于 `deepseeknova-orch` 的类型定义与接口预留已随该 crate 删除（B0），本节仅为规划性记录，不可作为现行能力使用。
+> **状态**：[规划中/未实现]（见 §十 P5）。原先位于 `deepseeknova-orch` 的类型定义与接口预留已随该 crate 删除（B0），本节仅为规划性记录，不可作为现行能力使用。**v0 wire 协议设计稿已出：[docs/federation-protocol-v0.md](docs/federation-protocol-v0.md)（NDJSON 封套 + announce/delegate/result/nack/ping 契约 + 行为不变量），实现仍待立 crate。**
 
 Agent Federation 允许多个 DeepseekNova 实例跨进程/跨机器协作。
 
@@ -507,7 +507,7 @@ Dangerous——在 `PermissionGate` 层硬拒（`CheckVerdict::hard_deny`），
 | P2 | 内置 5 个 Skill | ✅ 已完成（6 个 builtin skill md） |
 | P3 | 项目后置产出 | ✅ 已完成（artifacts 库 + `artifacts wiki/cards` CLI） |
 | P4 | Agent 工作规范 | ✅ 部分完成（dna-spec skill 已落地；system prompt 接入待定） |
-| P5 | Agent Federation 协议 | ⏳ 待实现（跨实例通信，需先出协议设计） |
+| P5 | Agent Federation 协议 | 📐 协议设计稿已出（`docs/federation-protocol-v0.md`，v0 NDJSON wire 契约）；实现待立 crate |
 | P6 | Windows 沙箱隔离 | ✅ 已实现（Job Object 进程树隔离 + 资源限制；网络/文件系统写路径限制仍待 WFP/AppContainer） |
 
 ---

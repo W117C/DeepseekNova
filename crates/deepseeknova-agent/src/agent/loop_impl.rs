@@ -2200,6 +2200,12 @@ pub(crate) fn is_tool_error_result(result: &str) -> bool {
     false
 }
 
+/// C-R1 确定性恢复上限：单次工具调用在 retryable 错误上的最大自动重试
+/// 次数（master plan §4.1 路径 A："恢复次数上限 2"）。
+const TOOL_RECOVERY_MAX_RETRIES: usize = 2;
+/// 确定性恢复重试间隔（固定短退避：retryable 类错误多为瞬时资源竞争）。
+const TOOL_RECOVERY_BACKOFF_MS: u64 = 100;
+
 /// 执行单个工具调用（并发段内每个任务调用一次），返回 (原始下标, 结果字符串)。
 /// 错误与超长输出沿用既有截断策略；本函数不抛错，保证 JoinSet 任务不 panic。
 async fn execute_tool_call(
@@ -2226,28 +2232,77 @@ async fn execute_tool_call(
         // `run_stream_with_parent_cancel` 传入的父令牌在此生效；顶层 run 的
         // Ctrl-C 取消同路径处理（此前主循环工具执行无取消分支，阻塞工具
         // 无法被父取消中断）。
-        match tokio::select! {
-            r = tool.execute(&ctx, &call.arguments) => r,
-            _ = cancel.cancelled() => Err(deepseeknova_core::DeepseeknovaError::Cancelled),
-        } {
-            Ok(output) => output,
-            Err(e) => {
-                let err_str = format!("{e:#}");
-                // Truncate tool errors to avoid leaking file paths or data into context
-                let max_len = 500;
-                let truncated = if err_str.len() > max_len {
-                    let end = err_str.floor_char_boundary(max_len);
-                    format!(
-                        "{}... [truncated {} bytes]",
-                        &err_str[..end],
-                        err_str.len() - end
-                    )
-                } else {
-                    err_str
-                };
-                format!("Error: {truncated}")
+        // C-R1 确定性恢复（master plan §4.1 路径 A）：retryable 类瞬时错误
+        // （`is_retryable` 类型化判定，非消息文本匹配）自动重跑，上限
+        // TOOL_RECOVERY_MAX_RETRIES 次。参数错误等确定性失败（NotFound /
+        // PermissionDenied / Cancelled 等）不重试，直接以错误文本回炉模型
+        // （§4.1 反例约束）。恢复成功的调用其结果尾追加标记（模型可见）；
+        // 写类工具恢复后仍置 wrote_files → verify 门重验证，满足"恢复后
+        // 必须重新验证"护栏。
+        let mut retry_failures: Vec<String> = Vec::new();
+        let mut output = loop {
+            let attempt = tokio::select! {
+                r = tool.execute(&ctx, &call.arguments) => r,
+                _ = cancel.cancelled() => Err(deepseeknova_core::DeepseeknovaError::Cancelled),
+            };
+            match attempt {
+                Ok(out) => break out,
+                Err(e) => {
+                    let retryable = e.is_retryable();
+                    let err_str = format!("{e:#}");
+                    if retryable && retry_failures.len() < TOOL_RECOVERY_MAX_RETRIES {
+                        info!(
+                            tool = %call.name,
+                            attempt = retry_failures.len() + 1,
+                            "tool failed with retryable error — deterministic recovery retry"
+                        );
+                        retry_failures.push(err_str);
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            TOOL_RECOVERY_BACKOFF_MS,
+                        ))
+                        .await;
+                        continue;
+                    }
+                    // Truncate tool errors to avoid leaking file paths or data into context
+                    let max_len = 500;
+                    let truncated = if err_str.len() > max_len {
+                        let end = err_str.floor_char_boundary(max_len);
+                        format!(
+                            "{}... [truncated {} bytes]",
+                            &err_str[..end],
+                            err_str.len() - end
+                        )
+                    } else {
+                        err_str
+                    };
+                    let mut text = format!("Error: {truncated}");
+                    if !retry_failures.is_empty() {
+                        text.push_str(&format!(
+                            "\n\n[deterministic recovery] {} automatic retry(ies) also failed",
+                            retry_failures.len()
+                        ));
+                    }
+                    break text;
+                }
             }
+        };
+        if !retry_failures.is_empty() && !output.starts_with("Error:") {
+            // 成功恢复：结果尾追加恢复标记（错误信息截断防上下文污染）。
+            let last = retry_failures.last().cloned().unwrap_or_default();
+            let max_len = 200;
+            let truncated = if last.len() > max_len {
+                let end = last.floor_char_boundary(max_len);
+                format!("{}... [truncated]", &last[..end])
+            } else {
+                last
+            };
+            output.push_str(&format!(
+                "\n\n---\n[recovered] auto-retry succeeded after {} failed attempt(s); \
+                 last error: {truncated}",
+                retry_failures.len()
+            ));
         }
+        output
     } else {
         format!("Error: unknown tool '{}'", call.name)
     };
@@ -2316,6 +2371,163 @@ mod tests {
         assert_eq!(changed_line_count("--- a\n+++ b\n"), 0);
     }
     use std::sync::Arc;
+
+    /// 可编程失败序列的工具桩：按序返回错误，耗尽后返回成功文本。
+    /// 记录总尝试次数供断言。
+    struct FlakyTool {
+        name: &'static str,
+        errors: std::sync::Mutex<Vec<deepseeknova_core::DeepseeknovaError>>,
+        calls: std::sync::atomic::AtomicUsize,
+        final_text: String,
+    }
+
+    impl FlakyTool {
+        fn new(
+            name: &'static str,
+            errors: Vec<deepseeknova_core::DeepseeknovaError>,
+            final_text: &str,
+        ) -> Self {
+            Self {
+                name,
+                errors: std::sync::Mutex::new(errors),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                final_text: final_text.to_string(),
+            }
+        }
+
+        fn attempts(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for FlakyTool {
+        fn schema(&self) -> ToolSchema {
+            ToolSchema {
+                name: self.name.to_string(),
+                description: "flaky tool".to_string(),
+                parameters: serde_json::json!({"type":"object","properties":{}}),
+            }
+        }
+        async fn execute(
+            &self,
+            _ctx: &ToolContext,
+            _args: &str,
+        ) -> Result<String, deepseeknova_core::DeepseeknovaError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut q = self.errors.lock().unwrap_or_else(|e| e.into_inner());
+            match q.pop() {
+                Some(e) => Err(e),
+                None => Ok(self.final_text.clone()),
+            }
+        }
+    }
+
+    fn recovery_tool_map(tools: Vec<Arc<dyn Tool>>) -> HashMap<String, Arc<dyn Tool>> {
+        tools.into_iter().map(|t| (t.schema().name, t)).collect()
+    }
+
+    async fn run_recovery_call(tool_map: HashMap<String, Arc<dyn Tool>>) -> String {
+        let call = PendingToolCall {
+            id: "call-1".to_string(),
+            name: tool_map.values().next().unwrap().schema().name,
+            arguments: "{}".to_string(),
+        };
+        let (_idx, result) = execute_tool_call(
+            0,
+            call,
+            tool_map,
+            std::env::temp_dir(),
+            deepseeknova_security::context::SecurityContext::default(),
+            Vec::new(),
+            tokio_util::sync::CancellationToken::new(),
+            8192,
+        )
+        .await;
+        result
+    }
+
+    #[tokio::test]
+    async fn recovery_retries_retryable_error_then_succeeds() {
+        // §4.1 验证路径：模拟工具失败（retryable）→ 自动重试成功；结果带
+        // 恢复标记，最终输出完整。
+        let flaky = Arc::new(FlakyTool::new(
+            "flaky_io",
+            vec![
+                deepseeknova_core::DeepseeknovaError::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "transient timeout",
+                )),
+                deepseeknova_core::DeepseeknovaError::Io(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionReset,
+                    "transient reset",
+                )),
+            ],
+            "final payload",
+        ));
+        let tool: Arc<dyn Tool> = flaky.clone();
+        let map = recovery_tool_map(vec![tool]);
+        let result = run_recovery_call(map).await;
+        assert!(
+            !is_tool_error_result(&result),
+            "恢复后不应再是错误: {result}"
+        );
+        assert!(result.contains("final payload"), "got: {result}");
+        assert!(
+            result.contains("[recovered] auto-retry succeeded after 2 failed attempt(s)"),
+            "应带恢复标记: {result}"
+        );
+        assert_eq!(flaky.attempts(), 3, "1 次原始 + 2 次重试");
+    }
+
+    #[tokio::test]
+    async fn recovery_does_not_retry_non_retryable_error() {
+        // §4.1 反例约束：参数/确定性错误（NotFound）不重试，直接回炉模型。
+        let flaky = Arc::new(FlakyTool::new(
+            "missing",
+            vec![deepseeknova_core::DeepseeknovaError::Io(
+                std::io::Error::new(std::io::ErrorKind::NotFound, "no such file"),
+            )],
+            "never reached",
+        ));
+        let tool: Arc<dyn Tool> = flaky.clone();
+        let map = recovery_tool_map(vec![tool]);
+        let result = run_recovery_call(map).await;
+        assert!(is_tool_error_result(&result), "got: {result}");
+        assert!(result.contains("no such file"), "got: {result}");
+        assert!(
+            !result.contains("[deterministic recovery]"),
+            "无重试记录: {result}"
+        );
+        assert_eq!(flaky.attempts(), 1, "确定性错误不重试");
+    }
+
+    #[tokio::test]
+    async fn recovery_caps_at_two_retries_then_errors() {
+        // 恢复上限护栏：持续 retryable 失败 → 恰好 1 + 2 次尝试，最终错误
+        // 文本携带重试次数说明。
+        let flaky = Arc::new(FlakyTool::new(
+            "always_busy",
+            (0..16)
+                .map(|_| {
+                    deepseeknova_core::DeepseeknovaError::Io(std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        "busy",
+                    ))
+                })
+                .collect(),
+            "never reached",
+        ));
+        let tool: Arc<dyn Tool> = flaky.clone();
+        let map = recovery_tool_map(vec![tool]);
+        let result = run_recovery_call(map).await;
+        assert!(is_tool_error_result(&result), "got: {result}");
+        assert!(
+            result.contains("[deterministic recovery] 2 automatic retry(ies) also failed"),
+            "应记录上限重试: {result}"
+        );
+        assert_eq!(flaky.attempts(), 3, "1 + 上限 2");
+    }
 
     /// 固定返回给定文本的写类工具桩（驱动工具钩子产 findings）。
     struct OkTool {

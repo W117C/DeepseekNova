@@ -9,6 +9,27 @@ All notable changes to DeepseekNova will be documented in this file.
 ## [0.6.0] — 2026-08-31
 
 
+### Added（2026-08-31 拆解清单第三轮）
+
+- **确定性恢复（C-R1，master plan §4.1 路径 A 落地）**：`execute_tool_call`
+  内 retryable 类错误（`DeepseeknovaError::is_retryable` 类型化判定：瞬时
+  IO / Provider 显式标注 / SQLITE_BUSY，**非消息文本匹配**）自动重跑，上限
+  2 次 + 固定 100ms 退避；参数错误等确定性失败不重试直接回炉模型（§4.1
+  反例约束）；恢复成功在结果尾追加 `[recovered]` 标记（模型可见），写类
+  工具恢复后仍置 wrote_files → verify 门重验证（"恢复后必须重新验证"护栏）
+- **Federation 协议设计稿（P5 docs-first）**：新增
+  `docs/federation-protocol-v0.md`——v0 NDJSON 封套（announce/delegate/
+  result/nack/ping/pong 契约）+ 六条行为不变量（委托不传染/只读默认/
+  结果可信边界/超时语义/幂等/版本协商）+ 安全留白与开放问题；DESIGN.md
+  §五与 §十 P5 行同步指向
+- 复核关闭：**#8 Worktree 隔离并行**已由 P2-7 轮实现（`cli/worktree.rs`
+  677 行：new/list/switch/delete/clean + 8 测试 + 运行态按工作区根隔离）；
+  拆解清单该项为重复发现
+- 待决策项：#9 完整生命周期事件总线（现有 ToolHook/RunEvent 已覆盖工具级
+  扩展，会话级总线需范围决策）；#12 Windows 沙箱网络/写限制（WFP/
+  AppContainer 为 Windows 内核级，本地 macOS 不可验证，需专项轮 + CI
+  Windows 证据）
+
 ### Added（2026-08-31 拆解清单第二轮）
 
 - **Conditional 条件求值（C-H2 落地）**：executor 新增 `eval_conditional`

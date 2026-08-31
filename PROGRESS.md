@@ -765,3 +765,16 @@ embed-backfill: attempted=0 ok=0
   截断 200 行 + 溢出提示）；非 git 工作区 DiffNoGit 提示。i18n 中英 8 键。
   测试：注册 / 截断纯函数 / Handled+输出存在性。
 - **验证**：make check EXIT=0（/tmp/dsnova-check9.log）。
+
+## 拆解清单第三轮（2026-08-31，#6 落地 + #8 复核关闭 + #11 设计稿）
+
+- **#6 确定性恢复**：agent/loop_impl.rs execute_tool_call 重试循环。retryable
+  判定复用 core error.rs 类型化 is_retryable()；上限 2 + 100ms；成功标记
+  [recovered]/失败标记 [deterministic recovery] N automatic retry(ies) also
+  failed。测试 3：retryable→成功（恰 3 次尝试）、NotFound 不重试（恰 1 次）、
+  持续失败上限封顶（恰 3 次 + 错误说明）。agent crate 393 测试全绿。
+- **#8 复核关闭**：P2-7 已交付（worktree.rs 677 行 + 8 测试 + main.rs 接线
+  + TUI /workspace 列表）。
+- **#11**：docs/federation-protocol-v0.md（v0 wire 契约 + 不变量 + 开放问题），
+  DESIGN.md 双处更新。实现需另立 crate，不在本轮。
+- **验证**：make check EXIT=0（/tmp/dsnova-check11.log）。
