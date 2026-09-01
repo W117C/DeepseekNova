@@ -220,7 +220,7 @@ model = "deepseek-chat"
 | Backend | Rust + SQLite FTS5 + tokio + axum |
 | Frontend | TUI (ratatui) · CLI (clap) · HTTP API (axum + SSE) |
 | Tracing | OpenTelemetry (OTLP) |
-| Tests | 2119 tests · cargo-llvm-cov · 3-platform CI |
+| Tests | 2122 tests · cargo-llvm-cov · 3-platform CI |
 
 ## 📄 License
 
