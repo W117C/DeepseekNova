@@ -70,12 +70,39 @@ pub(crate) fn user_hooks_from_config(
         session_start: map(&cfg.session_start),
         session_end: map(&cfg.session_end),
         failure: map(&cfg.failure),
+        verification: map(&cfg.verification),
+        run_done: map(&cfg.run_done),
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::*;
+
+    #[test]
+    fn user_hooks_from_config_maps_verification_and_run_done() {
+        // 新事件（C-R2）：verification / run_done 命令映射 + disabled 过滤。
+        let cfg = deepseeknova_config::HooksConfig {
+            enabled: true,
+            tool_before: vec![],
+            tool_after: vec![],
+            session_start: vec![],
+            session_end: vec![],
+            failure: vec![],
+            verification: vec![marker_cmd("v", std::path::Path::new("/tmp/v"))],
+            run_done: vec![deepseeknova_config::HookCommandConfig {
+                command: "disabled-done".into(),
+                args: vec![],
+                timeout_secs: None,
+                disabled: true,
+            }],
+        };
+        let hooks = user_hooks_from_config(&cfg);
+        assert_eq!(hooks.verification.len(), 1);
+        assert_eq!(hooks.verification[0].command, "sh");
+        assert!(hooks.run_done.is_empty(), "disabled 命令必须被过滤");
+        assert!(!hooks.is_empty());
+    }
 
     #[test]
     fn user_hooks_from_config_maps_events_and_filters_disabled() {
@@ -94,6 +121,8 @@ mod tests {
             session_start: vec![],
             session_end: vec![],
             failure: vec![],
+            verification: vec![],
+            run_done: vec![],
         };
         let hooks = user_hooks_from_config(&cfg);
         assert_eq!(hooks.tool_before.len(), 1, "disabled 命令必须被过滤");

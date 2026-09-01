@@ -778,3 +778,12 @@ embed-backfill: attempted=0 ok=0
 - **#11**：docs/federation-protocol-v0.md（v0 wire 契约 + 不变量 + 开放问题），
   DESIGN.md 双处更新。实现需另立 crate，不在本轮。
 - **验证**：make check EXIT=0（/tmp/dsnova-check11.log）。
+
+## 拆解清单第四轮（2026-09-01，#9 落地）
+
+- **#9 插件事件系统（最小可用面）**：核心判断——工具级扩展点（ToolHook +
+  UserHooks tool_*）已存在，真缺口是任务质量闭环结果对插件的可见性。
+  落地：UserHooks.verification / run_done 两事件 + HookPayload.detail +
+  config/runtime/GUIDE 全链路。Paused 路径未挂 run_done（Paused 已有
+  failure 钩子覆盖诊断面），留待需求出现再扩展。
+- **验证**：make check EXIT=0（/tmp/dsnova-check12.log）。

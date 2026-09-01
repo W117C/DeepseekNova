@@ -116,6 +116,10 @@ pub enum HookEvent {
     SessionEnd,
     /// 失败诊断时（run 以非成功终点结束，如 max_steps Paused / 异常返回）。
     Failure,
+    /// 确定性验证门单条命令结果（passed 见 detail JSON）。
+    Verification,
+    /// 一次 run 正常完成（Done 终点；Paused/Failure 不触发本事件）。
+    RunDone,
 }
 
 impl HookEvent {
@@ -127,6 +131,8 @@ impl HookEvent {
             HookEvent::SessionStart => "session_start",
             HookEvent::SessionEnd => "session_end",
             HookEvent::Failure => "failure",
+            HookEvent::Verification => "verification",
+            HookEvent::RunDone => "run_done",
         }
     }
 }
@@ -182,6 +188,10 @@ pub struct HookPayload<'a> {
     pub workspace: &'a Path,
     /// 会话 id。
     pub session_id: &'a str,
+    /// 事件细节 JSON（verification/run_done 携带；其余事件 None → 序列化
+    /// 省略该字段，不向外部命令泄露 schema 噪音）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<&'a str>,
 }
 
 /// 外部命令 stdout 的 JSON 裁决（tool_before 语义；缺省放行）。
@@ -222,6 +232,10 @@ pub struct UserHooks {
     pub session_end: Vec<UserHookCommand>,
     /// 失败诊断通知命令。
     pub failure: Vec<UserHookCommand>,
+    /// 确定性验证门结果通知命令（每条验证命令触发一次；失败仅 warn）。
+    pub verification: Vec<UserHookCommand>,
+    /// run 正常完成通知命令（Done 终点；失败仅 warn）。
+    pub run_done: Vec<UserHookCommand>,
 }
 
 impl UserHooks {
@@ -232,6 +246,8 @@ impl UserHooks {
             && self.session_start.is_empty()
             && self.session_end.is_empty()
             && self.failure.is_empty()
+            && self.verification.is_empty()
+            && self.run_done.is_empty()
     }
 }
 
@@ -534,7 +550,27 @@ mod tests {
             arguments: tool.map(|_| "{\"path\":\"/tmp/x\"}"),
             workspace: std::path::Path::new("/ws"),
             session_id: "sess-1",
+            detail: None,
         }
+    }
+
+    #[test]
+    fn hook_payload_detail_serializes_into_stdin_json() {
+        // detail 字段:verification/run_done 事件细节 JSON 原样透传;None 时字段缺席。
+        let with = hook_payload(HookEvent::Verification.as_str(), None);
+        let payload_with = HookPayload {
+            detail: Some("{\"passed\":true}"),
+            ..with
+        };
+        let s = serde_json::to_string(&payload_with).unwrap();
+        assert!(s.contains("\"detail\""), "got: {s}");
+        assert!(s.contains("passed"), "got: {s}");
+        let without = HookPayload {
+            detail: None,
+            ..hook_payload(HookEvent::ToolBefore.as_str(), Some("read_file"))
+        };
+        let s2 = serde_json::to_string(&without).unwrap();
+        assert!(!s2.contains("detail"), "None 时应省略字段: {s2}");
     }
 
     #[test]
@@ -555,6 +591,8 @@ mod tests {
         assert_eq!(HookEvent::SessionStart.as_str(), "session_start");
         assert_eq!(HookEvent::SessionEnd.as_str(), "session_end");
         assert_eq!(HookEvent::Failure.as_str(), "failure");
+        assert_eq!(HookEvent::Verification.as_str(), "verification");
+        assert_eq!(HookEvent::RunDone.as_str(), "run_done");
     }
 
     #[tokio::test]

@@ -1802,6 +1802,15 @@ pub struct HooksConfig {
     /// 失败诊断通知命令。
     #[serde(default)]
     pub failure: Vec<HookCommandConfig>,
+
+    /// 确定性验证门结果通知命令（每条验证命令触发一次，passed 见 payload
+    /// detail JSON；失败仅 warn）。
+    #[serde(default)]
+    pub verification: Vec<HookCommandConfig>,
+
+    /// run 正常完成通知命令（Done 终点；失败仅 warn）。
+    #[serde(default)]
+    pub run_done: Vec<HookCommandConfig>,
 }
 
 impl HooksConfig {

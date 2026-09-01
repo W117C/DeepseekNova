@@ -385,11 +385,13 @@ enabled = true    # 默认 true；false 时质量钩子关闭（写后策略评�
 
 ### 用户级 hooks（`[hooks]`）
 
-把事件接到外部命令（区别于上文的内部 ToolHook 链）：五事件
-`tool_before` / `tool_after` / `session_start` / `session_end` / `failure`，
+把事件接到外部命令（区别于上文的内部 ToolHook 链）：七事件
+`tool_before` / `tool_after` / `session_start` / `session_end` / `failure` /
+`verification` / `run_done`，
 事件间 **AND 链**——`tool_before` 的全部命令通过（exit 0 且裁决放行）才执行
 工具，任一失败（非 0 / 超时 / 崩溃 / `allowed=false`）即阻止（**fail-closed**，
-叠加在内部治理链之后）；`tool_after` / `session_*` / `failure` 失败仅 warn。
+叠加在内部治理链之后）；`tool_after` / `session_*` / `failure` / `verification` /
+`run_done` 失败仅 warn。
 无 hooks 配置零进程开销：
 
 ```toml
@@ -400,10 +402,14 @@ tool_before = [
 ]
 ```
 
-JSON 协议：stdin 传 `{"event","tool","arguments","workspace","session_id"}`，
-stdout 期望 `{"allowed":bool,"reason"}`。`session_start`/`session_end` 于 run
+JSON 协议：stdin 传 `{"event","tool","arguments","workspace","session_id"[,"detail"]}`，
+stdout 期望 `{"allowed":bool,"reason"}`（仅 `tool_before` 的裁决被消费；其余
+事件为通知型）。`session_start`/`session_end` 于 run
 边界触发，`failure` 挂 MetricsGuard emit（Paused/异常触发，Completed/Cancelled
-不触发）。单条命令可配 `disabled = true` 保留配置但跳过执行。
+不触发）。`verification`（C-R2）在确定性验证门每条命令出结果后触发，
+`detail` 携带 `{"command","passed"[,"summary"]}`；`run_done`（C-R2）在 run
+正常完成（含取消路径的 Done）触发，`detail` 携带 `{"status"[,"steps"]}`。
+单条命令可配 `disabled = true` 保留配置但跳过执行。
 
 ### 协议增强能力包（`[protocol]`）
 

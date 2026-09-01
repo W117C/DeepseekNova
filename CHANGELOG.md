@@ -9,6 +9,18 @@ All notable changes to DeepseekNova will be documented in this file.
 ## [0.6.0] — 2026-08-31
 
 
+### Added（2026-08-31/09-01 拆解清单第四轮）
+
+- **插件事件系统扩展（C-R2，#9 最小可用面）**：UserHooks 新增
+  `verification`（确定性验证门每条命令出结果即触发，detail 携带
+  `{"command","passed"[,"summary"]}`）与 `run_done`（run 正常完成/取消
+  终点触发，detail 携带 `{"status"[,"steps"]}`）两个事件；HookPayload 加
+  `detail` 字段（`skip_serializing_if`，None 不进 stdin JSON）；HookEvent
+  加 `verification`/`run_done`。config `[hooks]` 两列表 + runtime 映射 +
+  verify.rs/loop_impl.rs 触发点接线；GUIDE.md 七事件文档同步。测试：
+  core detail 序列化/as_str、runtime 映射过滤、agent verify 端到端
+  marker 文件触发（stdin JSON 全量断言）
+
 ### Added（2026-08-31 拆解清单第三轮）
 
 - **确定性恢复（C-R1，master plan §4.1 路径 A 落地）**：`execute_tool_call`

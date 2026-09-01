@@ -320,6 +320,18 @@ pub(crate) async fn run_agent_loop(
             })))
             .await
             .ok();
+            if !user_hooks.run_done.is_empty() {
+                let detail = serde_json::json!({ "status": "cancelled" }).to_string();
+                let payload = HookPayload {
+                    event: HookEvent::RunDone.as_str(),
+                    tool: None,
+                    arguments: None,
+                    workspace: &workspace_root,
+                    session_id,
+                    detail: Some(&detail),
+                };
+                fire_user_notify_hooks(&user_hooks.run_done, &payload);
+            }
             return Ok(());
         }
 
@@ -714,6 +726,8 @@ pub(crate) async fn run_agent_loop(
                                 &extensions,
                                 cancel,
                                 tx,
+                                &user_hooks.verification,
+                                session_id,
                             )
                             .await
                             {
@@ -1105,6 +1119,18 @@ pub(crate) async fn run_agent_loop(
                 };
                 metrics.emit(Some(outcome));
                 tx.send(Ok(RunEvent::Done(output))).await.ok();
+                if !user_hooks.run_done.is_empty() {
+                    let detail = serde_json::json!({ "status": "ok" }).to_string();
+                    let payload = HookPayload {
+                        event: HookEvent::RunDone.as_str(),
+                        tool: None,
+                        arguments: None,
+                        workspace: &workspace_root,
+                        session_id,
+                        detail: Some(&detail),
+                    };
+                    fire_user_notify_hooks(&user_hooks.run_done, &payload);
+                }
                 return Ok(());
             }
             StepOutcome::Continue => {
@@ -1758,6 +1784,7 @@ async fn stream_and_process_turn(
                     arguments: Some(&call.arguments),
                     workspace: workspace_root,
                     session_id,
+                    detail: None,
                 };
                 for cmd in &user_hooks.tool_before {
                     let run = run_user_hook(cmd, &payload).await;
@@ -2122,6 +2149,7 @@ async fn stream_and_process_turn(
                     arguments: Some(&call.arguments),
                     workspace: workspace_root,
                     session_id,
+                    detail: None,
                 };
                 fire_user_notify_hooks(&user_hooks.tool_after, &payload);
             }

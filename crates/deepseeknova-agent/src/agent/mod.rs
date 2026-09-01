@@ -351,6 +351,7 @@ impl MetricsGuard {
             arguments: None,
             workspace: &self.workspace_root,
             session_id,
+            detail: None,
         };
         fire_user_notify_hooks(&self.failure_hooks, &payload);
     }
@@ -1180,6 +1181,7 @@ impl Agent {
                     arguments: None,
                     workspace: &session_hook_workspace,
                     session_id: &session_hook_id,
+                    detail: None,
                 };
                 fire_user_notify_hooks(&user_hooks.session_start, &payload);
             }
@@ -1241,6 +1243,7 @@ impl Agent {
                     arguments: None,
                     workspace: &session_hook_workspace,
                     session_id: &session_hook_id,
+                    detail: None,
                 };
                 fire_user_notify_hooks(&user_hooks.session_end, &payload);
             }

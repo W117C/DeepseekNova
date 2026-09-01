@@ -4,6 +4,7 @@
 //! 失败结果以 User 消息回喂循环（不能伪装成 Tool 结果——无对应 tool_call_id
 //! 会破坏 DeepSeek V4 replay 不变量）；超过 max_cycles 后优雅 Paused。
 
+use deepseeknova_core::tool_hook::{HookEvent, HookPayload};
 use deepseeknova_core::RunEvent;
 use deepseeknova_core::Tool;
 use deepseeknova_core::{Message, Role};
@@ -126,6 +127,8 @@ pub(crate) async fn run_verify_pass(
     extensions: &[Arc<crate::agent::ExtensionApplier>],
     cancel: &CancellationToken,
     tx: &mpsc::Sender<Result<RunEvent, deepseeknova_core::DeepseeknovaError>>,
+    verification_hooks: &[deepseeknova_core::tool_hook::UserHookCommand],
+    session_id: &str,
 ) -> VerifyOutcome {
     let Some(bash) = tool_map.get("bash") else {
         warn!("verify skipped: bash tool not registered");
@@ -158,6 +161,22 @@ pub(crate) async fn run_verify_pass(
                     }))
                     .await
                     .ok();
+                    if !verification_hooks.is_empty() {
+                        let detail = serde_json::json!({
+                            "command": cmd,
+                            "passed": true,
+                        })
+                        .to_string();
+                        let payload = HookPayload {
+                            event: HookEvent::Verification.as_str(),
+                            tool: None,
+                            arguments: None,
+                            workspace: workspace_root,
+                            session_id,
+                            detail: Some(&detail),
+                        };
+                        crate::agent::fire_user_notify_hooks(verification_hooks, &payload);
+                    }
                     break;
                 }
                 Err(e) => {
@@ -180,6 +199,23 @@ pub(crate) async fn run_verify_pass(
                     }))
                     .await
                     .ok();
+                    if !verification_hooks.is_empty() {
+                        let detail = serde_json::json!({
+                            "command": cmd,
+                            "passed": false,
+                            "summary": capped,
+                        })
+                        .to_string();
+                        let payload = HookPayload {
+                            event: HookEvent::Verification.as_str(),
+                            tool: None,
+                            arguments: None,
+                            workspace: workspace_root,
+                            session_id,
+                            detail: Some(&detail),
+                        };
+                        crate::agent::fire_user_notify_hooks(verification_hooks, &payload);
+                    }
                     return VerifyOutcome::Fail(capped);
                 }
             }
@@ -393,6 +429,8 @@ mod tests {
             &[],
             &cancel,
             &channel(),
+            &[],
+            "sess-test",
         )
         .await;
         assert_eq!(outcome, VerifyOutcome::Pass);
@@ -416,6 +454,8 @@ mod tests {
             &[],
             &cancel,
             &channel(),
+            &[],
+            "sess-test",
         )
         .await;
         match outcome {
@@ -425,6 +465,58 @@ mod tests {
             }
             other => panic!("expected Fail, got {other:?}"),
         }
+    }
+    /// C-R2：verification 钩子触发——用 marker 文件法（与 runtime UserHooks
+    /// 集成测试同型）：钩子命令 sh -c 'echo "$1" >> marker'，验证 passed 两
+    /// 形态各触发一次且 detail JSON 携带 command/passed。
+    #[tokio::test]
+    async fn verify_fires_verification_hooks_with_detail() {
+        use deepseeknova_core::tool_hook::UserHookCommand;
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("marker.log");
+        let marker_p = marker.to_string_lossy().to_string();
+        let hook = UserHookCommand {
+            command: "sh".to_string(),
+            args: vec!["-c".to_string(), format!("cat >> {marker_p}")],
+            timeout: Some(std::time::Duration::from_secs(5)),
+        };
+        let map: HashMap<String, Arc<dyn Tool>> = HashMap::from([(
+            "bash".to_string(),
+            Arc::new(FakeBash {
+                fail_on: Some("failing".to_string()),
+            }) as Arc<dyn Tool>,
+        )]);
+        let sec = SecurityContext::with_safe_defaults();
+        let cancel = CancellationToken::new();
+        let outcome = run_verify_pass(
+            &map,
+            &settings(&["passing", "failing"]),
+            Path::new("."),
+            &sec,
+            &[],
+            &cancel,
+            &channel(),
+            std::slice::from_ref(&hook),
+            "sess-vt",
+        )
+        .await;
+        assert!(matches!(outcome, VerifyOutcome::Fail(_)));
+        // detail 是嵌套 JSON 串（文件内为转义形态），归一化后断言语义。
+        let raw = std::fs::read_to_string(&marker).unwrap_or_default();
+        let logged = raw.replace("\\", "");
+        // passing 命令:passed true;failing:passed false + summary。
+        assert!(
+            logged.contains("\"passed\":true") && logged.contains("passing"),
+            "got: {logged}"
+        );
+        assert!(
+            logged.contains("\"passed\":false") && logged.contains("failing"),
+            "got: {logged}"
+        );
+        assert!(
+            logged.contains("sess-vt"),
+            "payload 应含 session_id: {logged}"
+        );
     }
 
     #[tokio::test]
@@ -440,6 +532,8 @@ mod tests {
             &[],
             &cancel,
             &channel(),
+            &[],
+            "sess-test",
         )
         .await;
         assert_eq!(outcome, VerifyOutcome::Skipped);

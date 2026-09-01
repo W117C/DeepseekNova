@@ -1089,6 +1089,7 @@ async fn run_sub_agent_loop(
                                 arguments: Some(arguments),
                                 workspace: &workspace_root,
                                 session_id: &sub_agent_name,
+                                detail: None,
                             };
                             let mut denied: Option<String> = None;
                             for cmd in &user_hooks.tool_before {
@@ -1258,6 +1259,7 @@ async fn run_sub_agent_loop(
                                     arguments: Some(arguments),
                                     workspace: &workspace_root,
                                     session_id: &sub_agent_name,
+                                    detail: None,
                                 };
                                 fire_user_notify_hooks(&user_hooks.tool_after, &payload);
                             }

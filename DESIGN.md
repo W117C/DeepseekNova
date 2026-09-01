@@ -508,7 +508,7 @@ Dangerous——在 `PermissionGate` 层硬拒（`CheckVerdict::hard_deny`），
 | P3 | 项目后置产出 | ✅ 已完成（artifacts 库 + `artifacts wiki/cards` CLI） |
 | P4 | Agent 工作规范 | ✅ 部分完成（dna-spec skill 已落地；system prompt 接入待定） |
 | P5 | Agent Federation 协议 | 📐 协议设计稿已出（`docs/federation-protocol-v0.md`，v0 NDJSON wire 契约）；实现待立 crate |
-| P6 | Windows 沙箱隔离 | ✅ 已实现（Job Object 进程树隔离 + 资源限制；网络/文件系统写路径限制仍待 WFP/AppContainer） |
+| P6 | Windows 沙箱隔离 | ✅ 已实现（Job Object 进程树隔离 + 资源限制）；网络/文件写限制设计稿已出：`docs/windows-sandbox-network-fs-v0.md`（AppContainer 首选路径 + CI 验收标准），实现待 Windows 专项 |
 
 ---
 
