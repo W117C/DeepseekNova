@@ -123,7 +123,7 @@ tracing-opentelemetry = "0.33"
 tempfile = "3.14"
 proptest = "1.5"
 similar = "3.1"
-windows-sys = { version = "0.59", default-features = false }
+windows-sys = { version = "0.61", default-features = false }
 
 # Internal crates
 deepseeknova-agent = { version = "0.6.0", path = "crates/deepseeknova-agent" }
