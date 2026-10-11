@@ -6,6 +6,11 @@ All notable changes to DeepseekNova will be documented in this file.
 
 > 测试数口径：README badge / 技术栈表的测试数为当前权威值（Linux CI 维护）；下方历史条目中出现的测试数（如「1729」）为对应提交时点的快照，非当前值。
 
+### Added
+
+- **CLI REPL 命令历史**：会话内记住所有已提交的非空命令；↑/↓ 循环浏览并把
+  历史命令回填到提示符（多行输入时 ↑/↓ 仍为行间光标移动）。
+
 ## [0.6.0] — 2026-08-31
 
 
