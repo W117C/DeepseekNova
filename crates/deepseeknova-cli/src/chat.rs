@@ -369,7 +369,10 @@ where
                                     close_block(&mut block_open);
                                     // dim 区间只开一次，流式增量不重复包裹，
                                     // 收尾（正文/工具开始）时统一闭合。
-                                    print!("\x1b[2m[{}]\x1b[0m \x1b[2m", tr.t(Key::ReplThinkingLabel));
+                                    print!(
+                                        "\x1b[2m[{}]\x1b[0m \x1b[2m",
+                                        tr.t(Key::ReplThinkingLabel)
+                                    );
                                     reasoning_open = true;
                                 }
                                 print!("{text}");
@@ -603,10 +606,18 @@ async fn handle_slash_command(
                     println!("{}", tr.t(Key::ModelHelpSwitch));
                     println!("{}", tr.t(Key::ModelHelpUse));
                     println!();
-                    let model_str = current_model.as_deref().unwrap_or_else(|| tr.t(Key::DefaultLabel));
+                    let model_str = current_model
+                        .as_deref()
+                        .unwrap_or_else(|| tr.t(Key::DefaultLabel));
                     println!(
                         "{}",
-                        tr.t_args(Key::ModelCurrent, &[("effort", &effort_label(*current_effort)), ("model", model_str)])
+                        tr.t_args(
+                            Key::ModelCurrent,
+                            &[
+                                ("effort", &effort_label(*current_effort)),
+                                ("model", model_str)
+                            ]
+                        )
                     );
                     if let Some(r) = router {
                         use deepseeknova_provider::cost::ModelRole;
@@ -621,7 +632,8 @@ async fn handle_slash_command(
                             println!(
                                 "  {:<8} → {}",
                                 role.label(),
-                                r.pointer(role).unwrap_or_else(|| tr.t(Key::DefaultLabel).to_string())
+                                r.pointer(role)
+                                    .unwrap_or_else(|| tr.t(Key::DefaultLabel).to_string())
                             );
                         }
                         println!("  (note: an explicit /model switch overrides the main pointer for this session)");
@@ -968,10 +980,7 @@ async fn handle_slash_command(
 
         // ---- Unknown ----------------------------------------
         other => {
-            eprintln!(
-                "{}",
-                tr.t_args(Key::UnknownCommand, &[("cmd", other)])
-            );
+            eprintln!("{}", tr.t_args(Key::UnknownCommand, &[("cmd", other)]));
         }
     }
 
@@ -1475,7 +1484,11 @@ mod tests {
         h.push("c");
         assert!(!h.is_navigating(), "push 后回到编辑新行状态");
         assert_eq!(h.len(), 3);
-        assert_eq!(h.navigate_up("x"), Some("c".to_string()), "push 后 ↑ 从最新一条开始");
+        assert_eq!(
+            h.navigate_up("x"),
+            Some("c".to_string()),
+            "push 后 ↑ 从最新一条开始"
+        );
     }
 
     #[test]

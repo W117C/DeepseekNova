@@ -6,6 +6,13 @@ All notable changes to DeepseekNova will be documented in this file.
 
 > 测试数口径：README badge / 技术栈表的测试数为当前权威值（Linux CI 维护）；下方历史条目中出现的测试数（如「1729」）为对应提交时点的快照，非当前值。
 
+
+### Fixed
+
+- **TUI: shortcuts 栏在 ru/zh 下首帧 panic（字节切片落在多字节字符内部）**：
+  `seg[..3]` 按字节切片而非字符，`/ команды` 第 3 字节落在 `к` 内部 → end byte index 3 is not a char boundary。
+  提取 `shortcuts_spans` 为纯函数，替换为 `seg.chars().take(3)` 字符安全判断；
+  新增 `Lang::ALL` × `Focus` 全组合回归测试（TestBackend 真实渲染 + 纯函数）。
 ### Added
 
 - **CLI REPL 命令历史**：会话内记住所有已提交的非空命令；↑/↓ 循环浏览并把

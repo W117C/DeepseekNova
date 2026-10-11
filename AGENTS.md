@@ -182,6 +182,14 @@ make eval-ci        # 跑 evals/core.jsonl 基准任务集并施加 CI 门槛（
   子代理死循环到 max_steps），审查才暴露
 - [如何避免]：跨层强制（prompt 层 + 执行层）必须两端都落地再写注释；写完注释
   立即 grep 确认执行路径真实存在 gate/强制点，而非只凭构建意图
+- [字符串按字节切片在多语言文案下 panic]：shortcuts 段前缀判定用 `seg[..3]`
+  （字节）判断键位，ru/zh 文案（`/ команды`）第 3 字节落在 `к` 内部，
+  TUI 首帧 panic；i18n 测试只断言文案内容，未覆盖渲染路径，en 默认语言
+  掩盖了缺陷
+- [如何避免]：对用户可见/多语言字符串一律按字符切片（`chars().take(n)`）
+  或先用 `is_char_boundary`/`floor_char_boundary`；涉及 i18n 文案的渲染
+  逻辑，回归测试必须遍历 `Lang::ALL` 且执行真实渲染路径（TestBackend），
+  不能只断言词表字符串
 - [新执行段漏 replay 不变量]：C2 给 SubAgentRunner 补工具执行后，只写 Role::Tool
   消息不写 assistant(tool_calls)，ValidatedRequest 把孤儿 Tool 结果判为
   OrphanToolResult → 子代理任何工具调用后硬失败（P0 级功能回归）
