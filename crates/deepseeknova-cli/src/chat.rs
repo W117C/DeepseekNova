@@ -3,6 +3,7 @@ use deepseeknova_core::runner::{RunEvent, RunInput, Runner};
 use deepseeknova_core::{DeepseeknovaError, Message, Role};
 use deepseeknova_provider::factory::ReasoningEffort;
 use deepseeknova_store::{SessionStore, StoredOutput};
+use deepseeknova_tui::i18n::{Key, Lang, Tr};
 use deepseeknova_tui::{McpProbe, McpServerInfo, McpStatus, UndoController};
 use std::collections::HashMap;
 use std::io::{BufRead, IsTerminal, Write};
@@ -173,6 +174,7 @@ pub async fn run_chat_repl<F>(
     mut persist: Option<ChatPersistence>,
     router: Option<std::sync::Arc<deepseeknova_provider::router::ModelRouter>>,
     caps: ReplCaps,
+    lang: Lang,
 ) -> Result<bool, deepseeknova_core::DeepseeknovaError>
 where
     F: Fn(
@@ -182,11 +184,12 @@ where
 {
     let mut current_effort = baseline_effort;
     let mut current_model = initial_model;
+    let tr = Tr::new(lang);
     println!();
     // 启动横幅：行宽统一由 title/commands 行动态计算填充，避免硬编码
     // 空格数导致右边界错位（此前标题行比边框宽 5 列）。
     let banner_width = 50usize;
-    let title = "     deepseeknova — interactive chat";
+    let title = tr.t(Key::CliBannerTitle);
     let commands = "     /exit  /new  /model  /cost  /skills  /help";
     println!("╭{}╮", "─".repeat(banner_width));
     println!(
@@ -207,6 +210,8 @@ where
     let mut mode = DisplayMode::Normal;
 
     let mut restart_requested = false;
+    // 命令历史（本次会话）：↑/↓ 循环浏览已提交命令。
+    let mut history = CommandHistory::default();
 
     // Build initial agent via the factory.
     let mut runner = agent_factory(Some(current_effort), current_model.clone())?;
@@ -223,7 +228,7 @@ where
         // TTY 走 raw 模式字符级编辑：退格按整字删除，中文不产生残渣；
         // 管道/重定向回退字节级 read_until + 残渣清理（原逻辑）。
         let line = if std::io::stdin().is_terminal() {
-            match read_line_tty(&prompt)? {
+            match read_line_tty(&prompt, Some(&mut history))? {
                 Some(l) => l,
                 // EOF / Esc / Ctrl+C → 退出
                 None => break,
@@ -262,11 +267,14 @@ where
         if trimmed.is_empty() {
             continue;
         }
+        // 记录已提交命令（空行不记），供 ↑/↓ 循环浏览。
+        history.push(trimmed);
 
         // Slash commands
         if let Some(cmd) = trimmed.strip_prefix('/') {
             let action = handle_slash_command(
                 cmd,
+                &tr,
                 &mut mode,
                 &mut restart_requested,
                 &mut current_effort,
@@ -342,7 +350,7 @@ where
                                     // [回答] 标签独立成行，不与上游内容粘连。
                                     close_reasoning(&mut reasoning_open);
                                     close_block(&mut block_open);
-                                    print!("\x1b[36m[回答]\x1b[0m ");
+                                    print!("\x1b[36m[{}]\x1b[0m ", tr.t(Key::ReplAnswerLabel));
                                 }
                                 print!("{text}");
                                 block_open = true;
@@ -361,7 +369,10 @@ where
                                     close_block(&mut block_open);
                                     // dim 区间只开一次，流式增量不重复包裹，
                                     // 收尾（正文/工具开始）时统一闭合。
-                                    print!("\x1b[2m[思考]\x1b[0m \x1b[2m");
+                                    print!(
+                                        "\x1b[2m[{}]\x1b[0m \x1b[2m",
+                                        tr.t(Key::ReplThinkingLabel)
+                                    );
                                     reasoning_open = true;
                                 }
                                 print!("{text}");
@@ -534,6 +545,7 @@ where
 #[allow(clippy::too_many_arguments)]
 async fn handle_slash_command(
     cmd: &str,
+    tr: &Tr,
     mode: &mut DisplayMode,
     restart_requested: &mut bool,
     current_effort: &mut ReasoningEffort,
@@ -586,22 +598,26 @@ async fn handle_slash_command(
             let (sub, sub_args) = args.split_once(' ').unwrap_or((args, ""));
             match sub {
                 "" | "help" => {
-                    println!("Model commands:");
-                    println!("  /model                — show this help");
-                    println!(
-                        "  /model effort <level>  — set reasoning effort: \
-                         disabled|low|medium|high|max"
-                    );
-                    println!("  /model thinking        — toggle thinking on/off");
-                    println!("  /model switch <name>   — switch to a named provider model");
-                    println!(
-                        "  /model use <role> <name>  — set a role pointer: main|task|compact|quick"
-                    );
+                    println!("{}", tr.t(Key::ModelCommandsHeader));
+                    println!("{}", tr.t(Key::ModelHelpDisplay));
+
+                    println!("{}", tr.t(Key::ModelHelpEffort));
+                    println!("{}", tr.t(Key::ModelHelpThinking));
+                    println!("{}", tr.t(Key::ModelHelpSwitch));
+                    println!("{}", tr.t(Key::ModelHelpUse));
                     println!();
+                    let model_str = current_model
+                        .as_deref()
+                        .unwrap_or_else(|| tr.t(Key::DefaultLabel));
                     println!(
-                        "Current: effort={}, model={}",
-                        effort_label(*current_effort),
-                        current_model.as_deref().unwrap_or("(default)")
+                        "{}",
+                        tr.t_args(
+                            Key::ModelCurrent,
+                            &[
+                                ("effort", &effort_label(*current_effort)),
+                                ("model", model_str)
+                            ]
+                        )
                     );
                     if let Some(r) = router {
                         use deepseeknova_provider::cost::ModelRole;
@@ -616,13 +632,11 @@ async fn handle_slash_command(
                             println!(
                                 "  {:<8} → {}",
                                 role.label(),
-                                r.pointer(role).unwrap_or_else(|| "(default)".to_string())
+                                r.pointer(role)
+                                    .unwrap_or_else(|| tr.t(Key::DefaultLabel).to_string())
                             );
                         }
-                        println!(
-                            "  (note: an explicit /model switch overrides the main pointer \
-                             for this session)"
-                        );
+                        println!("  (note: an explicit /model switch overrides the main pointer for this session)");
                     }
                 }
                 "effort" => {
@@ -957,35 +971,16 @@ async fn handle_slash_command(
             },
         },
 
-        // ── Help ──────────────────────────────────────────────
+        // ── Help ─────────────────────────
         "help" => {
-            println!("Commands:");
-            println!("  /exit, /quit, /q  — end the session");
-            println!("  /new              — start a new conversation");
-            println!("  /clear            — clear the screen");
-            println!("  /raw              — cycle display mode (normal/lite/raw)");
-            println!("  /model            — show / change model & reasoning settings");
-            println!("  /cost             — show per-model token usage & estimated cost");
-            println!("  /skills           — list available agent skills");
-            println!("  /mcp              — MCP server status (/mcp status)");
-            println!("  /sessions         — list saved sessions");
-            println!("  /resume <id>      — restore a saved session's history");
-            println!("  /rename <title>   — name the current session");
-            println!("  /undo             — revert changes (/undo all | /undo list | /undo diff)");
-            println!("  /help             — show this help");
-            println!();
-            println!("Display modes:");
-            println!("  normal  — text, reasoning, tool calls, results");
-            println!("  lite    — hide reasoning content");
-            println!("  raw     — show chunk types");
-            println!();
-            println!("Anything else is sent to the agent as a prompt.");
+            println!("{}", tr.t(Key::CliHelpCommands));
+            println!("{}", tr.t(Key::CliHelpDisplayModes));
+            println!("{}", tr.t(Key::CliHelpFooter));
         }
 
-        // ── Unknown ───────────────────────────────────────────
+        // ---- Unknown ----------------------------------------
         other => {
-            eprintln!("unknown command: /{other}");
-            eprintln!("type /help for available commands.");
+            eprintln!("{}", tr.t_args(Key::UnknownCommand, &[("cmd", other)]));
         }
     }
 
@@ -1193,7 +1188,7 @@ impl deepseeknova_core::runner::ApprovalResponder for ReplApprovalResponder {
                 eprintln!("  {line}");
             }
         }
-        match read_line_tty("  允许执行? [y/N] > ") {
+        match read_line_tty("  允许执行? [y/N] > ", None) {
             Ok(Some(line)) => matches!(line.trim(), "y" | "Y" | "yes"),
             _ => false,
         }
@@ -1212,9 +1207,85 @@ pub(crate) fn repl_approval_responder(
 // 整行重绘；非 TTY（管道/重定向）走上方 read_until 回退路径。
 // ---------------------------------------------------------------------------
 
+/// 命令历史：记录 REPL 中提交的所有非空命令，支持 ↑/↓ 循环浏览。
+///
+/// - `push` 追加一条已提交命令，并回到「编辑新行」状态；
+/// - `navigate_up` 从最近一条往回翻，首次进入历史时保存当前草稿行；已达
+///   最早一条时返回 `None`（提示符保持现状）；
+/// - `navigate_down` 向更新方向翻，翻到最新一条后再按 ↓ 还原进入历史前
+///   的草稿行。
+#[derive(Debug, Default)]
+pub struct CommandHistory {
+    /// 已提交命令（按提交顺序追加；导航从最新一条往前）。
+    entries: Vec<String>,
+    /// 当前浏览下标（`entries` 下标）；`None` = 不在历史浏览中。
+    pos: Option<usize>,
+    /// 进入历史前的草稿行（↓ 到末尾时还原）。
+    draft: String,
+}
+
+impl CommandHistory {
+    /// 追加一条已提交命令，并重置浏览状态。
+    pub fn push(&mut self, line: &str) {
+        self.entries.push(line.to_string());
+        self.pos = None;
+        self.draft.clear();
+    }
+
+    /// ↑：返回上一条历史命令（`current` 为进入历史前的当前输入）。
+    pub fn navigate_up(&mut self, current: &str) -> Option<String> {
+        if self.entries.is_empty() {
+            return None;
+        }
+        let next = match self.pos {
+            None => {
+                self.draft = current.to_string();
+                self.entries.len() - 1
+            }
+            Some(p) if p > 0 => p - 1,
+            Some(_) => return None,
+        };
+        self.pos = Some(next);
+        Some(self.entries[next].clone())
+    }
+
+    /// ↓：返回下一条历史命令；到最新一条后还原草稿并退出浏览。
+    pub fn navigate_down(&mut self) -> Option<String> {
+        let p = self.pos?;
+        if p + 1 < self.entries.len() {
+            self.pos = Some(p + 1);
+            Some(self.entries[p + 1].clone())
+        } else {
+            self.pos = None;
+            Some(std::mem::take(&mut self.draft))
+        }
+    }
+
+    /// 是否正处于历史浏览中。
+    #[cfg(test)]
+    pub fn is_navigating(&self) -> bool {
+        self.pos.is_some()
+    }
+
+    /// 已记录命令条数。
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// 是否尚无历史命令。
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
 /// 从 stdin 读一行。返回 `Ok(Some(line))` 为输入；`Ok(None)` 表示退出
 /// （EOF / Esc / Ctrl+C / 读取失败）。调用方负责恢复后的换行排版。
-fn read_line_tty(prompt: &str) -> std::io::Result<Option<String>> {
+fn read_line_tty(
+    prompt: &str,
+    mut history: Option<&mut CommandHistory>,
+) -> std::io::Result<Option<String>> {
     use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
     use crossterm::QueueableCommand;
     use deepseeknova_tui::input::editor::InputState;
@@ -1239,8 +1310,26 @@ fn read_line_tty(prompt: &str) -> std::io::Result<Option<String>> {
                 KeyCode::Right => input.move_right(),
                 KeyCode::Home => input.home_line(),
                 KeyCode::End => input.end_line(),
-                KeyCode::Up => input.move_line_up(),
-                KeyCode::Down => input.move_line_down(),
+                // ↑/↓：多行输入（粘贴产生）保留行间光标移动；单行输入
+                // 循环浏览命令历史（有多行内容时优先行移动）。
+                KeyCode::Up => {
+                    if input.text.contains('\n') {
+                        input.move_line_up();
+                    } else if let Some(hist) = history.as_mut() {
+                        if let Some(line) = hist.navigate_up(&input.text) {
+                            input.set_text(line);
+                        }
+                    }
+                }
+                KeyCode::Down => {
+                    if input.text.contains('\n') {
+                        input.move_line_down();
+                    } else if let Some(hist) = history.as_mut() {
+                        if let Some(line) = hist.navigate_down() {
+                            input.set_text(line);
+                        }
+                    }
+                }
                 KeyCode::Esc => return Ok(None),
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     return Ok(None);
@@ -1349,6 +1438,70 @@ mod tests {
 
         // ASCII 与残渣混合
         assert_eq!(utf8_prefix_len(b"hi\xe5"), 2);
+    }
+
+    // ── CommandHistory（命令历史 ↑/↓ 浏览）─────────────────────────
+
+    #[test]
+    fn history_navigate_up_returns_newest_first() {
+        let mut h = CommandHistory::default();
+        assert!(h.is_empty());
+        assert_eq!(h.navigate_up("x"), None, "无历史时 ↑ 无动作");
+        h.push("first");
+        h.push("second");
+        assert_eq!(h.len(), 2);
+        // 首次 ↑：保存草稿并显示最新一条；继续 ↑ 逐条往回。
+        assert_eq!(h.navigate_up("typing..."), Some("second".to_string()));
+        assert_eq!(h.navigate_up(""), Some("first".to_string()));
+        // 已到最早一条：再按 ↑ 保持现状。
+        assert_eq!(h.navigate_up(""), None);
+        assert_eq!(h.navigate_up(""), None);
+    }
+
+    #[test]
+    fn history_navigate_down_returns_to_newest_then_draft() {
+        let mut h = CommandHistory::default();
+        h.push("first");
+        h.push("second");
+        assert_eq!(h.navigate_up("draft-line"), Some("second".to_string()));
+        assert_eq!(h.navigate_up(""), Some("first".to_string()));
+        assert!(h.is_navigating());
+        assert_eq!(h.navigate_down(), Some("second".to_string()));
+        // 到最新一条后再 ↓：还原进入历史前的草稿并退出浏览。
+        assert_eq!(h.navigate_down(), Some("draft-line".to_string()));
+        assert!(!h.is_navigating());
+        // 已退出浏览：再按 ↓ 无动作。
+        assert_eq!(h.navigate_down(), None);
+    }
+
+    #[test]
+    fn history_push_records_all_commands_and_resets_navigation() {
+        let mut h = CommandHistory::default();
+        h.push("a");
+        h.push("b");
+        assert_eq!(h.navigate_up("draft"), Some("b".to_string()));
+        assert!(h.is_navigating());
+        h.push("c");
+        assert!(!h.is_navigating(), "push 后回到编辑新行状态");
+        assert_eq!(h.len(), 3);
+        assert_eq!(
+            h.navigate_up("x"),
+            Some("c".to_string()),
+            "push 后 ↑ 从最新一条开始"
+        );
+    }
+
+    #[test]
+    fn history_editing_recalled_line_keeps_navigation_position() {
+        let mut h = CommandHistory::default();
+        h.push("one");
+        h.push("two");
+        h.push("three");
+        assert_eq!(h.navigate_up("draft"), Some("three".to_string()));
+        assert_eq!(h.navigate_up(""), Some("two".to_string()));
+        // 编辑（如 Backspace）后仍处于浏览中：↓ 进入更新条目而非丢失位置。
+        assert_eq!(h.navigate_down(), Some("three".to_string()));
+        assert_eq!(h.navigate_down(), Some("draft".to_string()));
     }
 
     // ── parse_effort_command ───────────────────────────────────────────

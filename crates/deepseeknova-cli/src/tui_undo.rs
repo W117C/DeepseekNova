@@ -36,7 +36,7 @@ impl UndoController for TuiUndoController {
         let mut ck = CheckpointManager::load_from(&self.path)?;
         match ck.rollback().await? {
             Some((path, hash)) => Ok(Some(format!(
-                "已回滚 {} (hash {})",
+                "rolled back {} (hash {})",
                 path.display(),
                 &hash[..8.min(hash.len())]
             ))),

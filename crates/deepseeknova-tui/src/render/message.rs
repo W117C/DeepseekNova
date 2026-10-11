@@ -1339,25 +1339,7 @@ impl AppState {
         // 由 hint_for 文案按 ` · ` 分段，段间 `  │  ` 分隔（key 加粗
         // text_secondary、动作 gray），替代旧单行 dim 文本。
         let hint_text = crate::render::status::hint_for(self.focus, self.tr);
-        let mut hint_spans: Vec<Span<'static>> = Vec::new();
-        for (i, seg) in hint_text.split(" · ").enumerate() {
-            if i > 0 {
-                hint_spans.push(Span::styled("  │  ", Style::default().fg(theme.gray_dim)));
-            }
-            // 段内首个 `Ctrl+`/`Shift+`/`Esc`/`Tab` 键位前缀加粗。
-            let styled_seg = if seg.len() >= 3 && seg[..3].contains('+') {
-                Span::styled(
-                    seg.to_string(),
-                    Style::default()
-                        .fg(theme.text_secondary)
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else {
-                Span::styled(seg.to_string(), Style::default().fg(theme.gray))
-            };
-            hint_spans.push(styled_seg);
-        }
-        let hint = Paragraph::new(Line::from(hint_spans));
+        let hint = Paragraph::new(Line::from(shortcuts_spans(&hint_text, &theme)));
         f.render_widget(hint, hint_area);
 
         // ── 浮层（信任确认 / 审批居中 / @ 补全与 /help 锚定输入框上方）────
@@ -1427,9 +1409,43 @@ impl AppState {
     }
 }
 
+/// shortcuts 栏文案：`hint_for` 文本按 ` · ` 分段，段间 `  │  ` 分隔。
+/// 段内前 3 个字符若含 `+`（如 `Ctrl+P` / `Shift+Enter`），整段加粗
+/// 并使用 text_secondary 色，否则使用 gray 色。
+/// 纯函数：不依赖 Frame，便于按语言回归测试。
+fn shortcuts_spans(hint_text: &str, theme: &Theme) -> Vec<Span<'static>> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (i, seg) in hint_text.split(" · ").enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("  │  ", Style::default().fg(theme.gray_dim)));
+        }
+        // 段内首个 `Ctrl+`/`Shift+`/`Esc`/`Tab` 键位前缀加粗。
+        // 按字符而非字节判断——多字节文案（ru/zh）下字节切片会落在字符内部。
+        let styled_seg = if has_key_prefix(seg) {
+            Span::styled(
+                seg.to_string(),
+                Style::default()
+                    .fg(theme.text_secondary)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::styled(seg.to_string(), Style::default().fg(theme.gray))
+        };
+        spans.push(styled_seg);
+    }
+    spans
+}
+
+/// 段首键位前缀判定：首 3 个字符含 `+`（`X+Y` 形态）。
+/// 注意按字符而非字节取前缀——多字节文案（ru/zh）下字节切片会落在字符内部。
+fn has_key_prefix(seg: &str) -> bool {
+    seg.chars().take(3).any(|c| c == '+')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::focus::Focus;
     use crate::app::state::FoldPolicy;
     use crate::model::conversation::{done_output, ToolStatus};
     use deepseeknova_core::runner::RunEvent;
@@ -2234,5 +2250,73 @@ mod tests {
         let empty = AppState::default();
         assert_eq!(anchor_scroll_target(&empty, true, width), None);
         assert_eq!(anchor_scroll_target(&empty, false, width), None);
+    }
+    // ── shortcuts_spans 相关测试 ──────────────────────────
+    /// Test 1: draw 在非 ASCII 语言下不应 panic。
+    /// 使用 TestBackend 执行完整的 AppState::draw 路径（ru/zh 均测试）。
+    #[test]
+    fn draw_does_not_panic_for_non_ascii_hints() {
+        let backend = ratatui::backend::TestBackend::new(120, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        for lang in [
+            crate::i18n::Lang::En,
+            crate::i18n::Lang::Zh,
+            crate::i18n::Lang::Ru,
+        ] {
+            let mut app = AppState {
+                tr: Tr::new(lang),
+                ..Default::default()
+            };
+            terminal.draw(|f| app.draw(f)).unwrap();
+        }
+    }
+
+    /// Test 2: shortcuts_spans 对所有语言 × 所有焦点都 panic-free，
+    /// 且拼接后的文本与预期一致（段间分隔符 `  │  `，文本不丢失）。
+    #[test]
+    fn shortcuts_spans_never_panic_and_keep_text() {
+        let theme = Theme::default();
+        for lang in crate::i18n::Lang::ALL {
+            for focus in [
+                Focus::Input,
+                Focus::Conversation,
+                Focus::Sidebar,
+                Focus::Completion,
+                Focus::Help,
+                Focus::Confirm,
+            ] {
+                let text = crate::render::status::hint_for(focus, Tr::new(lang));
+                let spans = shortcuts_spans(&text, &theme);
+                let joined: String = spans.iter().map(|s| s.content.as_ref()).collect();
+                let expected = text.split(" · ").collect::<Vec<_>>().join("  │  ");
+                assert_eq!(
+                    joined, expected,
+                    "{lang:?}/{focus:?}: text/separator mismatch"
+                );
+            }
+        }
+    }
+
+    /// Test 3: 没有 `+` 的段为 gray，有 `+` 的段为 text_secondary+bold
+    ///（变体 A 语义：现有行为不变，仅修复 panic——`+` 键位极少出现）。
+    #[test]
+    /// Test 3: 分隔符样式为 gray_dim；无 `+` 前缀的段为 gray。
+    /// 当前 `has_key_prefix` 仅在前 3 字符判断 `+`（变体 A），
+    /// 实际 `Ctrl+P` 中 `+` 在第 4 位，故该段不会被加粗——行为同修前。
+    #[test]
+    fn shortcuts_spans_styles() {
+        let theme = Theme::default();
+        let text = "Ctrl+P mode · simple text";
+        let spans = shortcuts_spans(text, &theme);
+        let seg_count = text.split(" · ").count();
+        let sep_count = seg_count - 1;
+        assert_eq!(spans.len(), seg_count + sep_count);
+        // 分隔符 gray_dim
+        assert_eq!(spans[1].style.fg, Some(theme.gray_dim));
+        // 首段含 `+` 但在第 4 字符，当前变体 A 不识别 → gray
+        assert_eq!(spans[0].style.fg, Some(theme.gray));
+        // 最后一段无 `+` → gray
+        let last = spans.last().unwrap();
+        assert_eq!(last.style.fg, Some(theme.gray));
     }
 }

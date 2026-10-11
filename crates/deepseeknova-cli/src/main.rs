@@ -1060,6 +1060,7 @@ async fn run_cli() -> Result<i32, DeepseeknovaError> {
                     persist,
                     Some(Arc::clone(&model_router)),
                     repl_caps.clone(),
+                    resolve_ui_lang(&config).unwrap_or_else(deepseeknova_tui::i18n::Lang::from_env),
                 )
                 .await?;
                 if !restart {
@@ -1667,6 +1668,7 @@ async fn run_cli() -> Result<i32, DeepseeknovaError> {
                     persist,
                     Some(Arc::clone(&model_router)),
                     repl_caps.clone(),
+                    resolve_ui_lang(&config).unwrap_or_else(deepseeknova_tui::i18n::Lang::from_env),
                 )
                 .await?;
                 if !restart {
@@ -1684,13 +1686,14 @@ async fn run_cli() -> Result<i32, DeepseeknovaError> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// 解析界面语言：`[ui] lang` 配置优先（`en`/`zh` 及别名），`None` 回退
+/// 解析界面语言：`[ui] lang` 配置优先（`en`/`zh`/`ru` 及别名），`None` 回退
 /// 环境变量路径（TUI 内部 `Lang::from_env` 已读 `DEEPSEEKNOVA_LANG`）。
 fn resolve_ui_lang(config: &deepseeknova_config::Config) -> Option<deepseeknova_tui::i18n::Lang> {
     let raw = config.ui.lang.as_ref()?;
     let norm = raw.trim().to_ascii_lowercase().replace('-', "_");
     Some(match norm.as_str() {
         "zh" | "zh_cn" | "cn" | "chinese" | "中文" => deepseeknova_tui::i18n::Lang::Zh,
+        "ru" | "ru_ru" | "russian" | "русский" => deepseeknova_tui::i18n::Lang::Ru,
         _ => deepseeknova_tui::i18n::Lang::En,
     })
 }
