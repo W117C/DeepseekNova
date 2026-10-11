@@ -3,6 +3,7 @@ use deepseeknova_core::runner::{RunEvent, RunInput, Runner};
 use deepseeknova_core::{DeepseeknovaError, Message, Role};
 use deepseeknova_provider::factory::ReasoningEffort;
 use deepseeknova_store::{SessionStore, StoredOutput};
+use deepseeknova_tui::i18n::{Key, Lang, Tr};
 use deepseeknova_tui::{McpProbe, McpServerInfo, McpStatus, UndoController};
 use std::collections::HashMap;
 use std::io::{BufRead, IsTerminal, Write};
@@ -173,6 +174,7 @@ pub async fn run_chat_repl<F>(
     mut persist: Option<ChatPersistence>,
     router: Option<std::sync::Arc<deepseeknova_provider::router::ModelRouter>>,
     caps: ReplCaps,
+    lang: Lang,
 ) -> Result<bool, deepseeknova_core::DeepseeknovaError>
 where
     F: Fn(
@@ -207,6 +209,7 @@ where
     let mut mode = DisplayMode::Normal;
 
     let mut restart_requested = false;
+    let tr = Tr::new(lang);
     // 命令历史（本次会话）：↑/↓ 循环浏览已提交命令。
     let mut history = CommandHistory::default();
 
@@ -346,7 +349,7 @@ where
                                     // [回答] 标签独立成行，不与上游内容粘连。
                                     close_reasoning(&mut reasoning_open);
                                     close_block(&mut block_open);
-                                    print!("\x1b[36m[回答]\x1b[0m ");
+                                    print!("\x1b[36m[{}]\x1b[0m ", tr.t(Key::ReplAnswerLabel));
                                 }
                                 print!("{text}");
                                 block_open = true;
@@ -365,7 +368,7 @@ where
                                     close_block(&mut block_open);
                                     // dim 区间只开一次，流式增量不重复包裹，
                                     // 收尾（正文/工具开始）时统一闭合。
-                                    print!("\x1b[2m[思考]\x1b[0m \x1b[2m");
+                                    print!("\x1b[2m[{}]\x1b[0m \x1b[2m", tr.t(Key::ReplThinkingLabel));
                                     reasoning_open = true;
                                 }
                                 print!("{text}");

@@ -1060,6 +1060,7 @@ async fn run_cli() -> Result<i32, DeepseeknovaError> {
                     persist,
                     Some(Arc::clone(&model_router)),
                     repl_caps.clone(),
+                    resolve_ui_lang(&config).unwrap_or_else(deepseeknova_tui::i18n::Lang::from_env),
                 )
                 .await?;
                 if !restart {
@@ -1667,6 +1668,7 @@ async fn run_cli() -> Result<i32, DeepseeknovaError> {
                     persist,
                     Some(Arc::clone(&model_router)),
                     repl_caps.clone(),
+                    resolve_ui_lang(&config).unwrap_or_else(deepseeknova_tui::i18n::Lang::from_env),
                 )
                 .await?;
                 if !restart {

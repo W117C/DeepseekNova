@@ -647,6 +647,12 @@ pub enum Key {
     // ── 主题（theme.rs）───────────────────────────────────
     /// 未知主题回退（`{theme}`）。
     ThemeUnknownFallback,
+
+    // ── CLI REPL 流式标签（deepseeknova-cli chat 输出标记）─────────
+    /// 正文标签（`[Answer]` / `[回答]`）。
+    ReplAnswerLabel,
+    /// 推理标签（`[Thinking]` / `[思考]`）。
+    ReplThinkingLabel,
 }
 
 impl Key {
@@ -994,6 +1000,9 @@ impl Key {
 
             // 主题
             ThemeUnknownFallback => "Unknown theme '{theme}' (deepseek|dark|light), falling back to deepseek",
+            // CLI REPL 流式标签
+            ReplAnswerLabel => "Answer",
+            ReplThinkingLabel => "Thinking",
         }
     }
 
@@ -1326,6 +1335,9 @@ impl Key {
 
             // 主题
             ThemeUnknownFallback => "未知主题 '{theme}'（deepseek|dark|light），已回退 deepseek",
+            // CLI REPL 流式标签
+            ReplAnswerLabel => "回答",
+            ReplThinkingLabel => "思考",
 
             // ── 技术性/本就英文：中文模式回退英文 ──────────
             ModelCommandsHeader
@@ -1633,4 +1645,6 @@ pub const ALL_KEYS: &[Key] = &[
     Key::SnapshotDiffHeader,
     Key::NoDiffChanges,
     Key::DiffFailed,
+    Key::ReplAnswerLabel,
+    Key::ReplThinkingLabel,
 ];
