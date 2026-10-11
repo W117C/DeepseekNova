@@ -184,11 +184,12 @@ where
 {
     let mut current_effort = baseline_effort;
     let mut current_model = initial_model;
+    let tr = Tr::new(lang);
     println!();
     // 启动横幅：行宽统一由 title/commands 行动态计算填充，避免硬编码
     // 空格数导致右边界错位（此前标题行比边框宽 5 列）。
     let banner_width = 50usize;
-    let title = "     deepseeknova — interactive chat";
+    let title = tr.t(Key::CliBannerTitle);
     let commands = "     /exit  /new  /model  /cost  /skills  /help";
     println!("╭{}╮", "─".repeat(banner_width));
     println!(
@@ -209,7 +210,6 @@ where
     let mut mode = DisplayMode::Normal;
 
     let mut restart_requested = false;
-    let tr = Tr::new(lang);
     // 命令历史（本次会话）：↑/↓ 循环浏览已提交命令。
     let mut history = CommandHistory::default();
 
@@ -274,6 +274,7 @@ where
         if let Some(cmd) = trimmed.strip_prefix('/') {
             let action = handle_slash_command(
                 cmd,
+                &tr,
                 &mut mode,
                 &mut restart_requested,
                 &mut current_effort,
@@ -541,6 +542,7 @@ where
 #[allow(clippy::too_many_arguments)]
 async fn handle_slash_command(
     cmd: &str,
+    tr: &Tr,
     mode: &mut DisplayMode,
     restart_requested: &mut bool,
     current_effort: &mut ReasoningEffort,
@@ -593,22 +595,18 @@ async fn handle_slash_command(
             let (sub, sub_args) = args.split_once(' ').unwrap_or((args, ""));
             match sub {
                 "" | "help" => {
-                    println!("Model commands:");
-                    println!("  /model                — show this help");
-                    println!(
-                        "  /model effort <level>  — set reasoning effort: \
-                         disabled|low|medium|high|max"
-                    );
-                    println!("  /model thinking        — toggle thinking on/off");
-                    println!("  /model switch <name>   — switch to a named provider model");
-                    println!(
-                        "  /model use <role> <name>  — set a role pointer: main|task|compact|quick"
-                    );
+                    println!("{}", tr.t(Key::ModelCommandsHeader));
+                    println!("{}", tr.t(Key::ModelHelpDisplay));
+
+                    println!("{}", tr.t(Key::ModelHelpEffort));
+                    println!("{}", tr.t(Key::ModelHelpThinking));
+                    println!("{}", tr.t(Key::ModelHelpSwitch));
+                    println!("{}", tr.t(Key::ModelHelpUse));
                     println!();
+                    let model_str = current_model.as_deref().unwrap_or_else(|| tr.t(Key::DefaultLabel));
                     println!(
-                        "Current: effort={}, model={}",
-                        effort_label(*current_effort),
-                        current_model.as_deref().unwrap_or("(default)")
+                        "{}",
+                        tr.t_args(Key::ModelCurrent, &[("effort", &effort_label(*current_effort)), ("model", model_str)])
                     );
                     if let Some(r) = router {
                         use deepseeknova_provider::cost::ModelRole;
@@ -623,13 +621,10 @@ async fn handle_slash_command(
                             println!(
                                 "  {:<8} → {}",
                                 role.label(),
-                                r.pointer(role).unwrap_or_else(|| "(default)".to_string())
+                                r.pointer(role).unwrap_or_else(|| tr.t(Key::DefaultLabel).to_string())
                             );
                         }
-                        println!(
-                            "  (note: an explicit /model switch overrides the main pointer \
-                             for this session)"
-                        );
+                        println!("  (note: an explicit /model switch overrides the main pointer for this session)");
                     }
                 }
                 "effort" => {
@@ -964,35 +959,19 @@ async fn handle_slash_command(
             },
         },
 
-        // ── Help ──────────────────────────────────────────────
+        // ── Help ─────────────────────────
         "help" => {
-            println!("Commands:");
-            println!("  /exit, /quit, /q  — end the session");
-            println!("  /new              — start a new conversation");
-            println!("  /clear            — clear the screen");
-            println!("  /raw              — cycle display mode (normal/lite/raw)");
-            println!("  /model            — show / change model & reasoning settings");
-            println!("  /cost             — show per-model token usage & estimated cost");
-            println!("  /skills           — list available agent skills");
-            println!("  /mcp              — MCP server status (/mcp status)");
-            println!("  /sessions         — list saved sessions");
-            println!("  /resume <id>      — restore a saved session's history");
-            println!("  /rename <title>   — name the current session");
-            println!("  /undo             — revert changes (/undo all | /undo list | /undo diff)");
-            println!("  /help             — show this help");
-            println!();
-            println!("Display modes:");
-            println!("  normal  — text, reasoning, tool calls, results");
-            println!("  lite    — hide reasoning content");
-            println!("  raw     — show chunk types");
-            println!();
-            println!("Anything else is sent to the agent as a prompt.");
+            println!("{}", tr.t(Key::CliHelpCommands));
+            println!("{}", tr.t(Key::CliHelpDisplayModes));
+            println!("{}", tr.t(Key::CliHelpFooter));
         }
 
-        // ── Unknown ───────────────────────────────────────────
+        // ---- Unknown ----------------------------------------
         other => {
-            eprintln!("unknown command: /{other}");
-            eprintln!("type /help for available commands.");
+            eprintln!(
+                "{}",
+                tr.t_args(Key::UnknownCommand, &[("cmd", other)])
+            );
         }
     }
 

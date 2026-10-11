@@ -137,7 +137,7 @@ pub struct TuiRunner {
     workspace_cwd: String,
     /// 当前 git 分支（非 git 工作区为 None）。
     git_branch: Option<String>,
-    /// 界面语言（`DEEPSEEKNOVA_LANG` 解析，缺省英文；`with_lang` 可覆盖）。
+    /// 界面语言（`DEEPSEEKNOVA_LANG` 解析：`en`/`zh`/`ru`，缺省英文；`with_lang` 可覆盖）。
     lang: Lang,
 }
 
@@ -179,7 +179,7 @@ impl TuiRunner {
     }
 
     /// 编程式注入界面语言（优先级高于 `DEEPSEEKNOVA_LANG` 环境变量）。
-    /// 缺省为英文；`Lang::Zh` 切换到中文。
+    /// 缺省为英文；`Lang::Zh` / `Lang::Ru` 分别切换到中文/俄文。
     pub fn with_lang(mut self, lang: Lang) -> Self {
         self.lang = lang;
         self

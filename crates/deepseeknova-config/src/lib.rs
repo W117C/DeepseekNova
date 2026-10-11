@@ -99,8 +99,8 @@ pub struct Config {
     #[serde(default)]
     pub metrics: MetricsConfig,
 
-    /// 界面语言（TUI/桌面）：`"en"` 默认 / `"zh"` 中文。缺省读取
-    /// `DEEPSEEKNOVA_LANG` 环境变量。
+    /// 界面语言（TUI/桌面）：`"en"` 默认 / `"zh"` 中文 / `"ru"` 俄文。缺省读取
+    /// `DEEPSEEKNOVA_LANG` 环境变量（`en`/`zh`/`ru`）。
     #[serde(default)]
     pub ui: UiConfig,
 
@@ -1464,7 +1464,8 @@ impl Default for MetricsConfig {
 /// 界面语言配置（TUI/桌面共享词表的语言选择）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UiConfig {
-    /// 界面语言代码：`en`（默认）/ `zh`（也接受 `zh-cn`/`cn`/`中文` 别名）。
+    /// 界面语言代码：`en`（默认）/ `zh`（也接受 `zh-cn`/`cn`/`中文` 别名）/
+    /// `ru`（也接受 `ru-ru`/`russian`/`русский` 别名）。
     /// `None` 时回退 `DEEPSEEKNOVA_LANG` 环境变量（缺省英文）。
     #[serde(default)]
     pub lang: Option<String>,
