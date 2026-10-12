@@ -79,7 +79,7 @@ jobs:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@v2.87.0
+        uses: taiki-e/install-action@v2.87.27
         with:
           tool: cargo-llvm-cov
       - name: Generate coverage report
